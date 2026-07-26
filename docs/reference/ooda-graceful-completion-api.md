@@ -47,9 +47,11 @@ pub fn goals_all_achieved(
 
 A single goal is achieved when its verdict `is_complete()`. That verdict already
 encapsulates the goal's success-criteria evaluation, so the predicate adds no
-second evidence source. `goals_all_achieved` is the board-level conjunction used
-for the optional daemon-idle decision. The per-goal predicate is exposed as
-`goal_achieved(verdict) -> bool` for the loop-break path.
+second evidence source. `goals_all_achieved` is the board-level conjunction
+exposed for an all-verified check (the daemon's own idle stop instead uses a
+board-drain predicate; see [Daemon wiring](#daemon-wiring-run_ooda_daemon)). The
+per-goal predicate is exposed as `goal_achieved(verdict) -> bool` for the
+loop-break path.
 
 ## `ReflectionBounds`
 
@@ -142,30 +144,40 @@ the dashboard thinking-cycle history.
 
 ## Daemon wiring (`run_ooda_daemon`)
 
-Inside the `run_ooda_daemon` loop, after the done-gate verdicts are computed for
-the cycle, the daemon calls `completion::evaluate` per active goal:
+`run_ooda_daemon` reads `ReflectionBounds::from_env()` once at daemon start and
+consumes the decision layer through three concrete mechanisms — it does **not**
+call `completion::evaluate` per goal (that function is the pure, unit-tested
+decision spec; the daemon reuses its shared predicate rather than re-running it):
 
-```rust
-match completion::evaluate(goal, verdict, streak, &bounds) {
-    LoopDecision::GracefulComplete => {
-        // Mark ACHIEVED, free the goal, emit a terminal tracing span, continue
-        // with the rest of the board. NOT a daemon exit.
-        mark_goal_achieved(goal, verdict);
-        tracing::info!(goal_id = %goal.id, verdict = ?verdict,
-            "goal ACHIEVED (gate-verified); reflection loop closed");
-    }
-    LoopDecision::BoundExceeded => {
-        // Record a blocker with the WHY; never claim completion.
-        record_reflection_bound_blocker(goal, streak);
-    }
-    LoopDecision::Continue => { /* normal reflection */ }
-}
-```
+1. **Graceful completion.** For each goal the done-gate reports newly complete
+   this cycle (`newly_done`), the daemon emits one terminal line —
+   `OODA graceful completion: goal {id} ACHIEVED (gate-verified) — closing
+   reflection loop` — and moves on to the rest of the board. This is the
+   loop-break for a delivered goal, **not** a daemon exit.
 
-The existing `shutdown` and `max_cycles` break paths are unchanged. Daemon-level
-idling on an all-ACHIEVED board only occurs when
-`ReflectionBounds::stop_when_idle` is `true` **and** `goals_all_achieved`
-returns `true`; with defaults, the daemon stays perpetual.
+2. **Bounded no-progress safeguard (opt-in).** When
+   `max_reflection_cycles > 0`, `reflection_bound_yields(active, tracker, bounds)`
+   selects the non-perpetual, non-terminal goals whose consecutive no-progress
+   streak has reached the cap. Each is marked `GoalProgress::Blocked(..)` with the
+   streak in the WHY and logged for human review. It delegates the per-goal
+   decision to `ReflectionBounds::bound_exhausted` — the same predicate
+   `evaluate`'s `BoundExceeded` arm uses (locked by
+   `bound_exhausted_matches_evaluate_bound_arm`), so there is one source of truth
+   for the bound. It never fabricates completion.
+
+3. **Graceful idle stop (opt-in).** When `stop_when_idle` is set,
+   `should_graceful_idle_stop(stop_when_idle, had_active_at_cycle_start,
+   active_now_empty, backlog_now_empty)` breaks the perpetual loop once a board
+   that held delivery work at cycle start has been fully drained. A board that
+   started empty never trips it, and with the flag unset (the default) it never
+   fires.
+
+The existing `shutdown` and `max_cycles` break paths are unchanged. With
+defaults (`max_reflection_cycles == 0`, `stop_when_idle == false`) none of the
+opt-in paths fire and the daemon stays perpetual. `goals_all_achieved` is the
+board-level conjunction exposed for callers (and the acceptance tests) that want
+an all-verified check; the daemon's own idle stop uses the board-drain predicate
+above.
 
 ## Failure and safety semantics
 
@@ -183,9 +195,16 @@ returns `true`; with defaults, the daemon stays perpetual.
 
 - `src/ooda_loop/completion.rs` inline `#[cfg(test)]`: `goals_all_achieved`
   truth table, `evaluate` decision matrix (precedence, perpetual exemption,
-  bound-disabled), streak-reset behavior.
-- `tests/issue_1025_graceful_achieved_completion.rs`: the daemon breaks a goal's
-  reflection loop on a gate-verified all-ACHIEVED state when
-  `stop_when_idle` is set, and stays perpetual by default; a criteria-unmet goal
-  keeps reflecting (running path); a stuck non-perpetual goal yields
-  `BoundExceeded` with a recorded blocker and no false completion.
+  bound-disabled), `ReflectionBounds::from_env_values` parsing (aliases, blank,
+  malformed-degrades-without-panic), and the shared `bound_exhausted` predicate
+  (including `bound_exhausted_matches_evaluate_bound_arm`).
+- `src/operator_commands_ooda/daemon/mod.rs` inline `#[cfg(test)]`: the daemon
+  glue — `reflection_bound_yields` (disabled cap, stuck non-perpetual yield,
+  perpetual/terminal exemption, moving-goal left alone) and
+  `should_graceful_idle_stop` (opt-in + drained-board matrix).
+- `tests/issue_1025_graceful_achieved_completion.rs`: locks the pure decision
+  contract at the crate's public boundary — terminal path (gate-verified goal ⇒
+  `GracefulComplete`), running path (criteria unmet ⇒ `Continue`), bound path (a
+  stuck non-perpetual goal ⇒ `BoundExceeded`, explicitly **not** a completion),
+  perpetual exemption, `goals_all_achieved` only when every goal is verified, and
+  perpetual-safe `from_env` defaults.

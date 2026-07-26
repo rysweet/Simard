@@ -119,9 +119,9 @@ pub fn act(
     crate::ooda_actions::dispatch_actions_bounded(actions, memories, state, max_concurrency)
 }
 
-pub use completion::{
-    LoopDecision, ReflectionBounds, evaluate as evaluate_reflection, goal_achieved,
-    goals_all_achieved,
-};
+// The daemon consumes `ReflectionBounds` via this short path; the rest of the
+// pure decision contract (`LoopDecision`, `evaluate`, `goal_achieved`,
+// `goals_all_achieved`) is reached through `crate::ooda_loop::completion::*`.
+pub use completion::ReflectionBounds;
 pub use cycle::run_ooda_cycle;
 pub use cycle::{compose_procedure_name, derive_triggers_from_objective};
