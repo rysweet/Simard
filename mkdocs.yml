@@ -76,6 +76,7 @@ nav:
     - Episode Ingestion Policy & Promotion: architecture/episode-ingestion-policy.md
     - Episode Distillation: architecture/episode-distillation.md
     - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
+    - Reflective Cognitive Threads Act via Tools: architecture/reflective-cognitive-threads.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -286,6 +287,7 @@ nav:
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
+    - Configure the Reflective Cognitive Threads: howto/configure-reflective-cognitive-threads.md
     - Record an Investigation Finding (issue/memory, not a repo doc): howto/record-an-investigation-finding.md
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
@@ -482,6 +484,7 @@ nav:
     - Idempotent Release Publishing: reference/release-idempotency.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
+    - Salience-Signal CLI: reference/simard-cognition-salience-signal-cli.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
     - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md
