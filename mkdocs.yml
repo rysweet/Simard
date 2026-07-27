@@ -209,6 +209,7 @@ nav:
       - Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
       - Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
+    - Triage ERROR Lines in the OODA Daemon Log: howto/triage-ooda-log-error-lines.md
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Diagnose Signal-Meeting E2BIG Spawn Failures: howto/diagnose-signal-meeting-e2big.md
     - Add a Safe Agent/Recipe Spawn Site: howto/add-a-safe-agent-spawn-site.md
