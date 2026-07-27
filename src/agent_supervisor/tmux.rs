@@ -71,27 +71,33 @@ pub fn build_tmux_wrapped_command(
     argv
 }
 
-/// Default fallback root for per-worktree cargo target dirs when neither
-/// `CARGO_TARGET_DIR` nor `SIMARD_CARGO_TARGETS_ROOT` is set in the parent
-/// env, AND `HOME` is also absent. Kept under `/tmp` so a missing-HOME
-/// edge case can never escalate into writing target artifacts somewhere
-/// the operator did not anticipate.
+/// Default root for per-worktree cargo target dirs when
+/// `SIMARD_CARGO_TARGETS_ROOT` is unset (issue #4803). This is the
+/// large-volume relocation target: the 28G `/` volume that holds `$HOME`
+/// and `~/.simard` saturates under accumulated `target/debug` +
+/// `target/llvm-cov-target` artifacts, so the default deliberately routes
+/// build artifacts off `/` onto the roomier `/tmp` volume. Operators who
+/// have a dedicated data volume can point `SIMARD_CARGO_TARGETS_ROOT` at it.
 pub const DEFAULT_CARGO_TARGETS_ROOT_FALLBACK: &str = "/tmp/simard-cargo-targets";
 
-/// Default subdirectory of `$HOME` used as the per-worktree cargo targets
-/// root when `SIMARD_CARGO_TARGETS_ROOT` is unset.
+/// Default subdirectory of `$HOME` that HISTORICALLY held the per-worktree
+/// cargo targets root (pre-issue #4803). The resolver no longer routes here
+/// — `$HOME` lives on the saturating `/` volume — but the name is retained
+/// so the legacy `cap_home_cargo_targets` cleanup (`cmd_cleanup/disk.rs`)
+/// can still LRU-rotate any artifacts left behind by older daemons.
 pub const DEFAULT_CARGO_TARGETS_HOME_SUBDIR: &str = ".cargo-targets";
 
 /// Compute the default `CARGO_TARGET_DIR` for an engineer worktree at
-/// `worktree_path`. Pure — pulls `HOME` and `SIMARD_CARGO_TARGETS_ROOT`
-/// from `parent_pairs` only (never `std::env`).
+/// `worktree_path`. Pure — pulls `SIMARD_CARGO_TARGETS_ROOT` from
+/// `parent_pairs` only (never `std::env`).
 ///
-/// Resolution order:
+/// Resolution order (issue #4803 — the `$HOME` branch was removed):
 /// 1. `<SIMARD_CARGO_TARGETS_ROOT>/<worktree_basename>` if the env var is set.
-/// 2. `<HOME>/.cargo-targets/<worktree_basename>` if `HOME` is set in
-///    parent_pairs (the production case — the OODA daemon always inherits
-///    `HOME` from the operator shell).
-/// 3. `/tmp/simard-cargo-targets/<worktree_basename>` as a last-resort fallback.
+/// 2. `/tmp/simard-cargo-targets/<worktree_basename>` otherwise — the
+///    large-volume default. The previous `<HOME>/.cargo-targets/...` default
+///    piled build artifacts onto the 28G `/` volume and drove the ~25-min
+///    emergency-cleanup crash-loop, so it is no longer used even when `HOME`
+///    is set.
 ///
 /// The basename is taken from `worktree_path.file_name()`. If the path has
 /// no terminal component (extremely unlikely — would require `/`), the
@@ -99,7 +105,10 @@ pub const DEFAULT_CARGO_TARGETS_HOME_SUBDIR: &str = ".cargo-targets";
 /// path is still well-formed and per-engineer (the worktree path's full
 /// hash gets folded in by callers via the directory layout, but for this
 /// purely defensive branch we accept a shared fallback dir).
-fn default_cargo_target_for_worktree(
+///
+/// `pub(crate)` so the direct-exec spawn path (`lifecycle/spawn.rs`) shares
+/// this single source of truth instead of hardcoding a divergent root.
+pub(crate) fn default_cargo_target_for_worktree(
     worktree_path: &Path,
     parent_pairs: &[(String, String)],
 ) -> String {
@@ -117,8 +126,14 @@ fn default_cargo_target_for_worktree(
             .filter(|v| !v.is_empty())
     };
 
+    // Issue #4803: the `$HOME` default branch is REMOVED. `HOME` lives on the
+    // 28G `/` volume that saturates; routing per-worktree cargo target dirs
+    // there piled `target/debug` + `target/llvm-cov-target` (0.7–2.6 GB each)
+    // onto `/` and drove the ~25-min emergency-cleanup crash-loop. Absent an
+    // explicit `SIMARD_CARGO_TARGETS_ROOT` override, the default now relocates
+    // onto the large-volume fallback `/tmp/simard-cargo-targets` EVEN WHEN
+    // HOME IS SET, so build artifacts stop refilling `/`.
     let root = lookup("SIMARD_CARGO_TARGETS_ROOT")
-        .or_else(|| lookup("HOME").map(|h| format!("{h}/{DEFAULT_CARGO_TARGETS_HOME_SUBDIR}")))
         .unwrap_or_else(|| DEFAULT_CARGO_TARGETS_ROOT_FALLBACK.to_string());
 
     format!("{root}/{basename}")
@@ -143,11 +158,12 @@ fn default_cargo_target_for_worktree(
 ///    cargo target dir (which would deadlock cargo's file lock or corrupt
 ///    incremental output). The default is
 ///    `<root>/<basename(config.worktree_path)>`, where `<root>` resolves
-///    in this order:
+///    in this order (issue #4803 relocated the default off the `/` volume):
 ///     1. `SIMARD_CARGO_TARGETS_ROOT` env (operator override),
-///     2. `<HOME>/.cargo-targets` (production default),
-///     3. `/tmp/simard-cargo-targets` (last-resort fallback when HOME
-///        is absent — should never happen under the OODA daemon).
+///     2. `/tmp/simard-cargo-targets` (large-volume default). The former
+///        `<HOME>/.cargo-targets` default was removed: `$HOME` is on the 28G
+///        `/` volume that saturates, so per-worktree target dirs there refilled
+///        `/` within one build cycle and thrashed the emergency cleanup.
 ///
 ///    This intentionally REPLACES the previous shared
 ///    `/tmp/simard-engineer-target` default: that path caused 7-12 GB

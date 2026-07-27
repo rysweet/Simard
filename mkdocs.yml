@@ -162,6 +162,7 @@ nav:
     - Goal Stewardship Mode: concepts/stewardship-mode.md
     - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
+    - Root-Disk Saturation Relocation: concepts/root-disk-saturation-relocation.md
     - Agentic Disk Reclamation: concepts/agentic-disk-reclamation.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
@@ -259,6 +260,7 @@ nav:
     - Configure the Simard Whisperer: howto/configure-the-simard-whisperer.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
+    - Relocate Build Artifacts Off the Root Volume: howto/relocate-build-artifacts-off-root-volume.md
     - Configure Disk Reclamation: howto/configure-disk-reclamation.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
@@ -466,6 +468,7 @@ nav:
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
     - Disk-Health API: reference/disk-health-api.md
+    - Build-Artifact Relocation & Disk-Thrash Guard: reference/build-artifact-relocation-and-disk-thrash-guard.md
     - Disk Reclaim API: reference/disk-reclaim-api.md
     - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md

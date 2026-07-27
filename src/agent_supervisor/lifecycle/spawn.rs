@@ -59,12 +59,20 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
         )
         .current_dir(&config.worktree_path);
-    // Issue #1197: per-engineer git worktrees would otherwise force a
-    // cold cargo rebuild (incl. lbug, ~40min) every spawn. Share one
-    // target dir across all engineer worktrees, but respect any operator
-    // override already in the environment.
+    // Issue #1197 / #4803: per-engineer git worktrees would otherwise force a
+    // cold cargo rebuild (incl. lbug, ~40min) every spawn. Give each worktree
+    // its own target dir, but delegate to the SINGLE per-worktree resolver the
+    // tmux path uses (`compute_tmux_env` → `default_cargo_target_for_worktree`)
+    // so both spawn paths agree on an off-`/` default (#4803: no longer the
+    // shared `/tmp/simard-engineer-target`, which deadlocked cargo's build lock
+    // across concurrent engineers). Respect any operator override already set.
     if std::env::var_os("CARGO_TARGET_DIR").is_none() {
-        cmd.env("CARGO_TARGET_DIR", "/tmp/simard-engineer-target");
+        let parent_pairs: Vec<(String, String)> = std::env::vars().collect();
+        let target = crate::agent_supervisor::tmux::default_cargo_target_for_worktree(
+            &config.worktree_path,
+            &parent_pairs,
+        );
+        cmd.env("CARGO_TARGET_DIR", target);
     }
 
     if let Some((out, err)) = open_agent_log(&config.agent_name) {

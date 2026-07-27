@@ -240,16 +240,46 @@ fn compute_tmux_env_uses_per_worktree_default_when_parent_unset() {
 }
 
 #[test]
-fn compute_tmux_env_default_uses_home_when_present() {
-    // Production case: the OODA daemon inherits HOME from the operator
-    // shell. Default must be <HOME>/.cargo-targets/<basename>.
+fn compute_tmux_env_default_relocates_off_home_when_present() {
+    // Issue #4803 (root-disk saturation): the OODA daemon inherits HOME from
+    // the operator shell, and HOME lives on the 28G `/` volume that saturates.
+    // The OLD contract routed the per-worktree cargo target dir to
+    // `<HOME>/.cargo-targets/<basename>`, which piled `target/debug` +
+    // `target/llvm-cov-target` (0.7–2.6 GB each) onto `/` and drove the
+    // ~25-min emergency-cleanup crash-loop. The FIX drops the `$HOME`
+    // default branch so, absent an explicit `SIMARD_CARGO_TARGETS_ROOT`
+    // override, the default relocates onto the large-volume fallback
+    // `/tmp/simard-cargo-targets/<basename>` EVEN WHEN HOME IS SET.
     let config = make_test_config("e1", 0);
     let parent = vec![("HOME".to_string(), "/home/azureuser".to_string())];
     let env = compute_tmux_env(&config, parent);
     assert_eq!(
         env_value(&env, "CARGO_TARGET_DIR"),
-        Some("/home/azureuser/.cargo-targets/worktree"),
-        "default must be <HOME>/.cargo-targets/<basename>"
+        Some("/tmp/simard-cargo-targets/worktree"),
+        "with HOME set (no override), default must relocate to \
+         /tmp/simard-cargo-targets/<basename>, NOT <HOME>/.cargo-targets/<basename>"
+    );
+}
+
+#[test]
+fn compute_tmux_env_default_never_lands_under_home() {
+    // Hard regression guard for issue #4803: the resolved CARGO_TARGET_DIR
+    // default must NEVER be placed under the HOME subtree (which is on the
+    // saturating `/` volume). This pins the ROOT-CAUSE fix: build artifacts
+    // must not refill `/`.
+    let config = make_test_config("e1", 0);
+    let home = "/home/azureuser";
+    let parent = vec![("HOME".to_string(), home.to_string())];
+    let env = compute_tmux_env(&config, parent);
+    let target = env_value(&env, "CARGO_TARGET_DIR").expect("CARGO_TARGET_DIR must be set");
+    assert!(
+        !target.starts_with(home),
+        "CARGO_TARGET_DIR default must not live under HOME ({home}) — that is the \
+         28G `/`-volume path that saturates (#4803); got {target}"
+    );
+    assert!(
+        !target.contains("/.cargo-targets/"),
+        "the $HOME/.cargo-targets default branch must be removed (#4803); got {target}"
     );
 }
 

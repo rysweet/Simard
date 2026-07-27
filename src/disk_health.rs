@@ -63,31 +63,187 @@ fn resolve_recipe_path(repo_root: &Path, home_override: Option<&Path>) -> Option
     None
 }
 
+/// High-watermark: emergency cleanup TRIGGERS at or above this used-% (#4803).
+pub(crate) const EMERGENCY_HIGH_WATERMARK_PCT: u8 = 95;
+
+/// Low-watermark: the re-arm line of the hysteresis band (#4803). Documented
+/// as the used-% the disk must fall back below before a fresh trigger is
+/// semantically "re-armed". Anti-thrash is enforced concretely by the
+/// persistent time-backoff below; this constant pins the band so `high > low`
+/// is a real two-edge gate, never a single edge that re-fires every timer tick.
+pub(crate) const EMERGENCY_LOW_WATERMARK_PCT: u8 = 85;
+
+/// Default minimum seconds between two emergency cleanups (#4803). 15 min is
+/// longer than the observed ~25-min refill cadence (one fire per timer tick),
+/// so a single build window can never trigger a second delete-then-rebuild
+/// storm. Override via `SIMARD_DISK_EMERGENCY_MIN_REFIRE_SECS`.
+pub(crate) const DEFAULT_EMERGENCY_MIN_REFIRE_SECS: u64 = 900;
+
+/// Upper clamp for the min-refire backoff (24h) so a fat-fingered override
+/// can't wedge cleanup off for days.
+const EMERGENCY_MIN_REFIRE_CEILING_SECS: u64 = 86_400;
+
+/// Parse `SIMARD_DISK_EMERGENCY_MIN_REFIRE_SECS`, clamping to `[0, 86400]`.
+/// Unset / empty / unparseable / negative → the 900s default. An explicit `0`
+/// disables the backoff gate (documented escape hatch).
+pub(crate) fn emergency_refire_min_secs_from(raw: Option<&str>) -> u64 {
+    match raw.map(str::trim) {
+        Some(s) if !s.is_empty() => match s.parse::<u64>() {
+            Ok(n) => n.min(EMERGENCY_MIN_REFIRE_CEILING_SECS),
+            Err(_) => DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+        },
+        _ => DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+    }
+}
+
+/// Pure hysteresis + time-backoff decision for the emergency cleanup (#4803).
+///
+/// Returns `true` iff cleanup should fire now:
+///   - `pct` must be at or above [`EMERGENCY_HIGH_WATERMARK_PCT`] (95%); below
+///     that (including at the 85% low watermark) it never fires.
+///   - If `min_refire_secs == 0` the backoff is disabled and any at/above-high
+///     tick fires.
+///   - Otherwise a prior run within `min_refire_secs` SUPPRESSES the re-fire
+///     (the anti-thrash contract); once the window elapses — or there is no
+///     prior run — a genuinely-full disk may fire again.
+pub(crate) fn should_fire_emergency_cleanup(
+    pct: u8,
+    last_run: Option<std::time::SystemTime>,
+    now: std::time::SystemTime,
+    min_refire_secs: u64,
+) -> bool {
+    if pct < EMERGENCY_HIGH_WATERMARK_PCT {
+        return false;
+    }
+    if min_refire_secs == 0 {
+        return true;
+    }
+    match last_run {
+        None => true,
+        Some(prev) => match now.duration_since(prev) {
+            Ok(elapsed) => elapsed.as_secs() >= min_refire_secs,
+            // Clock skew (prev in the future): treat as "just ran" and
+            // suppress, so a backwards clock can't reopen the thrash loop.
+            Err(_) => false,
+        },
+    }
+}
+
+/// Path of the persistent last-emergency-cleanup marker under
+/// `<state_root>/disk-health/`.
+fn emergency_marker_path(state_root: &Path) -> PathBuf {
+    state_root
+        .join("disk-health")
+        .join("last-emergency-cleanup")
+}
+
+/// Read the last-run timestamp (unix secs) from the marker. Fail-open: any
+/// I/O or parse error is treated as "no prior run" (returns `None`) so a
+/// missing/corrupt marker can never wedge a genuinely-needed cleanup.
+fn read_emergency_marker(path: &Path) -> Option<std::time::SystemTime> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+}
+
+/// Persist `now` as the last-run timestamp. Fail-open with a warn log: if the
+/// marker cannot be written the next tick simply lacks backoff (it stays gated
+/// by the high watermark), which is strictly safer than aborting the cleanup
+/// that just freed space.
+fn write_emergency_marker(path: &Path, now: std::time::SystemTime) {
+    let secs = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        warn!(
+            target: "simard::disk_health",
+            path = %parent.display(),
+            error = %e,
+            "could not create disk-health marker dir; emergency backoff not persisted this cycle",
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(path, secs.to_string()) {
+        warn!(
+            target: "simard::disk_health",
+            path = %path.display(),
+            error = %e,
+            "could not write emergency-cleanup marker; backoff not persisted this cycle",
+        );
+    }
+}
+
+/// Guard every destructive `remove_dir_all` (#4803): refuse to delete a path
+/// that is a symlink (following it could redirect the delete outside the tree)
+/// or that is not contained within one of the `allowed_roots`
+/// (`repo_root` / `state_root`). Uses `symlink_metadata` so a symlink is
+/// detected WITHOUT being followed.
+fn safe_to_remove(path: &Path, allowed_roots: &[&Path]) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) if md.file_type().is_symlink() => {
+            warn!(
+                target: "simard::disk_health",
+                path = %path.display(),
+                "refusing to remove symlinked build-artifact path (containment guard)",
+            );
+            false
+        }
+        Ok(_) => allowed_roots.iter().any(|root| path.starts_with(root)),
+        Err(_) => false,
+    }
+}
+
 /// Deterministic emergency disk cleanup — no LLM, no recipe, just rm.
 ///
-/// Runs when disk usage is critically high (≥95%). Deletes known-safe build
-/// artifacts that can always be regenerated by `cargo build`:
+/// Runs when disk usage is critically high (≥95%) AND the anti-thrash backoff
+/// window is clear (#4803). Deletes known-safe build artifacts that can always
+/// be regenerated by `cargo build`:
 ///   - `repo_root/target/debug/` (main build cache)
 ///   - `repo_root/worktrees/*/target/` (engineer worktree build caches)
 ///   - `repo_root/target/llvm-cov-target/` (coverage artifacts)
 ///   - `state_root/cargo-target/` and `state_root/shared-target/`
 ///   - stale backups beyond the 2 most recent
 ///
-/// Returns a report of what was done, or None if disk is below threshold.
+/// Returns a report of what was done, or None if disk is below threshold or the
+/// min-refire backoff suppressed this tick.
 pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHealthReport> {
     let pct = get_disk_usage_pct(repo_root)?;
 
-    if pct < 95 {
+    // Issue #4803: hysteresis high watermark + persistent time-backoff. The
+    // old `pct < 95` edge re-fired every timer tick, deleting target/debug +
+    // target/llvm-cov-target only for cargo to instantly rebuild and refill
+    // `/` within one cycle (~25-min thrash). The backoff marker makes a second
+    // fire within one build window impossible.
+    let min_refire = emergency_refire_min_secs_from(
+        std::env::var("SIMARD_DISK_EMERGENCY_MIN_REFIRE_SECS")
+            .ok()
+            .as_deref(),
+    );
+    let marker = emergency_marker_path(state_root);
+    let last_run = read_emergency_marker(&marker);
+    let now = std::time::SystemTime::now();
+
+    if !should_fire_emergency_cleanup(pct, last_run, now, min_refire) {
         return None;
     }
 
-    warn!(disk_pct = pct, "Emergency disk cleanup triggered (≥95%)");
+    warn!(
+        disk_pct = pct,
+        min_refire_secs = min_refire,
+        high_watermark = EMERGENCY_HIGH_WATERMARK_PCT,
+        low_watermark = EMERGENCY_LOW_WATERMARK_PCT,
+        "Emergency disk cleanup triggered (≥95% high watermark; backoff window clear)"
+    );
+    let allowed_roots: [&Path; 2] = [repo_root, state_root];
     let mut freed: u64 = 0;
     let mut actions: Vec<String> = Vec::new();
 
     // 1. Main target/debug/ — the single biggest consumer
     let debug_dir = repo_root.join("target/debug");
-    if debug_dir.is_dir() {
+    if debug_dir.is_dir() && safe_to_remove(&debug_dir, &allowed_roots) {
         let size = dir_size_bytes(&debug_dir);
         if std::fs::remove_dir_all(&debug_dir).is_ok() {
             freed += size;
@@ -97,7 +253,7 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
 
     // 2. target/llvm-cov-target/
     let cov_dir = repo_root.join("target/llvm-cov-target");
-    if cov_dir.is_dir() {
+    if cov_dir.is_dir() && safe_to_remove(&cov_dir, &allowed_roots) {
         let size = dir_size_bytes(&cov_dir);
         if std::fs::remove_dir_all(&cov_dir).is_ok() {
             freed += size;
@@ -115,7 +271,7 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
     {
         for entry in entries.flatten() {
             let target = entry.path().join("target");
-            if target.is_dir() {
+            if target.is_dir() && safe_to_remove(&target, &allowed_roots) {
                 let size = dir_size_bytes(&target);
                 if std::fs::remove_dir_all(&target).is_ok() {
                     freed += size;
@@ -132,7 +288,7 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
     // 4. State root cargo dirs
     for name in &["cargo-target", "shared-target"] {
         let dir = state_root.join(name);
-        if dir.is_dir() {
+        if dir.is_dir() && safe_to_remove(&dir, &allowed_roots) {
             let size = dir_size_bytes(&dir);
             if std::fs::remove_dir_all(&dir).is_ok() {
                 freed += size;
@@ -171,6 +327,11 @@ pub fn emergency_cleanup(repo_root: &Path, state_root: &Path) -> Option<DiskHeal
     }
 
     let final_pct = get_disk_usage_pct(repo_root).unwrap_or(pct);
+
+    // Persist the run time so the next timer tick honors the min-refire
+    // backoff and cannot thrash within this build window (#4803).
+    write_emergency_marker(&marker, now);
+
     info!(
         freed_mb = freed / 1_000_000,
         before_pct = pct,
@@ -457,5 +618,155 @@ mod tests {
     fn truncate_zero_max() {
         let result = truncate("hello", 0);
         assert_eq!(result, "…");
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #4803 — anti-thrash hysteresis + persistent backoff (TDD).
+    //
+    // The emergency cleanup currently re-fires every timer tick above 95%,
+    // deleting target/debug + target/llvm-cov-target and pruning backups,
+    // only for cargo to instantly rebuild and refill `/` within one cycle
+    // (~25 min thrash observed 21:58→00:42). Post-relocation `/` is no
+    // longer the fill target, but the cleanup itself must ALSO gain a
+    // durable low-watermark + backoff so it can never thrash within one
+    // build window. These pin the pure decision seams:
+    //   - `should_fire_emergency_cleanup` — hysteresis + time-backoff gate
+    //   - `emergency_refire_min_secs_from` — env parse + clamp [0, 86400]
+    //   - watermark band constants (high=95 / low=85)
+    // ------------------------------------------------------------------
+
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn watermark_band_is_valid_hysteresis() {
+        // High must strictly exceed low so the two form a real hysteresis
+        // band (fire high, re-arm only after dropping below low), never a
+        // single edge that re-triggers on every tick. Bound to locals so the
+        // comparison is evaluated at runtime (clippy::assertions_on_constants).
+        let high = EMERGENCY_HIGH_WATERMARK_PCT;
+        let low = EMERGENCY_LOW_WATERMARK_PCT;
+        assert!(
+            high > low,
+            "high watermark ({high}) must exceed low watermark ({low})"
+        );
+        assert_eq!(
+            EMERGENCY_HIGH_WATERMARK_PCT, 95,
+            "high watermark must remain the documented ≥95% trigger"
+        );
+        assert_eq!(
+            EMERGENCY_LOW_WATERMARK_PCT, 85,
+            "low watermark must remain the documented 85% re-arm line"
+        );
+    }
+
+    #[test]
+    fn below_high_watermark_never_fires() {
+        let now = SystemTime::now();
+        // No prior run and 94% is still below the 95% trigger.
+        assert!(
+            !should_fire_emergency_cleanup(94, None, now, DEFAULT_EMERGENCY_MIN_REFIRE_SECS),
+            "94% (below high watermark) must not trigger cleanup even on first look"
+        );
+        assert!(
+            !should_fire_emergency_cleanup(
+                EMERGENCY_LOW_WATERMARK_PCT,
+                None,
+                now,
+                DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+            ),
+            "at the low watermark cleanup must not fire"
+        );
+    }
+
+    #[test]
+    fn at_or_above_high_watermark_fires_on_first_run() {
+        let now = SystemTime::now();
+        assert!(
+            should_fire_emergency_cleanup(95, None, now, DEFAULT_EMERGENCY_MIN_REFIRE_SECS),
+            "≥95% with no prior run must fire (no backoff marker yet)"
+        );
+        assert!(
+            should_fire_emergency_cleanup(100, None, now, DEFAULT_EMERGENCY_MIN_REFIRE_SECS),
+            "100% with no prior run must fire"
+        );
+    }
+
+    #[test]
+    fn backoff_suppresses_refire_within_window() {
+        // This is the core anti-thrash contract: even at 99% full, if the
+        // last cleanup ran more recently than the min-refire window, the
+        // next tick must be SUPPRESSED — otherwise we recreate the observed
+        // delete-then-rebuild-then-delete crash-loop.
+        let now = SystemTime::now();
+        let last_run = now - Duration::from_secs(60); // 1 min ago
+        assert!(
+            !should_fire_emergency_cleanup(99, Some(last_run), now, 900),
+            "a cleanup 60s ago with a 900s window must be suppressed (anti-thrash)"
+        );
+    }
+
+    #[test]
+    fn backoff_allows_refire_after_window() {
+        let now = SystemTime::now();
+        let last_run = now - Duration::from_secs(1_000); // > 900s window
+        assert!(
+            should_fire_emergency_cleanup(99, Some(last_run), now, 900),
+            "once the min-refire window has elapsed, a genuinely-full disk may fire again"
+        );
+    }
+
+    #[test]
+    fn zero_min_refire_disables_backoff() {
+        // An explicit 0 disables the backoff gate: every tick at/above the
+        // high watermark fires. This is the documented escape hatch.
+        let now = SystemTime::now();
+        let last_run = now - Duration::from_secs(1);
+        assert!(
+            should_fire_emergency_cleanup(96, Some(last_run), now, 0),
+            "min_refire_secs == 0 must disable the backoff gate"
+        );
+    }
+
+    #[test]
+    fn refire_secs_default_when_unset_or_invalid() {
+        assert_eq!(
+            emergency_refire_min_secs_from(None),
+            DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+            "unset env must yield the 900s default"
+        );
+        assert_eq!(
+            emergency_refire_min_secs_from(Some("")),
+            DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+            "empty string must fall back to default"
+        );
+        assert_eq!(
+            emergency_refire_min_secs_from(Some("not-a-number")),
+            DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+            "unparseable value must fall back to default"
+        );
+        assert_eq!(
+            emergency_refire_min_secs_from(Some("-5")),
+            DEFAULT_EMERGENCY_MIN_REFIRE_SECS,
+            "negative value must fall back to default (u64 parse fails)"
+        );
+    }
+
+    #[test]
+    fn refire_secs_parses_and_clamps() {
+        assert_eq!(
+            emergency_refire_min_secs_from(Some("300")),
+            300,
+            "a valid in-range value must be honored"
+        );
+        assert_eq!(
+            emergency_refire_min_secs_from(Some("0")),
+            0,
+            "an explicit 0 (disable backoff) is in-range and honored"
+        );
+        assert_eq!(
+            emergency_refire_min_secs_from(Some("99999999")),
+            86_400,
+            "values above the 86400s (24h) ceiling must clamp down"
+        );
     }
 }

@@ -193,6 +193,48 @@ fn posture_observe_only_refusal(
 ///
 /// Takes the shared state behind a `Mutex` and holds it only for short
 /// critical sections (assignment re-check, goal lookup, status writeback).
+/// Verdict of the build-heavy dispatch preflight (issue #4803).
+#[derive(Debug)]
+pub(crate) enum BuildDispatchPreflight {
+    /// Root `/` has adequate free space (or the probe failed and we fail
+    /// open) — the engineer spawn may proceed.
+    Proceed,
+    /// Root `/` is critically low — SKIP this spawn this cycle. Carries the
+    /// operator-facing reason for the benign retry-next-cycle outcome.
+    Skip { detail: String },
+}
+
+/// Pure decision seam mapping a `/`-filesystem disk-pressure probe to a
+/// Proceed / Skip verdict for the build-heavy engineer dispatch (issue #4803).
+///
+///   - `Ok(Ok)` / `Ok(Warn)` → Proceed (Warn is logged upstream by
+///     `check_with_default_threshold`; it is not fatal to a single spawn).
+///   - `Ok(Refuse)`          → Skip (NO silent fallback — the caller must not
+///     spawn; it returns a benign retry-next-cycle outcome).
+///   - `Err(probe)`          → Proceed (fail-open: a `statvfs` error must not
+///     wedge all goal advancement; it is logged, not fatal).
+pub(crate) fn build_dispatch_preflight(
+    probe: Result<crate::disk_pressure::PressureLevel, std::io::Error>,
+) -> BuildDispatchPreflight {
+    use crate::disk_pressure::PressureLevel;
+    match probe {
+        Ok(PressureLevel::Ok) | Ok(PressureLevel::Warn) => BuildDispatchPreflight::Proceed,
+        Ok(PressureLevel::Refuse) => BuildDispatchPreflight::Skip {
+            detail: "spawn_engineer skipped: root filesystem '/' is critically low on free \
+                     space; deferring build-heavy dispatch to next cycle (#4803)"
+                .to_string(),
+        },
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::ooda_brain",
+                error = %e,
+                "build-dispatch preflight: '/' disk probe failed; failing open (proceeding) (#4803)",
+            );
+            BuildDispatchPreflight::Proceed
+        }
+    }
+}
+
 /// The slow work — target-repo resolution, git worktree allocation, and the
 /// detached subprocess spawn — runs WITHOUT the lock held, so multiple
 /// engineers start concurrently within one OODA round (bounded by the AIMD
@@ -548,6 +590,34 @@ pub fn dispatch_spawn_engineer(
         }
     };
     let task = engineer_task_base.as_str();
+
+    // Issue #4803: build-heavy dispatch preflight. Spawning an engineer
+    // allocates a worktree and launches parallel `cargo` builds that write GBs
+    // of artifacts. BEFORE that, probe the ROOT filesystem `/` (which holds
+    // `~/.simard` and, historically, the cargo target dirs) against the shared
+    // disk-pressure threshold. A `Refuse` verdict means `/` is critically low;
+    // SKIP this spawn (benign retry-next-cycle, loud warn) rather than pile
+    // another build onto a saturating volume and cascade into the observed
+    // cognitive-lock / typed 'database is locked' / memory-IPC write failures.
+    // A probe error fails OPEN (proceed but log) so a `statvfs` hiccup can
+    // never wedge all goal advancement. Reuses `disk_pressure` — no new
+    // thresholds — and probes `/` specifically (distinct from the
+    // resource-admission gate below, which weighs the worktrees-root volume).
+    {
+        let probe =
+            crate::disk_pressure::check_with_default_threshold(Path::new("/")).map(|r| r.level);
+        match build_dispatch_preflight(probe) {
+            BuildDispatchPreflight::Proceed => {}
+            BuildDispatchPreflight::Skip { detail } => {
+                tracing::warn!(
+                    target: "simard::ooda_brain",
+                    goal = %goal_id,
+                    "{detail}",
+                );
+                return make_outcome(action, true, detail);
+            }
+        }
+    }
 
     // Issue #2706: resource-aware engineer ADMISSION gate. AFTER the overlap gate
     // and BEFORE worktree allocation. Spawning another engineer allocates a git
@@ -1071,8 +1141,56 @@ mod tests {
             .expect("epoch suffix must parse even with empty goal id");
     }
 
-    // ── truncate_for_log ───────────────────────────────────────────────────
+    // ── build-heavy dispatch preflight (issue #4803, TDD) ───────────────────
+    //
+    // Before allocating a worktree and launching parallel `cargo` builds, the
+    // dispatcher probes the root filesystem `/` via
+    // `disk_pressure::check_with_default_threshold`. These pin the pure
+    // decision seam that maps that probe to a Proceed / Skip verdict:
+    //   - Ok / Warn  → Proceed (build may run; Warn is logged upstream).
+    //   - Refuse     → Skip    (benign retry-next-cycle skip, loud warn!,
+    //                            NEVER a silent fallback that spawns anyway).
+    //   - Err(probe) → Proceed (fail-open: a statvfs error must not wedge all
+    //                            goal advancement; it is logged, not fatal).
 
+    #[test]
+    fn preflight_ok_pressure_proceeds() {
+        let decision = build_dispatch_preflight(Ok(crate::disk_pressure::PressureLevel::Ok));
+        assert!(
+            matches!(decision, BuildDispatchPreflight::Proceed),
+            "PressureLevel::Ok must permit the build-heavy dispatch to proceed, got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_warn_pressure_proceeds() {
+        let decision = build_dispatch_preflight(Ok(crate::disk_pressure::PressureLevel::Warn));
+        assert!(
+            matches!(decision, BuildDispatchPreflight::Proceed),
+            "PressureLevel::Warn proceeds (warn is emitted upstream), got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_refuse_pressure_skips() {
+        let decision = build_dispatch_preflight(Ok(crate::disk_pressure::PressureLevel::Refuse));
+        assert!(
+            matches!(decision, BuildDispatchPreflight::Skip { .. }),
+            "PressureLevel::Refuse must SKIP the spawn (no silent fallback), got {decision:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_probe_error_fails_open_and_proceeds() {
+        let err = std::io::Error::other("statvfs failed");
+        let decision = build_dispatch_preflight(Err(err));
+        assert!(
+            matches!(decision, BuildDispatchPreflight::Proceed),
+            "a probe error must fail OPEN (proceed but log), never wedge advancement, got {decision:?}"
+        );
+    }
+
+    // ── truncate_for_log ───────────────────────────────────────────────────
     #[test]
     fn truncate_for_log_passes_short_strings_through_unchanged() {
         let s = "a short, safe log line";
