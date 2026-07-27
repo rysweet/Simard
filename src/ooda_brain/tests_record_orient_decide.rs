@@ -549,6 +549,16 @@ fn orient_r2_malformed_json_fails_closed() {
     );
 }
 
+#[test]
+fn orient_r2_empty_file_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_bytes(dir.path(), b"");
+    assert!(
+        read_verified_orient(&path, GOAL, CYCLE).is_err(),
+        "R2: an empty (truncated) orient file MUST fail CLOSED (parity with the decide reader)"
+    );
+}
+
 // ----- R3: schema version pin -----------------------------------------------
 
 #[test]
@@ -561,6 +571,19 @@ fn orient_r3_wrong_schema_version_fails_closed() {
     assert!(
         read_verified_orient(&path, GOAL, CYCLE).is_err(),
         "R3: a mismatched schema version MUST fail CLOSED"
+    );
+}
+
+#[test]
+fn orient_r3_missing_schema_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let json = format!(
+        r#"{{"goal_id":"{GOAL}","cycle_number":{CYCLE},"base_urgency":{BASE_URGENCY},"adjusted_urgency":0.4,"confidence":1.0,"demotion_applied":0.4,"reason":"no schema"}}"#
+    );
+    let path = write_bytes(dir.path(), json.as_bytes());
+    assert!(
+        read_verified_orient(&path, GOAL, CYCLE).is_err(),
+        "R3: an orient record with no schema field MUST fail CLOSED (parity with the decide reader)"
     );
 }
 
@@ -621,6 +644,34 @@ fn orient_r5_control_byte_only_reason_fails_closed() {
     assert!(
         read_verified_orient(&path, GOAL, CYCLE).is_err(),
         "R5: a control-byte-only orient reason MUST fail CLOSED (empty after sanitize)"
+    );
+}
+
+#[test]
+fn orient_r5_missing_reason_field_fails_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let json = format!(
+        r#"{{"schema":"{ORIENT_SCHEMA}","goal_id":"{GOAL}","cycle_number":{CYCLE},"base_urgency":{BASE_URGENCY},"adjusted_urgency":0.4,"confidence":1.0,"demotion_applied":0.4}}"#
+    );
+    let path = write_bytes(dir.path(), json.as_bytes());
+    assert!(
+        read_verified_orient(&path, GOAL, CYCLE).is_err(),
+        "R5: an orient record with no reason field MUST fail CLOSED (parity with the decide reader)"
+    );
+}
+
+#[test]
+fn orient_reader_sanitizes_ansi_control_from_reason() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let json = format!(
+        "{{\"schema\":\"{ORIENT_SCHEMA}\",\"goal_id\":\"{GOAL}\",\"cycle_number\":{CYCLE},\"base_urgency\":{BASE_URGENCY},\"adjusted_urgency\":0.4,\"confidence\":1.0,\"demotion_applied\":0.4,\"reason\":\"\\u001b[31mALERT\\u001b[0m keep base urgency\"}}"
+    );
+    let path = write_bytes(dir.path(), json.as_bytes());
+    let fields = read_verified_orient(&path, GOAL, CYCLE).expect("sanitizable reason must verify");
+    assert!(
+        !fields.reason.contains('\u{1b}') && fields.reason.contains("ALERT"),
+        "ANSI/C0 bytes MUST be stripped on read while preserving the text (parity with the decide reader); got {:?}",
+        fields.reason
     );
 }
 
