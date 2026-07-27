@@ -63,6 +63,16 @@ impl ReclaimReport {
         self.bytes_freed > 0 || !self.removed.is_empty()
     }
 
+    /// Whether this run **freed space** — the signal the reclaim-effectiveness
+    /// gate keys its per-partition backoff on (issue #4809/#4825/#4810). True
+    /// when bytes were freed or the measured `%-used` dropped across the run;
+    /// a dry-run (removes nothing, `%-used` unchanged) is therefore *not*
+    /// effective, so a daemon stuck dry-running proven-no-op candidates backs
+    /// off instead of re-firing every cycle.
+    pub fn was_effective(&self) -> bool {
+        self.bytes_freed > 0 || self.used_pct_after < self.used_pct_before
+    }
+
     /// Daemon one-liner summary.
     pub fn summary(&self) -> String {
         format!(
@@ -611,6 +621,34 @@ mod tests {
             report.summary(),
             "disk reclaim: 88% -> 84% used, freed 12026531840 bytes, 0 paths removed, 0 skipped for review",
         );
+    }
+
+    #[test]
+    fn was_effective_tracks_freed_space_for_the_backoff_gate() {
+        // Base: a dry-run that removed nothing and left %-used unchanged is NOT
+        // effective — the daemon must back off instead of re-firing (#4809).
+        let mut report = ReclaimReport {
+            mode: ReclaimMode::DryRun,
+            used_pct_before: 94,
+            used_pct_after: 94,
+            target_pct: 85,
+            bytes_freed: 0,
+            removed: vec![],
+            would_remove: vec![],
+            skipped: vec![],
+            failures: vec![],
+        };
+        assert!(!report.was_effective(), "no-op dry-run is not effective");
+
+        // Bytes freed ⇒ effective even if %-used has not yet ticked down.
+        report.bytes_freed = 4096;
+        assert!(report.was_effective(), "freed bytes ⇒ effective");
+
+        // A %-used drop alone (e.g. large file unlinked by our removal) ⇒
+        // effective even without a byte count.
+        report.bytes_freed = 0;
+        report.used_pct_after = 90;
+        assert!(report.was_effective(), "%-used dropped ⇒ effective");
     }
 
     fn stale_cache(path: &Path) -> ReclaimCandidate {

@@ -176,7 +176,7 @@ In the Tier-3 disk-reclaim block of
 1. samples fresh `used_pct` via the existing `df` probe;
 2. if `used_pct ≥ SIMARD_DISK_RECLAIM_PCT`, calls
    `gate.peek(key, used_pct, now)`;
-3. on `Suppress`, logs a `WARN` line, increments
+3. on `Suppress`, logs an `info` line, increments
    `simard.disk.reclaim.suppressed_cycles`, and skips the run;
 4. on `Run`, invokes `run_disk_reclaim(..)` as before, then calls
    `gate.record(key, report.was_effective(), now)` where `was_effective()` is

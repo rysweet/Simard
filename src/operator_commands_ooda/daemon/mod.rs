@@ -822,6 +822,24 @@ pub fn run_ooda_daemon(
     );
     // -------------------------------------------------------------------
 
+    // --- disk-reclaim effectiveness gate state (issue #4809/#4825/#4810) -
+    // A suppress-only per-partition exponential-backoff cooldown that stops the
+    // Tier-3 reclaim below from re-firing every ~15-min cycle once a streak of
+    // runs has freed nothing — the churn that burned CPU/IO/log volume on the
+    // ~94%-full host without reclaiming a byte. A genuinely filling disk (used
+    // %-used at/above the hard ceiling) always bypasses the cooldown, and a run
+    // that actually frees space immediately re-admits the next cycle.
+    let reclaim_gate_enabled = crate::disk_reclaim::effectiveness_gate_enabled();
+    let mut reclaim_effectiveness_gate = crate::disk_reclaim::ReclaimEffectivenessGate::from_env();
+    daemon_log(
+        &state_root,
+        &format!(
+            "[simard] OODA daemon: disk-reclaim effectiveness gate = {}",
+            if reclaim_gate_enabled { "on" } else { "off" }
+        ),
+    );
+    // -------------------------------------------------------------------
+
     // --- periodic engineer worktree sweep state (issue #2167) -----------
     let worktree_sweep_interval_secs: u64 = std::env::var("SIMARD_WORKTREE_SWEEP_INTERVAL_SECS")
         .ok()
@@ -1196,22 +1214,76 @@ pub fn run_ooda_daemon(
                     .map(|p| p.round().clamp(0.0, 100.0) as u8);
                 match used_now {
                     Some(used) if crate::disk_reclaim::daemon_should_trigger(used, reclaim_pct) => {
-                        let mode = crate::disk_reclaim::daemon_apply_from_env();
-                        match crate::disk_reclaim::run_disk_reclaim(
-                            &memories.repo_root,
-                            &state_root,
-                            None,
-                            mode,
-                            reclaim_pct,
-                            crate::disk_reclaim::ReclaimSource::Daemon,
-                        ) {
-                            Ok(report) => {
-                                daemon_log(&state_root, &format!("[simard] {}", report.summary()));
-                            }
-                            Err(e) => daemon_log(
+                        // Effectiveness gate (issue #4809/#4825/#4810): a fresh
+                        // local `used` sample keys a per-partition backoff. A
+                        // streak of runs that freed nothing arms a growing
+                        // cooldown so this branch stops re-firing every cycle;
+                        // a disk at/above the hard ceiling always bypasses it.
+                        let reclaim_key = format!("disk-reclaim:{}", state_root.display());
+                        let now_secs = SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        if reclaim_gate_enabled
+                            && reclaim_effectiveness_gate.peek(&reclaim_key, used, now_secs)
+                                == crate::disk_reclaim::EffectivenessDecision::Suppress
+                        {
+                            let streak = reclaim_effectiveness_gate.noop_streak(&reclaim_key);
+                            crate::telemetry::registry::counter_add(
+                                crate::telemetry::names::DISK_RECLAIM_SUPPRESSED_CYCLES,
+                                1,
+                                &[(
+                                    crate::telemetry::names::ATTR_SOURCE,
+                                    crate::disk_reclaim::ReclaimSource::Daemon.as_str(),
+                                )],
+                            );
+                            tracing::info!(
+                                target: "simard::disk_reclaim",
+                                used_pct = used,
+                                noop_streak = streak,
+                                "disk reclaim suppressed: prior runs freed nothing; in \
+                                 effectiveness cooldown",
+                            );
+                            daemon_log(
                                 &state_root,
-                                &format!("[simard] WARN: disk reclaim failed: {e}"),
-                            ),
+                                &format!(
+                                    "[simard] disk reclaim: {used}% used, suppressed \
+                                     (ineffective-run cooldown, streak {streak})"
+                                ),
+                            );
+                        } else {
+                            let mode = crate::disk_reclaim::daemon_apply_from_env();
+                            match crate::disk_reclaim::run_disk_reclaim(
+                                &memories.repo_root,
+                                &state_root,
+                                None,
+                                mode,
+                                reclaim_pct,
+                                crate::disk_reclaim::ReclaimSource::Daemon,
+                            ) {
+                                Ok(report) => {
+                                    // Record the outcome so a no-op run arms/grows
+                                    // the cooldown and a run that actually freed
+                                    // space re-admits the next cycle. A failed run
+                                    // (Err below) is left unrecorded so a transient
+                                    // error never arms a cooldown.
+                                    if reclaim_gate_enabled {
+                                        reclaim_effectiveness_gate.record(
+                                            &reclaim_key,
+                                            report.was_effective(),
+                                            now_secs,
+                                        );
+                                    }
+                                    daemon_log(
+                                        &state_root,
+                                        &format!("[simard] {}", report.summary()),
+                                    );
+                                }
+                                Err(e) => daemon_log(
+                                    &state_root,
+                                    &format!("[simard] WARN: disk reclaim failed: {e}"),
+                                ),
+                            }
                         }
                     }
                     Some(used) => daemon_log(
