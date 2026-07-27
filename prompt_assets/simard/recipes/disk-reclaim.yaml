@@ -83,11 +83,24 @@ steps:
          ```
          Skip any candidate whose path is at/under a live cwd.
 
-      5. **Find stale build caches.** Locate `target/` directories that are
-         obviously stale (belong to a worktree you are already proposing, or the
-         shared cargo caches `{{state_root}}/cargo-target/` and
-         `{{state_root}}/shared-target/`). Measure sizes with
-         `du -sb <path>`.
+      5. **Find stale build caches.** Propose rebuildable Cargo artifact
+         directories, measuring each with `du -sb <path>`. Always propose the
+         **children** of a `target/` (e.g. `target/debug`, `target/release`,
+         `target/llvm-cov-target`), never a bare `target/` parent — the
+         executor's strict-inside containment refuses a path that equals an
+         allow-root. Cover:
+         - each managed repo's top-level `target/` children —
+           `/home/azureuser/src/Simard/target/*`,
+           `/home/azureuser/src/amplihack-rs/target/*`, and
+           `/home/azureuser/src/amplihack-memory-lib/target/*` — when no live
+           process (step 4) holds them. These are the routine build-cache wins
+           that keep the partition off the emergency backstop between passes,
+         - `target/` children belonging to a worktree you are already proposing,
+         - the shared cargo caches under `{{state_root}}/cargo-target/` and
+           `{{state_root}}/shared-target/`.
+         A running `cargo build` simply rebuilds a deleted artifact directory, so
+         this is only a cost, never a correctness risk — but still skip any path
+         with a live process; the executor refuses it anyway.
 
       6. **Reason largest-first.** Sort your proposed candidates by measured size
          descending. Propose the biggest safe wins first. Propose enough to get

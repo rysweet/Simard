@@ -619,6 +619,50 @@ mod tests {
         );
     }
 
+    /// Safety boundary the issue-#4809 fix depends on: making `<repo>/target`
+    /// an allow-root must NOT make the bare `target/` directory itself
+    /// deletable. `is_safe_to_delete` requires a candidate to be *strictly
+    /// inside* an allow-root (`real != root`), so a candidate that **equals** an
+    /// allow-root is refused `OutsideAllowRoot`, while its rebuildable child
+    /// (`target/debug`) clears containment and is reclaimed. This is exactly why
+    /// the recipe proposes `target/` children and never the bare parent — if
+    /// this equality guard ever regressed, routine reclaim could `rm -rf` a
+    /// whole `target/` allow-root.
+    #[test]
+    fn rail_refuses_candidate_equal_to_allow_root_but_allows_its_child() {
+        // The allow-root stands in for `<repo>/target`; `debug` is its child.
+        let target = TempDir::new().expect("target allow-root");
+        let debug = target.path().join("debug");
+        std::fs::create_dir_all(&debug).expect("target/debug");
+        let allow_roots = vec![target.path().to_path_buf()];
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let live = FakeLiveProcessProbe::default();
+        let wt = FixedWtProbe(WorktreeVerdict::Reclaimable);
+        let measurer = MapMeasurer::default();
+        measurer.set(&debug, 4096);
+
+        // A candidate that IS the allow-root (bare `target/`) must be refused.
+        let bare = cand(target.path(), CandidateKind::StaleBuildCache);
+        assert_eq!(
+            vet(&bare, &allow_roots, &protected, &live, &wt, &measurer),
+            Verdict::Reject {
+                reason: RejectReason::OutsideAllowRoot
+            },
+            "a path equal to an allow-root (bare target/) must never be deletable",
+        );
+
+        // Its child (`target/debug`) is strictly inside → reclaimed.
+        let child = cand(&debug, CandidateKind::StaleBuildCache);
+        assert_eq!(
+            vet(&child, &allow_roots, &protected, &live, &wt, &measurer),
+            Verdict::Allow {
+                primitive: ReclaimPrimitive::RemoveDir,
+                bytes: 4096,
+            },
+            "a rebuildable child of the target allow-root must be reclaimable",
+        );
+    }
+
     #[test]
     fn rail_refuses_hallucinated_nonexistent_path() {
         let allow = TempDir::new().expect("allow root");

@@ -212,11 +212,26 @@ pub fn exec_reclaim(
         }
 
         match vet_candidate(&candidate, ctx) {
-            Verdict::Reject { reason } => report.skipped.push(SkippedPath {
-                path: candidate.path.clone(),
-                kind: candidate.kind,
-                reject_reason: reason,
-            }),
+            Verdict::Reject { reason } => {
+                // Per-candidate structured skip-reason trace feeding the
+                // human-review audit trail. Fields-only (no `{}` interpolation
+                // of the agent's free-text `reason`), so a hostile candidate
+                // string can never forge or inject log lines. `info` level:
+                // routine, expected, and useful for observing which rail refused
+                // each path between reclaim passes. No `print!`/`println!`.
+                tracing::info!(
+                    target: "simard::disk_reclaim",
+                    path = %candidate.path.display(),
+                    reason = ?reason,
+                    kind = ?candidate.kind,
+                    "reclaim candidate skipped by guard",
+                );
+                report.skipped.push(SkippedPath {
+                    path: candidate.path.clone(),
+                    kind: candidate.kind,
+                    reject_reason: reason,
+                });
+            }
             Verdict::Allow { primitive, bytes } => {
                 let entry = RemovedPath {
                     path: candidate.path.clone(),
@@ -596,5 +611,94 @@ mod tests {
             report.summary(),
             "disk reclaim: 88% -> 84% used, freed 12026531840 bytes, 0 paths removed, 0 skipped for review",
         );
+    }
+
+    fn stale_cache(path: &Path) -> ReclaimCandidate {
+        ReclaimCandidate {
+            path: path.to_path_buf(),
+            kind: CandidateKind::StaleBuildCache,
+            parent_repo: None,
+            reason: None,
+            est_bytes: None,
+        }
+    }
+
+    /// Routine-reclaim regression (issue #4809): a `<repo>/target/debug`
+    /// candidate frees nothing while `<repo>/target` is outside the allow-roots
+    /// (the pre-fix no-op between emergency passes), and is reclaimed once the
+    /// per-repo `target/` root is in scope.
+    #[test]
+    fn routine_reclaim_frees_target_only_when_target_root_is_in_scope() {
+        let repo = TempDir::new().unwrap();
+        let target = repo.path().join("target");
+        let debug = target.join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let live = FakeLiveProcessProbe::default();
+        let wt = AllowAllWtProbe;
+        let measurer = MapMeasurer::default();
+        measurer.set(&debug, 4096);
+
+        // Old scope: the only allow-root is `<repo>/worktrees`, which does NOT
+        // contain `<repo>/target/debug` → rejected `OutsideAllowRoot`, freeing
+        // nothing. This reproduces the routine no-op.
+        let old_roots = vec![repo.path().join("worktrees")];
+        let old_guard = GuardContext {
+            allow_roots: &old_roots,
+            protected: &protected,
+            live_probe: &live,
+            wt_probe: &wt,
+            measurer: &measurer,
+        };
+        let remover_old = RecordingRemover::default();
+        let before = exec_reclaim(
+            vec![stale_cache(&debug)],
+            &old_guard,
+            ReclaimMode::Apply,
+            85,
+            &ScriptedDisk::new(vec![90]),
+            Path::new("/home"),
+            &remover_old,
+        );
+        assert_eq!(before.bytes_freed, 0, "no target root → routine no-op");
+        assert!(before.removed.is_empty());
+        assert_eq!(before.skipped.len(), 1);
+        assert_eq!(before.skipped[0].path, debug);
+        assert_eq!(
+            before.skipped[0].reject_reason,
+            RejectReason::OutsideAllowRoot,
+        );
+        assert!(remover_old.calls.borrow().is_empty());
+
+        // New scope: the `<repo>/target` parent is an allow-root → `target/debug`
+        // is strictly inside, clears the guard, and is reclaimed.
+        let new_roots = vec![target.clone()];
+        let new_guard = GuardContext {
+            allow_roots: &new_roots,
+            protected: &protected,
+            live_probe: &live,
+            wt_probe: &wt,
+            measurer: &measurer,
+        };
+        let remover_new = RecordingRemover::default();
+        let after = exec_reclaim(
+            vec![stale_cache(&debug)],
+            &new_guard,
+            ReclaimMode::Apply,
+            85,
+            &ScriptedDisk::new(vec![90]),
+            Path::new("/home"),
+            &remover_new,
+        );
+        assert!(
+            after.bytes_freed > 0,
+            "target root in scope → artifact freed"
+        );
+        assert_eq!(after.removed.len(), 1);
+        assert_eq!(after.removed[0].path, debug);
+        assert_eq!(after.removed[0].kind, CandidateKind::StaleBuildCache);
+        assert!(after.skipped.is_empty());
+        assert_eq!(remover_new.calls.borrow().len(), 1);
     }
 }
