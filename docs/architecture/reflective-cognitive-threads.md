@@ -24,10 +24,11 @@ related:
 
 # Reflective cognitive threads act via tools (no JSON envelope)
 
-!!! note "Status — implemented; superseding PR for #3142; default-OFF (double-gated)"
+!!! note "Status — implemented; superseding PR for #3142; default-ON (opt-out) since #4845"
     The nine reflective cognitive threads are wired into the `Mind` scheduler and
-    run on their configured cadence. Every thread is **dormant by default** behind
-    a **double gate** (master + per-thread, both must be truthy). Each thread's
+    run on their configured cadence. Every thread is **ENABLED by default (opt-out)**
+    behind a **default-ON double gate** (master + per-thread; a thread runs unless
+    a gate is set to an explicit falsy token). Each thread's
     side effects are performed **inside its recipe** by calling existing `simard`
     command-line tools — there is **no JSON envelope**, no output file, and **no
     Rust-side parse** of recipe stdout. A thread's only job is: *check gate →
@@ -128,7 +129,7 @@ effect. Simard reads this recipe by its exit status."*
 ## The nine reflective threads
 
 Each thread maps to one recipe and one per-thread gate. All are additive and
-**OFF by default**.
+**ENABLED by default (opt-out)** since #4845.
 
 | Thread (`threads/*.rs`) | Recipe (`prompt_assets/simard/recipes/`) | Per-thread gate | Primary effect |
 | --- | --- | --- | --- |
@@ -175,12 +176,12 @@ wrote nothing."
 
 ## What is preserved unchanged (zero-behavior-change when dormant)
 
-The rework is behavior-preserving whenever the gates are OFF, which is the
-default. These invariants are **unchanged**:
+The rework is behavior-preserving. These invariants are **unchanged**:
 
-- **Double-default-OFF gates.** The master gate `SIMARD_COGNITIVE_THREADS_ENABLED`
-  **and** the per-thread `SIMARD_THREAD_<NAME>_ENABLED` must **both** be truthy
-  for a reflective thread to run.
+- **Default-ON opt-out gates (#4845).** The master gate
+  `SIMARD_COGNITIVE_THREADS_ENABLED` and the per-thread
+  `SIMARD_THREAD_<NAME>_ENABLED` are default-ON: a reflective thread runs unless
+  a gate is set to an explicit falsy token (`0`/`false`/`no`/`off`).
 - **Security fence.** `secret_scrub`, `sanitize_value`, `is_fenced_payload`,
   `build_context_args`, and `resolve_recipe_path` (SR-4) still guard every
   recipe invocation and every context value.

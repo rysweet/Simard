@@ -494,6 +494,7 @@ nav:
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
     - Salience-Signal CLI: reference/simard-cognition-salience-signal-cli.md
     - Cognitive-Threads Catalog (ten reflective threads): reference/cognitive-threads-catalog.md
+    - Cognitive Threads — Always-On Scheduling, Telemetry & Auto-Remediation: reference/cognitive-thread-full-activation.md
     - The RecipeInvoker Seam: reference/recipe-invoker-seam.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md

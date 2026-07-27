@@ -227,3 +227,164 @@ pub fn read_ooda_tail(state_root: &Path, max_bytes: u64) -> Vec<String> {
     }
     it.map(str::to_string).collect()
 }
+
+// ---------------------------------------------------------------------------
+// Issue #4845 — TDD contract (Step 7) for the detect → dispatch → dedup path
+// (design component C6 / requirement 3). Authored alongside the full-activation
+// work: it pins that an injected thread failure, surfaced by
+// `detect_thread_anomalies`, folds through the SAME Observe→Orient pipeline
+// every other observation uses (`signals_from` → `orient`) into EXACTLY ONE
+// deduplicated `ProcessHealth` problem — never a parallel remediation rail
+// (#4719: no new scrape path) and never a per-cycle re-dispatch. These tests are
+// pure and hermetic (hand-built snapshot + registry), no I/O.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod full_activation_dispatch_tests {
+    use super::detect_thread_anomalies;
+    use crate::cognitive_threads::ThreadHealth;
+    use crate::overseer::capabilities::ObservedState;
+    use crate::overseer::orient;
+    use crate::overseer::signal::{self, ProblemKind, Signal};
+    use crate::telemetry::snapshot::{CounterSeries, GaugeSeries, MetricsSnapshot};
+
+    const NOW: u64 = 2_000_000_000;
+
+    fn tname(id: &str, suffix: &str) -> String {
+        format!("simard.thread.{id}.{suffix}")
+    }
+
+    fn reg(id: &str, cadence: u64) -> ThreadHealth {
+        ThreadHealth {
+            id: id.to_string(),
+            enabled: true,
+            last_run_epoch: None,
+            next_run_epoch: None,
+            last_success: None,
+            consecutive_errors: 0,
+            backoff_until_epoch: None,
+            purpose: format!("{id} purpose"),
+            cadence_secs: Some(cadence),
+        }
+    }
+
+    /// A snapshot for a thread that has failed the MAJORITY of its runs
+    /// (`failed` of `runs`), on-cadence so only the failure-rate branch fires.
+    fn failing_snapshot(id: &str, runs: u64, failed: u64) -> MetricsSnapshot {
+        let mut snap = MetricsSnapshot::empty();
+        snap.gauges.push(GaugeSeries {
+            name: tname(id, "next_run_epoch"),
+            attrs: Vec::new(),
+            value: (NOW + 300) as i64,
+        });
+        snap.counters.push(CounterSeries {
+            name: tname(id, "runs"),
+            attrs: Vec::new(),
+            value: runs,
+        });
+        snap.counters.push(CounterSeries {
+            name: tname(id, "failures"),
+            attrs: Vec::new(),
+            value: failed,
+        });
+        snap
+    }
+
+    // C6: an injected failure is DETECTED and dispatches exactly ONE fix.
+    #[test]
+    fn injected_failure_yields_exactly_one_process_health_dispatch() {
+        let id = "engineer_log_analysis";
+        let snap = failing_snapshot(id, 10, 8);
+        let registry = vec![reg(id, 300)];
+
+        // 1. Detect — the deterministic rail names the failing thread.
+        let anomalies = detect_thread_anomalies(&snap, &registry, &[], NOW);
+        assert!(
+            anomalies.iter().any(|a| a.contains(id)),
+            "the injected failing thread must be detected + named: {anomalies:?}"
+        );
+
+        // 2. Fold through the SAME Observe→Orient fan-out (no bespoke rail).
+        let state = ObservedState {
+            anomalies: anomalies.clone(),
+            ..ObservedState::default()
+        };
+        let signals = signal::signals_from(&state);
+        assert!(
+            signals.iter().any(|s| matches!(s, Signal::Anomaly { .. })),
+            "each anomaly string must lift into a Signal::Anomaly"
+        );
+
+        // 3. Orient → exactly ONE ProcessHealth problem, keyed `anomaly:<...>`.
+        let problems = orient(&signals, &[]);
+        let health_problems: Vec<_> = problems
+            .iter()
+            .filter(|p| p.kind == ProblemKind::ProcessHealth)
+            .collect();
+        assert_eq!(
+            health_problems.len(),
+            1,
+            "one failing thread ⇒ exactly one remediation problem, got: {problems:?}"
+        );
+        assert!(
+            health_problems[0].dedup_key.starts_with("anomaly:"),
+            "the remediation problem is keyed on the stable anomaly signature so the \
+             Overseer's recipe_dedup_key suppresses duplicate fix-goals: {}",
+            health_problems[0].dedup_key
+        );
+    }
+
+    // C6: the SAME failure across two Observe passes dedups to ONE dispatch
+    // (no per-cycle re-launch for one persistently unhealthy thread).
+    #[test]
+    fn recurring_failure_dedups_to_a_single_dispatch() {
+        let id = "metacognition";
+        let registry = vec![reg(id, 300)];
+
+        // Two cycles, DIFFERENT live magnitudes (8/10 then 30/40 failures) —
+        // the detector must emit a byte-identical stable string both times
+        // (the signature is content-free w.r.t. the raw counts, so dedup holds).
+        let a = detect_thread_anomalies(&failing_snapshot(id, 10, 8), &registry, &[], NOW);
+        let b = detect_thread_anomalies(&failing_snapshot(id, 40, 30), &registry, &[], NOW);
+        assert_eq!(a, b, "same condition ⇒ identical stable anomaly string");
+
+        // Both cycles' signals in Orient at once ⇒ still ONE problem (merged by
+        // dedup_key), i.e. exactly one fix is dispatched, not one per cycle.
+        let state = ObservedState {
+            anomalies: [a, b].concat(),
+            ..ObservedState::default()
+        };
+        let signals = signal::signals_from(&state);
+        let problems = orient(&signals, &[]);
+        let health = problems
+            .iter()
+            .filter(|p| p.kind == ProblemKind::ProcessHealth)
+            .count();
+        assert_eq!(
+            health, 1,
+            "a recurring failure signature dedups to a single dispatch, got {health} problems"
+        );
+    }
+
+    // Dual-CHANNEL detection: the failure-rate verdict is driven by the real
+    // per-thread telemetry series. Drop the `failures` counter and the same
+    // thread is no longer flagged — proving detection reads live telemetry, not
+    // a hardcoded verdict (zero-BS).
+    #[test]
+    fn detection_is_driven_by_the_real_failures_counter() {
+        let id = "salience";
+        let registry = vec![reg(id, 300)];
+
+        let flagged = detect_thread_anomalies(&failing_snapshot(id, 10, 8), &registry, &[], NOW);
+        assert!(
+            flagged.iter().any(|x| x.contains(id)),
+            "with a majority-failure counter the thread is flagged"
+        );
+
+        // Same thread, but only 1 of 10 failed ⇒ healthy ⇒ not flagged.
+        let healthy = detect_thread_anomalies(&failing_snapshot(id, 10, 1), &registry, &[], NOW);
+        assert!(
+            !healthy.iter().any(|x| x.contains(id)),
+            "a mostly-succeeding thread is NOT flagged (verdict tracks real counts): {healthy:?}"
+        );
+    }
+}

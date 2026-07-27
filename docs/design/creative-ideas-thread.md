@@ -610,9 +610,10 @@ threads, and ticks on its configured cadence — it is not a separate process or
 "Bridge."
 
 **Runtime gate.** The generic cognitive-thread scheduler master switch
-(`SIMARD_COGNITIVE_THREADS_ENABLED`) is default-OFF and owns only the
-maintenance / engineer-log threads. Creative Ideas is **not** behind it: the
-daemon builds the `Mind` runtime when *either* that switch is truthy **or**
+(`SIMARD_COGNITIVE_THREADS_ENABLED`) is default-ON (opt-out) since #4845 and owns
+the maintenance / engineer-log / reflective threads. Creative Ideas is **not**
+behind it: the daemon builds the `Mind` runtime when *either* that switch is not
+opted out **or**
 `CreativeIdeasConfig::from_env().enabled()` is true (default). This keeps the
 existing threads' gating and timing byte-for-byte unchanged while letting the
 default-ON Creative Ideas thread run on a stock deployment.

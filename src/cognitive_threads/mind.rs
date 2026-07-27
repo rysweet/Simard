@@ -16,7 +16,14 @@ use super::thread::{CognitiveThread, Priority, ThreadContext, ThreadHealth, Thre
 /// Env var controlling the per-tick non-critical fan-out budget.
 const BUDGET_ENV: &str = "SIMARD_MIND_MAX_NONCRITICAL_PER_TICK";
 /// Default non-critical fan-out per tick when the env var is unset/invalid.
-const DEFAULT_BUDGET: usize = 2;
+///
+/// Sized to cover the full default-ON scheduled non-critical roster (issue
+/// #4845, requirement 4): maintenance + engineer-log + the ten reflective
+/// threads + creative-ideas = 13. OODA is `Critical` and budget-exempt. A
+/// smaller default (the historical `2`) starves long-cadence threads on a tick
+/// where several come due, which would make the Overseer's stall detector
+/// false-positive. Operators can still throttle via `SIMARD_MIND_MAX_NONCRITICAL_PER_TICK`.
+const DEFAULT_BUDGET: usize = 13;
 
 /// Base delay of the per-thread capped-exponential backoff.
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
@@ -285,4 +292,39 @@ fn record_thread_failure(id: &str, summary: &str) {
         exit_code: None,
         evidence,
     });
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4845 — TDD contract (Step 7) for the per-tick budget default
+// (design component C3 / requirement 4). Authored BEFORE the bump, so this is
+// RED until `DEFAULT_BUDGET` is raised from 2 to cover the full scheduled
+// non-critical roster (~13 threads). With the old default of 2, a tick where
+// many long-cadence threads come due would starve all but two of them, and the
+// Overseer's staleness detector would then false-positive on the starved ones.
+// The budget default is the single source of truth for that fan-out ceiling.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod default_budget_tests {
+    use super::DEFAULT_BUDGET;
+
+    /// The full default-ON scheduled non-critical roster after issue #4845:
+    /// maintenance + engineer-log + the ten reflective threads + creative-ideas
+    /// = 13. OODA is `Critical` and budget-EXEMPT, so it is not counted here.
+    const SCHEDULED_NONCRITICAL_ROSTER: usize = 13;
+
+    #[test]
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "deliberate compile-time invariant: the budget default must \
+                  cover the whole scheduled roster; both operands are consts"
+    )]
+    fn default_budget_covers_the_full_scheduled_roster() {
+        assert!(
+            DEFAULT_BUDGET >= SCHEDULED_NONCRITICAL_ROSTER,
+            "the per-tick non-critical budget default ({DEFAULT_BUDGET}) must cover every \
+             scheduled non-critical thread ({SCHEDULED_NONCRITICAL_ROSTER}) so a tick where \
+             they all come due never starves the long-cadence ones (which would make the \
+             Overseer's stall detector false-positive). RED under the old default of 2."
+        );
+    }
 }

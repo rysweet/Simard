@@ -5,7 +5,7 @@
 //! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
 //! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
 //! tool calls (writing `narrative:` facts) ARE the effect — the thread parses NOTHING
-//! back and performs NO durable write itself. OFF by default behind the double
+//! back and performs NO durable write itself. ENABLED by default (opt-out) behind the default-ON double
 //! env gate.
 //!
 //! **Status (issue #5):** implemented; [`NarrativeThread::tick`] is covered by

@@ -15,8 +15,9 @@ pub mod creative_ideas;
 
 // Issue #5: the ten reflective threads. Each is a thin `CognitiveThread` rail
 // over an agentic recipe (or, for interoception, deterministic sensing),
-// scheduled by the shared `Mind` alongside OODA and OFF by default behind the
-// double env gate. See `docs/reference/cognitive-threads-catalog.md`.
+// scheduled by the shared `Mind` alongside OODA and ENABLED by default (opt-out)
+// behind the default-ON double env gate (issue #4845). See
+// `docs/reference/cognitive-thread-full-activation.md`.
 pub mod analogy;
 pub mod consolidation;
 pub mod interoception;
@@ -46,13 +47,13 @@ pub use values_deliberation::{ValuesDeliberationConfig, ValuesDeliberationThread
 
 /// Register the ten reflective threads (issue #5) with the shared [`Mind`].
 ///
-/// Called from the daemon **only** when the master gate
-/// `SIMARD_COGNITIVE_THREADS_ENABLED` is truthy, so with the gate unset nothing
-/// registers. Each thread is additionally OFF by default behind its own
-/// per-thread gate: a registered-but-disabled thread never ticks (the `Mind`
-/// filters on `enabled()`), so registration here is safe and fully additive.
-/// Nine are recipe rails built from the environment (repo + state roots);
-/// interoception is recipe-free deterministic sensing.
+/// Called from the daemon when the master gate
+/// `SIMARD_COGNITIVE_THREADS_ENABLED` is not explicitly opted out (default-ON,
+/// issue #4845). Each thread is additionally ENABLED by default (opt-out) behind
+/// its own per-thread gate: a registered-but-disabled thread never ticks (the
+/// `Mind` filters on `enabled()`), so registration here is safe and fully
+/// additive. Nine are recipe rails built from the environment (repo + state
+/// roots); interoception is recipe-free deterministic sensing.
 pub fn register_reflective_threads(
     mind: &mut super::Mind,
     repo_root: &std::path::Path,

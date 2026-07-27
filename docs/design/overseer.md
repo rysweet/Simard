@@ -129,7 +129,7 @@ flowchart TB
   subgraph daemon["simard daemon process"]
     subgraph loop["daemon loop — src/operator_commands_ooda/daemon/mod.rs"]
       ooda["OODA inline cycle\n(external repos + own features)"]
-      mind["Mind.run_due()\nbackground CognitiveThreads\n(off by default)"]
+      mind["Mind.run_due()\nbackground CognitiveThreads\n(on by default, opt-out)"]
     end
     store[("shared durable store\n~/.simard: cognitive/, goal-board,\ntelemetry/metrics_snapshot.json,\ncosts/ledger.jsonl")]
     overseer["Overseer co-process\n(meta-OODA; guarded capabilities)\n— M2+ sibling task —"]
@@ -162,7 +162,7 @@ daemon already flushes — it never reads daemon RAM, so it is process-agnostic:
 The daemon loop lives in `src/operator_commands_ooda/daemon/mod.rs`. Each iteration
 it runs the authoritative OODA cycle inline, then ticks the `Mind`
 (`mind.run_due(&mut ctx)`, ~L959–984; the `Mind` is wired ~L517–562, additive and
-**off by default** via `SIMARD_COGNITIVE_THREADS_ENABLED`). Two future wiring
+**on by default (opt-out)** via `SIMARD_COGNITIVE_THREADS_ENABLED`). Two future wiring
 options — **neither implemented in this spike**:
 
 - **M1 read-only sensor:** register an `impl CognitiveThread` next to
