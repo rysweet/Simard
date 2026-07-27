@@ -218,6 +218,7 @@ nav:
     - Report a Bug or Request a Feature: howto/report-a-bug-or-request-a-feature.md
     - Resume an Interrupted Meeting: howto/resume-an-interrupted-meeting.md
     - Recover from Meeting-Close Timeout: howto/recover-from-meeting-close-timeout.md
+    - Recover from a Corrupt Cognitive WAL: howto/recover-from-a-corrupt-cognitive-wal.md
     - Use Meeting Templates: howto/use-meeting-templates.md
     - Export Meeting Markdown: howto/export-meeting-markdown.md
     - Inspect Meeting Records: howto/inspect-meeting-records.md
@@ -507,6 +508,7 @@ nav:
     - Cognitive-Memory Durability: operations/cognitive-memory-durability.md
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md
     - Cognitive-Memory Open Serialization: reference/cognitive-memory-open-serialization.md
+    - Cognitive-Memory WAL Crash-Consistency (#4687): reference/cognitive-memory-wal-crash-consistency.md
     - Meeting REPL & Handoff Ingestion: operations/meeting-handoffs.md
     - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
     - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md

@@ -131,8 +131,21 @@ path = "src/bin/supply_chain_steward.rs"
 # The fork engine writes on-disk storage format v42 (forward-only from v41; the
 # v40->v41+ no-data-loss gate now accepts v41-or-newer). Simard's direct `lbug` dep
 # below is repointed at the SAME fork rev in lockstep so the final binary links
-# exactly one engine. Still an upstream-`main` commit.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "c266e15d1399967c04324370e77cf281990b8be1", features = ["persistent"] }
+# exactly one engine.
+#
+# Issue #4687 (WAL crash-consistency): bumped OFF the WAL-corrupting rev
+# c266e15d… to the single-owner / fsync-durable WAL fix. The pin targets the
+# WAL-only fix commit `0031505b…` (branch `fix/issue-4687-wal-only-on-c266e15`,
+# durably anchored by tag `issue-4687-wal-crash-consistency-c266e15`), which is
+# the SAME diff as the upstream `main` squash-merge (b3033f7…, PR #144) applied
+# directly onto Simard's current base c266e15. We deliberately do NOT pin to the
+# `main` merge commit yet: `main` also carries the #137 multi-writer coordination
+# layer (a new engine-level single-writer store lock), which is a separate,
+# out-of-scope adoption for Simard and would break the pre-existing
+# concurrent-open cognitive-memory tests. Keeping the pin WAL-only stays
+# additive/non-breaking and preserves store format v42. Follow-up: adopt the
+# coordination layer and repin to `main` in its own change.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "0031505b911151bf47409694a6c45f8b778d91b9", features = ["persistent"] }
 rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "dcccad80ed381c66a7728565be5cb84120aacbed" }
 rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "dcccad80ed381c66a7728565be5cb84120aacbed" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
