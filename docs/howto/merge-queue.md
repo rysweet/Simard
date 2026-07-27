@@ -220,7 +220,10 @@ the workflow triggers can be left in place.
   never passed as arguments, echoed, or logged. `--dry-run` prints only method
   and path.
 - **Input validation.** `--repo` / `--branch` are regex-validated and every
-  expansion is quoted; JSON is parsed only with `jq`, never `eval`/`source`d.
+  expansion is quoted. The script never `eval`/`source`s API output: response
+  bodies are discarded and outcomes are classified only by matching `gh`'s HTTP
+  status text (the `--jq` read-back in §3 is illustrative, not part of the
+  apply path).
 - **Pinned API version.** All calls send `X-GitHub-Api-Version: 2022-11-28` so a
   server-side default change can't silently alter behavior.
 - **Unchanged CI permissions.** Adding `merge_group` does not broaden workflow
