@@ -67,6 +67,14 @@ Commands:
   demote <goal-id>            Move an active goal to the backlog.
   set-priority <goal-id> <p>  Change an active goal's priority.
   unblock <goal-id>           Clear Blocked status (unconditional).
+  set-done-gate <goal-id> [--pr <n>] [--issue <n>] [--criteria <text>]
+                              Bind a machine-checkable finish line to a goal so
+                              the completion gate can certify it automatically.
+                              --pr/--issue link a PR (checked MERGED) and/or an
+                              issue (checked CLOSED); --criteria replaces the
+                              plain-English finish line. Requires at least one of
+                              --pr/--issue. Clears the no-progress breaker and
+                              restores the goal to NotStarted.
   unblock-all                 Bulk-clear brain-failure-marker blocks only.
   remove <id>...              Drop one or more goal ids (variadic, idempotent).
   decompose <goal-id> [--max-children <N>] [--dry-run]
@@ -102,6 +110,11 @@ pub(super) fn dispatch_goal_command(
             let goal_id = next_required(&mut args, "goal id")?;
             reject_extra_args(args)?;
             handle_unblock(&goal_id)
+        }
+        "set-done-gate" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let flags: Vec<String> = args.collect();
+            handle_set_done_gate(&goal_id, &flags)
         }
         "unblock-all" => {
             reject_extra_args(args)?;
@@ -203,6 +216,43 @@ fn with_board<R>(
             Ok(r) => Ok(r),
             Err(e) => {
                 s.board = snapshot;
+                Err(e)
+            }
+        }
+    })
+    .map_err(|e| -> Box<dyn Error> {
+        format!("failed to persist authoritative goal store: {e}").into()
+    })??;
+    let committed = crate::goal_board_store::load(&state_root).board;
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, memory.ops()) {
+        eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
+    }
+    Ok(out)
+}
+
+/// Atomically apply `f` to the whole authoritative [`PersistentGoalState`] —
+/// board **and** the no-progress breaker counters — under the shared store
+/// flock, then mirror the committed board to the cognitive-memory cache.
+///
+/// Identical anti-clobber semantics to [`with_board`], but `f` receives the full
+/// persistent state so a mutation can both edit a goal and reset its breaker
+/// bookkeeping (`no_progress`) in one atomic window. On `Err`, the pre-image is
+/// restored and the error surfaced so a rejected command never leaves a partial
+/// write.
+fn with_state<R>(
+    f: impl FnOnce(&mut crate::goal_board_store::PersistentGoalState) -> Result<R, Box<dyn Error>>,
+) -> Result<R, Box<dyn Error>> {
+    let state_root = simard_state_root();
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    crate::goal_board_store::load_or_migrate(&state_root, memory.ops())
+        .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
+    let out = crate::goal_board_store::mutate(&state_root, move |s| {
+        let snapshot = s.clone();
+        match f(s) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                *s = snapshot;
                 Err(e)
             }
         }
@@ -459,6 +509,148 @@ fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
         Ok(prior)
     })?;
     eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
+    Ok(())
+}
+
+/// Parsed `goal set-done-gate` flags.
+struct DoneGateFlags {
+    pr: Option<String>,
+    issue: Option<String>,
+    criteria: Option<String>,
+}
+
+/// Parse `[--pr <n>] [--issue <n>] [--criteria <text…>]`. `--criteria` is
+/// greedy: it consumes the remainder of the argument list as the finish-line
+/// text so an operator can pass an unquoted multi-word criterion.
+fn parse_done_gate_flags(flags: &[String]) -> Result<DoneGateFlags, Box<dyn Error>> {
+    let mut pr = None;
+    let mut issue = None;
+    let mut criteria = None;
+    let mut i = 0;
+    while i < flags.len() {
+        match flags[i].as_str() {
+            "--pr" => {
+                let v = flags
+                    .get(i + 1)
+                    .ok_or_else(|| -> Box<dyn Error> { "--pr requires a PR number".into() })?;
+                pr = Some(parse_ref_number("--pr", v)?);
+                i += 2;
+            }
+            "--issue" => {
+                let v = flags.get(i + 1).ok_or_else(|| -> Box<dyn Error> {
+                    "--issue requires an issue number".into()
+                })?;
+                issue = Some(parse_ref_number("--issue", v)?);
+                i += 2;
+            }
+            "--criteria" => {
+                let text = flags[i + 1..].join(" ");
+                if text.trim().is_empty() {
+                    return Err("--criteria requires a non-empty finish-line description".into());
+                }
+                criteria = Some(text.trim().to_string());
+                i = flags.len();
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag '{other}' (expected --pr, --issue, or --criteria)"
+                )
+                .into());
+            }
+        }
+    }
+    Ok(DoneGateFlags {
+        pr,
+        issue,
+        criteria,
+    })
+}
+
+/// Normalise a PR/issue reference to a bare positive integer string, accepting a
+/// leading `#`. The completion gate resolves state via `gh <kind> view <num>`,
+/// so a non-numeric token would silently never certify.
+fn parse_ref_number(flag: &str, raw: &str) -> Result<String, Box<dyn Error>> {
+    let trimmed = raw.trim().trim_start_matches('#');
+    if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("{flag} expects a numeric reference, got '{raw}'").into());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// `simard goal set-done-gate <id> [--pr n] [--issue n] [--criteria text]` —
+/// bind a machine-checkable finish line to a goal so the completion gate
+/// (`src/goal_curation/completion_gate.rs`) can certify it automatically. A goal
+/// whose done-criteria lived only in prose has no PR/issue the gate can observe,
+/// so the no-progress breaker parks it as `UNCLEAR-CRITERIA`; this command is the
+/// supported operator remedy — it links the PR (checked MERGED) and/or issue
+/// (checked CLOSED), rewrites the plain-English finish line, resets the breaker,
+/// and restores the goal to `NotStarted` so work resumes toward a checkable end.
+///
+/// The edit is made **durable** against the daemon's in-flight-wins reconcile by
+/// recording a [`crate::goal_board_store::DoneGatePin`]: the daemon re-asserts
+/// the pinned anchor + finish line every cycle instead of clobbering the goal
+/// back to unmeasurable prose (the failure mode that made prior manual edits
+/// evaporate within a cycle).
+fn handle_set_done_gate(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error>> {
+    let parsed = parse_done_gate_flags(flags)?;
+    if parsed.pr.is_none() && parsed.issue.is_none() {
+        return Err(
+            "set-done-gate requires at least one of --pr <n> or --issue <n> (the anchor the \
+             completion gate measures)"
+                .into(),
+        );
+    }
+    let pin = crate::goal_board_store::DoneGatePin {
+        pr: parsed.pr.clone(),
+        issue: parsed.issue.clone(),
+        criteria: parsed.criteria.clone(),
+    };
+    let anchor = pin.anchor();
+    let goal_id_owned = goal_id.to_string();
+    let pin_for_board = pin.clone();
+    with_state(move |s| {
+        let goal = s
+            .board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id_owned)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id_owned}' not found on the active board").into()
+            })?;
+
+        // Bind the measurable anchor(s) and rewrite the plain-English finish
+        // line via the shared pin logic (identical to the daemon's re-assert).
+        pin_for_board.apply_to(goal);
+
+        goal.status = GoalProgress::NotStarted;
+        goal.current_activity = Some(format!(
+            "done-gate pinned by operator: {}",
+            pin_for_board.anchor()
+        ));
+
+        // The goal now has a checkable finish line — treat that as concrete
+        // progress so the no-progress breaker forgets its prior no-action count,
+        // spent guided-retry, and re-investigation bookkeeping for this goal.
+        s.no_progress.record_progress(&goal_id_owned);
+
+        Ok(())
+    })?;
+
+    // Record the durable pin so the daemon's per-cycle reconcile re-asserts the
+    // finish line instead of reverting it. A pin-write failure is non-fatal: the
+    // board edit already landed; we only warn that it may not survive a cycle.
+    let state_root = simard_state_root();
+    if let Err(e) = crate::goal_board_store::record_done_gate_pin(&state_root, goal_id, pin) {
+        eprintln!(
+            "[simard] goal set-done-gate: warning: durable pin not recorded (edit applied but \
+             the daemon may revert it next cycle): {e}"
+        );
+    }
+
+    eprintln!(
+        "[simard] goal set-done-gate: '{goal_id}' pinned — {anchor}; breaker reset; status \
+         NotStarted"
+    );
     Ok(())
 }
 
