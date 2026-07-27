@@ -218,8 +218,19 @@ pub(super) fn bound_gate_detail(detail: &str) -> String {
     )
 }
 
+/// Aggregate a canary's per-gate verdicts into a single deploy-authorization
+/// decision: `true` only when at least one gate ran and **every** gate passed.
+///
+/// FAIL CLOSED on empty (issue #4622 hardening): an empty verdict slice means
+/// *no* gate was evaluated, so nothing about the candidate has been proven
+/// healthy. Returning `true` there would be vacuously-true fail-OPEN — it would
+/// authorize a relaunch on zero evidence (e.g. if a caller ever handed
+/// `verify_canary` an empty gate list). The production path
+/// (`overseer::deploy::build_and_verify` → `all_gates_passed`) uses this result
+/// directly as `passed`, so the empty case must refuse, not authorize. A
+/// genuinely-passing canary always carries the four `default_gates()` verdicts.
 pub fn all_gates_passed(results: &[GateResult]) -> bool {
-    results.iter().all(|r| r.passed)
+    !results.is_empty() && results.iter().all(|r| r.passed)
 }
 
 fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateResult {
@@ -1154,8 +1165,11 @@ mod tests {
     // --- all_gates_passed ---
 
     #[test]
-    fn all_gates_passed_empty_is_true() {
-        assert!(all_gates_passed(&[]));
+    fn all_gates_passed_empty_is_false_fail_closed() {
+        // An empty verdict slice means no gate was evaluated — nothing was
+        // proven healthy — so the aggregate must refuse (fail-closed), never
+        // vacuously authorize a relaunch on zero evidence.
+        assert!(!all_gates_passed(&[]));
     }
 
     #[test]
