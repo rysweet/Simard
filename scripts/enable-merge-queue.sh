@@ -7,8 +7,10 @@
 # is no settings-as-code file in this repo), so enabling the queue is an
 # explicit, admin-run apply step rather than something CI can self-provision.
 # This script is the audited, idempotent way to perform that apply: it creates
-# or updates a `required_merge_queue` ruleset and sets required_status_checks
-# `strict: false` so the queue's merged-result testing — not per-PR re-runs —
+# a `required_merge_queue` ruleset if one is absent (an existing ruleset is
+# treated as already-satisfied and left unchanged) and sets
+# required_status_checks `strict: false` so the queue's merged-result testing —
+# not per-PR re-runs —
 # provides freshness. Re-running converges to the same state.
 #
 # See docs/howto/merge-queue.md for the full operator guide.
@@ -140,7 +142,7 @@ EOF
 # ── Dry-run: print method + path, write nothing, require no auth ─────────────
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "DRY-RUN: would POST ${RULESETS_PATH}"
-  echo "  creates/updates the '${RULESET_NAME}' ruleset (merge queue) on branch '${BRANCH}'"
+  echo "  creates the '${RULESET_NAME}' ruleset (merge queue) on branch '${BRANCH}' if absent; an existing ruleset is left unchanged"
   echo "  header ${API_VERSION_HEADER}"
   echo "DRY-RUN: would PATCH ${STRICT_PATH}"
   echo "  sets required_status_checks strict: false (relax up-to-date-before-merge)"
@@ -226,7 +228,7 @@ gh_api_resilient() {
 err_file="$(mktemp)"
 trap 'rm -f "$err_file"' EXIT
 
-# 1) Create/update the merge-queue ruleset.
+# 1) Create the merge-queue ruleset (an existing one is a convergent no-op).
 if gh_api_resilient POST "$RULESETS_PATH" "$(ruleset_payload)" >/dev/null; then
   log "applied '${RULESET_NAME}' ruleset on ${REPO}@${BRANCH}"
 else

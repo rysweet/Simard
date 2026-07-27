@@ -121,8 +121,9 @@ scripts/enable-merge-queue.sh --repo rysweet/Simard --branch main
 
 The script:
 
-- Creates or updates a **`required_merge_queue`** ruleset on the target branch
-  (via `gh api .../rulesets`, `X-GitHub-Api-Version: 2022-11-28`).
+- Creates a **`required_merge_queue`** ruleset on the target branch if one is
+  absent (via `gh api .../rulesets`, `X-GitHub-Api-Version: 2022-11-28`). An
+  existing ruleset is treated as already-satisfied and left unchanged.
 - **Relaxes** strict up-to-date-before-merge (`strict: false`) so the queue's
   merged-result testing — not per-PR re-runs — provides freshness.
 - **Preserves** every existing required status check context; it never removes
@@ -161,7 +162,7 @@ The script:
 
 | HTTP status | Script behavior |
 |-------------|-----------------|
-| 2xx | Ruleset created/updated → exit `0`. |
+| 2xx | Ruleset created (or `strict` relaxed) → exit `0`. |
 | 403 | Missing admin → exit `3`. |
 | 404 / 422 | Treated as already-satisfied / benign convergence → idempotent, exit `0`. |
 | 429 / 5xx / transport error | **Transient** — retried with bounded exponential backoff (up to 3 attempts, 2s→4s) before being surfaced. |
