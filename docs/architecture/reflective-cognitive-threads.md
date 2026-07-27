@@ -174,7 +174,7 @@ wrote nothing."
 - There are **no `.unwrap_or(...)` fallbacks** anywhere on the effect path. A
   missing/failed effect is an error, not an empty write.
 
-## What is preserved unchanged (zero-behavior-change when dormant)
+## What is preserved unchanged (zero-behavior-change when opted out)
 
 The rework is behavior-preserving. These invariants are **unchanged**:
 
@@ -201,8 +201,10 @@ The rework is behavior-preserving. These invariants are **unchanged**:
   by the rework — see the
   [salience-signal CLI reference](../reference/simard-cognition-salience-signal-cli.md).
 
-Merging with all gates OFF is a **zero-behavior change**; a regression test
-asserts no reflective recipe fires when the gates are off.
+Opting the gates out (setting them to a falsy token) is a **zero-behavior
+change**; a regression test asserts no reflective recipe fires when the gates are
+off. Note this is now the *opt-out* path, not the default — a stock daemon runs
+the roster (issue #4845).
 
 ## Verification (definition of done)
 
@@ -214,7 +216,7 @@ asserts no reflective recipe fires when the gates are off.
   `remember-procedure` / `goal add` / `cognition salience-signal` and prints no
   JSON envelope / writes no output file.
 - The double gate, the security fence, the scheduler wiring, and the fail-closed
-  salience reader are unchanged; dormant merge is zero-behavior-change.
+  salience reader are unchanged; an opted-out deployment is zero-behavior-change.
 
 ## See also
 
