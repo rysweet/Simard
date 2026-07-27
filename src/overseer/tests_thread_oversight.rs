@@ -255,3 +255,66 @@ fn anomaly_emissions_are_capped_per_cycle() {
         )
     };
 }
+
+/// Regression guard for the cross-cycle dedup contract: a thread in the SAME
+/// unhealthy condition must yield the byte-for-byte SAME anomaly string on
+/// successive Observe passes, even as its live magnitudes (seconds-overdue,
+/// failure counts, ooda.log tail) change. A per-cycle-varying string would
+/// defeat the Overseer's `recipe_dedup_key` / recurrence / write-back dedup and
+/// re-launch an investigation every cycle for one wedged thread.
+#[test]
+fn same_condition_yields_stable_string_across_cycles() {
+    // --- Stall: next_run fixed, `now` advances → different "overdue" amount. ---
+    let registry = vec![reg_entry("maintenance", 300)];
+    let mut snap = MetricsSnapshot::empty();
+    snap.gauges.push(gauge(
+        tname("maintenance", "next_run_epoch"),
+        (NOW - 3600) as i64,
+    ));
+    let stall_early = detect_thread_anomalies(&snap, &registry, &[], NOW);
+    let stall_late = detect_thread_anomalies(&snap, &registry, &[], NOW + 10_000);
+    assert_eq!(
+        stall_early, stall_late,
+        "a stalled thread must emit an identical string as `now` advances: {stall_early:?} vs {stall_late:?}"
+    );
+    assert!(!stall_early.is_empty(), "sanity: the thread is stalled");
+
+    // --- Failure rate: failures/runs grow but stay a majority. ---
+    let reg = vec![reg_entry("engineer_log", 300)];
+    let mut s1 = MetricsSnapshot::empty();
+    s1.gauges.push(gauge(
+        tname("engineer_log", "next_run_epoch"),
+        (NOW + 300) as i64,
+    ));
+    s1.counters.push(counter(tname("engineer_log", "runs"), 10));
+    s1.counters
+        .push(counter(tname("engineer_log", "failures"), 8));
+    let mut s2 = MetricsSnapshot::empty();
+    s2.gauges.push(gauge(
+        tname("engineer_log", "next_run_epoch"),
+        (NOW + 300) as i64,
+    ));
+    s2.counters.push(counter(tname("engineer_log", "runs"), 40));
+    s2.counters
+        .push(counter(tname("engineer_log", "failures"), 30));
+    assert_eq!(
+        detect_thread_anomalies(&s1, &reg, &[], NOW),
+        detect_thread_anomalies(&s2, &reg, &[], NOW),
+        "a failing thread must emit an identical string as its counts grow"
+    );
+
+    // --- ooda.log: two different error tails → one identical anomaly string. ---
+    let empty_reg: Vec<ThreadHealth> = Vec::new();
+    let tail_a = vec!["2026-07-26T19:05:00Z ERROR ooda: parse failed".to_string()];
+    let tail_b = vec![
+        "2026-07-26T19:00:00Z INFO ok".to_string(),
+        "2026-07-26T20:00:00Z ERROR ooda: a totally different error".to_string(),
+    ];
+    let a = detect_thread_anomalies(&MetricsSnapshot::empty(), &empty_reg, &tail_a, NOW);
+    let b = detect_thread_anomalies(&MetricsSnapshot::empty(), &empty_reg, &tail_b, NOW);
+    assert_eq!(
+        a, b,
+        "different ooda.log error tails must fold to one stable anomaly string: {a:?} vs {b:?}"
+    );
+    assert!(!a.is_empty(), "sanity: an error line surfaces an anomaly");
+}

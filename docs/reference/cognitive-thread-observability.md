@@ -420,11 +420,18 @@ $ jq '.counters[] | select(.name | startswith("simard.thread."))' \
 ### Read the Overseer-observed anomalies
 
 Thread anomalies surface in `ObservedState.anomalies` and as
-`Signal::Anomaly { detail }`, e.g.:
+`Signal::Anomaly { detail }`. Each string is **stable per (thread, condition)**
+across Observe passes — it never embeds a live, per-cycle-varying magnitude
+(seconds-overdue, failure counts, a log excerpt) — so the Overseer's launch /
+recurrence / write-back dedup gates collapse a persistently unhealthy thread to
+a single investigation instead of re-launching one every cycle. The live
+magnitudes are recoverable by the investigation from the telemetry snapshot and
+`ooda.log` directly. Examples:
 
 ```text
-telemetry anomaly: cognitive thread `reflection` stalled — next_run_epoch 1753557600 is 900s overdue (cadence 300s)
-telemetry anomaly: cognitive thread `salience` failure-rate 0.41 (7/17) over lifetime
+telemetry anomaly: cognitive thread 'reflection' stalled: scheduled run is overdue past its 600s grace window (cadence 300s) — purpose: …
+telemetry anomaly: cognitive thread 'salience' failing: the majority of its recorded runs have failed — purpose: …
+telemetry anomaly: ooda.log tail contains recent ERROR line(s) — see the daemon log for detail
 ```
 
 ## Testing

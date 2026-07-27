@@ -17,6 +17,15 @@
 //! stalled / failing / erroring" signals. Output is CAPPED
 //! ([`MAX_THREAD_ANOMALIES_PER_CYCLE`]) so a broad outage can never flood the
 //! notification path, and it never panics on malformed input (SR-R1).
+//!
+//! Each anomaly string is STABLE per (thread, condition) across Observe passes:
+//! it never embeds a live, per-cycle-varying magnitude (seconds-overdue,
+//! failure counts, log excerpts). A volatile string would make the derived
+//! `problem.summary` / `dedup_key` differ every cycle, defeating the Overseer's
+//! `recipe_dedup_key`, recurrence-recall, and observation-write-back dedup gates
+//! — re-launching an investigation (and re-recording an episode) every single
+//! cycle for one persistently unhealthy thread. The live magnitudes are
+//! recoverable by the investigation from telemetry / `ooda.log` directly.
 
 use std::path::Path;
 
@@ -42,9 +51,6 @@ const MIN_STALL_GRACE_SECS: u64 = 60;
 /// Minimum lifetime run count before the failure-rate check fires — avoids
 /// flagging a thread on a tiny, unrepresentative sample.
 const MIN_RUNS_FOR_RATE: u64 = 5;
-
-/// Max characters of an ooda.log error line echoed into an anomaly string.
-const OODA_ERROR_EXCERPT_LEN: usize = 200;
 
 /// Default bounded tail size read from `ooda.log` for the error scan.
 pub const OODA_TAIL_MAX_BYTES: u64 = 64 * 1024;
@@ -83,10 +89,18 @@ pub fn detect_thread_anomalies(
                 .max(MIN_STALL_GRACE_SECS);
             let overdue_after = next_run.saturating_add(grace as i64);
             if (now as i64) > overdue_after {
-                let overdue_secs = (now as i64).saturating_sub(next_run).max(0);
+                // The message is deliberately STABLE per (thread, condition): it
+                // names only the thread, its fixed grace/cadence, and its
+                // purpose — never the live "N seconds overdue", which grows every
+                // cycle. A volatile value here would make `problem.summary`
+                // differ each Observe pass, defeating the Overseer's
+                // `recipe_dedup_key` / recurrence-recall / observation-write-back
+                // gates and re-launching an investigation every cycle for one
+                // wedged thread. The investigation reads the live overdue amount
+                // from telemetry itself.
                 anomalies.push(format!(
-                    "cognitive thread '{id}' stalled: scheduled run is {overdue_secs}s overdue \
-                     (cadence {cadence}s) — purpose: {}",
+                    "cognitive thread '{id}' stalled: scheduled run is overdue past its \
+                     {grace}s grace window (cadence {cadence}s) — purpose: {}",
                     entry.purpose
                 ));
                 // One anomaly per thread per cycle: a stalled thread's failure
@@ -105,8 +119,13 @@ pub fn detect_thread_anomalies(
             .counter(&series_name(id, names::THREAD_SUFFIX_FAILURES), &[])
             .unwrap_or(0);
         if runs >= MIN_RUNS_FOR_RATE && failures.saturating_mul(2) > runs {
+            // STABLE per (thread, condition): no live `{failures}/{runs}` counts,
+            // which grow every cycle and would defeat cross-cycle dedup (see the
+            // stall branch). The investigation reads the live counts from
+            // telemetry.
             anomalies.push(format!(
-                "cognitive thread '{id}' failing: {failures}/{runs} runs failed — purpose: {}",
+                "cognitive thread '{id}' failing: the majority of its recorded runs have \
+                 failed — purpose: {}",
                 entry.purpose
             ));
         }
@@ -121,24 +140,19 @@ pub fn detect_thread_anomalies(
     anomalies
 }
 
-/// Scan a bounded ooda.log tail for ERROR lines, returning a single summarized
-/// anomaly (count + a bounded excerpt of the most recent error) or `None`.
-/// Summarizing keeps the emission bounded regardless of how many errors the tail
-/// holds.
+/// Scan a bounded ooda.log tail for ERROR lines, returning a single STABLE
+/// anomaly string when any is present, else `None`. The string is deliberately
+/// content-free (no count, no excerpt): a live count/excerpt changes every cycle
+/// and would defeat the Overseer's cross-cycle dedup (see
+/// [`detect_thread_anomalies`]), re-launching an investigation each Observe pass
+/// while any error sits in the tail. Omitting the raw log line also keeps
+/// untrusted log content out of the notification path entirely (SR-R1). The
+/// investigation reads the concrete error lines from `ooda.log` itself.
 fn scan_ooda_errors(ooda_tail: &[String]) -> Option<String> {
-    let mut count = 0usize;
-    let mut last: Option<&str> = None;
-    for line in ooda_tail {
-        if is_error_line(line) {
-            count += 1;
-            last = Some(line.as_str());
-        }
-    }
-    let last = last?;
-    let excerpt = bounded_excerpt(last, OODA_ERROR_EXCERPT_LEN);
-    Some(format!(
-        "ooda.log shows {count} recent error line(s); latest: {excerpt}"
-    ))
+    let has_error = ooda_tail.iter().any(|line| is_error_line(line));
+    has_error.then(|| {
+        "ooda.log tail contains recent ERROR line(s) — see the daemon log for detail".to_string()
+    })
 }
 
 /// Whether a log line is an ERROR line (case-insensitive `error` **token**).
@@ -180,21 +194,6 @@ fn is_error_line(line: &str) -> bool {
 /// boundary detection in [`is_error_line`].
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// A single-line, length-bounded excerpt of `line` (control chars stripped).
-fn bounded_excerpt(line: &str, max: usize) -> String {
-    let cleaned: String = line
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.chars().count() <= max {
-        trimmed.to_string()
-    } else {
-        let head: String = trimmed.chars().take(max).collect();
-        format!("{head}…")
-    }
 }
 
 /// Read a bounded tail of `<state_root>/ooda.log` as lines, best-effort.
