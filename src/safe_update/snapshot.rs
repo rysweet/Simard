@@ -51,14 +51,23 @@ pub fn take_snapshot_of(
     retention: usize,
     bin_dir: PathBuf,
 ) -> Result<BinarySnapshot, SafeUpdateError> {
-    let bytes = fs::read(binary).map_err(|e| SafeUpdateError::SnapshotIo {
+    // The self-deploy trigger derives `binary` from `current_exe()`. On Linux a
+    // still-running image whose on-disk file was unlinked by a prior swap resolves
+    // to `<path> (deleted)`, which no longer exists; reading it directly fails with
+    // `No such file` and aborted every deploy at the mandatory protective backup
+    // (DeployDrift, issue #4857 / #4836). The LIVE running image stays readable via
+    // `/proc/self/exe` even after its directory entry is unlinked, so degrade to it.
+    // An existing declared path is read verbatim — the fallback never fires when the
+    // path exists, so it can never mask a genuine wrong-path bug.
+    let source = resolve_readable_binary(binary);
+    let bytes = fs::read(&source).map_err(|e| SafeUpdateError::SnapshotIo {
         action: "read".into(),
-        path: binary.to_path_buf(),
+        path: source.clone(),
         reason: e.to_string(),
     })?;
     let sha256 = sha256_hex(&bytes);
-    let mtime = mtime_iso8601(binary);
-    let version = read_embedded_version(binary, &bytes);
+    let mtime = mtime_iso8601(&source);
+    let version = read_embedded_version(&source, &bytes);
 
     fs::create_dir_all(&bin_dir).map_err(|e| SafeUpdateError::SnapshotIo {
         action: "mkdir bin_dir".into(),
@@ -74,7 +83,7 @@ pub fn take_snapshot_of(
     set_executable(&backup_path)?;
 
     let snapshot = BinarySnapshot {
-        binary_path: binary.to_path_buf(),
+        binary_path: source.clone(),
         sha256,
         mtime,
         version,
@@ -101,6 +110,45 @@ pub fn take_snapshot_of(
 
     prune_backups(&bin_dir, retention)?;
     Ok(snapshot)
+}
+
+/// Resolve the path actually read for the binary snapshot, degrading to the LIVE
+/// running image when the declared on-disk path is missing.
+///
+/// The self-deploy trigger derives the declared path from `current_exe()`. On
+/// Linux, once a prior self-deploy has swapped the on-disk binary, a still-running
+/// old image's `current_exe()` resolves to `<path> (deleted)` and that file no
+/// longer exists, so a direct read fails with `No such file`. Because the
+/// protective backup is mandatory, that hard-failure aborted EVERY deploy and
+/// stranded the running binary behind merged main (DeployDrift, issue #4857 /
+/// #4836).
+///
+/// `/proc/self/exe` still yields the bytes of the running image even after its
+/// directory entry is unlinked (the inode is held open by the running process),
+/// so when the declared path is missing we snapshot through it. When the declared
+/// path exists it is returned unchanged, so the fallback can never fire for a
+/// present-but-wrong path and thus cannot mask an unrelated bug. On platforms
+/// without `/proc/self/exe` (e.g. macOS) the declared path is returned so the
+/// existing loud failure is preserved.
+fn resolve_readable_binary(declared: &Path) -> PathBuf {
+    if declared.exists() {
+        return declared.to_path_buf();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let running_image = Path::new("/proc/self/exe");
+        if running_image.exists() {
+            tracing::warn!(
+                declared = %declared.display(),
+                fallback = "/proc/self/exe",
+                "self-deploy snapshot: declared binary path is missing (unlinked \
+                 running image); snapshotting the LIVE running image so the \
+                 mandatory protective backup does not deadlock the deploy (issue #4857)"
+            );
+            return running_image.to_path_buf();
+        }
+    }
+    declared.to_path_buf()
 }
 
 /// Prune old `simard.bak.*` files to at most `retention` entries (newest kept).
@@ -357,5 +405,146 @@ mod tests {
         let loaded = read_snapshot(state.path()).unwrap().unwrap();
         assert_eq!(loaded.sha256, written.sha256);
         assert_eq!(loaded.version, "1.2.3");
+    }
+}
+
+/// TDD (Step 7) — FAILING tests pinning the "back up the RUNNING image, not the
+/// deleted on-disk path" contract for the issue #4857 self-deploy deadlock.
+///
+/// # The defect these tests lock down
+///
+/// The protective binary backup snapshots `install_path`, which the deploy
+/// trigger derives from `std::env::current_exe()`. On Linux, once a prior
+/// self-deploy has replaced the on-disk binary, a *still-running* old image's
+/// `current_exe()` resolves to `<path> (deleted)` and that on-disk file no
+/// longer exists. [`take_snapshot_of`] then does `fs::read(binary)` and fails
+/// with `SnapshotIo { action: "read", reason: "No such file (os error 2)" }` —
+/// the exact `snapshot read on /home/azureuser/.simard/bin/simard (deleted): No
+/// such file` failure observed on deploy `56755c8e8454`. Because the backup is
+/// mandatory, EVERY deploy aborts, so the running binary drifts ever further
+/// behind merged main (DeployDrift) and no self-improvement ever ships.
+///
+/// # The contract (what the fix must make true)
+///
+/// A snapshot whose declared on-disk path is missing/deleted MUST degrade to
+/// reading the **live running image** rather than hard-failing:
+///   * on Linux the running image is always readable via `/proc/self/exe` even
+///     after its directory entry is unlinked (the inode is held open by the
+///     running process), so the backup must read those bytes;
+///   * the resulting binary backup must be written and byte-identical to the
+///     running image — a real, restorable rollback artifact, not a stub;
+///   * the happy path is unchanged: when the declared path DOES exist, its bytes
+///     are snapshotted verbatim and the running-image fallback is NOT used (so
+///     the fallback can never mask an unrelated wrong-path bug).
+///
+/// These tests compile against the CURRENT public symbols and fail on
+/// BEHAVIOUR: today a deleted path returns `Err(SnapshotIo { action: "read" })`.
+#[cfg(all(test, target_os = "linux"))]
+mod tests_deleted_running_image {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Bytes of the live running image (this test binary). After a swap the
+    /// inode behind `/proc/self/exe` stays readable even though the on-disk name
+    /// is `(deleted)`, so this is exactly what the protective backup must
+    /// capture when the declared install path is gone.
+    fn running_image_bytes() -> Vec<u8> {
+        fs::read("/proc/self/exe").expect("the running image must be readable via /proc/self/exe")
+    }
+
+    /// T1 — the core deadlock-breaker. A `<path> (deleted)` install path (the
+    /// literal string `current_exe()` hands back post-swap) whose on-disk file
+    /// is absent must NOT abort the snapshot; it must degrade to the running
+    /// image so the deploy can still ship. Today: `Err(SnapshotIo read)`.
+    #[test]
+    fn deleted_install_path_degrades_to_running_image() {
+        let state = tempdir().unwrap();
+        let bin_dir = tempdir().unwrap();
+        // Mirror the post-swap install path: same "(deleted)" suffix, no file.
+        let deleted = bin_dir.path().join("simard (deleted)");
+        assert!(!deleted.exists(), "precondition: the on-disk file is gone");
+
+        let snap = take_snapshot_of(
+            &deleted,
+            state.path(),
+            DEFAULT_BACKUP_RETENTION,
+            bin_dir.path().to_path_buf(),
+        )
+        .expect(
+            "a deleted on-disk install path must degrade to the running image, \
+             not hard-fail the mandatory protective backup (issue #4857)",
+        );
+
+        assert!(
+            snap.backup_path.exists(),
+            "a binary backup of the running image must be written"
+        );
+        let backed_up = fs::read(&snap.backup_path).unwrap();
+        assert!(
+            !backed_up.is_empty(),
+            "the running-image backup must be non-empty"
+        );
+        assert_eq!(
+            backed_up,
+            running_image_bytes(),
+            "the backup must be byte-identical to the LIVE running image so it is \
+             a restorable rollback artifact, not a stub",
+        );
+    }
+
+    /// T2 — a non-suffixed but simply-absent install path (e.g. the on-disk file
+    /// was unlinked without the `(deleted)` annotation) is the same degrade: the
+    /// running image is snapshotted rather than the backup aborting.
+    #[test]
+    fn absent_install_path_degrades_to_running_image() {
+        let state = tempdir().unwrap();
+        let bin_dir = tempdir().unwrap();
+        let absent = bin_dir.path().join("simard");
+        assert!(!absent.exists());
+
+        let snap = take_snapshot_of(
+            &absent,
+            state.path(),
+            DEFAULT_BACKUP_RETENTION,
+            bin_dir.path().to_path_buf(),
+        )
+        .expect("an absent running-image path must degrade to the live image, not abort");
+        assert_eq!(
+            fs::read(&snap.backup_path).unwrap(),
+            running_image_bytes(),
+            "an absent declared path must fall back to the running image bytes",
+        );
+    }
+
+    /// T3 — regression guard: the fallback must ONLY trigger when the declared
+    /// path is unreadable. An EXISTING path is still snapshotted verbatim, so
+    /// the degrade can never mask a genuine wrong-path bug by silently backing
+    /// up the running image instead of the file the caller named.
+    #[test]
+    fn existing_install_path_is_read_verbatim_not_the_running_image() {
+        let state = tempdir().unwrap();
+        let bin_dir = tempdir().unwrap();
+        let src = tempdir().unwrap();
+        let declared = src.path().join("simard");
+        // Distinct sentinel content that is NOT the running image.
+        fs::write(&declared, b"simard 4.8.5 declared-on-disk-payload").unwrap();
+
+        let snap = take_snapshot_of(
+            &declared,
+            state.path(),
+            DEFAULT_BACKUP_RETENTION,
+            bin_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        let backed_up = fs::read(&snap.backup_path).unwrap();
+        assert_eq!(
+            backed_up, b"simard 4.8.5 declared-on-disk-payload",
+            "an existing declared path must be snapshotted verbatim",
+        );
+        assert_ne!(
+            backed_up,
+            running_image_bytes(),
+            "the running-image fallback must NOT fire when the declared path exists",
+        );
     }
 }

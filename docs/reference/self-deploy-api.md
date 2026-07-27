@@ -179,6 +179,20 @@ The memory snapshot reuses `memory_backup`; the
 binary backup reuses the existing safe-update `snapshot` phase. Backups are not
 reinvented here — they are sequenced and made mandatory.
 
+### Deleted running-image degrade (issue #4857 / #4836)
+
+The deploy trigger derives `install_path` from `current_exe()`. On Linux, once a
+prior self-deploy has swapped the on-disk binary, a still-running old image's
+`current_exe()` resolves to `<path> (deleted)` and that file no longer exists.
+The binary backup's `snapshot` phase therefore degrades to the **live running
+image** via `/proc/self/exe` (still readable while the inode is held open) rather
+than hard-failing with `snapshot read on .../simard (deleted): No such file`.
+Without this degrade the mandatory backup aborted every deploy and stranded the
+running binary behind merged main (DeployDrift). The fallback fires **only** when
+the declared path is missing; an existing path is snapshotted verbatim, so it can
+never mask a wrong-path bug, and each fallback emits a `WARN` tracing span. On
+platforms without `/proc/self/exe` the original loud failure is preserved.
+
 ## Engineer-orphan reaper
 
 ```rust
