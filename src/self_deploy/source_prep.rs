@@ -339,6 +339,13 @@ impl GitSourcePreparer {
                     detail: "no existing canonical self-deploy source checkout found".to_string(),
                 })?;
         self.fetch_origin(&repo)?;
+        // Issue #4878 Mode (a): reset+clean the disposable canonical checkout
+        // before checkout so a wedged tree from a prior deploy cannot abort
+        // `checkout --detach`. Gated to the canonical source dir only (never a
+        // caller-supplied override).
+        if is_canonical_src_repo(&repo) {
+            reset_source_tree(&repo)?;
+        }
         git_capture(&repo, &["checkout", "--detach", target_commit])
             .map(|_| ())
             .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
@@ -390,6 +397,19 @@ impl SelfDeploySourcePreparer for GitSourcePreparer {
         // network blip after the head was read.
         if !commit_present(&repo, target_commit) {
             self.fetch_origin(&repo)?;
+        }
+        // Issue #4878 Mode (a): a previous self-deploy can leave the disposable
+        // canonical checkout wedged with local modifications to tracked files
+        // (e.g. `.github/hooks/amplihack-hooks.json`), so the next
+        // `checkout --detach` aborts with "Your local changes ... would be
+        // overwritten by checkout: Aborting". Reset+clean the disposable source
+        // tree *before* checkout — on BOTH the fetch and the skip-fetch
+        // (commit-already-present) paths — so a redeploy cannot wedge. Gated to
+        // the canonical throwaway checkout only: a caller-supplied override's
+        // working tree must never be destroyed (it still fails loud at checkout
+        // if dirty).
+        if is_canonical_src_repo(&repo) {
+            reset_source_tree(&repo)?;
         }
         git_capture(&repo, &["checkout", "--detach", target_commit])
             .map(|_| ())
@@ -607,6 +627,81 @@ fn git_capture(repo: &Path, args: &[&str]) -> Result<String, String> {
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Whether `repo` is the canonical, disposable self-deploy source checkout
+/// ([`self_deploy_src_dir`]) — the *only* tree [`reset_source_tree`] is allowed
+/// to hard-reset and clean.
+///
+/// Both paths are canonicalized so symlink/`..`/trailing-slash spelling
+/// differences cannot cause a false negative (which would leave the canonical
+/// tree wedged) or a false positive (which would wipe a caller-supplied
+/// override). If either path cannot be canonicalized — e.g. the canonical
+/// checkout does not exist because this deploy is a `repo_override` /
+/// `SIMARD_SELF_DEPLOY_REPO` run — the answer is `false` (fail closed: never
+/// reset a tree we cannot prove is the throwaway checkout). Issue #4878.
+fn is_canonical_src_repo(repo: &Path) -> bool {
+    match (repo.canonicalize(), self_deploy_src_dir().canonicalize()) {
+        (Ok(actual), Ok(canonical)) => actual == canonical,
+        _ => false,
+    }
+}
+
+/// Reset the disposable canonical self-deploy source checkout to a pristine
+/// tree at its current `HEAD` (`git reset --hard`) and remove untracked files
+/// and directories (`git clean -fd`), so a subsequent `checkout --detach` of
+/// the merged head cannot abort on locally-modified tracked files left by a
+/// prior wedged deploy (issue #4878, Mode (a)).
+///
+/// **Destructive — strictly scoped.** As defense in depth on top of the
+/// [`is_canonical_src_repo`] gate at every call site, this re-asserts that
+/// `repo` canonicalizes to exactly [`self_deploy_src_dir`] and fails closed
+/// (returning [`SafeUpdateError::CheckoutFailed`]) on any mismatch or if either
+/// path cannot be canonicalized. It therefore can never reset the operator's
+/// cwd or a caller-supplied `repo_override` / `SIMARD_SELF_DEPLOY_REPO` tree.
+///
+/// `git clean` is run as `-fd` (**never** `-x`) so ignored files — secrets,
+/// caches, and notably the separate warm cargo target dir
+/// ([`self_deploy_target_dir`]) — are preserved and self-deploys stay
+/// incremental. Both git invocations go through the env-scrubbed
+/// [`git_capture`] (no shell, argv-array exec) so a hostile ambient env cannot
+/// hijack them, and any failure maps to the existing
+/// [`SafeUpdateError::CheckoutFailed`] variant (no new error types).
+fn reset_source_tree(repo: &Path) -> Result<(), SafeUpdateError> {
+    let canonical = repo
+        .canonicalize()
+        .map_err(|e| SafeUpdateError::CheckoutFailed {
+            detail: format!(
+                "refusing to reset self-deploy source: cannot canonicalize {}: {e}",
+                repo.display()
+            ),
+        })?;
+    let expected =
+        self_deploy_src_dir()
+            .canonicalize()
+            .map_err(|e| SafeUpdateError::CheckoutFailed {
+                detail: format!(
+                    "refusing to reset self-deploy source: cannot resolve canonical source dir: {e}"
+                ),
+            })?;
+    if canonical != expected {
+        return Err(SafeUpdateError::CheckoutFailed {
+            detail: format!(
+                "refusing to reset non-canonical self-deploy source tree {} (expected {})",
+                canonical.display(),
+                expected.display()
+            ),
+        });
+    }
+
+    tracing::debug!(repo = %canonical.display(), "resetting disposable self-deploy source checkout before checkout");
+    git_capture(repo, &["reset", "--hard"])
+        .map(|_| ())
+        .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
+    git_capture(repo, &["clean", "-fd"])
+        .map(|_| ())
+        .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
+    Ok(())
 }
 
 /// Compose source preparation with the warm-target build: the exact step the
