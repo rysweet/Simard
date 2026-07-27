@@ -103,7 +103,23 @@ fn scannable_build_roots(state_root: &Path) -> Vec<PathBuf> {
 fn sorted_children(dir: &Path) -> Vec<PathBuf> {
     let mut children: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(entries) => entries.flatten().map(|e| e.path()).collect(),
-        Err(_) => Vec::new(),
+        // A missing directory is the normal "nothing to reclaim here" case
+        // (e.g. no engineer-worktrees root yet) and is intentionally silent.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        // Any *other* error (e.g. EACCES on a dir that does exist) would
+        // silently suppress candidates and reproduce the invisible "0 bytes
+        // freed" steady state this change exists to end — surface it (R7: no
+        // silent fallbacks) rather than swallowing it.
+        Err(e) => {
+            tracing::warn!(
+                target: "simard::disk_reclaim",
+                dir = %dir.display(),
+                error = %e,
+                "reclaimable enumeration could not read directory; proposing no \
+                 candidates from it this cycle",
+            );
+            Vec::new()
+        }
     };
     children.sort();
     children
@@ -207,11 +223,14 @@ pub fn enumerate_reclaimable(
     out
 }
 
-/// Production entry point: the single shared deterministic enumerator consumed by
-/// **both** routine reclaim (additively, next to LLM proposals) and
-/// `emergency_cleanup`, so the two paths can never diverge. Wires production
-/// defaults — real `/proc` liveness, real mtimes/now, and the env-configured idle
-/// windows — into [`enumerate_reclaimable`].
+/// Production entry point for **routine** reclaim: wires production defaults —
+/// real `/proc` liveness, real mtimes/now, and the env-configured idle windows —
+/// into [`enumerate_reclaimable`], added additively next to the LLM proposals.
+///
+/// The build-tree containment root it scans ([`build_tree_roots`]) is the single
+/// shared source of truth that `emergency_cleanup` also consumes directly, so the
+/// routine and emergency tiers can never diverge on *which* build tree is
+/// reclaimable.
 pub fn reclaimable_targets(state_root: &Path) -> Vec<ReclaimCandidate> {
     let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
     enumerate_reclaimable(

@@ -578,8 +578,9 @@ mod tests {
     // The regression: emergency cleanup already removed target caches and old
     // backups, but never reclaimed the idle `self-deploy-target/` build tree —
     // the same regenerable consumer routine reclaim also ignored. After the fix
-    // both tiers consume `reclaimable::reclaimable_targets`, so emergency frees
-    // its previous set PLUS the idle self-deploy-target build tree.
+    // both tiers derive that build tree from the shared
+    // `reclaimable::build_tree_roots` source of truth, so emergency frees its
+    // previous set PLUS the idle self-deploy-target build tree.
     //
     // These drive the injectable `emergency_cleanup_with_pct` seam so no real
     // ≥95% disk is required.

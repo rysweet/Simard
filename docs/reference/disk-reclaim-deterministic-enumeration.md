@@ -136,11 +136,14 @@ the source of disk pressure, the lever is `MaintenanceThread`'s retention /
 
 ### `reclaimable_targets(state_root: &Path) -> Vec<ReclaimCandidate>`
 
-The single shared deterministic enumerator. Returns the proposed candidate set
-described above, read from the current on-disk state (directory listings, mtimes,
-`/proc` liveness). Pure proposal: performs **no** deletion and mutates nothing.
-Consumed by **both** the routine-reclaim candidate collection (additively, next
-to LLM proposals) and `emergency_cleanup`, so the two paths can never diverge.
+The **routine-reclaim** production entry point. Returns the proposed candidate
+set described above, read from the current on-disk state (directory listings,
+mtimes, `/proc` liveness). Pure proposal: performs **no** deletion and mutates
+nothing. Consumed by the routine-reclaim candidate collection, additively next to
+the LLM proposals. It builds on `build_tree_roots` (below), which is the single
+shared source of truth for build-tree containment that `emergency_cleanup` also
+consumes directly — so the routine and emergency tiers can never diverge on
+*which* build tree is reclaimable.
 
 Thresholds are read from the environment (see [below](#configuration)) with
 defensive clamping applied — a `0` or empty value **never** means "purge now"; it
