@@ -246,6 +246,92 @@ pub fn record_provenance_coverage_metric(facts_with_provenance: u64, facts_total
     }
 }
 
+// ─────────────────────── graph-memory snapshot dedup hygiene ────────────────
+//
+// A graph-memory *hygiene* signal complementary to grounding coverage above.
+// Snapshot facts (those stored under a stable caller/dedup key — goal-board
+// snapshots and the like) are revisioned: each new revision SUPERSEDES the
+// prior one, and `prune_superseded` (controlled forgetting) reclaims the
+// archived revisions over time. `snapshot_facts_total` counts every snapshot
+// revision the store still holds (live + not-yet-pruned superseded);
+// `distinct_snapshot_caller_keys` counts the distinct logical streams behind
+// them. Their ratio is the average *liveness* of the snapshot layer: 1.0 when
+// every stream holds exactly one revision, falling toward 0 as superseded
+// revisions accumulate faster than pruning reclaims them. That accumulation is
+// exactly the monotonic-growth failure controlled forgetting exists to prevent,
+// and — like grounding coverage — it was previously visible only as raw
+// `graph_stats()` counts, never as a durable, comparable, regressable
+// `metrics.jsonl` series. Emitting the *ratio* makes a pruning/hygiene
+// regression raise the same gym-history signal every other self-metric does.
+
+/// Durable self-metric name for snapshot-layer dedup hygiene, emitted to
+/// `metrics.jsonl` once per OODA cycle by [`record_snapshot_dedup_ratio_metric`].
+pub const FACT_SNAPSHOT_DEDUP_RATIO_METRIC: &str = "fact_snapshot_dedup_ratio";
+
+/// Average liveness of the snapshot layer (`distinct_snapshot_caller_keys /
+/// snapshot_facts_total`), in `(0.0, 1.0]`. Higher is healthier: `1.0` means
+/// every snapshot stream holds a single live revision; a value approaching `0`
+/// means superseded revisions have piled up (the inverse — total / distinct —
+/// is the mean revisions retained per stream).
+///
+/// Returns `None` (undefined, **not** `0.0`) when the store holds no snapshot
+/// facts, so a store with an empty snapshot layer contributes no misleading
+/// `0.0` sample — the same "skip rather than drag the series to zero"
+/// convention [`provenance_coverage`] and [`precision_at_k`] use.
+/// `distinct_snapshot_caller_keys` is clamped to `snapshot_facts_total`
+/// defensively (a stream always has ≥1 revision, so distinct ≤ total holds), so
+/// a backend that miscounts can never yield a ratio above `1.0`.
+pub fn snapshot_dedup_ratio(
+    distinct_snapshot_caller_keys: u64,
+    snapshot_facts_total: u64,
+) -> Option<f64> {
+    if snapshot_facts_total == 0 {
+        return None;
+    }
+    let distinct = distinct_snapshot_caller_keys.min(snapshot_facts_total);
+    Some(distinct as f64 / snapshot_facts_total as f64)
+}
+
+/// Emit ONE durable [`FACT_SNAPSHOT_DEDUP_RATIO_METRIC`] sample (the snapshot
+/// liveness ratio over the current `graph_stats()` snapshot) to `metrics.jsonl`.
+///
+/// Called once per OODA cycle by the daemon metric sweep from the same block
+/// that already reads `graph_stats()` for the OpenTelemetry edge gauges and
+/// [`record_provenance_coverage_metric`], so it adds no extra store read. A
+/// snapshot-shaped metric (store state, not a per-cycle accumulator).
+///
+/// No-op when the store holds no snapshot facts (undefined ratio — see
+/// [`snapshot_dedup_ratio`]), so the series carries signal only. Best-effort: a
+/// metrics-write failure is logged, never propagated. Skipped under
+/// `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl`.
+pub fn record_snapshot_dedup_ratio_metric(
+    distinct_snapshot_caller_keys: u64,
+    snapshot_facts_total: u64,
+) {
+    let Some(ratio) = snapshot_dedup_ratio(distinct_snapshot_caller_keys, snapshot_facts_total)
+    else {
+        return;
+    };
+    if cfg!(test) {
+        return;
+    }
+    let context = serde_json::json!({
+        "snapshot_facts_total": snapshot_facts_total,
+        "distinct_snapshot_caller_keys": distinct_snapshot_caller_keys,
+    })
+    .to_string();
+    if let Err(e) =
+        crate::self_metrics::record_metric(FACT_SNAPSHOT_DEDUP_RATIO_METRIC, ratio, &context)
+    {
+        tracing::warn!(
+            target: "simard::memory",
+            error = %e,
+            "failed to record fact_snapshot_dedup_ratio metric (memory unaffected)",
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +474,45 @@ mod tests {
         // panic or touch global state.
         record_provenance_coverage_metric(3, 4);
         record_provenance_coverage_metric(0, 0);
+    }
+
+    // ── graph-memory snapshot dedup hygiene: pure math ──────────────────────
+
+    #[test]
+    fn snapshot_dedup_ratio_is_distinct_streams_over_total_revisions() {
+        // Two streams, four revisions retained → each stream averages two
+        // revisions → liveness 0.5. One-revision-per-stream is a healthy 1.0.
+        assert_eq!(snapshot_dedup_ratio(2, 4), Some(0.5));
+        assert_eq!(snapshot_dedup_ratio(4, 4), Some(1.0));
+        assert_eq!(snapshot_dedup_ratio(1, 8), Some(0.125));
+        // Snapshot facts present but none carry a grouping key → distinct 0 over
+        // a nonzero total is a real, maximally-unhealthy 0.0 (emit it), NOT the
+        // undefined None reserved for an empty snapshot layer.
+        assert_eq!(snapshot_dedup_ratio(0, 4), Some(0.0));
+    }
+
+    #[test]
+    fn snapshot_dedup_ratio_is_none_for_an_empty_snapshot_layer() {
+        // No snapshot facts → undefined ratio (skip, do NOT emit a misleading
+        // 0.0), matching the provenance_coverage / precision@k convention. A
+        // nonzero distinct count with a zero denominator is still None.
+        assert_eq!(snapshot_dedup_ratio(0, 0), None);
+        assert_eq!(snapshot_dedup_ratio(3, 0), None);
+    }
+
+    #[test]
+    fn snapshot_dedup_ratio_clamps_overcount_to_one() {
+        // distinct ≤ total always holds (a stream has ≥1 revision); a backend
+        // that miscounts must never yield a ratio above 1.0.
+        assert_eq!(snapshot_dedup_ratio(9, 4), Some(1.0));
+    }
+
+    #[test]
+    fn record_snapshot_dedup_ratio_metric_is_a_no_op_under_test() {
+        // Guards the operator's real metrics.jsonl: the emitter is cfg!(test)-
+        // skipped, and an empty snapshot layer is a no-op regardless. Neither
+        // call may panic or touch global state.
+        record_snapshot_dedup_ratio_metric(2, 4);
+        record_snapshot_dedup_ratio_metric(0, 0);
     }
 }

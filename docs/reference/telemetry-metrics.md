@@ -187,6 +187,15 @@ gauges the section renders `absent`, never a fabricated zero.
 > comparable and regressable, not just a raw count. See
 > [Cognitive-memory provenance § Observability](./cognitive-memory-provenance.md#observability-grounding-coverage-self-metric).
 
+> **Snapshot hygiene.** A sibling durable **`fact_snapshot_dedup_ratio`**
+> self-metric emits, from the same per-cycle `graph_stats()` snapshot, the
+> average *liveness* of the snapshot layer
+> (`distinct_snapshot_caller_keys / snapshot_facts_total` ∈ `(0, 1]`, higher is
+> healthier). It falls when superseded snapshot revisions accumulate faster than
+> controlled forgetting (`prune_superseded`) reclaims them, turning a pruning
+> regression into a regressable series rather than a raw count. See
+> [Cognitive-memory provenance § Snapshot dedup hygiene](./cognitive-memory-provenance.md#observability-snapshot-dedup-hygiene-self-metric).
+
 ### LLM usage — `simard.llm.*`
 
 Mirrored from `cost_tracking` (the ledger format is unchanged; these are

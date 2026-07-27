@@ -1687,6 +1687,18 @@ pub fn run_ooda_daemon(
                             g.facts_with_provenance,
                             g.facts_total,
                         );
+                        // Emit the durable snapshot-layer dedup-hygiene
+                        // self-metric from the SAME snapshot: average liveness
+                        // of the snapshot layer (distinct streams / retained
+                        // revisions). Turns a pruning/hygiene regression —
+                        // superseded snapshot revisions accumulating faster than
+                        // controlled forgetting reclaims them — into a
+                        // comparable, regressable `metrics.jsonl` series.
+                        // Best-effort; no-op on an empty snapshot layer.
+                        crate::cognitive_memory::metrics::record_snapshot_dedup_ratio_metric(
+                            g.distinct_snapshot_caller_keys,
+                            g.snapshot_facts_total,
+                        );
                     }
                     // Flush the metrics snapshot with the per-cycle enrichment
                     // rollup section attached (issue #2942) so the dashboard's

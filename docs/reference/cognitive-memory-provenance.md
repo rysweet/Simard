@@ -450,6 +450,56 @@ self-metrics they sit alongside.
 
 ---
 
+## Observability: snapshot-dedup-hygiene self-metric
+
+Grounding coverage watches whether facts enter the graph *connected*; a sibling
+self-metric watches whether the **snapshot layer stays lean**. Snapshot facts
+(those written under a stable caller/dedup key — goal-board snapshots and the
+like) are revisioned: each new revision `SUPERSEDES` the prior one, and
+`prune_superseded` (controlled forgetting) reclaims the archived revisions over
+time. `graph_stats()` already reports two raw counts for this layer:
+
+| Field | Meaning |
+|---|---|
+| `snapshot_facts_total` | every snapshot revision still held (live + not-yet-pruned superseded) |
+| `distinct_snapshot_caller_keys` | distinct logical snapshot streams behind them |
+
+The durable `fact_snapshot_dedup_ratio` self-metric is the hygiene *health*
+signal derived from them. Once per OODA cycle the daemon — from the **same**
+`graph_stats()` snapshot it already collects for the OTel edge gauges and the
+grounding-coverage metric — emits one sample to the `metrics.jsonl` series:
+
+```
+fact_snapshot_dedup_ratio = distinct_snapshot_caller_keys / snapshot_facts_total
+```
+
+- **What it measures.** The average *liveness* of the snapshot layer, in
+  `(0.0, 1.0]`. `1.0` means every stream holds a single live revision; the value
+  falls toward `0` as superseded revisions pile up (its inverse — total /
+  distinct — is the mean revisions retained per stream).
+- **Why it matters.** That accumulation is exactly the monotonic-growth failure
+  controlled forgetting exists to prevent: if `prune_superseded` stops keeping
+  pace, archived revisions bloat semantic memory. Previously that was visible
+  only as the raw `graph_stats()` counts, never as a durable, comparable,
+  regressable series — so a *ratio* (store-size-independent) makes a pruning
+  regression raise the same gym-history signal every other cognition self-metric
+  (`fact_provenance_coverage`, `recall_precision_at_k`, `distill_fact_yield`)
+  does.
+- **Undefined on an empty snapshot layer.** When the store holds zero snapshot
+  facts, the ratio is *undefined* and **no** sample is emitted (skip rather than
+  drag the series to a misleading `0.0`), mirroring the `fact_provenance_coverage`
+  convention. `distinct_snapshot_caller_keys` is clamped to `snapshot_facts_total`
+  defensively so a miscount can never yield a ratio above `1.0`. The emitter is
+  best-effort — a metrics-write failure is logged, never propagated — and pure
+  observation: it never changes memory state.
+
+The scoring is a pure function
+(`cognitive_memory::metrics::snapshot_dedup_ratio`) with the per-cycle emitter
+(`record_snapshot_dedup_ratio_metric`) beside `record_provenance_coverage_metric`,
+so both graph-memory hygiene self-metrics sit together.
+
+---
+
 ## Testing
 
 The feature is covered by a TDD round-trip test (in
@@ -488,6 +538,8 @@ cargo test memory_consolidation
   `facts_with_provenance` / `facts_total` snapshot the coverage metric reads.
 - `src/cognitive_memory/metrics.rs` — `provenance_coverage()` (pure ratio) and
   `record_provenance_coverage_metric()` (per-cycle `fact_provenance_coverage`
+  emitter), plus the sibling `snapshot_dedup_ratio()` /
+  `record_snapshot_dedup_ratio_metric()` (per-cycle `fact_snapshot_dedup_ratio`
   emitter), plus the `GraphStats` snapshot type in `src/memory_cognitive.rs`.
 - `src/operator_commands_ooda/daemon/mod.rs` — the per-cycle sweep that reads
   `graph_stats()` for the OTel edge gauges and emits the coverage self-metric
