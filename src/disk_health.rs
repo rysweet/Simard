@@ -117,9 +117,18 @@ pub(crate) fn emergency_cleanup_with_pct(
     let debug_dir = repo_root.join("target/debug");
     if debug_dir.is_dir() {
         let size = dir_size_bytes(&debug_dir);
-        if std::fs::remove_dir_all(&debug_dir).is_ok() {
-            freed += size;
-            actions.push(format!("Removed target/debug/ ({} MB)", size / 1_000_000));
+        match std::fs::remove_dir_all(&debug_dir) {
+            Ok(()) => {
+                freed += size;
+                actions.push(format!("Removed target/debug/ ({} MB)", size / 1_000_000));
+            }
+            Err(e) => {
+                warn!(
+                    path = %debug_dir.display(),
+                    error = %e,
+                    "Emergency cleanup failed to remove target/debug",
+                );
+            }
         }
     }
 
@@ -127,12 +136,21 @@ pub(crate) fn emergency_cleanup_with_pct(
     let cov_dir = repo_root.join("target/llvm-cov-target");
     if cov_dir.is_dir() {
         let size = dir_size_bytes(&cov_dir);
-        if std::fs::remove_dir_all(&cov_dir).is_ok() {
-            freed += size;
-            actions.push(format!(
-                "Removed target/llvm-cov-target/ ({} MB)",
-                size / 1_000_000
-            ));
+        match std::fs::remove_dir_all(&cov_dir) {
+            Ok(()) => {
+                freed += size;
+                actions.push(format!(
+                    "Removed target/llvm-cov-target/ ({} MB)",
+                    size / 1_000_000
+                ));
+            }
+            Err(e) => {
+                warn!(
+                    path = %cov_dir.display(),
+                    error = %e,
+                    "Emergency cleanup failed to remove target/llvm-cov-target",
+                );
+            }
         }
     }
 
@@ -145,13 +163,22 @@ pub(crate) fn emergency_cleanup_with_pct(
             let target = entry.path().join("target");
             if target.is_dir() {
                 let size = dir_size_bytes(&target);
-                if std::fs::remove_dir_all(&target).is_ok() {
-                    freed += size;
-                    actions.push(format!(
-                        "Removed worktrees/{}/target/ ({} MB)",
-                        entry.file_name().to_string_lossy(),
-                        size / 1_000_000
-                    ));
+                match std::fs::remove_dir_all(&target) {
+                    Ok(()) => {
+                        freed += size;
+                        actions.push(format!(
+                            "Removed worktrees/{}/target/ ({} MB)",
+                            entry.file_name().to_string_lossy(),
+                            size / 1_000_000
+                        ));
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %target.display(),
+                            error = %e,
+                            "Emergency cleanup failed to remove worktree target",
+                        );
+                    }
                 }
             }
         }
@@ -162,9 +189,18 @@ pub(crate) fn emergency_cleanup_with_pct(
         let dir = state_root.join(name);
         if dir.is_dir() {
             let size = dir_size_bytes(&dir);
-            if std::fs::remove_dir_all(&dir).is_ok() {
-                freed += size;
-                actions.push(format!("Removed {name}/ ({} MB)", size / 1_000_000));
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {
+                    freed += size;
+                    actions.push(format!("Removed {name}/ ({} MB)", size / 1_000_000));
+                }
+                Err(e) => {
+                    warn!(
+                        path = %dir.display(),
+                        error = %e,
+                        "Emergency cleanup failed to remove state-root cargo dir",
+                    );
+                }
             }
         }
     }
@@ -228,9 +264,18 @@ pub(crate) fn emergency_cleanup_with_pct(
         let mut pruned_any = false;
         for old in files.into_iter().skip(2) {
             let size = old.metadata().map(|m| m.len()).unwrap_or(0);
-            if std::fs::remove_file(old.path()).is_ok() {
-                freed += size;
-                pruned_any = true;
+            match std::fs::remove_file(old.path()) {
+                Ok(()) => {
+                    freed += size;
+                    pruned_any = true;
+                }
+                Err(e) => {
+                    warn!(
+                        path = %old.path().display(),
+                        error = %e,
+                        "Emergency cleanup failed to prune old backup",
+                    );
+                }
             }
         }
         if pruned_any {
