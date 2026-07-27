@@ -3,6 +3,12 @@ name: verify
 on:
   push:
   pull_request:
+  # Merge-queue live-lock remediation (issue #1050): run the same required
+  # contexts against the queued, freshly-merged result so strict
+  # up-to-date-before-merge can be relaxed to merge-queue semantics. This is
+  # ADDITIVE — the existing push/pull_request triggers and every required job
+  # are preserved so no required status-check context is renamed or dropped.
+  merge_group:
 
 permissions: {}
 
