@@ -986,6 +986,15 @@ mod tests_recall_precision_bench;
 #[cfg(test)]
 mod tests_recall_precision_delegation;
 
+// Issue #4378: characterization teeth pinning the THREE deliberately-divergent
+// "text relevance" definitions — served word-boundary gate (`search_facts`),
+// ungated ranker (`recall_facts_ranked`), and the substring-proxy precision
+// metric (`metrics::precision_at_k`). Pins the divergence (so it cannot silently
+// widen) and the agreement case (so it is specific to interior/suffix substring
+// hits), keeping any future convergence a deliberate, test-visible edit.
+#[cfg(test)]
+mod tests_relevance_definition_divergence;
+
 // Recall quality: `search_episodes_by_keywords` matches CLEAN alphanumeric
 // keywords at a WORD BOUNDARY (marker-safe), extending the word-boundary gate
 // `recall_episodes_ranked` already uses to the flat keyword scan while keeping
