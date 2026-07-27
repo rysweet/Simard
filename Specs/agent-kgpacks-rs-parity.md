@@ -109,6 +109,24 @@ the port is at full parity.**
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
+**The done-gate is fully machine-checkable and needs no further redefinition.**
+Completion is certified solely by the two commands above going green on `main`
+(each OPEN row's named acceptance test is its definition of done). There is no
+subjective "proven against the original on a shared fixture" step: a retrieval
+row counts as DONE only when its named test asserts a concrete numeric threshold
+and passes. Do not re-open the finish condition for renegotiation; work the
+backlog until the two commands are green.
+
+**Scope resolutions (decided 2026-07-20, operator may override):** two surface
+areas that are *not* part of this runtime-parity goal, and therefore do **not**
+gate closing it, matching the OUT-OF-SCOPE stance already applied to pack
+authoring (`KGP-B*`):
+
+- **Web frontend / PWA / e2e UI** — this goal is the knowledge-query *runtime*
+  (retrieval + answer synthesis), not a user interface. OUT-OF-SCOPE.
+- **Embeddable pack "skills"** — an authoring/extension concern in the same
+  family as `KGP-B*`. OUT-OF-SCOPE.
+
 ## Ordered backlog (so the next cycle is never stuck)
 
 **No in-scope criterion remains OPEN — full parity is achieved.** Per the
@@ -147,6 +165,33 @@ multi-hop retrieval — closed 2026-07-21. KGP-T3 — reuse an open `Connection`
   knowledge. The LIKE membership probes stay substring-based (recall breadth);
   ranking governs which candidates survive the cut. KGP-Q4 (parameterize the
   LIKE search) remains OPEN and orthogonal.
+- **2026-07-20 (triage / course-correction)** — This goal was being auto-flagged
+  as "stalled." Root cause on inspection: **not** a missing or unmeasurable
+  finish line — the done-gate is already machine-checkable (the two green
+  `cargo test` commands above). It is simply a large, still-incomplete effort:
+  KGP-Q4 shipped today (PR #4349 merged), leaving **KGP-T3** (connection reuse)
+  and **KGP-Q5** (GraphRAG multi-hop) OPEN. Course-correction applied: re-anchor
+  the finish condition to this spec's named-test definition (dropping an earlier
+  fuzzy "prove against the original on a shared fixture / ratify each row"
+  framing), and resolve the two open scope questions (web UI, pack "skills") as
+  OUT-OF-SCOPE so no operator decision blocks closure. No human input required.
+- **2026-07-20 (triage / root-cause reconciliation + Signal record)** — Closing
+  the loop on the course-correction above. The escalation seed hypothesis was
+  "the finish line can't be measured automatically." Inspection reconciles this
+  to a **false 'unclear-criteria' read**: the done-gate is *already*
+  machine-checkable (the two green `cargo test` commands); it only *looked*
+  criteria-less because it is a large, still-open effort and one leftover fuzzy
+  phrase made an objective gate read as subjective. So the right correction is
+  re-affirm-and-sharpen (done above), not rewrite an unmeasurable gate. This
+  also confirms the no-progress safeguard will **not** re-flag the goal: the
+  ordered backlog gives every cycle a concrete next step (so no `NO ACTION`
+  stall), the finish condition is objective and drift-free, and the two side
+  questions are resolved OUT-OF-SCOPE (so no dangling operator decision). The
+  goal stays OPEN by design (`KGP-T3`, `KGP-Q5` remain) and closes automatically
+  when the two commands are green on `main`. The plain-English Signal transcript
+  sent to the operator (one message per triage step, jargon-free) and the full
+  reconciliation are recorded in
+  [`docs/investigation/kgpacks-rs-escalation-triage-2026-07-20.md`](../docs/investigation/kgpacks-rs-escalation-triage-2026-07-20.md).
 - **2026-07-20** — **KGP-Q4 closed** (correctness + injection-shape removal):
   `query_articles` no longer string-interpolates keywords into its `LIKE`
   clauses. Each distinct keyword is now bound as a parameter (`?n`) built by the
