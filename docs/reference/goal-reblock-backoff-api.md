@@ -49,7 +49,7 @@ It is the same [`BackoffGate`](./overseer-backoff-gate-api.md) primitive used by
 the gap-scan rail (`peek` / `commit` / `admit`, bounded exponential window,
 clock-regression-safe, reset-on-long-silence). It is constructed from the shared
 `SIMARD_OVERSEER_BACKOFF_*` window configuration (see
-[BackoffGate reference](./overseer-backoff-gate-api.md#configuration)).
+[BackoffGate reference](./overseer-backoff-gate-api.md#configuration-accessors)).
 
 ### The dedup key
 

@@ -73,7 +73,7 @@ the first observation, and a **single** open stewardship issue for the goal.
 
 The suppression key is `overseer-obs:goal:blocked:{goal_id}` and it uses the
 shared Overseer backoff window (see
-[BackoffGate reference](../reference/overseer-backoff-gate-api.md#configuration)).
+[BackoffGate reference](../reference/overseer-backoff-gate-api.md#configuration-accessors)).
 The stewardship signature is stable per goal — the
 `consecutive_no_action` counter is kept in the issue body/title only, not in the
 hashed signature.
