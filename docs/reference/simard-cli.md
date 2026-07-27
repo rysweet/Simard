@@ -209,6 +209,33 @@ simard goal add 3 "Tidy the meeting REPL help text"
 The added id and priority are logged to stderr
 (`[simard] goal add: '<id>' added at p<priority>`).
 
+### `simard goal complete <goal-id>`
+
+Mark a goal **done** — the intent-revealing completion verb, as opposed to the
+administrative [`simard goal remove`](#simard-goal-remove-goal-id) escape hatch.
+`complete` marks the goal finished, removes it from the active board **and** the
+backlog, and writes a **durable tombstone** so no path (default seeding, memory
+recall, a meeting handoff, or the daemon's cycle reconcile) can resurrect it.
+
+Behaviour contract:
+
+- **Idempotent.** Completing an id that is absent from the board still records the
+  tombstone, so the same command is safe to rerun (and safe to call when a
+  concurrent daemon cycle already removed the goal).
+- **Standing/perpetual goals are refused** (issue
+  [#2580](https://github.com/rysweet/Simard/issues/2580)). A standing goal has no
+  terminal done-state, so `complete` does not terminate it — it **auto-reopens**
+  it for a fresh cycle (no removal, no tombstone) and says so on stderr.
+- Persists under the shared `goal-board.lock` flock via the same atomic
+  read-modify-write path as the other mutating subcommands, then records the
+  tombstone through `tombstone_goals`. The outcome is logged to stderr, e.g.
+  `[simard] goal complete: '<id>' marked done, removed from board, and tombstoned`.
+
+This is the authorized path the Overseer's
+[escalation-triage recipe](./escalation-triage-api.md) uses for its
+`complete-delivered-goal` decision — completing a goal whose work a merged PR has
+already delivered.
+
 ### `simard goal unblock <goal-id>`
 
 Operator escape hatch — clears the goal's `Blocked` status
