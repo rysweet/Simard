@@ -1,7 +1,7 @@
 ---
 title: Configure and run disk reclamation
 description: Operator guide for Simard's agentic disk-reclamation capability — running dry-run and live reclamation from the CLI, reading the report and human-review list, tuning the SIMARD_DISK_RECLAIM_PCT threshold, and understanding the self-healing daemon trigger.
-last_updated: 2026-07-07
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -51,6 +51,7 @@ Typical output:
 ```text
 disk-reclaim (dry-run) — home partition 88% used, target 85%
 WOULD REMOVE  tracked_worktree  ~/.simard/engineer-worktrees/goal-1841-...   3.9G  pr #1841 merged, idle
+WOULD REMOVE  stale_build_cache /home/azureuser/src/Simard/target            8.4G  rebuildable target/ (routine)
 WOULD REMOVE  stale_build_cache /home/azureuser/src/Simard/worktrees/feat-x/target  6.1G  stale target/
 WOULD REMOVE  orphan_dir        ~/.simard/engineer-worktrees/leftover-9f3   1.2G  de-registered, no gitdir
 SKIP (review) tracked_worktree  ~/src/amplihack-rs/worktrees/wip-parser     2.0G  unpushed commits not in a merged/closed PR
@@ -61,6 +62,15 @@ projected: 11.2G reclaimable → 85% used after; 2 candidates need human review
 Nothing is deleted in dry-run. `WOULD REMOVE` shows what a live run would
 reclaim (largest-first); `SKIP (review)` shows candidates a rail refused —
 these go to the human-review list, never auto-deleted.
+
+> **Routine reclaim covers each managed repo's own `target/`.** The reclamation
+> scope includes `<repo>/target` (`debug/`, `release/`, `llvm-cov-target/`, and
+> incremental caches) for every managed repo — the same rebuildable artifacts the
+> deterministic `emergency_cleanup` removes at severe pressure. This lets routine
+> reclaim free build artifacts *proactively between* emergency passes instead of
+> no-op'ing (`freed 0 bytes … N skipped for review`) until disk hits the
+> emergency threshold. The protected `worktrees/main` checkout (and its
+> `target/`) is never reclaimed — the deny-set overrides the allow-root.
 
 To actually reclaim, pass `--apply`:
 
@@ -210,7 +220,10 @@ For the full per-candidate detail, read the machine-readable report
 
 Candidates a rail refused are **never deleted** and are surfaced for a human.
 They appear as `SKIP (review)` in the CLI, in `skipped[]` of `--report-json`,
-and as `WARN` tracing from the daemon. Each carries a `reject_reason`:
+and as structured `tracing` from the daemon. Each skipped candidate is logged
+with its `path`, its `reject_reason` (the closed enum below), and its `kind`, so
+you can see *which* path was refused and *why* without reconstructing it from the
+summary counters. Each carries a `reject_reason`:
 
 | `reject_reason` | Meaning | What to do |
 | --------------- | ------- | ---------- |

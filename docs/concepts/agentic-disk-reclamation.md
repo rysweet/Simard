@@ -1,7 +1,7 @@
 ---
 title: Agentic disk reclamation
 description: Design rationale for Simard's fully agentic disk-reclamation capability — why the reclaim agent proposes candidates while a deterministic Rust executor disposes of them, the non-bypassable protected-path rails, and how the capability self-heals disk pressure without per-cycle hand-crafted cleanup heuristics.
-last_updated: 2026-07-07
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -122,7 +122,47 @@ Only three candidate classes can *ever* be reclaimed, and only after passing
 
 1. **Tracked worktrees** whose PR is MERGED or CLOSED and which are idle,
 2. **Orphaned, de-registered** (untracked) worktree directories,
-3. **Stale build caches** (`target/` and shared cargo target dirs).
+3. **Stale build caches** — per-managed-repo `<repo>/target/` (its `debug/`,
+   `release/`, `llvm-cov-target/`, and incremental caches) plus the shared cargo
+   target dirs under the state root.
+
+### Routine reclaim frees `target/` between emergency passes
+
+The reclamation **allow-root set** includes `<repo>/target` for every managed
+repo (rooted at the `target/` *parent* so the guard's strict-inside containment
+still confines removal to descendants of `target/`, never `<repo>/src` or
+`<repo>/.git`). This is what lets **routine** (non-emergency) reclaim actually
+free rebuildable build artifacts.
+
+Without that root, routine reclaim had nothing in scope: every `target/debug`
+candidate the agent proposed was rejected as *outside allow-root* and pushed to
+the human-review list, producing the "freed 0 bytes, 0 paths removed, N skipped
+for review" no-op. Disk then climbed unchecked until the deterministic
+`emergency_cleanup` (Tier 1) fired at ~95% and freed space in a burst — a
+~30-minute saw-tooth that rode the partition at 94–99% and risked `ENOSPC`
+between passes. With `<repo>/target` in scope, routine reclaim removes the same
+rebuildable artifacts *proactively and incrementally*, so the partition no longer
+depends on the emergency backstop to avoid filling. `emergency_cleanup` remains
+the deterministic hard stop, but it should now fire rarely rather than every
+cycle.
+
+Widening to `target/` stays **additive and non-breaking**: the artifacts are the
+same rebuildable class emergency cleanup already treats as safe, removal is still
+gated by every hard rail below (the live-PID rail refuses any candidate that a
+running process is sitting *inside* via `/proc/<pid>/cwd`; the protected deny-set
+still overrides the allow-root), and no new candidate *category* is introduced — only the containment
+scope of the existing `StaleBuildCache` kind is corrected.
+
+### Observability: per-candidate skip reasons
+
+Every rejected candidate is logged with a structured `tracing` event carrying its
+`path`, the closed `RejectReason` enum, and its `CandidateKind` — turning the
+opaque "N skipped for review" summary into a per-path audit trail. An operator
+can now tell a `target/debug` skipped for **Live process** (a build is running;
+expected) apart from one skipped for **Outside allow-root** (a scope bug worth
+investigating). The agent's free-text rationale is never logged as a field (anti
+log-forging); only the enum reason is. See
+[disk-reclaim telemetry](../reference/disk-reclaim-telemetry.md).
 
 ### Fail-closed, everywhere
 

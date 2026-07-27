@@ -82,11 +82,23 @@ pub fn managed_repos() -> Vec<PathBuf> {
 /// given Simard state root:
 /// - `<state_root>/engineer-worktrees` (the `~/.simard` engineer worktrees),
 /// - `<repo>/worktrees` for each managed repo,
+/// - `<repo>/target` for each managed repo (routine build-cache reclaim),
 /// - the shared cargo target dirs under the state root.
+///
+/// The per-repo `<repo>/target` root is the `target/` **parent** directory, not
+/// an exact `target/debug` entry: `is_safe_to_delete` requires a candidate to be
+/// *strictly inside* an allow-root, so rooting at `target/` is the smallest
+/// scope that lets a `StaleBuildCache` candidate for `target/debug` (and the
+/// other rebuildable children) clear containment. Widening is **additive** —
+/// every direct child of `target/` is a rebuildable Cargo artifact, and the
+/// live-PID, symlink, and `.git`-worktree rails still gate each deletion. This
+/// is what lets **routine** reclaim free `target/` between emergency passes
+/// instead of rejecting every `target/debug` candidate with `OutsideAllowRoot`.
 pub fn allow_roots(state_root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![state_root.join("engineer-worktrees")];
     for repo in managed_repos() {
         roots.push(repo.join("worktrees"));
+        roots.push(repo.join("target"));
     }
     roots.push(state_root.join("cargo-target"));
     roots.push(state_root.join("shared-target"));
@@ -422,6 +434,14 @@ mod tests {
         assert!(roots.contains(&PathBuf::from("/home/azureuser/src/amplihack-rs/worktrees")));
         assert!(roots.contains(&PathBuf::from(
             "/home/azureuser/src/amplihack-memory-lib/worktrees"
+        )));
+        // The per-repo `target/` roots that make routine build-cache reclaim
+        // possible (issue #4809): every managed repo's `target/` parent is in
+        // scope so a `target/debug` candidate clears containment.
+        assert!(roots.contains(&PathBuf::from("/home/azureuser/src/Simard/target")));
+        assert!(roots.contains(&PathBuf::from("/home/azureuser/src/amplihack-rs/target")));
+        assert!(roots.contains(&PathBuf::from(
+            "/home/azureuser/src/amplihack-memory-lib/target"
         )));
     }
 

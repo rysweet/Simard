@@ -1,7 +1,7 @@
 ---
 title: Disk reclaim API
-description: Reference for the src/disk_reclaim module — the ReclaimCandidate serde contract, the non-bypassable guard::vet_candidate rail and its RejectReason set, resolve_daemon_working_dirs, the exec_reclaim executor and ReclaimReport, the disk-reclaim.yaml analysis-only recipe contract, and the simard disk-reclaim CLI surface.
-last_updated: 2026-07-07
+description: Reference for the src/disk_reclaim module — the ReclaimCandidate serde contract, the non-bypassable guard::vet_candidate rail and its RejectReason set, the allow_roots reclamation scope (including per-repo target/ for routine build-cache reclaim), resolve_daemon_working_dirs, the exec_reclaim executor with per-candidate structured skip-reason tracing and ReclaimReport, the disk-reclaim.yaml analysis-only recipe contract, and the simard disk-reclaim CLI surface.
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -195,17 +195,61 @@ once per run from the same managed-repo set the recipe inspects:
 ```
 allow_roots =
       { <state_root>/engineer-worktrees }                 // ~/.simard engineer worktrees
-    ∪ { <repo>/worktrees for repo in MANAGED_REPOS }      // Simard, amplihack-rs, amplihack-memory-lib
-    ∪ { shared cargo target dirs under <state_root> }     // stale build caches
+    ∪ { <repo>/worktrees for repo in MANAGED_REPOS }      // per-repo worktree dirs
+    ∪ { <repo>/target    for repo in MANAGED_REPOS }      // per-repo build artifacts
+    ∪ { <state_root>/cargo-target, <state_root>/shared-target }  // shared build caches
 ```
 
 `MANAGED_REPOS` is the same hardcoded managed-repo list the recipe enumerates
 (§`recipe.rs`); it is **not** operator-configurable free-form (operators widen
 the *deny*-set via `SIMARD_GIT_PROTECTED_REPOS`, never the allow-set — widening
 the delete scope from the environment would be a footgun). A candidate outside
-every allow-root — anywhere in `$HOME` not under a managed worktree/cache root,
-or any absolute path the agent hallucinates — is refused before any other rail
-is even consulted.
+every allow-root — anywhere in `$HOME` not under a managed worktree/target/cache
+root, or any absolute path the agent hallucinates — is refused before any other
+rail is even consulted.
+
+#### The per-repo `target/` root (routine-reclaim scope)
+
+`allow_roots` includes **`<repo>/target`** (the `target/` **parent** directory)
+for every managed repo. This is the root that lets **routine** reclaim free
+rebuildable Cargo artifacts — `target/debug/`, `target/release/`,
+`target/llvm-cov-target/`, and the incremental-compilation caches — the same
+build artifacts the deterministic `emergency_cleanup` (Tier 1) removes at severe
+pressure.
+
+The root is deliberately the **parent** `target/`, not an exact-match
+`target/debug` entry, because `is_safe_to_delete`
+(`maintenance::is_safe_to_delete`) requires a candidate to be **strictly inside**
+an allow-root (component-wise `Path::starts_with`, never string-prefix). Rooting
+at `target/`'s parent is the smallest change that lets a `StaleBuildCache`
+candidate for `target/debug` clear the containment check without altering the
+guard's strict-inside semantics. Widening to `target/` is **additive**: every
+direct child of `target/` is a rebuildable artifact already inside the
+build-cache category the guard permits, and removal is still gated by
+
+- the agent proposing a `CandidateKind::StaleBuildCache` candidate,
+- the `ProtectedDenySet` (which still wins over any allow-root, so
+  `worktrees/main` and daemon working dirs remain unreclaimable),
+- the live-PID rail (any process whose `/proc/<pid>/cwd` resolves *inside* the
+  candidate is refused with `LiveProcess`; note this keys on cwd, so a
+  `cargo build` invoked with its cwd at the repo root is not caught by this rail
+  — such artifacts are instead safe because they are the rebuildable
+  `StaleBuildCache` class), and
+- the TOCTOU re-assert + symlink refusal at the syscall boundary.
+
+Rooting at `target/`'s parent **cannot** reach `<repo>/src`, `<repo>/.git`, or
+sibling files: strict-inside containment confines removal to descendants of
+`target/`. `MANAGED_REPOS` never includes bare `$HOME`
+(`managed_repos_do_not_include_bare_home` guards this), so the widened root
+cannot escalate to a home-directory sweep.
+
+**Why this matters (regression fixed):** before the `target/` root existed,
+routine reclaim had no allow-root covering `<repo>/target`, so every proposed
+`target/debug` candidate was rejected with `OutsideAllowRoot` and pushed to the
+human-review list — the "freed 0 bytes, 0 paths removed, N skipped for review"
+no-op that let disk climb until the ~30-minute `emergency_cleanup` pass. With
+`target/` in scope, routine reclaim frees those artifacts **proactively between**
+emergency passes instead of skipping them.
 
 ### `ProtectedDenySet`
 
@@ -258,6 +302,40 @@ Sorts candidates **largest-first** (by fresh measurement), then loops:
 
 Failures during an individual removal are captured in `failures[]` and do not
 abort the run.
+
+### Structured skip-reason tracing
+
+Every rejected candidate is both pushed to `skipped[]` **and** logged with a
+structured `tracing` event at the reject site (immediately after `vet_candidate`
+returns `Verdict::Reject`), so an operator can see *why* a path was not reclaimed
+without reconstructing it from counters:
+
+```rust
+tracing::info!(
+    target: "simard::disk_reclaim",
+    path = %candidate.path.display(),
+    reason = ?reason,            // the closed RejectReason enum
+    kind = ?candidate.kind,      // CandidateKind
+    "reclaim candidate skipped by guard",
+);
+```
+
+- **Fields only** — `path`, the `RejectReason` enum, and `CandidateKind`. The
+  agent's free-text `reason` field is **never** logged as a field (anti
+  log-forging; see [telemetry](./disk-reclaim-telemetry.md)),
+  and no file contents or env values are emitted.
+- **`info` level**, one event per skipped candidate, OTLP-compatible (rides the
+  same `tracing` → OTel pipeline as the rest of the module). No `print!` /
+  `println!` — library paths use `tracing` exclusively.
+- Complements, and does not replace, the existing `summary()` one-liner
+  (`"… N skipped for review"`) and the
+  `simard.disk.reclaim.candidates_skipped` counter. The per-candidate events
+  answer *which* path and *why*; the summary and counter answer *how many*.
+
+This is the observability that turns a silent "N skipped for review" line into
+an actionable, per-path audit trail — e.g. distinguishing a `target/debug`
+skipped for `LiveProcess` (a build is running; expected) from one skipped for
+`OutsideAllowRoot` (a scope bug worth investigating).
 
 **Subprocess hardening:** git is invoked with `env_clear` (only `PATH`/`HOME`),
 argument vectors only (no shell), `--` separators, and leading-dash paths
@@ -434,12 +512,13 @@ tempdirs, a fabricated `/proc` root, and `FakeLiveProcessProbe` / fake
 
 | Test file | Proves |
 | --------- | ------ |
-| `tests_guard.rs` | Refusal of: `worktrees/main`, daemon cwd, live-PID path, uncommitted/unpushed, active worktree, outside-root, unknown-PR, symlink, option-injection — each asserted **skipped even when instructed to delete**. Plus the **OPEN-PR merge-base-is-ancestor regression** (a fresh worktree whose merge-base is an ancestor of `main` is **not** reclaimed). |
+| `tests_guard.rs` | Refusal of: `worktrees/main`, daemon cwd, live-PID path, uncommitted/unpushed, active worktree, outside-root, unknown-PR, symlink, option-injection — each asserted **skipped even when instructed to delete**. Plus the **OPEN-PR merge-base-is-ancestor regression** (a fresh worktree whose merge-base is an ancestor of `main` is **not** reclaimed). With the widened `<repo>/target` allow-root: `<repo>/src` and `<repo>/.git` are still refused (`OutsideAllowRoot`), a symlinked `target/*` is refused, a live-PID `target/debug` is refused (`LiveProcess`), and `worktrees/main` in the deny-set still overrides the allow-root. |
 | `tests_candidate.rs` | `deny_unknown_fields`; bad-element-skip vs bad-array-hard-error; bounds. |
-| `tests_executor.rs` | Largest-first ordering; threshold stop; dry-run zero-ops; TOCTOU re-assert; fake `DiskStatProvider`. |
+| `tests_executor.rs` | Largest-first ordering; threshold stop; dry-run zero-ops; TOCTOU re-assert; fake `DiskStatProvider`. **Routine-reclaim regression:** a `target/debug` candidate outside the old scope reproduces `bytes_freed == 0` with the path in `skipped[]` (`reject_reason = OutsideAllowRoot`); with the `<repo>/target` root it moves to `removed[]` with `bytes_freed > 0`. The reject arm emits the per-candidate `tracing::info!(path, reason, kind)` event; the test asserts the recorded `SkippedPath.reject_reason`. |
 | `tests_daemon_dir.rs` | Union resolution with injected `proc_root`; hardcoded `main` always present. |
 | `tests_recipe.rs` | Marker parse; no-fallback `AdapterInvocationFailed` on recipe/parse failure. |
 | `tests_env.rs` | `reclaim_pct_from_env` clamping; `daemon_apply_from_env` returns `DryRun` unless `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`. |
+| `mod.rs` (unit) | `allow_roots_cover_engineer_and_managed_worktrees` (extended to cover per-repo `target/`); `managed_repos_do_not_include_bare_home` (widened root never resolves to bare `$HOME`). |
 
 ## Related
 
