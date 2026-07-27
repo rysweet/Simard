@@ -204,9 +204,14 @@ pub fn verify_canary(
 }
 
 /// Redact URL-embedded credentials (SEC-D2) and bound the length of a gate
-/// detail before it is emitted to `tracing`/OTel — a gate's stderr can embed a
+/// detail before it is surfaced to *any* sink — a gate's stderr can embed a
 /// token-bearing remote URL and can be arbitrarily long.
-fn bound_gate_detail(detail: &str) -> String {
+///
+/// This is the single source of truth for gate-detail sanitisation, shared by
+/// the `tracing`/OTel sink (below) and the operator-CLI sink
+/// ([`GateResult`](crate::self_relaunch::GateResult)'s `Display`), so the two
+/// paths can never diverge (#4511).
+pub(super) fn bound_gate_detail(detail: &str) -> String {
     truncate_output(
         &crate::self_deploy::source_prep::redact_credentials(detail),
         512,
