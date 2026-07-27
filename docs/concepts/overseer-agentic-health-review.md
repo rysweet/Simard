@@ -11,7 +11,7 @@ description: >
   plain-English operator notification on both channels). Deliberately WITHOUT
   record_step_failure plumbing or an N-identical-failure threshold counter: the
   journal already contains every failure, and an agent reading it sees them all.
-last_updated: 2026-07-21
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -126,9 +126,15 @@ caret, or surrounding backticks *before* matching a marker — otherwise a
 well-formed `LAUNCH_RECIPE=` line dressed as `- LAUNCH_RECIPE=…` would be
 silently dropped and a real crash-loop would go un-remediated with no signal
 (the terminal marker still parses, so the degraded-pass ladder never fires).
-Stripping decoration never *invents* a decision: only the three distinctive
-markers are ever acted on, a bulleted line of prose normalises to prose and
-matches nothing, and a malformed-JSON or empty-field decision is still skipped.
+Symmetrically, agents also append a short justification *after* a decision's JSON
+(`LAUNCH_RECIPE={…} — fixes the crash-loop`); because `serde_json` rejects a
+value with trailing non-whitespace, the rail first extracts the leading
+balanced JSON object (respecting braces inside string values) so that trailing
+clause is ignored rather than dropping the whole decision. Neither rail ever
+*invents* a decision: only the three distinctive markers are ever acted on, a
+bulleted line of prose normalises to prose and matches nothing, an
+unbalanced/truncated object is still skipped fail-closed, and a malformed-JSON or
+empty-field decision is still dropped.
 
 ### The verdict is observable, never a silent pass
 
