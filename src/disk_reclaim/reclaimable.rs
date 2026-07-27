@@ -292,7 +292,7 @@ mod tests {
     // ---- env knob parsing + defensive clamping ------------------------
 
     #[test]
-    #[serial(disk_reclaim_env)]
+    #[serial(disk_reclaim_env, cognitive_memory)]
     fn idle_day_knobs_default_when_unset() {
         clear_env();
         assert_eq!(build_idle_days_from_env(), DEFAULT_BUILD_IDLE_DAYS);
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(disk_reclaim_env)]
+    #[serial(disk_reclaim_env, cognitive_memory)]
     fn idle_day_knobs_read_valid_values() {
         clear_env();
         // SAFETY: serialized; cleared below.
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    #[serial(disk_reclaim_env)]
+    #[serial(disk_reclaim_env, cognitive_memory)]
     fn idle_day_knob_zero_empty_or_garbage_clamps_to_safe_floor() {
         // A misconfigured 0 / empty / non-numeric value must NEVER mean
         // "purge everything now" — it clamps to the safe default floor.
