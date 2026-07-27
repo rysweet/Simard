@@ -121,6 +121,10 @@ pub const DISK_RECLAIM_CANDIDATES_SKIPPED: &str = "simard.disk.reclaim.candidate
 pub const DISK_RECLAIM_USED_PCT_BEFORE: &str = "simard.disk.reclaim.used_pct_before";
 /// Home-partition `%-used` after the run (gauge, 0–100).
 pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_after";
+/// Daemon cycles the effectiveness gate skipped (counter, tagged by
+/// [`ATTR_SOURCE`]) — a would-have-run reclaim held because a streak of no-op
+/// runs is in cooldown (#4809 / #4825 / #4810).
+pub const DISK_RECLAIM_SUPPRESSED_CYCLES: &str = "simard.disk.reclaim.suppressed_cycles";
 
 // ── Attribute keys ──────────────────────────────────────────────────────────
 

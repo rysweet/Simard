@@ -24,6 +24,7 @@ use crate::error::SimardResult;
 
 pub mod candidate;
 pub mod daemon_dir;
+pub mod effectiveness;
 pub mod executor;
 pub mod guard;
 pub mod prod;
@@ -31,6 +32,11 @@ pub mod recipe;
 
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
+pub use effectiveness::{
+    EffectivenessDecision, ReclaimEffectivenessGate, cooldown_base_secs_from,
+    cooldown_max_secs_from, cooldown_multiplier_from, effectiveness_gate_enabled,
+    effectiveness_gate_enabled_from, hard_ceiling_pct_from,
+};
 pub use executor::{
     PathRemover, RealPathRemover, ReclaimFailure, ReclaimReport, RemovedPath, SkippedPath,
     exec_reclaim,
