@@ -105,7 +105,16 @@ pub fn build_cache_leaf_dirs(repos: &[PathBuf]) -> Vec<PathBuf> {
 /// producer never trusts an estimate for a size decision). Deterministic and
 /// env-independent: candidate selection is a pure function of the on-disk layout.
 pub fn build_cache_candidates(repos: &[PathBuf]) -> Vec<ReclaimCandidate> {
-    build_cache_leaf_dirs(repos)
+    build_cache_candidates_from_leaves(build_cache_leaf_dirs(repos))
+}
+
+/// The allocation-only half of [`build_cache_candidates`]: wrap already-vetted
+/// leaf dirs as `StaleBuildCache` candidates. Split out so a caller that has
+/// already paid for [`build_cache_leaf_dirs`] (production's `run_disk_reclaim`,
+/// which also needs the same leaves as the guard allowlist) reuses that single
+/// filesystem walk instead of re-`read_dir`/`canonicalize`-ing every leaf twice.
+pub fn build_cache_candidates_from_leaves(leaves: Vec<PathBuf>) -> Vec<ReclaimCandidate> {
+    leaves
         .into_iter()
         .map(|path| ReclaimCandidate {
             path,

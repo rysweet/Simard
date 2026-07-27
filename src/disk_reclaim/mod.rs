@@ -32,7 +32,8 @@ pub mod recipe;
 pub mod build_cache;
 
 pub use build_cache::{
-    EVICTABLE_CACHE_DIRS, build_cache_candidates, build_cache_leaf_dirs, target_debug_roots,
+    EVICTABLE_CACHE_DIRS, build_cache_candidates, build_cache_candidates_from_leaves,
+    build_cache_leaf_dirs, target_debug_roots,
 };
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
@@ -181,6 +182,32 @@ pub fn reclaim_candidates(
     target_pct: u8,
     source: ReclaimSource,
 ) -> ReclaimReport {
+    // Deterministic build-cache leaves for the managed repos (issue #4810).
+    // Every entry point (CLI, daemon) inherits the leaf allowlist by having it
+    // computed here rather than trusting the caller to supply it.
+    let build_cache_leaves = build_cache::build_cache_leaf_dirs(&managed_repos());
+    reclaim_candidates_with_leaves(
+        candidates,
+        build_cache_leaves,
+        state_root,
+        mode,
+        target_pct,
+        source,
+    )
+}
+
+/// [`reclaim_candidates`] with the build-cache leaves supplied by the caller,
+/// so the production path can compute that (filesystem-walking) set **once** and
+/// reuse it for both the candidate list and the guard allowlist. Callers that do
+/// not already have the leaves use [`reclaim_candidates`], which computes them.
+fn reclaim_candidates_with_leaves(
+    candidates: Vec<ReclaimCandidate>,
+    build_cache_leaves: Vec<PathBuf>,
+    state_root: &Path,
+    mode: ReclaimMode,
+    target_pct: u8,
+    source: ReclaimSource,
+) -> ReclaimReport {
     // Defense in depth: refuse to delete as root at the guarded core so every
     // entry point inherits the invariant — even a future caller that skips an
     // adapter-level pre-check. Downgrade apply -> dry-run rather than delete
@@ -196,13 +223,12 @@ pub fn reclaim_candidates(
         effective
     };
 
-    // Deterministic build-cache leaves for the managed repos (issue #4810).
-    // Threaded into BOTH the Rail-2 allow-scope and the guard's registered-leaf
-    // allowlist so routine reclaim can evict `<repo>/target/debug/*` without
-    // widening any other rail. The widening is expressed leaf-by-leaf (never
-    // `target/`), so `starts_with` structurally forbids a wholesale-`target/debug`
-    // candidate from ever being contained. Empty when nothing is built yet.
-    let build_cache_leaves = build_cache::build_cache_leaf_dirs(&managed_repos());
+    // The leaves are threaded into BOTH the Rail-2 allow-scope and the guard's
+    // registered-leaf allowlist so routine reclaim can evict
+    // `<repo>/target/debug/*` without widening any other rail. The widening is
+    // expressed leaf-by-leaf (never `target/`), so `starts_with` structurally
+    // forbids a wholesale-`target/debug` candidate from ever being contained.
+    // Empty when nothing is built yet.
     let mut allow = allow_roots(state_root);
     allow.extend(build_cache_leaves.iter().cloned());
 
@@ -272,10 +298,23 @@ pub fn run_disk_reclaim(
     // dependence on non-deterministic LLM output. There is NO fallback: a recipe
     // failure still surfaces above as `AdapterInvocationFailed`; the deterministic
     // candidates never mask a broken recipe.
-    let candidates = merge_dedup_by_path(candidates, build_cache_candidates(&managed_repos()));
+    //
+    // The leaf set is walked from disk **once** here and reused for both the
+    // candidate list and the guard allowlist (`reclaim_candidates_with_leaves`),
+    // so routine reclaim never re-`read_dir`/`canonicalize`s every leaf twice.
+    let build_cache_leaves = build_cache::build_cache_leaf_dirs(&managed_repos());
+    let candidates = merge_dedup_by_path(
+        candidates,
+        build_cache::build_cache_candidates_from_leaves(build_cache_leaves.clone()),
+    );
 
-    Ok(reclaim_candidates(
-        candidates, state_root, mode, target_pct, source,
+    Ok(reclaim_candidates_with_leaves(
+        candidates,
+        build_cache_leaves,
+        state_root,
+        mode,
+        target_pct,
+        source,
     ))
 }
 
