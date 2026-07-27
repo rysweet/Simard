@@ -351,7 +351,10 @@ assert spawn_count == 1
 - **The higher-level decision logic.** The Overseer's `gate()` already holds a
   `LaunchRecipe` decision when an in-flight workstream is tracked
   (`inflight_investigations` + `recipe_dedup_key`); this fix adds the mandatory
-  **launcher-level** rail beneath it. Both layers coexist: the decision layer
+  **launcher-level** rail beneath it. (The decision layer is *separately* extended
+  by the [open-PR/branch regeneration guard](#open-prbranch-regeneration-guard-decision-layer)
+  above — that is an additive decision-layer skip, not a change to this
+  launcher-level rail.) Both layers coexist: the decision layer
   avoids asking, and the launcher guarantees at-most-one-per-signature even if it
   does — and, being process-wide, does so **across ticks** where the per-tick
   decision layer resets. The two keys are **intentionally independent**: the
@@ -360,6 +363,48 @@ assert spawn_count == 1
   `recipe_signature` folds `target_repo` + the full normalized `task_description`.
   They need not agree — each is a self-sufficient guard, and the launcher rail
   holds even when the decision layer's key would not have matched.
+
+## Open-PR/branch regeneration guard (decision layer)
+
+The launcher rail above guarantees *at most one live process per signature*, but
+it is deliberately last-line: it fires **after** the decision layer has already
+chosen to launch. A second, complementary guard lives in the **decision layer**
+(`Overseer::gate` in `src/overseer/mod.rs`) so the Overseer does not even *decide*
+to regenerate work that an **open PR or branch** already covers — the runaway-PR
+case behind the 50-open-PR backlog (near-duplicate clusters all solving one goal).
+
+The existing in-flight guard already skips a spawn when an `inflight_investigations`
+entry (this-process, this-run) matches `recipe_dedup_key(brief)`. The regeneration
+guard **extends** that check: before emitting a `LaunchRecipe` for a surfaced goal,
+`gate()` also skips when an **already-open PR or branch** targets the same
+`recipe_dedup_key`, even though no recipe process is currently in flight (the prior
+engineer finished and opened a PR that has not merged yet). The skip is
+**fail-visible**, logged at `target: "overseer::recipe"` with the bounded dedup key
+— never silently dropped:
+
+```
+held: an open PR/branch already targets this goal (dedup_key=<token>)
+```
+
+Contract:
+
+- **Same canonical goal ⇒ at most one open PR/engineer.** A goal whose
+  `recipe_dedup_key` already has an open PR/branch does **not** spawn a second
+  engineer or PR; it is skip-with-structured-log until that PR merges or closes.
+- **Additive / non-breaking.** The guard only *removes* a spawn the Overseer would
+  otherwise have issued; it never opens a PR and never closes or rebases one.
+- **Out of scope: existing backlog cleanup.** Clearing or rebasing PRs that were
+  already opened before this guard existed is **operator/governance** work, not a
+  code path here. This rail is strictly the *regeneration* guard — it stops the
+  backlog from growing, it does not shrink it.
+- **Keyed on `recipe_dedup_key`.** The guard reuses the decision layer's existing
+  `recipe_dedup_key` (the stable `overseer-obs:` token), so the in-flight guard,
+  the open-PR/branch guard, and the [gap-scan `BackoffGate`](./overseer-backoff-gate-api.md)
+  all key off the **same** canonical signature and cannot disagree.
+
+This guard and the launcher rail are two layers of the same intent: the decision
+layer avoids *asking* to regenerate covered work, and the launcher guarantees
+at-most-one-per-signature even if it does.
 
 ## Related
 
@@ -371,3 +416,7 @@ assert spawn_count == 1
   per-tick human-readable action/observation lines.
 - [Overseer root-cause ("WHY") principle](../concepts/overseer-root-cause-why.md) —
   the always-on rule to target causes, not symptoms.
+- [Overseer verify-and-merge escalation convergence](./overseer-merge-escalation-convergence.md) —
+  the sibling decision-layer convergence rail for the `VerifyAndMergePr`
+  escalation (a different intervention, same "surface once, then rate-limit"
+  discipline).

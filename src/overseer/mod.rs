@@ -90,6 +90,8 @@ mod tests_m2;
 #[cfg(test)]
 mod tests_memory_recall;
 #[cfg(test)]
+mod tests_merge_escalation_convergence;
+#[cfg(test)]
 mod tests_merge_queue_reasoning;
 #[cfg(test)]
 mod tests_root_cause;
@@ -291,6 +293,23 @@ pub struct Overseer {
     /// equivalent relaunch (keyed by the same [`recipe_dedup_key`]) within a
     /// growing, bounded window even after completion — never permanently.
     coverage_backoff: BackoffGate,
+    /// Per-`repo#pr` exponential-backoff convergence gate on the verify-and-merge
+    /// ESCALATION path (#4344 / #4145). A PR that is merge-ready-but-not
+    /// auto-mergeable is escalated to the operator ONCE with a classified
+    /// [`MergeBlocker`], then this gate suppresses the identical re-escalation
+    /// while its state is unchanged (never re-paging every tick), yet always
+    /// re-surfaces once the window elapses or the blocker class changes — never a
+    /// permanent silence. Reuses the same `SIMARD_OVERSEER_BACKOFF_*` primitive as
+    /// `coverage_backoff`; keyed on `{repo}#{pr}`, timed on the injected
+    /// [`Overseer::with_clock`] seam. NEVER touched on a successful merge (a merged
+    /// PR needs no suppression). Distinct key space from `coverage_backoff` /
+    /// `blocked_goal_gate` so the convergence paths never interfere.
+    merge_escalation_gate: BackoffGate,
+    /// The last classified [`MergeBlocker::class`] escalated per `{repo}#{pr}`, so
+    /// a genuine state change (a CHANGED blocker class) re-pages immediately even
+    /// inside the `merge_escalation_gate` window — it is NOT the unchanged repeat
+    /// the gate suppresses (#4344 / #4145).
+    merge_escalation_blocker: HashMap<String, &'static str>,
     /// The agentic observe/orient merge-queue reasoner rail (#4097). When wired
     /// (`build_overseer` with a resolved recipe-runner), each due tick invokes the
     /// `observe-merge-queue` recipe — an AGENT surveys open PRs + issues across the
@@ -432,6 +451,65 @@ pub enum ActOutcome {
         pr: u32,
         duplicate_of: u32,
     },
+    /// A verify-and-merge escalation for a PR that is merge-ready-but-not
+    /// auto-mergeable was SUPPRESSED by the per-`repo#pr` `merge_escalation_gate`
+    /// (an UNCHANGED escalation re-fired inside the backoff window — #4344 /
+    /// #4145). The PR was already escalated to the operator and is still in the
+    /// same blocker class, so it converges to a quiet acknowledged-pending state
+    /// instead of re-paging every tick. `reason` names the still-pending blocker
+    /// (sanitised — no token, no verbatim PR body). NEVER a merge: suppressing a
+    /// repeat notification never advances the PR toward merge.
+    MergeEscalationSuppressed {
+        reason: String,
+    },
+}
+
+/// Why an otherwise-surfaced PR could not be auto-merged this tick, classified so
+/// the verify-and-merge convergence rail (#4344 / #4145) can tell a genuine state
+/// change (a CHANGED blocker class worth re-paging) from the unchanged repeat the
+/// `merge_escalation_gate` suppresses. Rendered into the escalation's structured
+/// log and the suppressed outcome's `reason` — carries NO token and NO verbatim
+/// PR body, only this closed set of causes with a sanitised, length-bounded
+/// detail (log-injection safe). See
+/// `docs/reference/overseer-merge-escalation-convergence.md`.
+#[derive(Debug)]
+enum MergeBlocker {
+    /// The pr-verify objective pre-filter said the PR is not ready (draft / not
+    /// MERGEABLE / base branch not allowed / a required check not green).
+    NotReady { detail: String },
+    /// The authoritative agentic merge-judge refused (or failed closed because no
+    /// LLM provider is configured): `OverseerError::NotMergeReady`.
+    JudgeRefused { detail: String },
+}
+
+impl MergeBlocker {
+    /// The stable class discriminant used for the convergence dedup — a CHANGED
+    /// class for the same `repo#pr` re-pages even inside the backoff window.
+    fn class(&self) -> &'static str {
+        match self {
+            MergeBlocker::NotReady { .. } => "not_ready",
+            MergeBlocker::JudgeRefused { .. } => "judge_refused",
+        }
+    }
+
+    /// A concise, operator-facing reason naming the class and its detail. The
+    /// detail is hardened through the shared [`signal::sanitize_detail`] (ANSI
+    /// strip, control/whitespace collapse, token-shaped-secret redaction, length
+    /// bound) so no token or raw PR body can reach a structured log or the
+    /// persisted activity feed.
+    fn reason(&self) -> String {
+        let (label, detail) = match self {
+            MergeBlocker::NotReady { detail } => ("not ready", detail),
+            MergeBlocker::JudgeRefused { detail } => ("judge refused", detail),
+        };
+        let clean = signal::sanitize_detail(detail);
+        let clean = if clean.is_empty() {
+            "no detail".to_string()
+        } else {
+            clean
+        };
+        format!("{label}: {clean}")
+    }
 }
 
 /// The `target_repo` marker attached to ecosystem-observe launches. The
@@ -493,6 +571,16 @@ impl Overseer {
                 config::overseer_backoff_multiplier(),
                 config::overseer_backoff_max_secs(),
             ),
+            // Same `SIMARD_OVERSEER_BACKOFF_*` schedule as `coverage_backoff`
+            // (900s → ×2 → capped 24h), applied to the verify-and-merge escalation
+            // convergence path (#4344 / #4145) on an independent per-`repo#pr` key
+            // space.
+            merge_escalation_gate: BackoffGate::new(
+                config::overseer_backoff_base_secs(),
+                config::overseer_backoff_multiplier(),
+                config::overseer_backoff_max_secs(),
+            ),
+            merge_escalation_blocker: HashMap::new(),
             merge_queue_reasoner: None,
             merge_queue_roster: Vec::new(),
             merge_queue_every_n: 1,
@@ -1594,19 +1682,40 @@ impl Overseer {
             }
             Intervention::VerifyAndMergePr { repo, pr } => {
                 let report = self.caps.prs.verify(repo, *pr)?;
-                if !report.ready {
-                    return Ok(ActOutcome::Escalated);
-                }
-                // `verify()` is only the objective pre-filter. The authoritative
-                // agentic review runs inside `merge()` (step 3); when it refuses
-                // — or the LLM provider is unavailable and the judge fails closed
-                // — `merge()` returns `NotMergeReady`, which is an ESCALATION, not
-                // an error (never a blind merge).
-                match self.caps.prs.merge(repo, *pr) {
-                    Ok(()) => Ok(ActOutcome::Merged),
-                    Err(OverseerError::NotMergeReady { .. }) => Ok(ActOutcome::Escalated),
-                    Err(e) => Err(e),
-                }
+                let blocker = if !report.ready {
+                    // The objective pre-filter refused. Classify with the failing
+                    // check names (if any) so the operator sees WHY on the first
+                    // escalation — never a bare "verify-and-merge #N".
+                    let failing: Vec<&str> = report
+                        .checks
+                        .iter()
+                        .filter(|c| !c.passed)
+                        .map(|c| c.name.as_str())
+                        .collect();
+                    let detail = if failing.is_empty() {
+                        "objective pre-filter reported the PR not ready".to_string()
+                    } else {
+                        format!("failing checks: {}", failing.join(", "))
+                    };
+                    MergeBlocker::NotReady { detail }
+                } else {
+                    // `verify()` is only the objective pre-filter. The authoritative
+                    // agentic review runs inside `merge()`; when it refuses — or the
+                    // LLM provider is unavailable and the judge fails closed —
+                    // `merge()` returns `NotMergeReady`, an ESCALATION, not an error
+                    // (never a blind merge). A successful merge returns `Merged` and
+                    // NEVER touches the convergence gate (a merged PR needs no
+                    // suppression). A genuine capability/safety error still
+                    // propagates as `Err`.
+                    match self.caps.prs.merge(repo, *pr) {
+                        Ok(()) => return Ok(ActOutcome::Merged),
+                        Err(OverseerError::NotMergeReady { reason, .. }) => {
+                            MergeBlocker::JudgeRefused { detail: reason }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                };
+                Ok(self.converge_merge_escalation(repo, *pr, blocker))
             }
             Intervention::ResolveConflict { repo, pr } => {
                 self.caps.prs.resolve_conflict(repo, *pr)?;
@@ -1683,6 +1792,61 @@ impl Overseer {
                     pr: *pr,
                     duplicate_of: *duplicate_of,
                 })
+            }
+        }
+    }
+
+    /// Converge the verify-and-merge ESCALATION for a merge-ready-but-not
+    /// auto-mergeable PR (#4344 / #4145). Peek → commit-on-escalate on the
+    /// per-`{repo}#{pr}` [`Overseer::merge_escalation_gate`]:
+    ///
+    /// * First escalation for this `repo#pr`, the backoff window has elapsed, OR
+    ///   the classified blocker CLASS changed (a genuine state change) → emit
+    ///   `Escalated` with a structured, sanitised log naming the blocker, and
+    ///   `commit` the gate (growing the window).
+    /// * An UNCHANGED escalation strictly inside the current window → return
+    ///   `MergeEscalationSuppressed { reason }` (an acknowledged held/pending
+    ///   state) WITHOUT re-committing — the operator is paged once, then left
+    ///   alone until something changes.
+    ///
+    /// This ONLY narrows notifications; it never advances a PR toward merge (a
+    /// merge happens solely through the `verify()`→`merge()` path in [`Self::act`],
+    /// which still runs the objective pre-filter and the authoritative agentic
+    /// merge-judge). A backwards clock jump fails toward surfacing (never wedged
+    /// silent), inherited from [`BackoffGate::peek`].
+    fn converge_merge_escalation(
+        &mut self,
+        repo: &str,
+        pr: u32,
+        blocker: MergeBlocker,
+    ) -> ActOutcome {
+        let key = format!("{repo}#{pr}");
+        let class = blocker.class();
+        let now = (self.clock)();
+        // A CHANGED blocker class is a fresh escalation worth re-paging even inside
+        // the window — it is not the "unchanged repeat" the gate suppresses.
+        let blocker_changed = self.merge_escalation_blocker.get(&key).copied() != Some(class);
+        let admit =
+            blocker_changed || self.merge_escalation_gate.peek(&key, now) == BackoffDecision::Admit;
+        if admit {
+            self.merge_escalation_gate.commit(&key, now);
+            self.merge_escalation_blocker.insert(key, class);
+            tracing::warn!(
+                target: "overseer::merge_escalation",
+                repo = %repo,
+                pr,
+                blocker = class,
+                reason = %blocker.reason(),
+                "verify-and-merge escalated to operator (merge-ready but not auto-mergeable)"
+            );
+            ActOutcome::Escalated
+        } else {
+            // Held/acknowledged-pending: still visible in the tick's structured
+            // action_details, but no fresh page. The gate is NOT re-committed (a
+            // suppressed action records nothing), so the window never grows on
+            // silence.
+            ActOutcome::MergeEscalationSuppressed {
+                reason: blocker.reason(),
             }
         }
     }
