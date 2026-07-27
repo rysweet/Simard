@@ -66,14 +66,18 @@ pub mod merge_queue_observe;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
+pub mod rework_loop;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
+pub mod signal_liaison;
 pub mod thread_oversight;
 pub mod tuning;
 pub mod whisper_ops;
 pub mod wiring;
 
+#[cfg(test)]
+mod tests_config_liaison_rework;
 #[cfg(test)]
 mod tests_deploy_drift;
 #[cfg(test)]
@@ -85,6 +89,8 @@ mod tests_gap_scan;
 #[cfg(test)]
 mod tests_goal_health;
 #[cfg(test)]
+mod tests_intervention_rework;
+#[cfg(test)]
 mod tests_m1;
 #[cfg(test)]
 mod tests_m2;
@@ -92,6 +98,8 @@ mod tests_m2;
 mod tests_memory_recall;
 #[cfg(test)]
 mod tests_merge_queue_reasoning;
+#[cfg(test)]
+mod tests_rework_loop;
 #[cfg(test)]
 mod tests_root_cause;
 #[cfg(test)]
@@ -101,6 +109,8 @@ mod tests_selfmerge_fix;
 #[cfg(test)]
 mod tests_whisper;
 // Issue #4786: TDD contract for the deterministic thread-oversight rail.
+#[cfg(test)]
+mod tests_signal_liaison;
 #[cfg(test)]
 mod tests_thread_oversight;
 
@@ -372,6 +382,19 @@ pub struct Overseer {
     /// constructor / tests, so thread oversight is skipped. Drives R5 oversight
     /// without a hand-maintained duplicate thread list.
     thread_registry: Vec<ThreadHealth>,
+    /// The operator-liaison external-I/O seam (issue #4911, D1). `None` (inert)
+    /// until `build_overseer` wires the production port; when present AND
+    /// `SIMARD_OVERSEER_SIGNAL_LIAISON` is enabled, `run_cycle` drains new
+    /// operator-group messages, runs the liaison recipe, reads the typed decision
+    /// fail-closed, posts any reply, and gates any directed intervention. All
+    /// deterministic logic lives in the tested `signal_liaison` pure functions.
+    liaison_port: Option<Box<dyn signal_liaison::LiaisonPort>>,
+    /// The PR-rework external-I/O seam (issue #4911, D2). `None` (inert) until
+    /// `build_overseer` wires the production port; when present AND
+    /// `SIMARD_OVERSEER_REWORK` is enabled, `run_cycle` evaluates each held
+    /// candidate PR via the tested `rework_loop::poll_rework` fail-closed rail and
+    /// gates the resulting rework/escalation.
+    rework_port: Option<Box<dyn rework_loop::ReworkPort>>,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -535,6 +558,8 @@ impl Overseer {
             deploy_drift_observer: None,
             state_root: None,
             thread_registry: Vec::new(),
+            liaison_port: None,
+            rework_port: None,
         }
     }
 
@@ -601,6 +626,23 @@ impl Overseer {
         self.ecosystem_roster = roster;
         self.ecosystem_observer = Some(observer);
         self.ecosystem_every_n = every_n;
+        self
+    }
+
+    /// Wire the operator-liaison external-I/O seam (issue #4911, D1). Absent by
+    /// default (the pass is inert); `build_overseer` wires the production Signal
+    /// receive/send + recipe-runner port. Gated at run time by
+    /// `SIMARD_OVERSEER_SIGNAL_LIAISON` (default off).
+    pub fn with_liaison_port(mut self, port: Box<dyn signal_liaison::LiaisonPort>) -> Self {
+        self.liaison_port = Some(port);
+        self
+    }
+
+    /// Wire the PR-rework external-I/O seam (issue #4911, D2). Absent by default
+    /// (the pass is inert); `build_overseer` wires the production candidate-lister
+    /// port. Gated at run time by `SIMARD_OVERSEER_REWORK` (default off).
+    pub fn with_rework_port(mut self, port: Box<dyn rework_loop::ReworkPort>) -> Self {
+        self.rework_port = Some(port);
         self
     }
 
@@ -1018,6 +1060,18 @@ impl Overseer {
         // self-improvement (issue/escalation/fix) instead of a silent reclaim.
         self.dispatch_reaper_interventions(&observed, &mut launches, &mut plan);
 
+        // Operator-liaison receive pass (issue #4911, D1): drain new operator
+        // -group messages, run the liaison recipe, read its typed decision fail
+        // -closed, post any reply, and gate any directed intervention. Inert
+        // until the port is wired AND the flag is enabled (both default off).
+        self.observe_operator_liaison(&observed, &mut launches, &mut plan);
+
+        // PR-rework pass (issue #4911, D2): evaluate each held candidate PR via
+        // the fail-closed `poll_rework` rail and gate any rework/escalation.
+        // Inert until the port is wired AND the flag is enabled (both default
+        // off).
+        self.observe_rework_candidates(&observed, &mut launches, &mut plan);
+
         Ok(CycleReport {
             observed,
             signals,
@@ -1102,8 +1156,222 @@ impl Overseer {
         plan.push(planned);
     }
 
-    /// One live agentic health-review pass ([standing]), appended to the cycle
-    /// plan when the rail is wired and due on the cadence.
+    /// The operator-liaison receive pass (issue #4911, D1). A THIN rail: it makes
+    /// no judgment. For each new operator-group message the wired port surfaces,
+    /// it applies the tested pure acceptance filter (operator ∧ group ∧ not-echo ∧
+    /// above the durable high-water-mark), hands the body to the `operator
+    /// -liaison` recipe via a ContextFile (never argv), reads the recipe's typed
+    /// decision FAIL-CLOSED, posts any plain-English reply back to the group, and
+    /// routes any directed intervention through the SAME gate every other action
+    /// uses. The high-water-mark advances once per handled message (dedup).
+    ///
+    /// Fail-closed and inert-by-default: an unwired port, the flag off (default),
+    /// an unconfigured operator number / group id, or a missing state root all
+    /// leave the plan unchanged. A per-message I/O or recipe error is contained
+    /// (logged, message skipped) so it can never abort the tick.
+    fn observe_operator_liaison(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if !config::signal_liaison_enabled() || self.liaison_port.is_none() {
+            return;
+        }
+        // Both identities must be configured; the port's `authorized` projection
+        // enforces the operator number, but an unconfigured deploy never acts.
+        let Some(group_id) = config::signal_group_id() else {
+            return;
+        };
+        if config::signal_operator_number().is_none() {
+            return;
+        }
+        let Some(state_root) = self.state_root.clone() else {
+            return;
+        };
+
+        // Do ALL external I/O behind the immutable port borrow, collecting the
+        // directed interventions; then release the borrow before gating (which
+        // needs `&mut self`), exactly as `observe_ecosystem` does.
+        let interventions: Vec<Intervention> = {
+            let port = self
+                .liaison_port
+                .as_ref()
+                .expect("liaison_port presence checked above");
+            let mut out = Vec::new();
+            for msg in port.receive() {
+                let above = signal_liaison::is_above_high_water_mark(
+                    &state_root,
+                    &group_id,
+                    msg.message_id,
+                );
+                if !signal_liaison::liaison_should_accept(
+                    msg.authorized,
+                    msg.group_id.as_deref(),
+                    &group_id,
+                    msg.is_echo,
+                    above,
+                ) {
+                    continue;
+                }
+                let message_key = msg.message_id.to_string();
+                // A fresh run token isolates this run's decision from any prior
+                // one; delete any stale record first so a failed recipe run can
+                // never let an old decision be read back.
+                let run_token = format!(
+                    "liaison-{}-{}-{}",
+                    std::process::id(),
+                    msg.message_id,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                );
+                let _ = crate::stewardship::liaison_decision_store::delete_record(
+                    &state_root,
+                    &group_id,
+                    &message_key,
+                );
+                let ctx = match crate::recipe_context_file::ContextFile::write(
+                    "operator-liaison",
+                    "operator_message",
+                    &msg.text,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "overseer::signal_liaison",
+                            error = %e,
+                            "could not stage operator-message context; skipping this message"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) =
+                    port.run_liaison_recipe(&group_id, msg.message_id, &run_token, ctx.path())
+                {
+                    tracing::warn!(
+                        target: "overseer::signal_liaison",
+                        error = %e,
+                        "operator-liaison recipe run failed; leaving message for a later tick"
+                    );
+                    // Do NOT advance the high-water-mark: retry on a later tick.
+                    continue;
+                }
+                match crate::stewardship::liaison_decision_store::read_verified(
+                    &state_root,
+                    &group_id,
+                    &message_key,
+                    &run_token,
+                ) {
+                    crate::stewardship::liaison_decision_store::ReadOutcome::Found(rec) => {
+                        let actions = signal_liaison::liaison_actions_from_decision(&rec);
+                        if let Some(reply) = actions.reply
+                            && let Err(e) = port.send_group_reply(&group_id, &reply)
+                        {
+                            tracing::warn!(
+                                target: "overseer::signal_liaison",
+                                error = %e,
+                                "could not post the operator-liaison reply"
+                            );
+                        }
+                        if let Some(iv) = actions.intervention {
+                            out.push(iv);
+                        }
+                    }
+                    other => {
+                        tracing::warn!(
+                            target: "overseer::signal_liaison",
+                            outcome = ?other,
+                            "no valid liaison decision recorded for this message (fail-closed)"
+                        );
+                    }
+                }
+                // Handled once: advance the durable high-water-mark so this
+                // message is never reprocessed, whatever the decision was.
+                if let Err(e) =
+                    signal_liaison::record_high_water_mark(&state_root, &group_id, msg.message_id)
+                {
+                    tracing::warn!(
+                        target: "overseer::signal_liaison",
+                        error = %e,
+                        "could not advance the liaison high-water-mark"
+                    );
+                }
+            }
+            out
+        };
+
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
+
+    /// The PR-rework pass (issue #4911, D2). A THIN rail: it makes no fixability
+    /// judgment. For each held candidate PR the wired port surfaces, it reads the
+    /// judge's typed verdict FAIL-CLOSED via [`rework_loop::poll_rework`] and,
+    /// only when that rail admits a rework (reworkable hold, cap not hit, not a
+    /// duplicate, not the Overseer's own PR), routes the resulting
+    /// [`Intervention::ReworkPr`] — or, at the cap, the
+    /// [`Intervention::Escalate`] — through the SAME gate every other action
+    /// uses.
+    ///
+    /// Fail-closed and inert-by-default: an unwired port, the flag off (default),
+    /// or a missing state root all leave the plan unchanged. A `Skip` outcome is
+    /// a no-op.
+    fn observe_rework_candidates(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if !config::rework_enabled() || self.rework_port.is_none() {
+            return;
+        }
+        let Some(state_root) = self.state_root.clone() else {
+            return;
+        };
+        let max_attempts = config::rework_max_attempts();
+        let overseer_login = config::overseer_author_login();
+
+        let interventions: Vec<Intervention> = {
+            let port = self
+                .rework_port
+                .as_ref()
+                .expect("rework_port presence checked above");
+            let mut out = Vec::new();
+            for cand in port.candidates() {
+                match rework_loop::poll_rework(
+                    &state_root,
+                    &cand.repo,
+                    cand.pr,
+                    &cand.pr_author,
+                    &cand.run_token,
+                    max_attempts,
+                    Some(overseer_login.as_str()),
+                ) {
+                    rework_loop::ReworkOutcome::Rework(iv)
+                    | rework_loop::ReworkOutcome::Escalate(iv) => out.push(iv),
+                    rework_loop::ReworkOutcome::Skip(reason) => {
+                        tracing::debug!(
+                            target: "overseer::rework_loop",
+                            repo = %cand.repo,
+                            pr = cand.pr,
+                            reason = %reason,
+                            "rework candidate skipped (fail-closed rail)"
+                        );
+                    }
+                }
+            }
+            out
+        };
+
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
     ///
     /// The observation AND the remediation judgment are entirely agentic: the
     /// thin rail invokes the `overseer-health-review` recipe, whose agent reads
@@ -1769,6 +2037,39 @@ impl Overseer {
                     duplicate_of: *duplicate_of,
                 })
             }
+            // Autonomous PR rework (#4911, D2). A THIN dispatch tag that REUSES
+            // the LaunchRecipe path against default-workflow. Anti-recursion
+            // fail-closed: it drives an autonomous fix on a governed PR, so — like
+            // the coverage launch and merge-queue hygiene — it requires a DISTINCT
+            // configured steward identity before firing. The `concern` rides a
+            // ContextFile (`concern_path`), never argv (E2BIG-safe).
+            Intervention::ReworkPr {
+                repo,
+                pr,
+                concern_path,
+            } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!("rework PR {repo}#{pr} (unconfigured steward identity)"),
+                    });
+                }
+                let brief = RecipeBrief {
+                    task_description: format!(
+                        "Rework PR #{pr} in {repo} on its existing branch to address the \
+                         merge-readiness judge's recorded concern. Read the concern verbatim \
+                         from the file at {concern_path} and make the minimal change that \
+                         resolves it (add the missing test/doc, fix the small correctness nit). \
+                         Do NOT widen scope. Push to the SAME PR branch so the judge re-reviews \
+                         it on the next tick.",
+                    ),
+                    target_repo: repo.clone(),
+                    sequence_group: Some(OVERSEER_REWORK_GROUP.to_string()),
+                };
+                let handle = self.caps.recipes.launch(&brief)?;
+                self.inflight_investigations
+                    .insert(recipe_dedup_key(&brief), handle.clone());
+                Ok(ActOutcome::Launched(handle))
+            }
         }
     }
 
@@ -2390,7 +2691,9 @@ fn now_secs() -> i64 {
 fn is_cost_bearing(iv: &Intervention) -> bool {
     matches!(
         iv,
-        Intervention::LaunchRecipe { .. } | Intervention::RunAudit { .. }
+        Intervention::LaunchRecipe { .. }
+            | Intervention::RunAudit { .. }
+            | Intervention::ReworkPr { .. }
     )
 }
 
@@ -2622,6 +2925,11 @@ impl StoredOccurrence {
 /// used to live on the notify-only `FlagWorkstreamGaps` path) and the sequencer
 /// serialises concurrent coverage launches.
 const WORKSTREAM_COVERAGE_GROUP: &str = "workstream-coverage";
+
+/// Sequence group for the autonomous PR rework loop (issue #4911, Deliverable 2).
+/// Serialises rework launches so two ticks never drive concurrent fixes for the
+/// same PR, and tags the reused `LaunchRecipe` dispatch for telemetry.
+const OVERSEER_REWORK_GROUP: &str = "overseer-rework";
 
 /// Per-gap dedup key for a backlog-coverage problem (issue #4128, D3a):
 /// `workstream-gap:<sorted, deduped gap signatures>`. Keying on the specific gap

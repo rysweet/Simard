@@ -103,6 +103,33 @@ pub const OVERSEER_AUTHOR_LOGIN_ENV: &str = "SIMARD_OVERSEER_AUTHOR_LOGIN";
 /// verifies/merges/deploys its OWN PRs and never re-opens its own goals.
 pub const DEFAULT_OVERSEER_AUTHOR_LOGIN: &str = "simard-overseer[bot]";
 
+/// Opt-in flag (default OFF, truthy-required) for the native Overseer Signal
+/// operator-liaison (issue #4911, Deliverable 1). Master-gated: an explicitly
+/// disabled Overseer forces it off regardless.
+pub const SIMARD_OVERSEER_SIGNAL_LIAISON_ENV: &str = "SIMARD_OVERSEER_SIGNAL_LIAISON";
+
+/// Opt-in flag (default OFF, truthy-required) for the autonomous PR rework loop
+/// (issue #4911, Deliverable 2). When OFF, a fixable hold stays held-with-reason.
+/// Master-gated.
+pub const SIMARD_OVERSEER_REWORK_ENV: &str = "SIMARD_OVERSEER_REWORK";
+
+/// Per-PR rework attempt cap (issue #4911). Parsed as an integer and clamped to
+/// `1..=10`; unset/empty/unparseable ⇒ [`DEFAULT_REWORK_MAX_ATTEMPTS`].
+pub const SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS_ENV: &str = "SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS";
+
+/// Default per-PR rework attempt cap: a small bound so a self-fighting loop
+/// escalates to a human quickly rather than churning.
+pub const DEFAULT_REWORK_MAX_ATTEMPTS: u32 = 3;
+
+/// Operator E.164 the liaison accepts messages from (mirrors
+/// `SIMARD_OVERSEER_EMAIL_TO`). Required for Deliverable 1 to act.
+pub const SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER_ENV: &str =
+    "SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER";
+
+/// Operator Signal group id the liaison acts on. Required for Deliverable 1 to
+/// act (both operator number AND group id must be configured).
+pub const SIMARD_OVERSEER_SIGNAL_GROUP_ID_ENV: &str = "SIMARD_OVERSEER_SIGNAL_GROUP_ID";
+
 /// Default observer cadence: 15 minutes — frequent enough to catch churn, far
 /// below any launch/merge cadence (M1 files at most one deduped issue per
 /// recurring signature, so a tighter interval adds no writes).
@@ -776,6 +803,92 @@ fn is_truthy(v: &str) -> bool {
 fn is_falsey(v: &str) -> bool {
     let norm = v.trim().to_ascii_lowercase();
     matches!(norm.as_str(), "0" | "false" | "no" | "off")
+}
+
+/// Resolve whether the native Overseer **Signal operator-liaison** (issue #4911,
+/// Deliverable 1) is enabled. **Default OFF** — explicit truthy required — AND
+/// only while the acting Overseer itself is enabled (an explicitly-disabled
+/// Overseer forces it off regardless of the liaison flag).
+pub fn signal_liaison_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    matches!(
+        lookup(SIMARD_OVERSEER_SIGNAL_LIAISON_ENV).as_deref().map(str::trim),
+        Some(v) if is_truthy(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_liaison_enabled() -> bool {
+    signal_liaison_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the autonomous **PR rework loop** (issue #4911, Deliverable 2)
+/// is enabled. **Default OFF** — explicit truthy required — AND master-gated by
+/// the acting Overseer flag. When OFF, a fixable hold stays held-with-reason.
+pub fn rework_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    matches!(
+        lookup(SIMARD_OVERSEER_REWORK_ENV).as_deref().map(str::trim),
+        Some(v) if is_truthy(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn rework_enabled() -> bool {
+    rework_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the per-PR rework attempt cap. Default [`DEFAULT_REWORK_MAX_ATTEMPTS`]
+/// (3); a parsed value is clamped to `1..=10`; unset/empty/unparseable falls back
+/// to the default. Never panics and never yields 0 (which would disable rework
+/// by stealth).
+pub fn rework_max_attempts_from(lookup: impl Fn(&str) -> Option<String>) -> u32 {
+    match lookup(SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => match s.parse::<u32>() {
+            Ok(n) => n.clamp(1, 10),
+            Err(_) => DEFAULT_REWORK_MAX_ATTEMPTS,
+        },
+        _ => DEFAULT_REWORK_MAX_ATTEMPTS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn rework_max_attempts() -> u32 {
+    rework_max_attempts_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the configured operator E.164 the liaison accepts messages from.
+/// Trimmed; `None` when unset or empty.
+pub fn signal_operator_number_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    non_empty_trimmed(lookup(SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER_ENV))
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_operator_number() -> Option<String> {
+    signal_operator_number_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the configured operator Signal group id the liaison acts on. Trimmed;
+/// `None` when unset or empty.
+pub fn signal_group_id_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    non_empty_trimmed(lookup(SIMARD_OVERSEER_SIGNAL_GROUP_ID_ENV))
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_group_id() -> Option<String> {
+    signal_group_id_from(|k| std::env::var(k).ok())
+}
+
+/// Trim a looked-up value and return `None` if it is absent or empty.
+fn non_empty_trimmed(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

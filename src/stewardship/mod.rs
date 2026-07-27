@@ -16,19 +16,23 @@
 
 pub mod dedup;
 pub mod gh_client;
+pub mod liaison_decision_store;
+#[cfg(test)]
+mod liaison_decision_store_tests;
 pub mod merge_authority;
 pub mod merge_judge;
 pub mod merge_verdict_store;
-pub mod recipe_merge_judge;
-pub mod routing;
-pub mod types;
-
+#[cfg(test)]
+mod merge_verdict_store_rework_tests;
 #[cfg(test)]
 mod merge_verdict_store_tests;
+pub mod recipe_merge_judge;
+pub mod routing;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_extra;
+pub mod types;
 
 pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};

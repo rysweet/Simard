@@ -64,6 +64,18 @@ pub struct MergeVerdictRecord {
     /// requires the record to echo it, so a record from a previous run can
     /// never be mistaken for this run's verdict.
     pub run_token: String,
+    /// Deliverable 2 (rework loop): `Some(true)` marks a *fixable* hold the
+    /// autonomous rework rail may dispatch. **Absent (old records) or
+    /// `Some(false)` ⇒ NOT reworkable** (fail-closed). `#[serde(default)]` keeps
+    /// records written before this field existed readable (they deserialize to
+    /// `None`), so `SCHEMA_VERSION` stays `1`.
+    #[serde(default)]
+    pub reworkable: Option<bool>,
+    /// Deliverable 2: a concise plain-English description of exactly what the
+    /// rework must change. Handed to the rework recipe via a ContextFile (never
+    /// argv). Absent ⇒ `None`.
+    #[serde(default)]
+    pub concern: Option<String>,
 }
 
 impl MergeVerdictRecord {
@@ -84,6 +96,8 @@ impl MergeVerdictRecord {
             reason: reason.to_string(),
             recorded_at: chrono::Utc::now().to_rfc3339(),
             run_token: run_token.to_string(),
+            reworkable: None,
+            concern: None,
         }
     }
 }
@@ -176,6 +190,15 @@ pub fn write_record(state_root: &Path, rec: &MergeVerdictRecord) -> Result<(), S
             .map_err(|e| format!("write temp {tmp:?} failed: {e}"))?;
         f.sync_all()
             .map_err(|e| format!("fsync temp {tmp:?} failed: {e}"))?;
+        // Owner-only (0o600): a merge verdict is safety-critical state — no group
+        // or world access. Applied on the temp file so the atomic rename lands an
+        // already-restricted record (no permissions window).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("chmod 0o600 temp {tmp:?} failed: {e}"))?;
+        }
     }
     std::fs::rename(&tmp, &path).map_err(|e| {
         // Best-effort cleanup so a failed rename never strands a temp file.

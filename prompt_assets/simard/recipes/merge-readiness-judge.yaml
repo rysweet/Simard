@@ -28,7 +28,7 @@
 
 name: "merge-readiness-judge"
 description: "Agentic merge-readiness judge that records a typed verdict via `simard merge record-verdict`"
-version: "2.0.0"
+version: "2.1.0"
 author: "Simard"
 tags: ["simard", "merge", "judge"]
 
@@ -190,4 +190,54 @@ steps:
       fetched, or you are otherwise unsure — fail closed. Do NOT print a JSON verdict
       object; do NOT print any decision envelope. Your single `record-verdict` call is
       the entire output. If the tool exits non-zero, report the error it printed.
+
+      ## Reworkable holds — the autonomous rework loop (issue #4911)
+
+      A `hold` is not always a job for a human. When you hold, you additionally decide
+      **whether the defect is FIXABLE by an autonomous engineer without human judgment**,
+      and if so you attach a precise, plain-English concern the engineer must address.
+
+      Add `--reworkable` **and** `--concern` to your `hold` when ALL of these are true:
+
+      - The defect is concrete and mechanical — e.g. a missing test for a new branch, an
+        off-by-one, a missing clamp/guard, a stale doc for a touched public surface, an
+        unhandled error path, or unjustified scope creep that can simply be trimmed.
+      - Fixing it needs **no product or design decision, no ambiguous-requirement
+        resolution, and no security/architecture judgment call** — an engineer with the
+        diff and your concern could carry it out unambiguously.
+      - The fix stays within this same PR's evident intent (you are asking for a
+        correction, not a redesign).
+
+      Do NOT add `--reworkable` (record a plain `hold`, which stays held for a human)
+      when the hold rests on judgment: a design disagreement, ambiguous or conflicting
+      requirements, a security/privacy trade-off, a "should this exist at all?" question,
+      or anything where a reasonable engineer would need to ask a person. This
+      fixable-vs-escalate decision lives ONLY here in your reasoning — the deterministic
+      rail encodes none of it; it merely reads the flag you recorded.
+
+      The `--concern` is the engineer's entire brief, so make it a single, specific,
+      actionable sentence naming WHAT to change and WHERE. Prefer `--concern @FILE` (a
+      file path prefixed with `@`) when the concern is long, so it never rides argv. The
+      tool rejects `--reworkable` on a `merge`, a `--concern` without `--reworkable`, and
+      a `--reworkable` without a non-empty `--concern` — so pair them.
+
+      Reworkable hold example:
+
+      ```
+      simard merge record-verdict \
+        --pr {{pr_number}} \
+        --repo {{repo}} \
+        --verdict hold \
+        --reworkable \
+        --concern "The backoff multiplies before clamping to the ceiling; clamp first, then multiply, and add a test asserting the ceiling is never exceeded." \
+        --reason "Fixable: clamp-order bug in the backoff with a missing ceiling test." \
+        --run-token {{run_token}} \
+        --state-root {{state_root}}
+      ```
+
+      When the rework loop is enabled, the rail will hand your `--concern` (never argv)
+      to an autonomous engineer on THIS PR's branch, then re-run YOU on the next tick to
+      re-judge the reworked change — looping until you record `merge` or the attempt cap
+      is reached (then it escalates to a human). If the loop is disabled, your reworkable
+      hold simply stays held-with-reason, exactly like any other hold.
     output: "judge_result"
