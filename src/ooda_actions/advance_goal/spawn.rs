@@ -187,12 +187,6 @@ fn posture_observe_only_refusal(
     ))
 }
 
-/// Spawn a subordinate engineer for a goal that the LLM picked
-/// `spawn_engineer` for, then mutate the active board to record the
-/// assignment.
-///
-/// Takes the shared state behind a `Mutex` and holds it only for short
-/// critical sections (assignment re-check, goal lookup, status writeback).
 /// Verdict of the build-heavy dispatch preflight (issue #4803).
 #[derive(Debug)]
 pub(crate) enum BuildDispatchPreflight {
@@ -235,6 +229,13 @@ pub(crate) fn build_dispatch_preflight(
     }
 }
 
+/// Spawn a subordinate engineer for a goal that the LLM picked
+/// `spawn_engineer` for, then mutate the active board to record the
+/// assignment.
+///
+/// Takes the shared state behind a `Mutex` and holds it only for short
+/// critical sections (assignment re-check, goal lookup, status writeback).
+///
 /// The slow work — target-repo resolution, git worktree allocation, and the
 /// detached subprocess spawn — runs WITHOUT the lock held, so multiple
 /// engineers start concurrently within one OODA round (bounded by the AIMD
