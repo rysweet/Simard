@@ -205,7 +205,10 @@ fn run_ooda_cycle_inner(
     }
 
     // --- Resource cleanup: proactive disk/process management (issue #373) ---
-    {
+    // Production-only: this walks the real filesystem and can kill orphaned
+    // cargo processes, so it is gated behind `config.run_resource_cleanup`
+    // (default off) to keep cargo-test hermetic and fast. See `OodaConfig`.
+    if config.run_resource_cleanup {
         use crate::cmd_cleanup::handle_cleanup;
         eprintln!("[simard] OODA cycle: running resource cleanup");
         if let Err(e) = handle_cleanup() {
