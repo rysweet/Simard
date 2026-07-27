@@ -325,7 +325,7 @@ pub fn validate_concept_key(_raw: &str) -> Option<String> {
 /// an opt-out and leave the gate OPEN. The predicate fails **closed** on an
 /// explicit falsy value on either gate (security T-S1): an operator opt-out is
 /// always honoured.
-pub fn env_gate_open(_master: Option<&str>, _thread: Option<&str>) -> bool {
+pub fn env_gate_open(master: Option<&str>, thread: Option<&str>) -> bool {
     fn falsy(v: Option<&str>) -> bool {
         v.map(|s| {
             matches!(
@@ -335,7 +335,7 @@ pub fn env_gate_open(_master: Option<&str>, _thread: Option<&str>) -> bool {
         })
         .unwrap_or(false)
     }
-    !falsy(_master) && !falsy(_thread)
+    !falsy(master) && !falsy(thread)
 }
 
 /// Read the double env gate for a thread from the process environment using
