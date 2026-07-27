@@ -323,12 +323,14 @@ Environment-variable and cache-file tests are serialized with
 `#[serial_test::serial(update_check_env, cognitive_memory)]` and use a
 `tempdir`-isolated cache path, because glibc `getenv`/`setenv` are not
 thread-safe under cargo's multi-threaded test runner (see issue #2360).
-Each such test also **saves and restores** `SIMARD_NO_UPDATE_CHECK` /
-`SIMARD_NONINTERACTIVE` around its body so it cannot leak an env value
-into a sibling test sharing the `update_check_env` serial token — the
-de-flake for the intermittent `Test`-check failure on PR #1055. The
-serial guards are preserved exactly; only the per-test env save/restore
-was tightened.
+Each such test also **saves and restores** `SIMARD_NO_UPDATE_CHECK`
+(and `XDG_CONFIG_HOME`) around its body so it cannot leak an env value
+into a sibling test sharing the `update_check_env` serial token. The
+PR #1055 fix delivered here is the **reader-list alignment** described
+above — the reference table and the `mod tests` invariant now pin the
+exact set of launch paths that honor `SIMARD_NO_UPDATE_CHECK` — so docs
+and code cannot drift. The serial guards and existing env save/restore
+are preserved exactly; no test logic was weakened.
 
 Run with:
 
