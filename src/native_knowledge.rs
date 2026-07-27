@@ -42,6 +42,12 @@ struct GraphStats {
     size_mb: f64,
 }
 
+/// Filename of a pack's optional article→source-URL provenance file, mirroring
+/// the upstream agent-kgpacks pack layout whose `pack_info` reports
+/// `urls_file_exists`. Native packs keep citations in the database `url` column
+/// (KGP-Q1), so this file is absent for them and the flag is truthfully `false`.
+const URLS_FILE_NAME: &str = "urls.json";
+
 /// Discovered pack on disk.
 #[derive(Clone, Debug)]
 struct DiscoveredPack {
@@ -50,6 +56,10 @@ struct DiscoveredPack {
     article_count: u32,
     section_count: u32,
     db_path: PathBuf,
+    /// Whether the pack's `pack.db` database file is present on disk.
+    db_exists: bool,
+    /// Whether the pack's `urls.json` provenance file is present on disk.
+    urls_file_exists: bool,
 }
 
 /// Discover all packs in the packs directory.
@@ -68,6 +78,8 @@ fn discover_packs(packs_dir: &Path) -> Vec<DiscoveredPack> {
 
         let manifest_path = path.join("manifest.json");
         let db_path = path.join("pack.db");
+        let db_exists = db_path.exists();
+        let urls_file_exists = path.join(URLS_FILE_NAME).exists();
 
         // Try to read manifest; fall back to directory-name based metadata.
         let (name, description, article_count, section_count) =
@@ -102,6 +114,8 @@ fn discover_packs(packs_dir: &Path) -> Vec<DiscoveredPack> {
             article_count,
             section_count,
             db_path,
+            db_exists,
+            urls_file_exists,
         });
     }
 
@@ -1345,6 +1359,8 @@ pub fn register_knowledge_handlers(transport: &mut NativeRpcTransport, packs_dir
                     "description": p.description,
                     "article_count": p.article_count,
                     "section_count": p.section_count,
+                    "db_exists": p.db_exists,
+                    "urls_file_exists": p.urls_file_exists,
                 })),
                 None => Err(RpcErrorPayload {
                     code: ERROR_INTERNAL,
@@ -1809,6 +1825,89 @@ mod tests {
         let result = response.result.unwrap();
         assert_eq!(result["name"], "test-pack");
         assert_eq!(result["article_count"], 10);
+    }
+
+    #[test]
+    fn native_knowledge_transport_pack_info_reports_computed_file_flags() {
+        // Parity criterion KGP-M2 (F2): the original agent-kgpacks `pack_info`
+        // returns the computed booleans `db_exists` / `urls_file_exists`
+        // alongside the manifest metadata. This asserts the port surfaces both
+        // and that each faithfully tracks on-disk state.
+        let tmp = TempDir::new().unwrap();
+
+        // Pack A: has a `pack.db` (via create_test_pack) AND a `urls.json`
+        // provenance file → both flags true.
+        create_test_pack(tmp.path(), "with-files");
+        fs::write(
+            tmp.path().join("with-files").join(URLS_FILE_NAME),
+            "{\"Ownership in Rust\": \"https://example.com/own\"}",
+        )
+        .unwrap();
+
+        // Pack B: manifest only, no database and no urls file → both flags false.
+        let bare = tmp.path().join("bare-pack");
+        fs::create_dir_all(&bare).unwrap();
+        fs::write(
+            bare.join("manifest.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": "bare-pack",
+                "description": "manifest only",
+                "graph_stats": { "articles": 0, "entities": 0, "relationships": 0, "size_mb": 0.0 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Pack C: the realistic native-pack case — a `pack.db` but NO `urls.json`
+        // (citations live in the db `url` column, KGP-Q1) → db_exists true,
+        // urls_file_exists false. Proves the two flags are INDEPENDENT, not
+        // both-or-nothing.
+        create_test_pack(tmp.path(), "db-only");
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let info = |pack: &str| {
+            let request = crate::rpc::RpcRequest {
+                id: crate::rpc::new_request_id(),
+                method: "knowledge.pack_info".to_string(),
+                params: serde_json::json!({ "pack_name": pack }),
+            };
+            crate::rpc::RpcTransport::call(&transport, request)
+                .unwrap()
+                .result
+                .unwrap()
+        };
+
+        let with_files = info("with-files");
+        assert_eq!(
+            with_files["db_exists"], true,
+            "pack.db present must report db_exists=true"
+        );
+        assert_eq!(
+            with_files["urls_file_exists"], true,
+            "urls.json present must report urls_file_exists=true"
+        );
+
+        let bare_info = info("bare-pack");
+        assert_eq!(
+            bare_info["db_exists"], false,
+            "missing pack.db must report db_exists=false"
+        );
+        assert_eq!(
+            bare_info["urls_file_exists"], false,
+            "missing urls.json must report urls_file_exists=false"
+        );
+
+        let db_only = info("db-only");
+        assert_eq!(
+            db_only["db_exists"], true,
+            "native pack with pack.db must report db_exists=true"
+        );
+        assert_eq!(
+            db_only["urls_file_exists"], false,
+            "native pack without urls.json must report urls_file_exists=false (flags are independent)"
+        );
     }
 
     #[test]
