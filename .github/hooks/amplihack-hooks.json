@@ -28,6 +28,13 @@
         "type": "command"
       }
     ],
+    "sessionEnd": [
+      {
+        "bash": ".github/hooks/session-end",
+        "timeoutSec": 30,
+        "type": "command"
+      }
+    ],
     "sessionStart": [
       {
         "bash": ".github/hooks/session-start",
