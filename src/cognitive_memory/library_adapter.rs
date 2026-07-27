@@ -725,6 +725,14 @@ fn partition_fact_query(query: &str) -> FactQueryNeedles {
 ///
 /// Both fields are checked because the library matches a query against concept
 /// AND content, so gating on content alone would drop a legitimate concept hit.
+///
+/// This word-boundary judgment is the **served** relevance definition (#1 of the
+/// three the cognition stack carries — issue #4378). It deliberately differs from
+/// the substring-proxy oracle the `recall_precision_at_k` self-metric uses
+/// ([`crate::cognitive_memory::metrics::precision_at_k`]): a fact this gate
+/// EXCLUDES on an interior/suffix hit can still count as relevant for that metric.
+/// The divergence is intentional and pinned by
+/// `cognitive_memory::tests_relevance_definition_divergence`.
 fn fact_shares_query_relevance(concept: &str, content: &str, needles: &FactQueryNeedles) -> bool {
     if !needles.clean.is_empty()
         && (shares_word_prefix(content, &needles.clean)
