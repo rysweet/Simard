@@ -13,7 +13,13 @@
 # not per-PR re-runs —
 # provides freshness. Re-running converges to the same state.
 #
-# See docs/howto/merge-queue.md for the full operator guide.
+# Scope / contract note: the strict-relax step targets *classic* branch
+# protection (repos/{repo}/branches/{branch}/protection/required_status_checks).
+# If up-to-date-before-merge is instead enforced by a repository RULESET's
+# required_status_checks (strict), this script does NOT relax it — the classic
+# PATCH is an idempotent no-op against ruleset-based freshness. Relaxing a
+# ruleset's strict flag must be done on that ruleset directly. See
+# docs/howto/merge-queue.md for the full operator guide.
 #
 # Auth: uses gh-managed auth or a GITHUB_TOKEN from the environment. A token is
 # NEVER accepted as a flag and NEVER echoed or logged.
@@ -28,10 +34,14 @@ set -euo pipefail
 # The exact, pinned API-version header sent with every call. Kept as a literal
 # so the pin is greppable in source and can't drift silently.
 readonly API_VERSION_HEADER="X-GitHub-Api-Version: 2022-11-28"
-# Repo/branch identifiers are validated against this allowlist before they are
-# ever placed into an API path, so a shell metacharacter can never be
-# interpolated into a call.
-readonly VALID_RE='^[A-Za-z0-9._/-]+$'
+# Repo/branch identifiers are validated against a strict allowlist before they
+# are ever placed into an API path, so a shell metacharacter can never be
+# interpolated into a call. --repo must be exactly `owner/name` (one slash,
+# each segment [A-Za-z0-9._-]); --branch allows the usual ref characters
+# (slashes for namespaces like feat/foo). A literal `..` is rejected in either
+# to foreclose any path-traversal (e.g. `--repo ../../x`) into the API path.
+readonly REPO_RE='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+readonly BRANCH_RE='^[A-Za-z0-9._/-]+$'
 readonly RULESET_NAME="required_merge_queue"
 # Resilience for the external GitHub API: transient failures (rate limits, 5xx,
 # transport blips) are retried with bounded exponential backoff. Terminal
@@ -100,12 +110,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 # ── Input validation (before any use in an API path) ────────────────────────
-if ! [[ "$REPO" =~ $VALID_RE ]]; then
-  log "invalid --repo '$REPO' (must match ${VALID_RE})"
+# Reject path-traversal outright, then enforce the per-field allowlists.
+if [[ "$REPO" == *..* ]] || ! [[ "$REPO" =~ $REPO_RE ]]; then
+  log "invalid --repo '$REPO' (must be owner/name matching ${REPO_RE}, no '..')"
   exit 2
 fi
-if ! [[ "$BRANCH" =~ $VALID_RE ]]; then
-  log "invalid --branch '$BRANCH' (must match ${VALID_RE})"
+if [[ "$BRANCH" == *..* ]] || ! [[ "$BRANCH" =~ $BRANCH_RE ]]; then
+  log "invalid --branch '$BRANCH' (must match ${BRANCH_RE}, no '..')"
   exit 2
 fi
 
@@ -252,7 +263,10 @@ fi
 
 # 2) Relax strict up-to-date-before-merge. Uses the targeted
 #    required_status_checks endpoint so existing required contexts are
-#    preserved — only the `strict` flag changes.
+#    preserved — only the `strict` flag changes. NOTE: this targets *classic*
+#    branch protection only; if freshness is enforced by a ruleset's
+#    required_status_checks (strict), this PATCH does not touch it and the
+#    below 404/422 idempotent no-op will silently apply. See script header.
 if gh_api_resilient PATCH "$STRICT_PATH" '{"strict":false}' >/dev/null; then
   log "relaxed strict up-to-date-before-merge on ${REPO}@${BRANCH} (strict: false)"
 else

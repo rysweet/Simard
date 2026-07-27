@@ -237,6 +237,14 @@ the workflow triggers can be left in place.
   ecosystem handoff refers to the same tree as `amplihack-rs`).
 - Relaxing strict *only* provides safety while the queue is actually active and
   enforcing — verify §3 after enabling.
+- **Classic protection only:** the script's strict-relax step patches *classic*
+  branch protection
+  (`repos/{repo}/branches/{branch}/protection/required_status_checks`). If
+  up-to-date-before-merge is instead enforced by a repository **ruleset**'s
+  `required_status_checks` with `strict: true`, this PATCH does **not** touch it
+  — it lands as a `404`/`422` idempotent no-op. In that case relax the `strict`
+  flag on the offending ruleset directly (via the GitHub UI or
+  `gh api repos/rysweet/Simard/rulesets/{id}`) after enabling the queue.
 
 ## See also
 
