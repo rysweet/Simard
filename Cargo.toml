@@ -183,7 +183,7 @@ tokio = { version = "=1.52.1", features = ["rt", "rt-multi-thread", "process", "
 axum = { version = "=0.8.9", features = ["ws"] }
 tower-http = { version = "=0.6.8", features = ["cors", "auth"] }
 uuid = { version = "=1.23.1", features = ["v4", "v7"] }
-chrono = "=0.4.44"
+chrono = "=0.4.45"
 # Issue #2727: the dashboard header renders the deployment/build timestamp in
 # US Pacific time with the date-correct PST/PDT abbreviation. chrono-tz is the
 # idiomatic tz-database crate for the runtime UTC->America/Los_Angeles
@@ -228,7 +228,7 @@ libc = "=0.2.185"
 # (SIMARD_BUILD_TIMESTAMP) as an RFC3339 UTC string and parses SOURCE_DATE_EPOCH
 # for reproducible builds. `=`-pinned to the same chrono as [dependencies].
 [build-dependencies]
-chrono = "=0.4.44"
+chrono = "=0.4.45"
 
 [features]
 # Issue #2576: every FUNCTIONAL/runtime capability ships in a plain `cargo build`
