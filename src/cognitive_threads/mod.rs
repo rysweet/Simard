@@ -32,6 +32,11 @@ mod tests_catalog;
 #[cfg(test)]
 mod tests_rework_contract;
 
+// Issue #4786: TDD contract for cognitive-thread observability instrumentation
+// (per-thread OTel series + durable error propagation).
+#[cfg(test)]
+mod tests_thread_telemetry;
+
 pub use mind::Mind;
 pub use thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,

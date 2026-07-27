@@ -69,6 +69,7 @@ pub mod pr_verify;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
+pub mod thread_oversight;
 pub mod tuning;
 pub mod whisper_ops;
 pub mod wiring;
@@ -99,6 +100,9 @@ mod tests_self_healing;
 mod tests_selfmerge_fix;
 #[cfg(test)]
 mod tests_whisper;
+// Issue #4786: TDD contract for the deterministic thread-oversight rail.
+#[cfg(test)]
+mod tests_thread_oversight;
 
 pub use capabilities::{
     Auditor, BlockedGoal, Deployer, GoalCurator, HealthReviewStatus, IssueFiler, IssuePriority,
@@ -143,6 +147,7 @@ pub use activity::ProblemEntry;
 pub use root_cause::{PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, root_cause_signature};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_threads::ThreadHealth;
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
 };
@@ -347,6 +352,17 @@ pub struct Overseer {
     /// admits this tick, `run_cycle` observes drift (fail-safe) and surfaces a
     /// `Signal::DeployDriftDetected` so Decide can emit a guarded deploy.
     deploy_drift_observer: Option<Box<dyn deploy_trigger::DeployDriftObserver>>,
+    /// The daemon state root (`~/.simard`), used by the cognitive-thread
+    /// oversight pass (#4786) to locate `telemetry/metrics_snapshot.json` and
+    /// `ooda.log`. `None` in the bare constructor / tests (the pass is then a
+    /// no-op); `build_overseer` sets it.
+    state_root: Option<PathBuf>,
+    /// The single-source-of-truth cognitive-thread registry (name + ORIGINAL
+    /// PURPOSE + cadence), captured from `Mind::health()` by the daemon each tick
+    /// and injected via [`Overseer::with_thread_registry`]. Empty in the bare
+    /// constructor / tests, so thread oversight is skipped. Drives R5 oversight
+    /// without a hand-maintained duplicate thread list.
+    thread_registry: Vec<ThreadHealth>,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -503,6 +519,8 @@ impl Overseer {
             health_review_every_n: 1,
             health_review_tick: 0,
             deploy_drift_observer: None,
+            state_root: None,
+            thread_registry: Vec::new(),
         }
     }
 
@@ -694,6 +712,22 @@ impl Overseer {
         self
     }
 
+    /// Set the daemon state root used by the cognitive-thread oversight pass
+    /// (#4786) to locate `telemetry/metrics_snapshot.json` and `ooda.log`.
+    /// `build_overseer` calls this; without it the oversight pass is skipped.
+    pub fn with_state_root(mut self, state_root: PathBuf) -> Self {
+        self.state_root = Some(state_root);
+        self
+    }
+
+    /// Inject the single-source-of-truth cognitive-thread registry (name +
+    /// purpose + cadence) the oversight pass enumerates (#4786), captured from
+    /// `Mind::health()`. Empty (the default) skips thread oversight.
+    pub fn with_thread_registry(mut self, registry: Vec<ThreadHealth>) -> Self {
+        self.thread_registry = registry;
+        self
+    }
+
     /// OBSERVE the autonomous self-deploy drift signal (issue #2590), enriching
     /// `observed.deploy_drift` when the running binary is behind merged `main`.
     ///
@@ -833,6 +867,33 @@ impl Overseer {
         // `observed_from_snapshot` projection) keeps that projection side-effect
         // free; the sink is bounded so this is O(capacity).
         observed.recent_step_failures = failure_sink::drain_recent();
+
+        // Cognitive-thread oversight (#4786): enumerate the single-source-of-
+        // truth thread registry (name + purpose + cadence from `Mind::health()`),
+        // read each thread's telemetry series from the metrics snapshot + a
+        // bounded `ooda.log` tail, and surface stalled / failing / erroring
+        // threads as anomalies. These flow through `observed.anomalies` →
+        // `Signal::Anomaly` (the SAME fan-out every other observation uses — no
+        // new scrape path). PURE + fail-closed: no registry / no snapshot / no
+        // log degrades to zero anomalies and never aborts the cycle.
+        if !self.thread_registry.is_empty()
+            && let Some(state_root) = self.state_root.as_ref()
+        {
+            let snap = crate::telemetry::snapshot::read(
+                &crate::telemetry::snapshot::snapshot_path(state_root),
+            )
+            .unwrap_or_else(crate::telemetry::snapshot::MetricsSnapshot::empty);
+            let ooda_tail =
+                thread_oversight::read_ooda_tail(state_root, thread_oversight::OODA_TAIL_MAX_BYTES);
+            let now = (self.clock)().max(0) as u64;
+            let mut thread_anomalies = thread_oversight::detect_thread_anomalies(
+                &snap,
+                &self.thread_registry,
+                &ooda_tail,
+                now,
+            );
+            observed.anomalies.append(&mut thread_anomalies);
+        }
 
         // Autonomous self-deploy OBSERVE rail (issue #2590): when the running
         // binary is behind merged `main`, enrich `observed.deploy_drift` so

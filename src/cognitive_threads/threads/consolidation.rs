@@ -106,6 +106,10 @@ impl CognitiveThread for ConsolidationThread {
         ThreadKind::MemoryConsolidation
     }
 
+    fn purpose(&self) -> &'static str {
+        "Replay and distill episodes into durable facts during sleep"
+    }
+
     fn policy(&self) -> SchedulePolicy {
         SchedulePolicy::Interval(Duration::from_secs(schedule::clamp_interval_secs(
             self.cfg.interval_secs,
@@ -171,6 +175,8 @@ impl CognitiveThread for ConsolidationThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

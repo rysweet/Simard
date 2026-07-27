@@ -27,6 +27,15 @@ pub trait CognitiveThread: Send {
     /// Coarse class of process.
     fn kind(&self) -> ThreadKind;
 
+    /// One-line ORIGINAL PURPOSE / intent of this thread, the single source of
+    /// truth the Overseer reads (issue #4786) when reasoning about whether the
+    /// thread is healthy. Defaults to a generic placeholder; every concrete
+    /// thread overrides it with its real intent (reusing its module doc). Must
+    /// be a short, fixed, human-readable string (SR-11: never untrusted input).
+    fn purpose(&self) -> &'static str {
+        "cognitive thread (purpose unspecified)"
+    }
+
     /// When this thread wants to run.
     fn policy(&self) -> SchedulePolicy;
 
@@ -108,6 +117,21 @@ pub enum SchedulePolicy {
         /// Current effective cadence.
         current: Duration,
     },
+}
+
+impl SchedulePolicy {
+    /// Expected cadence in whole seconds, or `None` for policies with no fixed
+    /// cadence (`OnDemand` / `EventDriven`). This is the single derivation the
+    /// scheduler and each thread's `health()` use to populate
+    /// [`ThreadHealth::cadence_secs`] (issue #4786), so the Overseer's
+    /// staleness/cadence oversight reads one consistent source.
+    pub fn cadence_secs(&self) -> Option<u64> {
+        match self {
+            SchedulePolicy::Interval(d) => Some(d.as_secs()),
+            SchedulePolicy::Adaptive { current, .. } => Some(current.as_secs()),
+            SchedulePolicy::OnDemand | SchedulePolicy::EventDriven => None,
+        }
+    }
 }
 
 /// Priority / resource class. Ordered so ascending sort places OODA first:
@@ -198,6 +222,14 @@ pub struct ThreadHealth {
     pub consecutive_errors: u32,
     /// If backed off, the epoch until which the thread is suppressed.
     pub backoff_until_epoch: Option<u64>,
+    /// One-line ORIGINAL PURPOSE / intent (from [`CognitiveThread::purpose`]).
+    /// The single-source-of-truth description the Overseer enumerates (#4786),
+    /// so oversight never maintains a duplicate hand-written thread list.
+    pub purpose: String,
+    /// Expected cadence in seconds, derived from the thread's
+    /// [`SchedulePolicy`]: `Some(secs)` for interval/adaptive threads, `None`
+    /// for `OnDemand`/`EventDriven` threads that have no fixed cadence.
+    pub cadence_secs: Option<u64>,
 }
 
 /// Borrowed daemon resources handed to each tick so threads do not reach into

@@ -135,6 +135,8 @@ impl CognitiveThread for FakeThread {
             last_success: None,
             consecutive_errors: 0,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

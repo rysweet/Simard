@@ -1848,7 +1848,14 @@ pub fn run_ooda_daemon(
                             repo_root_for_tick,
                             state_root_for_tick.clone(),
                         );
-                        let mut overseer = overseer.with_gap_scan_enabled(gap_scan_due);
+                        let mut overseer = overseer
+                            .with_gap_scan_enabled(gap_scan_due)
+                            // Cognitive-thread oversight (#4786): inject this
+                            // tick's single-source-of-truth thread registry
+                            // (name + purpose + cadence) captured from
+                            // `Mind::health()` above, so the deterministic
+                            // oversight pass can reason about each thread.
+                            .with_thread_registry(thread_healths.clone());
                         let (report, problem_entries) =
                             crate::overseer::run_overseer_tick_isolated_detailed(&mut overseer);
                         daemon_log(

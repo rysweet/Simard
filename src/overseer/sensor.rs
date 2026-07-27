@@ -610,6 +610,10 @@ impl CognitiveThread for OverseerSensorThread {
         SchedulePolicy::Interval(Duration::from_secs(self.interval_secs))
     }
 
+    fn purpose(&self) -> &'static str {
+        "Read-only observe of Simard's own telemetry, filing anomaly issues"
+    }
+
     fn priority(&self) -> Priority {
         // Background, never-critical: it must never steal budget from OODA.
         Priority::Low
@@ -707,6 +711,8 @@ impl CognitiveThread for OverseerSensorThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

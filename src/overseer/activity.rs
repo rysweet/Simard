@@ -690,6 +690,8 @@ mod tests {
             last_success: Some(true),
             consecutive_errors: 0,
             backoff_until_epoch: None,
+            purpose: "test".to_string(),
+            cadence_secs: Some(900),
         };
         let s = OverseerThreadStatus::from_thread_health(&h);
         assert_eq!(s.id, "maintenance");

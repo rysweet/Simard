@@ -106,6 +106,10 @@ impl CognitiveThread for NarrativeThread {
         ThreadKind::Narrative
     }
 
+    fn purpose(&self) -> &'static str {
+        "Maintain identity continuity — the narrative self and milestones"
+    }
+
     fn policy(&self) -> SchedulePolicy {
         SchedulePolicy::Interval(Duration::from_secs(schedule::clamp_interval_secs(
             self.cfg.interval_secs,
@@ -169,6 +173,8 @@ impl CognitiveThread for NarrativeThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }
