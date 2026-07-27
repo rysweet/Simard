@@ -658,7 +658,14 @@ pub fn run_ooda_daemon(
     // the highest persisted `cycle_<N>.json` for a brain upgraded from a build
     // that never persisted the field, so it never dips to #1 for one deploy.
     state.cycle_count = seed_cycle_count(persistent.cycle_count, &state_root);
-    let config = OodaConfig::default();
+    // The daemon is the live production OODA loop, so it opts in to proactive
+    // resource cleanup (disk/process reclamation). This side effect walks the
+    // real filesystem and must never run under cargo-test, hence it is off in
+    // `OodaConfig::default()` and enabled explicitly here. See `OodaConfig`.
+    let config = OodaConfig {
+        run_resource_cleanup: true,
+        ..OodaConfig::default()
+    };
 
     // Issue #1197: sweep orphaned engineer worktrees from prior crashed
     // daemons before starting the loop, so disk pressure doesn't accumulate.
