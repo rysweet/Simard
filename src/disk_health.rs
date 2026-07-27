@@ -188,13 +188,22 @@ pub(crate) fn emergency_cleanup_with_pct(
             continue;
         }
         let size = dir_size_bytes(&root);
-        if std::fs::remove_dir_all(&root).is_ok() {
-            freed += size;
-            let name = root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.display().to_string());
-            actions.push(format!("Removed {name}/ ({} MB)", size / 1_000_000));
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {
+                freed += size;
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
+                actions.push(format!("Removed {name}/ ({} MB)", size / 1_000_000));
+            }
+            Err(e) => {
+                warn!(
+                    path = %root.display(),
+                    error = %e,
+                    "Emergency cleanup failed to remove build tree",
+                );
+            }
         }
     }
 
