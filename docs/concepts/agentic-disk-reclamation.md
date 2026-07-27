@@ -148,9 +148,9 @@ cycle.
 
 Widening to `target/` stays **additive and non-breaking**: the artifacts are the
 same rebuildable class emergency cleanup already treats as safe, removal is still
-gated by every hard rail below (an in-flight `cargo build` holding `target/debug`
-is refused with **Live process**; the protected deny-set still overrides the
-allow-root), and no new candidate *category* is introduced — only the containment
+gated by every hard rail below (the live-PID rail refuses any candidate that a
+running process is sitting *inside* via `/proc/<pid>/cwd`; the protected deny-set
+still overrides the allow-root), and no new candidate *category* is introduced — only the containment
 scope of the existing `StaleBuildCache` kind is corrected.
 
 ### Observability: per-candidate skip reasons

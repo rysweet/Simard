@@ -230,8 +230,11 @@ build-cache category the guard permits, and removal is still gated by
 - the agent proposing a `CandidateKind::StaleBuildCache` candidate,
 - the `ProtectedDenySet` (which still wins over any allow-root, so
   `worktrees/main` and daemon working dirs remain unreclaimable),
-- the live-PID rail (an in-flight `cargo build` holding `target/debug` is
-  refused with `LiveProcess`), and
+- the live-PID rail (any process whose `/proc/<pid>/cwd` resolves *inside* the
+  candidate is refused with `LiveProcess`; note this keys on cwd, so a
+  `cargo build` invoked with its cwd at the repo root is not caught by this rail
+  — such artifacts are instead safe because they are the rebuildable
+  `StaleBuildCache` class), and
 - the TOCTOU re-assert + symlink refusal at the syscall boundary.
 
 Rooting at `target/`'s parent **cannot** reach `<repo>/src`, `<repo>/.git`, or
