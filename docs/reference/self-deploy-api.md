@@ -193,6 +193,17 @@ the declared path is missing; an existing path is snapshotted verbatim, so it ca
 never mask a wrong-path bug, and each fallback emits a `WARN` tracing span. On
 platforms without `/proc/self/exe` the original loud failure is preserved.
 
+> **Observed failure this closes.** Production cycles saw the mandatory binary
+> backup abort with `read on /home/azureuser/.simard/bin/simard (deleted): No
+> such file or directory` — an unlinked-inode swap failure — which stranded the
+> running binary behind merged `main`. The `/proc/self/exe` degrade above makes
+> the backup robust to a deleted/unlinked source inode: the still-open running
+> image is snapshotted instead of hard-failing. This is the binary-backup
+> counterpart to the source-preparer's
+> [managed-clone reset + clean](./self-deploy-source-prep.md#managed-clone-hygiene-reset--clean-before-checkout)
+> hardening — together they keep an autonomous self-deploy from live-locking on
+> either the source checkout or the protective backup.
+
 ## Engineer-orphan reaper
 
 ```rust
