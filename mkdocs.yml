@@ -98,6 +98,8 @@ nav:
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
+    - Reclaim Effectiveness Backoff (disk-reclaim stops churning): concepts/reclaim-effectiveness-backoff.md
+    - Goal-Reblock Backoff &amp; Stewardship Dedup: concepts/goal-reblock-backoff-dedup.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
@@ -260,6 +262,7 @@ nav:
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
     - Configure Disk Reclamation: howto/configure-disk-reclamation.md
+    - Configure Reclaim Effectiveness (stop disk-reclaim churn): howto/configure-reclaim-effectiveness.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
@@ -284,6 +287,7 @@ nav:
     - Review Overseer Workstream Gaps: howto/review-overseer-workstream-gaps.md
     - Diagnose Recurring Cognitive-Memory Signature: howto/diagnose-recurring-cognitive-memory-signature.md
     - Configure Overseer Gap-Scan Backoff: howto/configure-overseer-gap-scan-backoff.md
+    - Diagnose Recurring Goal-Reblock Churn: howto/diagnose-recurring-goal-reblock-churn.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
@@ -324,6 +328,7 @@ nav:
     - Overseer Signal JSON-RPC Transport: reference/overseer-signal-jsonrpc-transport.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
+    - Goal-Reblock Backoff &amp; Stewardship Dedup API: reference/goal-reblock-backoff-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
@@ -468,6 +473,7 @@ nav:
     - Disk-Health API: reference/disk-health-api.md
     - Disk Reclaim API: reference/disk-reclaim-api.md
     - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md
+    - Reclaim Effectiveness Gate API: reference/reclaim-effectiveness-gate-api.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Dashboard Goal Lifecycle-Status Badges: reference/dashboard-goal-lifecycle-status.md
@@ -510,6 +516,7 @@ nav:
     - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
     - Claim-Reaper Kill Switch & Tuning: operations/claim-reaper-kill-switch.md
     - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
+    - Reclaim-Effectiveness Kill Switch: operations/reclaim-effectiveness-kill-switch.md
     - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
