@@ -7,7 +7,7 @@ description: >
   forbidden-token list, and the two deterministic Rust rails it drives — the
   goal-completion seam simard goal complete / handle_complete (idempotent,
   tombstone-writing) and the dual-channel operator notifier notify() with its
-  goal-blocked kind. Includes the goal_id validation rule and idempotency
+  goal-blocked kind. Includes the goal_id injection-safety note and idempotency
   guarantees.
 last_updated: 2026-07-27
 review_schedule: as-needed
@@ -51,7 +51,7 @@ are **inputs to translate**, never text to forward verbatim.
 
 | Field | Meaning |
 | --- | --- |
-| `goal_id` | The blocked goal's id. The triage brain requires it to match `^[a-z0-9-]+$` before emitting the `simard goal complete` action (see validation below). |
+| `goal_id` | The blocked goal's id, an opaque board key (see the injection-safety note below). |
 | `problem_seed` | A plain-English problem seed to refine — not authoritative. |
 | `next_step_seed` | A recommended next-step seed to refine — not authoritative. |
 | `internal_why` | Internal diagnostic WHY. **Translate; never surface raw.** |
@@ -127,14 +127,11 @@ seam — no new entry point.
 simard goal complete audit-simard-s-test-coverage-and-raise-it-to-70-4d27c91a
 ```
 
-`goal_id` **validation:** the `^[a-z0-9-]+$` allowlist is enforced by the triage
-brain (recipe step 2, described in
-[the escalation-triage concept](../concepts/escalation-triage-before-human.md)),
-which refuses to emit a `complete-delivered-goal` action for an id that fails the
-pattern. `handle_complete` in Rust does **not** itself re-check the regex — it
-treats `goal_id` as an opaque board key. Separately, the CLI passes `goal_id` as a
-discrete argv element and never interpolates it into a `sh -c` string, so it
-cannot be used for command injection regardless of contents.
+`goal_id` **injection safety:** `handle_complete` in Rust treats `goal_id` as an
+opaque board key — it does not parse, interpret, or shell out on its contents.
+The CLI passes `goal_id` as a discrete argv element and never interpolates it
+into a `sh -c` string, so it cannot be used for command injection regardless of
+contents.
 
 ### `handle_complete` outcomes
 
