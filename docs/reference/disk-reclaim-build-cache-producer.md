@@ -126,8 +126,19 @@ pub fn build_cache_leaf_dirs(repos: &[PathBuf]) -> Vec<PathBuf>;
 
 /// The deterministic `StaleBuildCache` candidates for the given repos — one per
 /// existing leaf, `est_bytes = None`. Merged with the recipe's proposal by
-/// `run_disk_reclaim` (dedup by path).
+/// `run_disk_reclaim` (dedup by path). Equivalent to
+/// `build_cache_candidates_from_leaves(build_cache_leaf_dirs(repos))`.
 pub fn build_cache_candidates(repos: &[PathBuf]) -> Vec<ReclaimCandidate>;
+
+/// The allocation-only half of `build_cache_candidates`: wrap already-vetted
+/// leaf dirs as `StaleBuildCache` candidates. Split out so `run_disk_reclaim`
+/// — which already computes the leaves once for the guard allowlist — reuses
+/// that single filesystem walk instead of re-`read_dir`/`canonicalize`-ing
+/// every leaf twice per tick. Behavior-identical to the full-walk producer for
+/// the same leaves (locked by the `from_leaves_matches_full_walk_producer`
+/// equivalence test), so the candidate set can never diverge from the guard
+/// allowlist on this file-deleting path.
+pub fn build_cache_candidates_from_leaves(leaves: Vec<PathBuf>) -> Vec<ReclaimCandidate>;
 ```
 
 The module is registered as `pub mod build_cache;` in
@@ -195,11 +206,18 @@ proposal and de-duplicates by path:
 
 ```
 run_disk_reclaim
-  ├─ run_reclaim_recipe()            → Vec<ReclaimCandidate>   (agent proposal)
-  ├─ build_cache_candidates(repos)   → Vec<ReclaimCandidate>   (deterministic)
+  ├─ run_reclaim_recipe()                       → Vec<ReclaimCandidate>  (agent proposal)
+  ├─ build_cache_leaf_dirs(repos)               → Vec<PathBuf>  (single filesystem walk)
+  ├─ build_cache_candidates_from_leaves(leaves) → Vec<ReclaimCandidate>  (deterministic)
   ├─ merge + dedup by path (HashSet)
-  └─ reclaim_candidates(...)         → every candidate re-vetted by the guard
+  └─ reclaim_candidates_with_leaves(.., leaves) → every candidate re-vetted by the guard
 ```
+
+The managed repos' build-cache leaves are walked **once** per tick and the same
+`Vec` feeds both the deterministic candidate list
+(`build_cache_candidates_from_leaves`) and the guard allowlist
+(`GuardContext.build_cache_leaves`) — a single source of leaf computation on the
+destructive path, so the candidate set and the allowlist cannot diverge.
 
 The recipe contract is **unchanged** — the agent may still nominate build caches
 and everything else it inspects; the deterministic set simply guarantees the
@@ -213,7 +231,10 @@ a broken recipe.
 `reclaim_candidates` (the shared CLI + daemon entry point) computes the leaves
 and threads them into both `allow_roots` and `GuardContext.build_cache_leaves`,
 so **CLI callers inherit the same safe behavior** as the daemon — no signature
-change at the call sites.
+change at the call sites. Its private inner `reclaim_candidates_with_leaves`
+accepts precomputed leaves so `run_disk_reclaim` can supply the single walk it
+already performed; the public wrapper still walks internally for callers that
+have not.
 
 ## Steady-state behavior (the guarantee, and its condition)
 
@@ -326,15 +347,15 @@ freed <bytes> bytes` entries follow.
 - **Ownership check.** Leaves not owned by the effective UID are dropped — no
   cross-user or root deletion. The apply path is still refused entirely under
   `geteuid() == 0`.
-- **TOCTOU re-assert.** At the syscall boundary `RealPathRemover` already
-  re-canonicalizes the path and re-asserts allow-root containment
+- **TOCTOU re-assert.** At the syscall boundary `RealPathRemover` re-canonicalizes
+  the path and re-asserts allow-root containment
   (`under_any_root(canon, allow_roots)`) immediately before `remove_dir_all`,
-  refusing anything that no longer resolves under a live allow-root. For a
-  `StaleBuildCache` leaf this is tightened with a **type/owner re-stat** — the
-  path must still be a real directory (not a symlink swapped in after
-  enumeration) owned by the effective UID, or the candidate is aborted. Because
-  vetting is per-candidate, one abort skips only that leaf and never fails the
-  run.
+  refusing anything that no longer resolves under a live allow-root. The
+  `RemoveDir` primitive (which every `StaleBuildCache` leaf uses) is then further
+  tightened with a **type/owner re-stat** (`restat_real_dir_owned`) — the resolved
+  path must still be a real directory (not a symlink swapped in after enumeration)
+  owned by the effective UID, or the candidate is aborted. Because vetting is
+  per-candidate, one abort skips only that leaf and never fails the run.
 - **Live-process interlock.** Rail 3 vetoes any leaf with a live PID at/under it,
   so an in-flight `cargo build` writing `deps`/`build` is never deleted from
   under itself (worst case it regenerates next cycle — strictly safer than the

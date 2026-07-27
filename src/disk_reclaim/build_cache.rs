@@ -213,6 +213,39 @@ mod tests {
         );
     }
 
+    /// Locks the "behavior-identical" invariant between the two producer paths:
+    /// `build_cache_candidates` (walks the filesystem itself) and
+    /// `build_cache_candidates_from_leaves` (fed the same leaves the guard
+    /// allowlist reuses on the production path). The perf split that lets
+    /// `run_disk_reclaim` walk the leaves once must never let the candidate set
+    /// diverge from the guard allowlist — that divergence, on a file-deleting
+    /// path, is exactly the data-integrity hazard worth an explicit test.
+    #[test]
+    fn from_leaves_matches_full_walk_producer() {
+        let tmp = TempDir::new().unwrap();
+        basic_repo(tmp.path());
+        // A second managed repo plus a worktree, so the walk covers the
+        // multi-root / multi-worktree enumeration, not just a single target.
+        let other = tmp.path().join("other");
+        basic_repo(&other);
+        let wt = tmp.path().join("worktrees/wt-1");
+        basic_repo(&wt);
+
+        let repos = vec![tmp.path().to_path_buf(), other];
+
+        let leaves = build_cache_leaf_dirs(&repos);
+        assert!(!leaves.is_empty(), "fixture must yield leaves");
+
+        let full_walk = build_cache_candidates(&repos);
+        let from_leaves = build_cache_candidates_from_leaves(leaves);
+
+        assert_eq!(
+            full_walk, from_leaves,
+            "the two producer paths must yield identical candidate sets \
+             (same paths, kind, reason, est_bytes, and ordering)",
+        );
+    }
+
     #[test]
     fn candidates_are_stale_build_cache_without_estimate() {
         let tmp = TempDir::new().unwrap();
