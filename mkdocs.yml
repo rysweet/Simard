@@ -201,6 +201,7 @@ nav:
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Diagnose a No-Progress Breaker Issue Storm: howto/diagnose-a-no-progress-breaker-issue-storm.md
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
+    - Triage a Stuck Coverage Goal: howto/triage-a-stuck-coverage-goal.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
     - Steer a Standing Research Goal Toward Novelty: howto/steer-a-standing-research-goal-toward-novelty.md

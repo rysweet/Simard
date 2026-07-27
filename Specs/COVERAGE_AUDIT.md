@@ -3,12 +3,15 @@
 ## Status
 
 - **Created**: 2026-07-16
-- **State**: PROPOSED — awaiting owner/PM-architect ratification. The
-  disambiguation (§1), the measurable done-criteria (§2), and the
-  deterministic next-target procedure (§3) are actionable immediately; they
-  do not change any code or CI behavior.
+- **State**: RATIFIED — adopted as the goal's machine-checkable done-gate via
+  escalation triage (`rewrite-done-gate`). The disambiguation (§1), the
+  measurable done-criteria (§2), and the deterministic next-target procedure
+  (§3) are in force and actionable immediately; they do not change any code or
+  CI behavior.
 - **Consolidates goal slugs**: `audit-simard-test-coverage`,
-  `raise-coverage-to-70`, `improve-amplihack-test-coverage`.
+  `raise-coverage-to-70`, `improve-amplihack-test-coverage`,
+  `audit-simard-s-test-coverage-and-raise-it-to-70-4d27c91a` (the recurring
+  blocked goal this charter's `rewrite-done-gate` triage re-points here).
 - **Companion ledger**: [`docs/testing/COVERAGE_BASELINE.md`](../docs/testing/COVERAGE_BASELINE.md)
 - **Related epics**: [#1735](https://github.com/rysweet/Simard/issues/1735),
   [#1937](https://github.com/rysweet/Simard/issues/1937) (see the

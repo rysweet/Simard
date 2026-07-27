@@ -372,6 +372,7 @@ escalated goal:
 
 ## Related
 
+- [How the coverage goal was triaged and course-corrected](../../howto/triage-a-stuck-coverage-goal.md) — a worked `rewrite-done-gate` run of this flow.
 - [`prompt_assets/simard/overseer/escalation_triage.md`](../../../prompt_assets/simard/overseer/escalation_triage.md) — the agentic brain.
 - [`prompt_assets/simard/overseer/self_diagnose.md`](../../../prompt_assets/simard/overseer/self_diagnose.md) — the StepFailure precedent this mirrors.
 - [`prompt_assets/simard/overseer/README.md`](../../../prompt_assets/simard/overseer/README.md) — overseer prompt-surface map.
