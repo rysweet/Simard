@@ -5,7 +5,7 @@
 //! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
 //! and record ran/health from its EXIT STATUS alone. The thread parses NOTHING
 //! back and performs NO durable write itself — the recipe's `simard …` tool
-//! calls ARE the effect. OFF by default behind the double env gate.
+//! calls ARE the effect. ENABLED by default (opt-out) behind the default-ON double env gate.
 //!
 //! **Status (issue #5):** implemented; [`SalienceThread::tick`] is covered by
 //! the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)

@@ -891,17 +891,21 @@ pub fn run_ooda_daemon(
     // cadence and side-effects are byte-for-byte preserved; the scheduler is
     // invoked only AFTER the inline cycle and never gates it.
     //
-    // Two INDEPENDENT gates share the one runtime:
-    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-OFF) owns the maintenance +
-    //     engineer-log threads — their gating and timing stay unchanged.
+    // Two INDEPENDENT gates share the one runtime (issue #4845 — both default-ON
+    // opt-out now):
+    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-ON, opt-out) owns the
+    //     maintenance + engineer-log + ten reflective threads. It is enabled
+    //     UNLESS set to an explicit falsy token (0/false/no/off).
     //   * SIMARD_CREATIVE_IDEAS_ENABLED (default-ON, opt-out) owns the Creative
     //     Ideas generator (issue #2647), consistent with the default-ON
     //     Overseer/Journal threads — so it runs on a stock deployment WITHOUT
     //     the generic master switch.
-    let cognitive_threads_enabled = std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
-        .ok()
-        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false);
+    let cognitive_threads_enabled = crate::cognitive_threads::recipe_rail::env_gate_open(
+        std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
+            .ok()
+            .as_deref(),
+        None,
+    );
     let creative_ideas_cfg = crate::creative_ideas::CreativeIdeasConfig::from_env();
     let creative_ideas_enabled = creative_ideas_cfg.enabled();
     let cognitive_repo_root = memories.repo_root.clone();
@@ -926,8 +930,11 @@ pub fn run_ooda_daemon(
     };
     let mut mind = crate::cognitive_threads::Mind::new();
     if cognitive_runtime.is_some() {
-        // Maintenance + engineer-log stay behind the generic master switch so
-        // their default-OFF gating and timing are unchanged.
+        // Maintenance + engineer-log + the ten reflective threads register under
+        // the DEFAULT-ON master gate (issue #4845). Each thread's own per-thread
+        // gate (default-ON opt-out) decides whether it actually ticks; the
+        // scheduler skips any that report `!enabled()`, so registration is safe
+        // and observable even when a thread is individually opted out.
         if cognitive_threads_enabled {
             mind.register(Box::new(
                 crate::cognitive_threads::MaintenanceThread::from_env(),
@@ -935,10 +942,9 @@ pub fn run_ooda_daemon(
             mind.register(Box::new(
                 crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
             ));
-            // Issue #5: the ten reflective threads. Each is additive and OFF by
-            // default behind its own per-thread gate; registered only under the
-            // master gate (this block), so with it unset nothing registers, and a
-            // registered-but-disabled thread never ticks. Recipes over new plumbing.
+            // Issue #5 + #4845: the ten reflective threads. Additive and now
+            // ENABLED by default behind each thread's own opt-out gate. Recipes
+            // over new plumbing.
             crate::cognitive_threads::threads::register_reflective_threads(
                 &mut mind,
                 &cognitive_repo_root,
@@ -967,6 +973,29 @@ pub fn run_ooda_daemon(
                 mind.len()
             ),
         );
+        // Per-thread startup roster (issue #4845): one line per registered
+        // thread so `ooda.log` shows exactly which threads are ENABLED (with
+        // their cadence) or DISABLED (operator opt-out) — no thread is invisible.
+        for h in mind.health() {
+            let line = if h.enabled {
+                match h.cadence_secs {
+                    Some(secs) => format!(
+                        "[simard] OODA daemon: cognitive thread '{}' ENABLED (interval={}s)",
+                        h.id, secs
+                    ),
+                    None => format!(
+                        "[simard] OODA daemon: cognitive thread '{}' ENABLED (reactive)",
+                        h.id
+                    ),
+                }
+            } else {
+                format!(
+                    "[simard] OODA daemon: cognitive thread '{}' DISABLED (operator opt-out)",
+                    h.id
+                )
+            };
+            daemon_log(&state_root, &line);
+        }
     }
     // Creative-ideas startup line (mirrors the Journal thread) — logged
     // unconditionally so the operator can confirm the gate from journalctl.

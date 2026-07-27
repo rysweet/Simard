@@ -340,23 +340,28 @@ fn invoke_result_failed_maps_to_a_failed_outcome() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn env_gate_open_requires_both_truthy() {
-    // S8 / SR-12: a thread is enabled iff BOTH gates are truthy.
+fn env_gate_open_is_default_on_opt_out() {
+    // S8 / SR-12 after issue #4845: default-ON opt-out — a thread is enabled
+    // UNLESS a gate is set to an explicit falsy token. Unset/truthy stay open.
     assert!(recipe_rail::env_gate_open(Some("1"), Some("1")));
     assert!(recipe_rail::env_gate_open(Some("true"), Some("on")));
     assert!(recipe_rail::env_gate_open(Some(" yes "), Some("TRUE")));
+    assert!(
+        recipe_rail::env_gate_open(Some("1"), None),
+        "master on, thread unset ⇒ enabled (unset is not an opt-out)"
+    );
+    assert!(
+        recipe_rail::env_gate_open(None, Some("1")),
+        "thread on, master unset ⇒ enabled"
+    );
+    assert!(
+        recipe_rail::env_gate_open(None, None),
+        "both unset ⇒ enabled (default ON, the #4845 flip)"
+    );
 }
 
 #[test]
-fn env_gate_open_is_closed_when_either_is_missing_or_falsey() {
-    assert!(
-        !recipe_rail::env_gate_open(Some("1"), None),
-        "master on, thread unset"
-    );
-    assert!(
-        !recipe_rail::env_gate_open(None, Some("1")),
-        "thread on, master unset"
-    );
+fn env_gate_open_is_closed_only_on_explicit_falsy() {
     assert!(
         !recipe_rail::env_gate_open(Some("1"), Some("0")),
         "thread explicitly off"
@@ -366,8 +371,12 @@ fn env_gate_open_is_closed_when_either_is_missing_or_falsey() {
         "master explicitly off"
     );
     assert!(
-        !recipe_rail::env_gate_open(None, None),
-        "both unset (default OFF)"
+        !recipe_rail::env_gate_open(Some("off"), None),
+        "master opt-out, thread unset ⇒ disabled (fail-closed)"
+    );
+    assert!(
+        !recipe_rail::env_gate_open(None, Some("no")),
+        "thread opt-out, master unset ⇒ disabled"
     );
 }
 

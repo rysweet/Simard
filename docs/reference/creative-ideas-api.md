@@ -369,9 +369,9 @@ threads. Two facts make it observable and testable:
 
 - **Runtime gate.** The daemon builds the `Mind` runtime when *either* the
   generic scheduler master switch (`SIMARD_COGNITIVE_THREADS_ENABLED`,
-  default-OFF, which owns the maintenance/engineer-log threads) **or** Creative
-  Ideas is enabled — so the default-ON Creative Ideas thread runs even on a stock
-  deployment where the generic scheduler is off. Registration goes through
+  default-ON opt-out since #4845, which owns the maintenance/engineer-log/reflective
+  threads) **or** Creative Ideas is enabled — both default-ON, so the roster runs
+  on a stock deployment. Registration goes through
   `register_creative_ideas_if_enabled`, so an opted-out config leaves the thread
   unregistered (asserted by a test via `mind.health()` / `mind.len()`).
 - **Startup + per-tick logs.** At startup the daemon emits one dedicated line

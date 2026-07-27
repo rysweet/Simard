@@ -9,8 +9,9 @@ description: >
   the recommended one-at-a-time rollout, per-thread cadence tuning and the
   global SIMARD_THREAD_INTERVAL_SCALE multiplier, the non-critical per-tick
   budget, what to watch in telemetry and the durable stores, and how the
-  built-in fakes make every thread offline-testable. All ten are OFF by default.
-last_updated: 2026-07-08
+  built-in fakes make every thread offline-testable. All ten are ENABLED by
+  default (opt-out) since issue #4845.
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -33,14 +34,13 @@ threads** that mature Simard's single mind (issue #5). For what each thread *is*
 shared brick they run on, see
 [The RecipeInvoker seam](../reference/recipe-invoker-seam.md).
 
-!!! note "Status — OFF by default, roll out one at a time"
-    Every thread ships **OFF by default** behind a **double env gate** and is
-    additive: with the master gate unset, nothing registers and there are zero
-    side effects. The recommended posture is to enable **one thread at a time**,
-    watch its telemetry and durable output for a few cadences, then enable the
-    next. Threads write facts, metrics, issues, and (rarely) goal-board
+!!! note "Status — default-ON (opt-out) since issue #4845"
+    Every thread is **ENABLED by default (opt-out)** behind a **default-ON double
+    env gate** and is additive: a thread runs unless a gate is set to an explicit
+    falsy token. Threads write facts, metrics, issues, and (rarely) goal-board
     proposals — but never merge, never act outside the existing OODA/overseer
-    path, and never file point-in-time report docs.
+    path, and never file point-in-time report docs. To silence one, opt it out
+    with `SIMARD_THREAD_<NAME>_ENABLED=0`.
 
 ## When to use this
 
@@ -54,14 +54,17 @@ shared brick they run on, see
 
 ## The double env gate
 
-Nothing registers unless **both** gates are truthy:
+Both gates are **default-ON opt-out** (issue #4845): a thread runs UNLESS a gate
+is set to an explicit falsy token.
 
-1. **Master gate** — `SIMARD_COGNITIVE_THREADS_ENABLED` (also required by the
+1. **Master gate** — `SIMARD_COGNITIVE_THREADS_ENABLED` (also read by the
    existing cognitive-thread scheduler; see
    [Configure cognitive-thread scheduling](./configure-cognitive-thread-scheduling.md)).
 2. **Per-thread gate** — `SIMARD_THREAD_<NAME>_ENABLED`.
 
-Truthy set: `{1, true, TRUE, yes, on}`. Anything else (including unset) is OFF.
+Falsy (opt-out) set: `{0, false, no, off}` (case-insensitive, whitespace-trimmed).
+Unset — or any other value — leaves the gate OPEN. Setting **either** gate to a
+falsy value disables the thread (fail-closed operator opt-out).
 
 Belt-and-suspenders: each thread's `enabled()` **also** reads its config flag, so
 even a thread that somehow registered without its gate would `skipped()` every
@@ -136,10 +139,10 @@ rather than re-colliding.
 | narrative | Low | 43200 s (12 h) |
 
 The `Mind` runs OODA (`Critical`, budget-exempt) first, then at most
-`SIMARD_MIND_MAX_NONCRITICAL_PER_TICK` (default **2**) non-critical threads per
-tick, `Normal` before `Low`. This budget is the hard backstop: even on a
-pathological first tick where every thread is due, at most two run and the rest
-drain over subsequent ticks. OODA is never among the budgeted threads.
+`SIMARD_MIND_MAX_NONCRITICAL_PER_TICK` (default **13**) non-critical threads per
+tick, `Normal` before `Low`. The default covers the whole scheduled non-critical
+roster (issue #4845) so every thread ticks within its cadence; lower it to
+throttle. OODA is never among the budgeted threads.
 
 ### Guarded threads skip cheaply
 
@@ -213,10 +216,10 @@ subprocess, no network, no credentials, no sleeps.
 
 ## Turning a thread back off
 
-Unset (or set to a non-truthy value) that thread's `SIMARD_THREAD_<NAME>_ENABLED`
-and restart. Because threads are additive and write only durable, prefixed
-artifacts, disabling a thread simply stops new writes; nothing needs unwinding.
-To disable the entire batch, unset `SIMARD_COGNITIVE_THREADS_ENABLED`.
+Set that thread's `SIMARD_THREAD_<NAME>_ENABLED` to a falsy value (`0`, `false`,
+`no`, or `off`) and restart. Because threads are additive and write only durable,
+prefixed artifacts, disabling a thread simply stops new writes; nothing needs
+unwinding. To disable the entire batch, set `SIMARD_COGNITIVE_THREADS_ENABLED=0`.
 
 ## See also
 
