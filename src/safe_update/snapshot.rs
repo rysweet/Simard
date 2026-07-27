@@ -51,14 +51,8 @@ pub fn take_snapshot_of(
     retention: usize,
     bin_dir: PathBuf,
 ) -> Result<BinarySnapshot, SafeUpdateError> {
-    // The self-deploy trigger derives `binary` from `current_exe()`. On Linux a
-    // still-running image whose on-disk file was unlinked by a prior swap resolves
-    // to `<path> (deleted)`, which no longer exists; reading it directly fails with
-    // `No such file` and aborted every deploy at the mandatory protective backup
-    // (DeployDrift, issue #4857 / #4836). The LIVE running image stays readable via
-    // `/proc/self/exe` even after its directory entry is unlinked, so degrade to it.
-    // An existing declared path is read verbatim — the fallback never fires when the
-    // path exists, so it can never mask a genuine wrong-path bug.
+    // Degrade an unlinked `<path> (deleted)` running image to `/proc/self/exe`
+    // so the mandatory backup never deadlocks the deploy; see the helper's docs.
     let source = resolve_readable_binary(binary);
     let bytes = fs::read(&source).map_err(|e| SafeUpdateError::SnapshotIo {
         action: "read".into(),
@@ -83,7 +77,7 @@ pub fn take_snapshot_of(
     set_executable(&backup_path)?;
 
     let snapshot = BinarySnapshot {
-        binary_path: source.clone(),
+        binary_path: source,
         sha256,
         mtime,
         version,
@@ -117,19 +111,16 @@ pub fn take_snapshot_of(
 ///
 /// The self-deploy trigger derives the declared path from `current_exe()`. On
 /// Linux, once a prior self-deploy has swapped the on-disk binary, a still-running
-/// old image's `current_exe()` resolves to `<path> (deleted)` and that file no
-/// longer exists, so a direct read fails with `No such file`. Because the
-/// protective backup is mandatory, that hard-failure aborted EVERY deploy and
-/// stranded the running binary behind merged main (DeployDrift, issue #4857 /
-/// #4836).
+/// old image's `current_exe()` resolves to `<path> (deleted)` — the file is gone,
+/// so a direct read fails with `No such file`. Because the protective backup is
+/// mandatory, that hard-failure aborted EVERY deploy (DeployDrift, issue #4857 /
+/// #4836). `/proc/self/exe` still yields the running image's bytes after its
+/// directory entry is unlinked (the inode is held open), so we snapshot through it.
 ///
-/// `/proc/self/exe` still yields the bytes of the running image even after its
-/// directory entry is unlinked (the inode is held open by the running process),
-/// so when the declared path is missing we snapshot through it. When the declared
-/// path exists it is returned unchanged, so the fallback can never fire for a
-/// present-but-wrong path and thus cannot mask an unrelated bug. On platforms
-/// without `/proc/self/exe` (e.g. macOS) the declared path is returned so the
-/// existing loud failure is preserved.
+/// The degrade fires **only** when the declared path is missing; an existing path
+/// is returned unchanged, so it can never mask a present-but-wrong path. Platforms
+/// without `/proc/self/exe` (e.g. macOS) return the declared path, preserving the
+/// original loud failure.
 fn resolve_readable_binary(declared: &Path) -> PathBuf {
     if declared.exists() {
         return declared.to_path_buf();
