@@ -312,6 +312,11 @@ pub fn vet_candidate(candidate: &ReclaimCandidate, ctx: &GuardContext<'_>) -> Ve
 /// A symlink (symlink-swap defense), a non-directory, a canonicalize failure, or
 /// any prefix/substring relationship is **not** a match, so `target/debug`, a
 /// worktree root, or a sibling like `target/debug/simard` is never exempted.
+///
+/// `leaves` are already canonical by contract (produced by
+/// [`build_cache_leaf_dirs`](super::build_cache::build_cache_leaf_dirs), which
+/// canonicalizes every entry), so membership is a direct comparison against the
+/// freshly-canonicalized `path` — no need to re-resolve each leaf.
 fn is_registered_build_cache_leaf(path: &Path, leaves: &[PathBuf]) -> bool {
     if leaves.is_empty() {
         return false;
@@ -323,15 +328,10 @@ fn is_registered_build_cache_leaf(path: &Path, leaves: &[PathBuf]) -> bool {
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return false;
     }
-    let canon = match std::fs::canonicalize(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    leaves.iter().any(|leaf| {
-        std::fs::canonicalize(leaf)
-            .map(|l| l == canon)
-            .unwrap_or(false)
-    })
+    match std::fs::canonicalize(path) {
+        Ok(canon) => leaves.contains(&canon),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
