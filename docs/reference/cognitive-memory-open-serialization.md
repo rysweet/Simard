@@ -90,6 +90,10 @@ recoverable failure*.
 
 ## Related
 
+- [Engineer Cognitive-Access Degradation](./engineer-cognitive-access-degradation-api.md)
+  — how concurrent OODA engineers avoid *reaching* a contended open (IPC shared
+  read) and degrade gracefully to deferred/read-only cognition instead of
+  hard-exiting when they do.
 - [Cognitive Memory — Library Adapter](../architecture/cognitive-memory-library-adapter.md)
 - [Cognitive-Memory Durability](../operations/cognitive-memory-durability.md)
 - [Cognitive-Memory WAL Recovery Runbook](../operations/cognitive-memory-wal-recovery-runbook.md)

@@ -853,6 +853,7 @@ pub use library_adapter::LibraryCognitiveMemory;
 // the library as catalog corruption (which quarantines the DB and rebuilds it
 // empty, wiping cognitive memory). See the module docs for the full rationale.
 mod open_guard;
+pub(crate) use open_guard::{CognitiveOpenGuard, OpenLockOutcome};
 
 // Issue #2420: migration-aware live-store path resolution. Re-exported at the
 // module root so the verified-backup path (`memory_backup`) and the daemon both

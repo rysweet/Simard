@@ -74,6 +74,10 @@ pub enum DegradeReason {
     MemoryIpc,
     /// `launch_knowledge_client_native` failed.
     KnowledgeLaunch,
+    /// An OODA engineer lost the cross-process cognitive open-lock race and
+    /// degraded to deferred/read-only cognition instead of the fail-loud
+    /// hard-exit (engineer cognitive-access degradation).
+    CognitiveOpenLock,
 }
 
 impl DegradeReason {
@@ -82,6 +86,7 @@ impl DegradeReason {
         match self {
             DegradeReason::MemoryIpc => "memory_ipc",
             DegradeReason::KnowledgeLaunch => "knowledge_launch",
+            DegradeReason::CognitiveOpenLock => "cognitive_open_lock",
         }
     }
 }
@@ -200,6 +205,10 @@ pub fn observe_degrade(reason: DegradeReason, raw_error: &str) {
         DegradeReason::KnowledgeLaunch => {
             "knowledge reader unavailable — knowledge enrichment disabled for this session"
         }
+        DegradeReason::CognitiveOpenLock => {
+            "cognitive store held open by another process — engineer degraded to \
+             deferred/read-only cognition; the turn proceeds and still produces its artifact"
+        }
     };
     tracing::warn!(
         target: "simard::enrichment",
@@ -245,6 +254,7 @@ struct Rollup {
     attached: u64,
     degraded_memory_ipc: u64,
     degraded_knowledge_launch: u64,
+    degraded_cognitive_open_lock: u64,
     sum_facts: u64,
     sum_procedures: u64,
     sum_preamble_bytes: u64,
@@ -281,6 +291,10 @@ impl Rollup {
             DegradeReason::KnowledgeLaunch => {
                 self.degraded_knowledge_launch = self.degraded_knowledge_launch.saturating_add(1);
             }
+            DegradeReason::CognitiveOpenLock => {
+                self.degraded_cognitive_open_lock =
+                    self.degraded_cognitive_open_lock.saturating_add(1);
+            }
         }
     }
 
@@ -290,6 +304,7 @@ impl Rollup {
         if self.decisions == 0
             && self.degraded_memory_ipc == 0
             && self.degraded_knowledge_launch == 0
+            && self.degraded_cognitive_open_lock == 0
         {
             return None;
         }
@@ -323,6 +338,7 @@ impl Rollup {
             "degraded": {
                 "memory_ipc": self.degraded_memory_ipc,
                 "knowledge_launch": self.degraded_knowledge_launch,
+                "cognitive_open_lock": self.degraded_cognitive_open_lock,
             },
             "avg_facts_injected": avg(self.sum_facts),
             "avg_procedures_injected": avg(self.sum_procedures),
