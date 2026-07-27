@@ -9,6 +9,20 @@ decision. The decide brain runs as a **recipe step** via `recipe-runner-rs`.
 The parser extracts the **first word** of the agent's output and matches it
 against the 10 action keywords.
 
+> **Superseded on the OODA path by the typed-record model
+> ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A).**
+> The decide recipe no longer prints an action keyword for Rust to scrape. It now
+> calls the gated `simard ooda record-decide` tool, which validates `--choice`
+> against the closed `DecideJudgment` enum through the shared
+> `DecideChoice::from_choice_fields` chokepoint and atomically writes a typed
+> `DecideDecisionRecord` (`schema: simard.ooda.decide.v1`). `RecipeBrain` reads
+> that record **fail-CLOSED** with `read_verified_decide` and ignores stdout
+> entirely; an absent/malformed/mismatched record skips the priority (safe
+> no-op), never the old `advance_goal` default. The recipe YAML header documents
+> `Output: NONE scraped from stdout`. The first-word parser described below is
+> **legacy** and retained only for historical reference. See
+> [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
+
 > **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
 > The decide parser no longer scans the entire response for keywords. It
 > extracts only the first whitespace-delimited token and matches it

@@ -205,6 +205,15 @@ No `serde_json`. No regex. No keyword scanning. Only `str::split_whitespace()`,
 
 ### 1a. Decide phase (`recipe_brain.rs`)
 
+> **MOVED to the typed-record model
+> ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A).**
+> The decide phase no longer parses stdout at all. The `ooda-decide` recipe calls
+> the gated `simard ooda record-decide` tool, which writes a typed
+> `DecideDecisionRecord` (`schema: simard.ooda.decide.v1`); `RecipeBrain` reads it
+> **fail-CLOSED** via `read_verified_decide` (no `advance_goal` default). The
+> first-word grammar below is **legacy** and no longer runs on the OODA path. See
+> [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
+
 **Enum:** `DecideJudgment`
 
 **Parser:** `parse_action_from_text(text) -> DecideJudgment`
@@ -249,6 +258,17 @@ consolidate_memory Memory hasn't been consolidated in 12 hours.
 ---
 
 ### 1b. Orient phase (`recipe_brain.rs`)
+
+> **MOVED to the typed-record model
+> ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A).**
+> The orient phase no longer parses stdout at all. The `ooda-orient` recipe calls
+> the gated `simard ooda record-orient` tool, which writes a typed
+> `OrientDecisionRecord` (`schema: simard.ooda.orient.v1`, carrying `base_urgency`
+> for the self-consistent no-escalation recheck); `RecipeBrain` reads it
+> **fail-CLOSED** via `read_verified_orient` (keeps base urgency on failure, no
+> floor default). The float/floor grammar below is **legacy** and no longer runs
+> on the OODA path. See
+> [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
 
 **Struct:** `OrientJudgment`
 

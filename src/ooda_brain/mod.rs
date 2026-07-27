@@ -21,6 +21,7 @@ mod decide;
 mod fallback;
 mod judgment_record;
 mod orient;
+mod orient_decide_record;
 pub mod parse_failure;
 pub mod prompt_store;
 mod recipe_brain;
@@ -42,6 +43,10 @@ mod tests;
 mod tests_per_goal_cycle;
 #[cfg(test)]
 mod tests_record_decision;
+#[cfg(test)]
+mod tests_record_orient_decide;
+#[cfg(test)]
+mod tests_rework_contract;
 
 pub use confidence::{
     CalibrationWindow, ECE_BINS, ECE_METRIC, ECE_WINDOW, HIGH_STAKES_URGENCY, JudgedDecision,
@@ -63,6 +68,10 @@ pub use orient::{
     DeterministicOrientBrain, FAILURE_PENALTY_PER_CONSECUTIVE, OodaOrientBrain, OrientContext,
     OrientJudgment, PROMPT_NAME as ORIENT_PROMPT_NAME, RustyClawdOrientBrain,
     build_rustyclawd_orient_brain,
+};
+pub use orient_decide_record::{
+    DECIDE_SCHEMA, DecideChoice, DecideDecisionRecord, ORIENT_SCHEMA, OrientDecisionRecord,
+    OrientFields, read_verified_decide, read_verified_orient,
 };
 pub use parse_failure::ParseFailureRecord;
 pub use recipe_brain::RecipeBrain;

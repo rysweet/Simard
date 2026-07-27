@@ -41,7 +41,7 @@ description: |
   Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
   `parse_admission_decision`, `parse_resource_admission_decision`,
   `parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
-  `extract_decision_envelope` (decide), and `extract_orient_envelope`.
+  `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
 
   This scenario drives the hermetic, in-process tests that pin the corrected
   contract:
