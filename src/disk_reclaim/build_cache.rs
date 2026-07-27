@@ -25,10 +25,10 @@
 //! contract and the two narrow guard changes (leaf-only allow-scope + the
 //! exact-canonical deny-set exemption) that admit these candidates.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::candidate::{CandidateKind, ReclaimCandidate};
+use super::fs_predicates::is_real_dir_owned_by_euid;
 
 /// The regenerable cargo cache leaf dirs, relative to a `target/` root. These are
 /// `target/debug/{incremental,deps,build}` and the coverage mirror under
@@ -132,12 +132,7 @@ pub fn build_cache_candidates_from_leaves(leaves: Vec<PathBuf>) -> Vec<ReclaimCa
 /// closing symlink-swap into a foreign or protected location.
 fn vetted_leaf(path: &Path) -> Option<PathBuf> {
     let meta = std::fs::symlink_metadata(path).ok()?;
-    if meta.file_type().is_symlink() || !meta.is_dir() {
-        return None;
-    }
-    // SAFETY: `geteuid` takes no arguments, reads no memory, and cannot fail.
-    let euid = unsafe { libc::geteuid() };
-    if meta.uid() != euid {
+    if !is_real_dir_owned_by_euid(&meta) {
         return None;
     }
     std::fs::canonicalize(path).ok()

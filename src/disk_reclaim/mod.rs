@@ -13,6 +13,7 @@
 //! - [`candidate`] — the `ReclaimCandidate` serde contract + marker parser.
 //! - [`guard`] — the non-bypassable rail: `vet_candidate` → `Verdict`.
 //! - [`daemon_dir`] — the protected daemon-directory union.
+//! - `fs_predicates` — shared fail-closed real-dir / euid-ownership checks.
 //! - [`executor`] — the largest-first, threshold-stop, TOCTOU-reasserting disposer.
 //! - [`recipe`] — invoke the analysis recipe; strict parse; no fallback.
 
@@ -25,6 +26,7 @@ use crate::error::SimardResult;
 pub mod candidate;
 pub mod daemon_dir;
 pub mod executor;
+mod fs_predicates;
 pub mod guard;
 pub mod prod;
 pub mod recipe;

@@ -27,6 +27,7 @@ use crate::worktree_gc::liveness::LiveProcessProbe;
 
 use super::candidate::{CandidateKind, ReclaimCandidate};
 use super::daemon_dir::resolve_daemon_working_dirs;
+use super::fs_predicates::is_real_dir;
 
 /// The concrete filesystem primitive the executor will run for an allowed
 /// candidate.
@@ -325,7 +326,7 @@ fn is_registered_build_cache_leaf(path: &Path, leaves: &[PathBuf]) -> bool {
         Ok(m) => m,
         Err(_) => return false,
     };
-    if meta.file_type().is_symlink() || !meta.is_dir() {
+    if !is_real_dir(&meta) {
         return false;
     }
     match std::fs::canonicalize(path) {

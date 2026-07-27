@@ -6,7 +6,6 @@
 //! removes the minimum necessary. The delete primitive lives behind the
 //! [`PathRemover`] seam so tests never touch real system paths.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,6 +16,7 @@ use crate::worktree_gc::under_any_root;
 
 use super::ReclaimMode;
 use super::candidate::{CandidateKind, ReclaimCandidate};
+use super::fs_predicates::is_real_dir_owned_by_euid;
 use super::guard::{GuardContext, ReclaimPrimitive, RejectReason, Verdict, vet_candidate};
 
 /// A path the executor removed (or would remove, in dry-run).
@@ -130,6 +130,16 @@ impl PathRemover for RealPathRemover {
                 // canonical path itself is swapped to a symlink (or its owner
                 // changes) in the window between vetting and `remove_dir_all` —
                 // one aborted candidate never fails the run.
+                //
+                // The sub-microsecond window that remains between this re-stat
+                // and the `remove_dir_all` below is deliberately tolerated: even
+                // if the path were swapped to a symlink in that gap,
+                // `std::fs::remove_dir_all` (Rust 1.95) opens the final
+                // component without following it, so it unlinks the symlink
+                // itself rather than recursing into its target — worst case the
+                // one call errors out and this single candidate is skipped. The
+                // euid-ownership check further confines any such swap to paths
+                // the current user already owns, so the blast radius is nil.
                 restat_real_dir_owned(&canon)?;
                 std::fs::remove_dir_all(&canon)
                     .map_err(|e| format!("rm -rf {} failed: {e}", canon.display()))
@@ -147,17 +157,9 @@ impl PathRemover for RealPathRemover {
 fn restat_real_dir_owned(canon: &Path) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(canon)
         .map_err(|e| format!("refusing rm -rf — cannot re-stat {}: {e}", canon.display()))?;
-    if meta.file_type().is_symlink() || !meta.is_dir() {
+    if !is_real_dir_owned_by_euid(&meta) {
         return Err(format!(
-            "refusing rm -rf — {} is no longer a real directory",
-            canon.display()
-        ));
-    }
-    // SAFETY: `geteuid` takes no arguments, reads no memory, and cannot fail.
-    let euid = unsafe { libc::geteuid() };
-    if meta.uid() != euid {
-        return Err(format!(
-            "refusing rm -rf — {} is not owned by the effective UID",
+            "refusing rm -rf — {} is no longer a real directory owned by the effective UID",
             canon.display()
         ));
     }
