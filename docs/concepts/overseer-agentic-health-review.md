@@ -153,8 +153,16 @@ ran or silently degraded.
 The surface is the cycle's `ObservedState` — the same reasoning-cycle field
 `merge_reasoning_status` lives on, carried on the `CycleReport` and asserted by
 the wiring tests. Like that precedent, this closes the *silent-pass* gap at the
-reasoning boundary (the verdict is no longer parsed-and-discarded); it does not
-add a new TUI/feed widget beyond the parity that field already establishes.
+reasoning boundary (the verdict is no longer parsed-and-discarded).
+
+The verdict also reaches the **operator feed**: `observed_details_from`
+(`src/overseer/wiring.rs`) renders a `Reviewed` pass as a `health-review:
+<summary>` line and a `Degraded` pass as a loud `health-review: degraded …`
+line, which `humanize_tick_details` surfaces (prefixed `observed:`) in `simard
+status`, the TUI Overseer pane, and the dashboard SPA. A `NotRun` tick adds no
+line, keeping the feed quiet on what did not run. So the "never a silent no-op"
+guarantee holds at the operator surface, not only on the struct field — a
+HEALTHY pass leaves a visible breadcrumb instead of an empty tick.
 
 ### Systemic vs per-goal
 

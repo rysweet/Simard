@@ -130,6 +130,14 @@ require_test 'health_review_failure_surfaces_degraded_status'
 require_test 'health_review_ok_without_verdict_surfaces_degraded_status'
 require_test 'health_review_unwired_leaves_status_not_run'
 require_test 'health_review_off_cadence_leaves_status_not_run'
+# OPERATOR-FEED surfacing: the verdict is not only on the struct field — it is
+# rendered into the operator-visible `observed:` feed (simard status / TUI /
+# dashboard via `humanize_tick_details`). A Reviewed pass leaves a
+# `health-review: <summary>` breadcrumb (a HEALTHY pass included), a Degraded
+# pass is LOUD, and a NotRun tick stays quiet.
+require_test 'health_review_verdict_surfaces_in_the_operator_feed'
+require_test 'health_review_degraded_surfaces_loud_in_the_operator_feed'
+require_test 'health_review_not_run_stays_quiet_in_the_operator_feed'
 # The shared gap-scan throttle AND the dedicated opt-out each disable the rail.
 require_test 'health_review_skipped_when_gap_scan_disabled'
 require_test 'health_review_skipped_when_dedicated_flag_disabled'
