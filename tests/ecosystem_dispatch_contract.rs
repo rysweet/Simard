@@ -21,7 +21,7 @@
 //!      `tests/fixtures/ecosystem_dispatch/canonical.json`.
 //!
 //! Rules encoded (from the dispatch contract):
-//!   1. Top-level value is a JSON array.
+//!   1. Top-level value is a non-empty JSON array.
 //!   2. Every element is a brief (non-null `recipe`, the four canonical
 //!      required fields present, NO `escalate` field) OR an escalation
 //!      (`recipe` is `null`, `escalate` is a non-empty string).
@@ -343,7 +343,8 @@ fn validate_dispatch_array(v: &Value) -> Result<(), String> {
 }
 
 /// A well-formed `owner/name`: exactly one `/`, both sides non-empty and drawn
-/// from the GitHub-safe character set, no whitespace.
+/// from the GitHub-safe character set, no whitespace. The bare `.` and `..`
+/// segments are rejected — GitHub disallows them as owner or repo names.
 fn is_well_formed_repo(s: &str) -> bool {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 2 {
@@ -351,6 +352,8 @@ fn is_well_formed_repo(s: &str) -> bool {
     }
     let ok = |seg: &str| {
         !seg.is_empty()
+            && seg != "."
+            && seg != ".."
             && seg
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -361,9 +364,11 @@ fn is_well_formed_repo(s: &str) -> bool {
 /// Heuristic secret detector for rule 7. Matches common credential shapes.
 fn find_secret(text: &str) -> Option<&'static str> {
     const NEEDLES: [&str; 6] = [
-        "ghp_",                   // GitHub personal access token
-        "github_pat_",            // GitHub fine-grained PAT
-        "AKIA",                   // AWS access key id
+        "ghp_",        // GitHub personal access token
+        "github_pat_", // GitHub fine-grained PAT
+        "AKIA",        // AWS access key id prefix — deliberately broad; a false
+        // positive here only rejects a dispatch array (fail-safe), whereas
+        // tightening the needle risks missing a real leaked key.
         "-----BEGIN",             // PEM private key block
         "xoxb-",                  // Slack bot token
         "Authorization: Bearer ", // inline bearer credential
@@ -472,6 +477,12 @@ fn brief_with_malformed_target_repo_is_rejected() {
         "owner/",
         "/name",
         "own er/name",
+        ".",
+        "..",
+        "./name",
+        "owner/.",
+        "owner/..",
+        "../name",
     ] {
         let mut brief = valid_brief();
         brief["target_repo"] = json!(bad);

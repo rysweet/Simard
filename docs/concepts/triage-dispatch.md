@@ -85,16 +85,17 @@ it.
 ## Configuration
 
 The `NODE_OPTIONS` memory preference used by the observe/dispatch tooling is a
-saved preference:
+saved preference. Set it to whatever heap ceiling your host requires, for
+example:
 
 ```
-NODE_OPTIONS=--max-old-space-size=32768
+NODE_OPTIONS=--max-old-space-size=<MB>
 ```
 
-To change it, edit the amplihack config:
+To change it, edit the amplihack config in your home directory:
 
 ```
-/home/azureuser/.amplihack/config
+~/.amplihack/config
 ```
 
 The dispatch stage reads its input path from the observe run's temp directory,
@@ -209,7 +210,7 @@ P3 cross-cutting brief → P2 isolated brief):
 
 A dispatch array is valid iff **all** of the following hold:
 
-1. Top-level value is a JSON array.
+1. Top-level value is a **non-empty** JSON array.
 2. Every element is either a **brief** (non-null `recipe`, all four
    canonical required fields present — `recipe`, `task_description`,
    `target_repo`, `success_criteria` — and no `escalate` field) or an
