@@ -95,8 +95,8 @@ every-cycle relaunch stops for good.
 
 Retire the goal through the shipped operator CLI, which removes it from the board
 and writes the durable tombstone (verified in `src/operator_cli/goal.rs`
-`handle_complete`, lines 657-706: `CompleteOutcome::Completed` removes the goal
-from `board.active`/`board.backlog` then `tombstone(&[goal_id])`; idempotent on an
+`handle_complete`, lines 849-898 (`tombstone` at line 292): `CompleteOutcome::Completed`
+removes the goal from `board.active`/`board.backlog` then `tombstone(&[goal_id])`; idempotent on an
 absent/already-tombstoned goal; race-safe under the shared-store flock):
 
 ```
