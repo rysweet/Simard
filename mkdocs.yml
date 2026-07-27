@@ -266,6 +266,7 @@ nav:
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
     - Enable Autonomous Self-Merge (canary one repo): howto/enable-autonomous-self-merge-canary.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
+    - Enable and Operate the GitHub Merge Queue: howto/merge-queue.md
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
     - Browse the Simard Journal: howto/browse-the-simard-journal.md
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
