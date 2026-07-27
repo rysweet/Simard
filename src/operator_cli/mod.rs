@@ -22,6 +22,8 @@ mod self_health;
 mod signal;
 mod status;
 #[cfg(test)]
+mod tests_record_admission;
+#[cfg(test)]
 mod tests_record_decision;
 #[cfg(test)]
 mod tests_record_orient_decide;

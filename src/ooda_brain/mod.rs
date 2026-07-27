@@ -42,6 +42,8 @@ mod tests;
 #[cfg(test)]
 mod tests_per_goal_cycle;
 #[cfg(test)]
+mod tests_record_admission;
+#[cfg(test)]
 mod tests_record_decision;
 #[cfg(test)]
 mod tests_record_orient_decide;
@@ -707,6 +709,26 @@ pub struct EngineerAdmissionCtx {
     pub repo_root: String,
 }
 
+/// Max characters retained for an admission decision's `rationale` (and the
+/// variant-owned identifier fields) when validated through the shared
+/// [`EngineerAdmissionDecision::from_choice_fields`] /
+/// [`ResourceAdmissionDecision::from_choice_fields`] chokepoint. Mirrors the
+/// per-goal reason bound — caps the blast radius of a runaway/hostile model
+/// response on operator logs and persisted audit records.
+const ADMISSION_RATIONALE_MAX_CHARS: usize = 500;
+
+/// Sanitize every element of a variant-owned admission list (`blocked_by` /
+/// `overlap_files`) through the same ANSI/C0-stripping, whitespace-folding,
+/// length-bounding chokepoint as the free text. Goal-ids / repo-relative paths
+/// pass through unchanged; a hostile control-laden element is cleaned before it
+/// can reach an operator log or persisted record.
+fn sanitize_admission_list(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|s| sanitize::sanitize_context_var(s.trim(), ADMISSION_RATIONALE_MAX_CHARS))
+        .collect()
+}
+
 /// What the brain decided about admitting a NEW engineer for a candidate goal
 /// given the live engineer set (issue #2690). Tagged on `choice` (snake_case),
 /// matching [`EngineerLifecycleDecision`] and [`GoalOutcomeDecision`].
@@ -780,6 +802,83 @@ impl EngineerAdmissionDecision {
             Self::Admit { .. } => Vec::new(),
             Self::Defer { blocked_by, .. } => blocked_by.clone(),
             Self::SerializeAfter { after_goal_id, .. } => vec![after_goal_id.clone()],
+        }
+    }
+
+    /// Construct a validated [`EngineerAdmissionDecision`] from already-separated
+    /// `choice` + field inputs — the SINGLE shared closed-enum validation
+    /// chokepoint reused by the `simard ooda record-admission` CLI writer AND by
+    /// [`read_verified_admission`], so writer and reader can never drift.
+    ///
+    /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
+    /// * `rationale` is sanitized (ANSI/C0 stripped, whitespace folded, bounded
+    ///   to [`ADMISSION_RATIONALE_MAX_CHARS`]) and MUST be non-empty afterwards
+    ///   ⇒ `None` otherwise (fail CLOSED — a rationale made entirely of control
+    ///   bytes collapses to empty and is rejected, not accepted).
+    /// * Per-variant field OWNERSHIP is enforced: a field supplied on a variant
+    ///   that does not own it ⇒ `None`. `admit` owns NOTHING; `defer` owns
+    ///   `blocked_by` + `retry_after_secs`; `serialize_after` owns
+    ///   `after_goal_id` (required, non-empty) + `overlap_files`. This is the
+    ///   defense that keeps a compromised prompt or hostile CLI invocation from
+    ///   smuggling a defer-only field onto an admit (or vice versa).
+    pub fn from_choice_fields(
+        choice: &str,
+        rationale: &str,
+        blocked_by: &[String],
+        after_goal_id: &str,
+        overlap_files: &[String],
+        retry_after_secs: Option<u64>,
+    ) -> Option<Self> {
+        let rationale =
+            sanitize::sanitize_context_var(rationale.trim(), ADMISSION_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        let after_goal_id_present = !after_goal_id.trim().is_empty();
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("admit") => {
+                // `admit` owns no extra fields — any smuggled field fails CLOSED.
+                if !blocked_by.is_empty()
+                    || after_goal_id_present
+                    || !overlap_files.is_empty()
+                    || retry_after_secs.is_some()
+                {
+                    return None;
+                }
+                Some(Self::Admit { rationale })
+            }
+            c if c.eq_ignore_ascii_case("defer") => {
+                // `defer` owns blocked_by + retry_after_secs; reject the
+                // serialize_after-owned fields.
+                if after_goal_id_present || !overlap_files.is_empty() {
+                    return None;
+                }
+                Some(Self::Defer {
+                    blocked_by: sanitize_admission_list(blocked_by),
+                    rationale,
+                    retry_after_secs,
+                })
+            }
+            c if c.eq_ignore_ascii_case("serialize_after") => {
+                // `serialize_after` owns after_goal_id (required) + overlap_files;
+                // reject the defer-owned fields.
+                if !blocked_by.is_empty() || retry_after_secs.is_some() {
+                    return None;
+                }
+                let after_goal_id = sanitize::sanitize_context_var(
+                    after_goal_id.trim(),
+                    ADMISSION_RATIONALE_MAX_CHARS,
+                );
+                if after_goal_id.is_empty() {
+                    return None;
+                }
+                Some(Self::SerializeAfter {
+                    after_goal_id,
+                    overlap_files: sanitize_admission_list(overlap_files),
+                    rationale,
+                })
+            }
+            _ => None,
         }
     }
 }
@@ -896,6 +995,273 @@ impl ResourceAdmissionDecision {
             | Self::ReclaimFirst { rationale } => rationale,
         }
     }
+
+    /// Construct a validated [`ResourceAdmissionDecision`] from a `choice` tag +
+    /// `rationale` — the SINGLE shared closed-enum validation chokepoint reused
+    /// by the `simard ooda record-resource-admission` CLI writer AND by
+    /// [`read_verified_resource_admission`], so writer and reader can never
+    /// drift. `choice` is matched case-insensitively (unknown ⇒ `None`);
+    /// `rationale` is sanitized and MUST be non-empty afterwards (fail CLOSED).
+    /// All three variants carry ONLY `rationale`, so there are no variant-owned
+    /// extra fields to police here.
+    pub fn from_choice_fields(choice: &str, rationale: &str) -> Option<Self> {
+        let rationale =
+            sanitize::sanitize_context_var(rationale.trim(), ADMISSION_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("admit") => Some(Self::Admit { rationale }),
+            c if c.eq_ignore_ascii_case("defer") => Some(Self::Defer { rationale }),
+            c if c.eq_ignore_ascii_case("reclaim_first") => Some(Self::ReclaimFirst { rationale }),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed engineer- + resource-ADMISSION decision RECORDS + fail-CLOSED readers
+// (Group B of epic #4719, issue #4906).
+//
+// Replace the forbidden "recipe prints JSON → Rust scrapes prose → Rust acts"
+// pattern on the two admission seams. The `simard ooda record-admission` /
+// `record-resource-admission` tools write exactly one typed record;
+// `RecipeBrain` reads it back with `read_verified_admission` /
+// `read_verified_resource_admission` instead of scraping stdout. EVERY failure
+// mode is an `Err`; HOW that `Err` is surfaced is UNCHANGED by this rework — the
+// engineer-admission act-site turns it into a loud `Admit` (fail-OPEN), the
+// resource-admission act-site into a benign `Defer` (fail-CLOSED).
+// ---------------------------------------------------------------------------
+
+/// Pinned on-disk schema string for an [`AdmissionDecisionRecord`]. The reader
+/// rejects any other value, so a future `…v2` writer can never be honored by a
+/// `…v1` reader (bumping this is a hard, coordinated change).
+pub const ADMISSION_SCHEMA: &str = "simard.ooda.admission.v1";
+
+/// Pinned on-disk schema string for a [`ResourceAdmissionDecisionRecord`].
+pub const RESOURCE_ADMISSION_SCHEMA: &str = "simard.ooda.resource_admission.v1";
+
+/// One typed, on-disk engineer-admission verdict, written by the
+/// `simard ooda record-admission` tool and read by [`RecipeBrain`] via
+/// [`read_verified_admission`]. NEVER scraped from agent prose.
+///
+/// The `choice` discriminator + its per-variant fields come from
+/// [`EngineerAdmissionDecision`]'s existing `#[serde(tag = "choice",
+/// rename_all = "snake_case")]` representation, flattened into the record — so
+/// the tool and the enum can never disagree on the wire shape.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdmissionDecisionRecord {
+    /// Schema pin. Must equal [`ADMISSION_SCHEMA`].
+    pub schema: String,
+    /// The candidate goal this verdict is for. Re-verified against the live ctx.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified against the live ctx.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + fields).
+    #[serde(flatten)]
+    pub decision: EngineerAdmissionDecision,
+}
+
+/// One typed, on-disk resource-admission verdict, written by the
+/// `simard ooda record-resource-admission` tool and read by [`RecipeBrain`] via
+/// [`read_verified_resource_admission`]. NEVER scraped from agent prose.
+///
+/// Derives `PartialEq` only (no `Eq`, no `Default`): [`ResourceAdmissionDecision`]
+/// deliberately carries no `Eq`/`Default` (the fail-closed `Defer` is chosen in
+/// the seam, never by defaulting the enum), so this record mirrors that.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceAdmissionDecisionRecord {
+    /// Schema pin. Must equal [`RESOURCE_ADMISSION_SCHEMA`].
+    pub schema: String,
+    /// The candidate goal this verdict is for. Re-verified against the live ctx.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified against the live ctx.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + `rationale`).
+    #[serde(flatten)]
+    pub decision: ResourceAdmissionDecision,
+}
+
+/// Read and FULLY verify an engineer-admission record, returning the validated
+/// closed-enum decision.
+///
+/// Returns `Ok(EngineerAdmissionDecision)` ONLY when the record exists,
+/// deserializes into an [`AdmissionDecisionRecord`], pins [`ADMISSION_SCHEMA`],
+/// its embedded `goal_id`/`cycle_number` match the live ctx, and its fields
+/// re-validate through [`EngineerAdmissionDecision::from_choice_fields`]. EVERY
+/// other outcome is an `Err` — the caller (`decide_engineer_admission`) surfaces
+/// it on the EXISTING Rail-2 path (a loud `Admit`, fail-OPEN). This reader never
+/// picks a default; it only reports Ok/Err.
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R4 unknown choice or non-owned field, R5
+/// missing/empty(-after-sanitize) rationale, R6 goal_id mismatch, R7
+/// cycle_number mismatch. R8 (all pass) ⇒ `Ok`.
+pub fn read_verified_admission(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<EngineerAdmissionDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-engineer-admission-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED (surfaced as a loud Admit).
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "engineer-admission record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2/R4(unknown-choice)/R5(missing) — malformed JSON, an unknown `choice`,
+    // or a missing required field all fail deserialization into the closed type.
+    let record: AdmissionDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "engineer-admission record did not deserialize (malformed/unknown-choice/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != ADMISSION_SCHEMA {
+        return Err(fail(format!(
+            "engineer-admission record schema {:?} != expected {ADMISSION_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — goal identity (candidate goal).
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "engineer-admission record goal_id {:?} != live ctx {:?} (stale/other-goal; fail-CLOSED)",
+            record.goal_id, goal_id
+        )));
+    }
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "engineer-admission record cycle_number {} != live ctx {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R4(field-ownership)/R5(empty-after-sanitize) + defense-in-depth — extract
+    // the variant-owned fields and re-validate + re-sanitize through the SAME
+    // closed-enum chokepoint the writer uses, independently of the tool.
+    let (blocked_by, after_goal_id, overlap_files, retry_after_secs): (
+        &[String],
+        &str,
+        &[String],
+        Option<u64>,
+    ) = match &record.decision {
+        EngineerAdmissionDecision::Admit { .. } => (&[], "", &[], None),
+        EngineerAdmissionDecision::Defer {
+            blocked_by,
+            retry_after_secs,
+            ..
+        } => (blocked_by.as_slice(), "", &[], *retry_after_secs),
+        EngineerAdmissionDecision::SerializeAfter {
+            after_goal_id,
+            overlap_files,
+            ..
+        } => (&[], after_goal_id.as_str(), overlap_files.as_slice(), None),
+    };
+    EngineerAdmissionDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+        blocked_by,
+        after_goal_id,
+        overlap_files,
+        retry_after_secs,
+    )
+    .ok_or_else(|| {
+        fail(
+            "engineer-admission record failed chokepoint re-validation (empty rationale after \
+             sanitize / field-ownership violation; fail-CLOSED)"
+                .to_string(),
+        )
+    })
+}
+
+/// Read and FULLY verify a resource-admission record, returning the validated
+/// closed-enum decision.
+///
+/// Returns `Ok(ResourceAdmissionDecision)` ONLY when the record exists,
+/// deserializes into a [`ResourceAdmissionDecisionRecord`], pins
+/// [`RESOURCE_ADMISSION_SCHEMA`], its embedded `goal_id`/`cycle_number` match the
+/// live ctx, and its rationale re-validates through
+/// [`ResourceAdmissionDecision::from_choice_fields`]. EVERY other outcome is an
+/// `Err` — the caller (`decide_resource_admission`) surfaces it on the EXISTING
+/// fail-closed path (a benign `Defer`). This reader never picks a default.
+///
+/// Same R1–R8 matrix as [`read_verified_admission`]; the resource variants own
+/// no extra fields, so R4's field-ownership arm reduces to the unknown-choice
+/// check.
+pub fn read_verified_resource_admission(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<ResourceAdmissionDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-resource-admission-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED (surfaced as a benign Defer).
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "resource-admission record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2/R4/R5(missing) — malformed JSON, an unknown `choice`, or a missing
+    // rationale field all fail deserialization into the closed type.
+    let record: ResourceAdmissionDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "resource-admission record did not deserialize (malformed/unknown-choice/missing-rationale): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin (also rejects an engineer-admission record).
+    if record.schema != RESOURCE_ADMISSION_SCHEMA {
+        return Err(fail(format!(
+            "resource-admission record schema {:?} != expected {RESOURCE_ADMISSION_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — goal identity.
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "resource-admission record goal_id {:?} != live ctx {:?} (stale/other-goal; fail-CLOSED)",
+            record.goal_id, goal_id
+        )));
+    }
+    // R7 — cycle identity.
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "resource-admission record cycle_number {} != live ctx {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R5(empty-after-sanitize) + defense-in-depth — re-validate + re-sanitize
+    // through the SAME closed-enum chokepoint the writer uses.
+    ResourceAdmissionDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+    )
+    .ok_or_else(|| {
+        fail(
+            "resource-admission record failed chokepoint re-validation (empty rationale after \
+             sanitize; fail-CLOSED)"
+                .to_string(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------

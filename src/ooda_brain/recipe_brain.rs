@@ -1206,42 +1206,63 @@ impl OodaBrain for RecipeBrain {
         super::read_verified(&record_path, &ctx.goal_id, ctx.cycle_number)
     }
 
-    /// Dependency/overlap-aware engineer admission (issue #2690). Resolves the
-    /// admission recipe as a sibling of this act-phase brain's recipe, renders
-    /// the overlap context, runs the recipe, and parses the
-    /// `{"decision", "rationale", "blocked_by"?, "after_goal_id"?, "overlap_files"?}`
-    /// envelope into an [`EngineerAdmissionDecision`].
+    /// Dependency/overlap-aware engineer admission (issue #2690; Group B rework,
+    /// #4906). The reasoner ACTS by calling the gated `simard ooda
+    /// record-admission` tool, which validates the closed
+    /// [`EngineerAdmissionDecision`] enum + per-variant field ownership and
+    /// atomically writes one typed [`AdmissionDecisionRecord`](super::AdmissionDecisionRecord).
+    /// This method runs that recipe over a fresh, UNIQUE per-call temp dir, then
+    /// reads the typed record back with
+    /// [`read_verified_admission`](super::read_verified_admission) — it NEVER
+    /// scrapes the agent's prose stdout.
     ///
     /// FAIL-**OPEN** polarity (opposite the outcome verifier): a recipe
-    /// invocation failure OR an unparseable decision surfaces as an `Err`, which
-    /// the spawn seam's Rail-2 turns into a loud `Admit`. Scheduling is an
-    /// optimization — a broken reasoner must never stall a spawn. The one hard
-    /// guarantee that survives is the seam's deterministic exact-path rail.
+    /// invocation failure OR any read-verification failure (absent / malformed /
+    /// wrong-schema / out-of-enum / field-ownership / empty-rationale / goal- or
+    /// cycle-mismatch) surfaces as an `Err`, which the spawn seam's Rail-2 turns
+    /// into a loud `Admit`. Scheduling is an optimization — a broken reasoner
+    /// must never stall a spawn. The one hard guarantee that survives is the
+    /// seam's deterministic exact-path rail.
     fn decide_engineer_admission(
         &self,
         ctx: &EngineerAdmissionCtx,
     ) -> SimardResult<EngineerAdmissionDecision> {
-        let raw = self.invoke_admission_raw(ctx)?;
-        parse_admission_decision(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
-            base_type: ADMISSION_ADAPTER_TAG.to_string(),
-            reason: format!(
-                "engineer-admission recipe output had no parseable decision envelope: {}",
-                truncate(&raw, MAX_RATIONALE_CHARS)
-            ),
-        })
+        let tempdir = tempfile::Builder::new()
+            .prefix("simard-ooda-admission-")
+            .tempdir()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!("could not allocate a per-call admission temp dir: {e}"),
+            })?;
+        let record_path = tempdir.path().join("admission.json");
+
+        // The agent records its verdict by calling `simard ooda record-admission`
+        // (writing `record_path`); its stdout is IGNORED.
+        self.run_admission_recipe(ctx, &record_path)?;
+
+        // Read the TYPED record — never scrape prose. Every failure mode is an
+        // Err → the seam's Rail-2 fail-OPEN Admit. `cycle_number` binds to the
+        // REASONER_RECORD_CYCLE sentinel (the fresh per-call temp dir already
+        // defeats cross-cycle replay); `goal_id` binds to the candidate id.
+        super::read_verified_admission(&record_path, &ctx.candidate.id, REASONER_RECORD_CYCLE)
     }
 
-    /// Resource-aware engineer admission (issue #2706). Resolves the resource
-    /// recipe as a sibling of this act-phase brain's recipe, renders the resource
-    /// picture, runs the recipe, and parses the `{"decision", "rationale"}`
-    /// envelope into a [`ResourceAdmissionDecision`].
+    /// Resource-aware engineer admission (issue #2706; Group B rework, #4906).
+    /// The reasoner ACTS by calling the gated `simard ooda
+    /// record-resource-admission` tool, which validates the closed
+    /// [`ResourceAdmissionDecision`] enum and atomically writes one typed
+    /// [`ResourceAdmissionDecisionRecord`](super::ResourceAdmissionDecisionRecord).
+    /// This method runs that recipe over a fresh, UNIQUE per-call temp dir, then
+    /// reads the typed record back with
+    /// [`read_verified_resource_admission`](super::read_verified_resource_admission)
+    /// — it NEVER scrapes the agent's prose stdout.
     ///
     /// FAIL-**CLOSED** polarity (unlike the overlap gate, which fails open): an
-    /// invocation failure OR an unparseable decision surfaces as an `Err`, which
-    /// the spawn seam turns into a benign `Defer` (skip this cycle, retried next
-    /// round) — never an `Admit`. On a resource gate the conservative failure is
-    /// to NOT add disk load when the reasoning that was supposed to run broke.
-    /// The one hard guarantee that survives regardless is the seam's
+    /// invocation failure OR any read-verification failure surfaces as an `Err`,
+    /// which the spawn seam turns into a benign `Defer` (skip this cycle, retried
+    /// next round) — never an `Admit`. On a resource gate the conservative
+    /// failure is to NOT add disk load when the reasoning that was supposed to
+    /// run broke. The one hard guarantee that survives regardless is the seam's
     /// deterministic disk-ceiling rail (the ENOSPC guard); the kill-switch
     /// (`SIMARD_RESOURCE_ADMISSION=off`) is the escape hatch if the recipe is
     /// persistently broken.
@@ -1249,16 +1270,18 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &ResourceAdmissionCtx,
     ) -> SimardResult<ResourceAdmissionDecision> {
-        let raw = self.invoke_resource_admission_raw(ctx)?;
-        parse_resource_admission_decision(&raw).ok_or_else(|| {
-            SimardError::AdapterInvocationFailed {
+        let tempdir = tempfile::Builder::new()
+            .prefix("simard-ooda-resource-admission-")
+            .tempdir()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!(
-                    "resource-admission recipe output had no parseable decision envelope: {}",
-                    truncate(&raw, MAX_RATIONALE_CHARS)
-                ),
-            }
-        })
+                reason: format!("could not allocate a per-call resource-admission temp dir: {e}"),
+            })?;
+        let record_path = tempdir.path().join("resource_admission.json");
+
+        self.run_resource_admission_recipe(ctx, &record_path)?;
+
+        super::read_verified_resource_admission(&record_path, &ctx.goal_id, REASONER_RECORD_CYCLE)
     }
 
     /// Semantic dedup + enhance for one candidate creative idea (issue #2925).
@@ -1513,12 +1536,22 @@ impl RecipeBrain {
         // verifies `record_path`.
         Ok(())
     }
-    /// (the act-phase [`RecipeBrain`] holds the lifecycle recipe; the admission
-    /// recipe lives beside it in the same `recipes/` dir, whether that resolved
-    /// to the hot-reload `~/.simard/...` copy or the in-tree copy). Every ctx
+    /// Run the engineer-admission recipe once over a fresh temp dir, threading
+    /// the typed-record seam context vars (`record_path`, `simard_bin`,
+    /// `goal_id`, `cycle_number`) plus the existing overlap render vars
+    /// (candidate goal/title/scope, the live-engineer block, repo root). The
+    /// admission recipe is resolved as a sibling of this act-phase brain's
+    /// lifecycle recipe (whether that resolved to the hot-reload `~/.simard/...`
+    /// copy or the in-tree copy). The agent records its verdict by calling
+    /// `simard ooda record-admission`; stdout is intentionally IGNORED. Every ctx
     /// field is routed through [`sanitize_context_var`] before it becomes a `-c`
-    /// arg. Errors surface as `Err` (the seam fails OPEN).
-    fn invoke_admission_raw(&self, ctx: &EngineerAdmissionCtx) -> SimardResult<String> {
+    /// arg. Genuine recipe-runner failures propagate as `Err` (the seam fails
+    /// OPEN).
+    fn run_admission_recipe(
+        &self,
+        ctx: &EngineerAdmissionCtx,
+        record_path: &Path,
+    ) -> SimardResult<()> {
         let admission_recipe = self
             .recipe_path
             .parent()
@@ -1532,6 +1565,17 @@ impl RecipeBrain {
                 ),
             })?;
 
+        // Resolve THIS binary so the recipe sandbox can invoke the
+        // `record-admission` tool deterministically — resolved the same way
+        // `recipe-runner-rs` is (via the running executable), never a bare name
+        // that depends on PATH. If it cannot be resolved, no record is written
+        // and the reader fails CLOSED at R1 (surfaced as a loud Admit).
+        let simard_bin =
+            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!("could not resolve the running simard binary: {e}"),
+            })?;
+
         let scope = ctx.candidate.predicted_scope.join(", ");
         let live = render_admission_engineers(&ctx.live_engineers);
 
@@ -1540,6 +1584,21 @@ impl RecipeBrain {
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            // The typed-admission seam: where to write the record and which
+            // binary records it. Paths are trusted (a daemon-owned per-call temp
+            // dir + the resolved current_exe), so they are passed verbatim —
+            // never sanitized (which would fold/truncate a path).
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                sanitize_context_var(&ctx.candidate.id, 500)
+            ))
+            .arg("-c")
+            .arg(format!("cycle_number={REASONER_RECORD_CYCLE}"))
             .arg("-c")
             .arg(format!(
                 "candidate_goal_id={}",
@@ -1589,15 +1648,25 @@ impl RecipeBrain {
             });
         }
 
-        extract_recipe_decision_output(&output.stdout, ADMISSION_ADAPTER_TAG)
+        // The verdict lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored; the caller reads and
+        // verifies `record_path`.
+        Ok(())
     }
 
-    /// Invoke the resource-admission recipe once and return the raw decision
-    /// text (issue #2706). The recipe is resolved as a **sibling** of this
-    /// brain's own recipe, like the overlap recipe. Every ctx field is rendered
-    /// to a bounded, sanitized `-c` arg; any unmeasured `Option` renders as the
-    /// literal `unknown`. Errors surface as `Err` (the seam fails CLOSED).
-    fn invoke_resource_admission_raw(&self, ctx: &ResourceAdmissionCtx) -> SimardResult<String> {
+    /// Run the resource-admission recipe once over a fresh temp dir, threading
+    /// the typed-record seam context vars (`record_path`, `simard_bin`,
+    /// `goal_id`, `cycle_number`) plus the existing resource render vars (disk /
+    /// build-cache / worktree / load figures; any unmeasured `Option` renders as
+    /// the literal `unknown`). The recipe is resolved as a sibling of this
+    /// brain's own lifecycle recipe. The agent records its verdict by calling
+    /// `simard ooda record-resource-admission`; stdout is intentionally IGNORED.
+    /// Genuine recipe-runner failures propagate as `Err` (the seam fails CLOSED).
+    fn run_resource_admission_recipe(
+        &self,
+        ctx: &ResourceAdmissionCtx,
+        record_path: &Path,
+    ) -> SimardResult<()> {
         let recipe = self
             .recipe_path
             .parent()
@@ -1609,6 +1678,12 @@ impl RecipeBrain {
                     "resource-admission recipe '{RESOURCE_ADMISSION_RECIPE_FILENAME}' not found beside {}",
                     self.recipe_path.display()
                 ),
+            })?;
+
+        let simard_bin =
+            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
+                reason: format!("could not resolve the running simard binary: {e}"),
             })?;
 
         let opt = |v: Option<String>| v.unwrap_or_else(|| "unknown".to_string());
@@ -1630,6 +1705,12 @@ impl RecipeBrain {
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
+            .arg("-c")
+            .arg(format!("cycle_number={REASONER_RECORD_CYCLE}"))
             .arg("-c")
             .arg(format!(
                 "goal_id={}",
@@ -1703,7 +1784,10 @@ impl RecipeBrain {
             });
         }
 
-        extract_recipe_decision_output(&output.stdout, RESOURCE_ADMISSION_ADAPTER_TAG)
+        // The verdict lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored; the caller reads and
+        // verifies `record_path`.
+        Ok(())
     }
 
     /// Invoke the creative-idea dedup recipe once and return the raw decision
@@ -1855,124 +1939,6 @@ fn render_admission_engineers(engineers: &[EngineerAdmissionSignalView]) -> Stri
 /// A local view keeps `render_admission_engineers` decoupled from the full ctx
 /// type and trivially unit-testable.
 type EngineerAdmissionSignalView = super::LiveEngineerSignal;
-
-/// A structured engineer-admission decision envelope. Unlike the shared
-/// [`DecisionEnvelope`], this reads the load-bearing `blocked_by` /
-/// `after_goal_id` / `overlap_files` / `retry_after_secs` fields explicitly so a
-/// `defer` / `serialize_after` decision carries its target (the base shim would
-/// default every struct-variant field to empty — see #2690 API reference).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct AdmissionEnvelope {
-    decision: String,
-    #[serde(default)]
-    rationale: String,
-    #[serde(default)]
-    blocked_by: Vec<String>,
-    #[serde(default)]
-    after_goal_id: String,
-    #[serde(default)]
-    overlap_files: Vec<String>,
-    #[serde(default)]
-    retry_after_secs: Option<u64>,
-}
-
-/// Parse the admission recipe output into an [`EngineerAdmissionDecision`], or
-/// `None` when no balanced JSON object with a known `decision` variant is
-/// present (the caller surfaces that as a fail-open `Err`). Routes through the
-/// shared sanitizing chokepoint so a banner-polluted envelope still parses.
-fn parse_admission_decision(text: &str) -> Option<EngineerAdmissionDecision> {
-    let env: AdmissionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    if env.decision.trim().is_empty() {
-        return None;
-    }
-    let rationale = {
-        let r = env.rationale.trim();
-        if r.is_empty() {
-            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
-        } else {
-            truncate(r, MAX_RATIONALE_CHARS)
-        }
-    };
-    admission_decision_from_variant(&env, rationale)
-}
-
-/// Map an admission decision variant token (case-insensitive) to an
-/// [`EngineerAdmissionDecision`]; `None` for an unknown token. `blocked_by` /
-/// `after_goal_id` / `overlap_files` / `retry_after_secs` are carried only by
-/// the variants that own them.
-fn admission_decision_from_variant(
-    env: &AdmissionEnvelope,
-    rationale: String,
-) -> Option<EngineerAdmissionDecision> {
-    let w = env.decision.trim();
-    if w.eq_ignore_ascii_case("admit") {
-        Some(EngineerAdmissionDecision::Admit { rationale })
-    } else if w.eq_ignore_ascii_case("defer") {
-        Some(EngineerAdmissionDecision::Defer {
-            blocked_by: env.blocked_by.clone(),
-            rationale,
-            retry_after_secs: env.retry_after_secs,
-        })
-    } else if w.eq_ignore_ascii_case("serialize_after") {
-        Some(EngineerAdmissionDecision::SerializeAfter {
-            after_goal_id: env.after_goal_id.clone(),
-            overlap_files: env.overlap_files.clone(),
-            rationale,
-        })
-    } else {
-        None
-    }
-}
-
-/// A structured resource-admission decision envelope (issue #2706). Reads the
-/// `decision` token + `rationale`. There is intentionally no `retry_after_secs`:
-/// a resource `Defer` is retried on the natural next OODA round.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct ResourceAdmissionEnvelope {
-    decision: String,
-    #[serde(default)]
-    rationale: String,
-}
-
-/// Parse the resource-admission recipe output into a
-/// [`ResourceAdmissionDecision`], or `None` when no balanced JSON object with a
-/// known `decision` variant is present (the caller surfaces that as an `Err`,
-/// which the seam fails CLOSED to a benign `Defer`). Routes through the shared
-/// sanitizing chokepoint so a banner-polluted envelope still parses.
-fn parse_resource_admission_decision(text: &str) -> Option<ResourceAdmissionDecision> {
-    let env: ResourceAdmissionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    if env.decision.trim().is_empty() {
-        return None;
-    }
-    let rationale = {
-        let r = env.rationale.trim();
-        if r.is_empty() {
-            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
-        } else {
-            truncate(r, MAX_RATIONALE_CHARS)
-        }
-    };
-    resource_admission_decision_from_variant(&env, rationale)
-}
-
-/// Map a resource-admission decision variant token (case-insensitive) to a
-/// [`ResourceAdmissionDecision`]; `None` for an unknown token so the seam fails
-/// CLOSED (to a benign `Defer`) rather than defaulting on the brain's behalf.
-fn resource_admission_decision_from_variant(
-    env: &ResourceAdmissionEnvelope,
-    rationale: String,
-) -> Option<ResourceAdmissionDecision> {
-    let w = env.decision.trim();
-    if w.eq_ignore_ascii_case("admit") {
-        Some(ResourceAdmissionDecision::Admit { rationale })
-    } else if w.eq_ignore_ascii_case("defer") {
-        Some(ResourceAdmissionDecision::Defer { rationale })
-    } else if w.eq_ignore_ascii_case("reclaim_first") {
-        Some(ResourceAdmissionDecision::ReclaimFirst { rationale })
-    } else {
-        None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Creative-ideas semantic dedup + consolidation envelopes (issue #2925)
@@ -2867,93 +2833,6 @@ mod tests {
     }
 
     // ===================================================================
-    // Engineer-admission (issue #2690) — envelope parser + fail-open error
-    // ===================================================================
-
-    #[test]
-    fn parse_admission_admit_envelope() {
-        let d =
-            parse_admission_decision(r#"{"decision": "admit", "rationale": "independent files"}"#)
-                .expect("parses");
-        assert!(matches!(d, EngineerAdmissionDecision::Admit { .. }));
-        assert_eq!(d.rationale(), "independent files");
-    }
-
-    #[test]
-    fn parse_admission_defer_carries_blocked_by() {
-        let d = parse_admission_decision(
-            r#"{"decision": "defer", "blocked_by": ["fix-goals-status"], "rationale": "shared goals_status.rs"}"#,
-        )
-        .expect("parses");
-        match d {
-            EngineerAdmissionDecision::Defer {
-                blocked_by,
-                retry_after_secs,
-                ..
-            } => {
-                assert_eq!(blocked_by, vec!["fix-goals-status".to_string()]);
-                assert!(retry_after_secs.is_none());
-            }
-            other => panic!("expected Defer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_admission_serialize_after_carries_target_and_files() {
-        let d = parse_admission_decision(
-            r#"{"decision": "serialize_after", "after_goal_id": "g1", "overlap_files": ["src/a.rs"], "rationale": "rebase first"}"#,
-        )
-        .expect("parses");
-        match d {
-            EngineerAdmissionDecision::SerializeAfter {
-                after_goal_id,
-                overlap_files,
-                ..
-            } => {
-                assert_eq!(after_goal_id, "g1");
-                assert_eq!(overlap_files, vec!["src/a.rs".to_string()]);
-            }
-            other => panic!("expected SerializeAfter, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_admission_unknown_variant_is_none() {
-        assert!(parse_admission_decision(r#"{"decision": "nope"}"#).is_none());
-        assert!(parse_admission_decision("not json at all").is_none());
-        assert!(parse_admission_decision(r#"{"decision": ""}"#).is_none());
-    }
-
-    // ---- trailing-comma recovery (reasoner reliability, issue #2658) -------
-
-    #[test]
-    fn parse_admission_recovers_trailing_comma_in_object() {
-        // A stray trailing comma before `}` is the most common LLM JSON defect.
-        // Before the shared `extract_and_parse_json` chokepoint applied the
-        // trailing-comma recovery view, this failed the strict parse and the
-        // reasoner silently dropped its whole admission decision (fail-open).
-        let d =
-            parse_admission_decision(r#"{"decision": "admit", "rationale": "independent files",}"#)
-                .expect("trailing comma before } must be recovered");
-        assert!(matches!(d, EngineerAdmissionDecision::Admit { .. }));
-        assert_eq!(d.rationale(), "independent files");
-    }
-
-    #[test]
-    fn parse_admission_recovers_trailing_comma_in_array_and_banner() {
-        // Trailing comma inside the `blocked_by` array AND a banner/log preamble
-        // the sanitizing extractor must strip first — the two defects compose.
-        let noisy = "Recipe: ooda-engineer-lifecycle SUCCESS (12.0s)\n2026-07-20T00:00:00.000000Z INFO decide\n{\"decision\": \"defer\", \"blocked_by\": [\"fix-goals-status\",], \"rationale\": \"shared file\",}";
-        let d =
-            parse_admission_decision(noisy).expect("banner + trailing commas must be recovered");
-        match d {
-            EngineerAdmissionDecision::Defer { blocked_by, .. } => {
-                assert_eq!(blocked_by, vec!["fix-goals-status".to_string()]);
-            }
-            other => panic!("expected Defer, got {other:?}"),
-        }
-    }
-
     #[test]
     fn parse_outcome_recovers_trailing_comma() {
         // The outcome seam fails NO-FALLBACK on a parse miss, so recovering a
@@ -2975,14 +2854,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_admission_still_rejects_non_comma_malformed_json() {
-        // Leniency must NOT widen beyond the trailing-comma defect: an unquoted
-        // key / missing value stays a parse miss (returns None, not a default).
-        assert!(parse_admission_decision(r#"{decision: "admit"}"#).is_none());
-        assert!(parse_admission_decision(r#"{"decision": }"#).is_none());
-    }
-
-    #[test]
     fn decide_engineer_admission_error_includes_adapter_tag() {
         // Recipe path with no sibling admission recipe ⇒ the resolve fails and
         // the error carries the admission adapter tag (the seam then fails open).
@@ -2998,57 +2869,6 @@ mod tests {
             msg.contains("recipe-engineer-admission-brain"),
             "error should contain the admission adapter tag; got: {msg}"
         );
-    }
-
-    // ── Resource-admission parsing (issue #2706) ───────────────────────────
-
-    #[test]
-    fn parse_resource_admission_admit_envelope() {
-        let d = parse_resource_admission_decision(
-            r#"{"decision": "admit", "rationale": "plenty of headroom"}"#,
-        )
-        .expect("parses");
-        assert!(matches!(d, ResourceAdmissionDecision::Admit { .. }));
-        assert_eq!(d.rationale(), "plenty of headroom");
-    }
-
-    #[test]
-    fn parse_resource_admission_defer_envelope() {
-        let d = parse_resource_admission_decision(
-            r#"{"decision": "defer", "rationale": "box saturated"}"#,
-        )
-        .expect("parses");
-        assert!(matches!(d, ResourceAdmissionDecision::Defer { .. }));
-        assert_eq!(d.rationale(), "box saturated");
-    }
-
-    #[test]
-    fn parse_resource_admission_reclaim_first() {
-        let d = parse_resource_admission_decision(
-            r#"{"decision": "reclaim_first", "rationale": "16 stale caches"}"#,
-        )
-        .expect("parses");
-        assert!(matches!(d, ResourceAdmissionDecision::ReclaimFirst { .. }));
-        assert_eq!(d.rationale(), "16 stale caches");
-    }
-
-    #[test]
-    fn parse_resource_admission_strips_banner_prose() {
-        // A banner-polluted envelope (leading prose + fenced block) still parses
-        // through the shared sanitizing chokepoint.
-        let d = parse_resource_admission_decision(
-            "some banner\n```json\n{\"decision\": \"admit\", \"rationale\": \"ok\"}\n```\n",
-        )
-        .expect("parses through banner");
-        assert!(matches!(d, ResourceAdmissionDecision::Admit { .. }));
-    }
-
-    #[test]
-    fn parse_resource_admission_unknown_variant_is_none() {
-        assert!(parse_resource_admission_decision(r#"{"decision": "serialize_after"}"#).is_none());
-        assert!(parse_resource_admission_decision(r#"{"decision": "nope"}"#).is_none());
-        assert!(parse_resource_admission_decision("not json at all").is_none());
-        assert!(parse_resource_admission_decision(r#"{"decision": ""}"#).is_none());
     }
 
     // --- creative-idea dedup envelope (issue #2925) ------------------------

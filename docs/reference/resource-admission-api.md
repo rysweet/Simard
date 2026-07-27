@@ -9,7 +9,7 @@ description: >
   SIMARD_DISK_ADMISSION_CEILING_PCT ceiling and SIMARD_RESOURCE_ADMISSION
   kill-switch, the reclaim invocation, the observability record and metric, and
   the hermetic test matrix.
-last_updated: 2026-07-07
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -17,6 +17,7 @@ status: implemented
 related:
   - ../concepts/resource-aware-engineer-admission.md
   - ./ooda-resource-admission-recipe.md
+  - ./ooda-record-admission-cli.md
   - ./adaptive-scaling-api.md
   - ./disk-health-api.md
   - ./engineer-admission-api.md
@@ -150,14 +151,23 @@ metric.
 
 ### Parsing contract (NO-FALLBACK)
 
-`RecipeBrain::decide_resource_admission` parses the recipe's JSON envelope. The
-parse is deliberately strict (matching `parse_admission_decision`):
+`RecipeBrain::decide_resource_admission` no longer parses a scraped stdout
+envelope. As of the Group B record-tool conversion
+([#4719](https://github.com/rysweet/Simard/issues/4719)) the recipe **calls the
+[`simard ooda record-resource-admission`](ooda-record-admission-cli.md) tool**,
+which validates `--choice` and `--rationale` through the **shared
+`ResourceAdmissionDecision::from_choice_fields` chokepoint** and writes a typed
+[`ResourceAdmissionDecisionRecord`](ooda-record-admission-cli.md#resourceadmissiondecisionrecord)
+(`schema = simard.ooda.resource_admission.v1`). The brain reads it with
+[`read_verified_resource_admission`](ooda-record-admission-cli.md#read_verified_resource_admission-the-fail-closed-reader):
 
-1. Extract the first fenced/bare JSON object and deserialize it.
-2. If that fails, accept a bare first-word decision token
-   (`admit` / `defer` / `reclaim_first`).
-3. Otherwise return `Err` — the shim does **not** invent a decision on the
-   brain's behalf. The seam turns that `Err` into a fail-closed `Defer`.
+1. Read the typed record and re-validate it through the same chokepoint the
+   writer used (closed enum `admit` / `defer` / `reclaim_first`; non-empty
+   sanitized `rationale`; schema + `goal_id` + `cycle_number` pins).
+2. If the record is absent, malformed, out-of-enum, or mismatched (R1–R7) return
+   `Err` — the brain does **not** invent a decision on the agent's behalf.
+3. The seam turns that `Err` into a **fail-closed `Defer`** (see
+   [The seam and the hard rail](#the-seam-and-the-hard-rail)).
 
 ## `OodaBrain::decide_resource_admission`
 
@@ -234,7 +244,7 @@ The decision-to-outcome mapping is the whole apply step:
 | `Admit` | **at/above ceiling** | `Defer` (hard-rail override) | benign skip | `true` |
 | `Defer` | — | `Defer` | benign skip | `true` |
 | `ReclaimFirst` | — | `ReclaimFirst` | `run_disk_health_check` best-effort, then benign skip | `true` |
-| `Err(_)` | — | `Defer` (fail-closed) + loud `error!` | benign skip | `true` |
+| `Err(_)` (record absent / malformed / mismatched, R1–R7) | — | `Defer` (fail-closed) + loud `error!` | benign skip | `true` |
 | unknown disk stat | rail inert | brain's `Admit`/`Defer`/`ReclaimFirst` honored | as above | as above |
 
 The caller mirrors the [overlap gate's](engineer-admission-api.md) two-arm match,
@@ -446,12 +456,19 @@ src/disk_pressure/
 └── mod.rs                # + configured_admission_ceiling_pct()
 src/ooda_brain/
 ├── mod.rs                # ResourceAdmissionCtx, ResourceAdmissionDecision,
+│                         #   ResourceAdmissionDecision::from_choice_fields (shared
+│                         #   chokepoint), ResourceAdmissionDecisionRecord +
+│                         #   RESOURCE_ADMISSION_SCHEMA, read_verified_resource_admission,
 │                         #   OodaBrain::decide_resource_admission (defaulted)
-├── recipe_brain.rs       # RecipeBrain::decide_resource_admission + parse
+├── recipe_brain.rs       # RecipeBrain::decide_resource_admission →
+│                         #   run_resource_admission_recipe (writes -c record_path/
+│                         #   simard_bin/goal_id/cycle_number) → read_verified_resource_admission
 ├── context.rs            # gather helpers reused (count_live_engineer_claims)
 └── judgment_record.rs    # BrainPhase::ResourceAdmission, from_resource_admission
+src/operator_cli/
+└── ooda.rs               # dispatch_record_resource_admission (the record-resource-admission verb)
 prompt_assets/simard/recipes/
-└── ooda-resource-admission.yaml   # the reasoning asset (hot-reloadable)
+└── ooda-resource-admission.yaml   # the reasoning asset (hot-reloadable; calls the tool)
 ```
 
 ## Test matrix
@@ -465,13 +482,14 @@ the tests prove the **seam** and the **hard rail**.
 | --- | --- |
 | `hard_rail_overrides_admit` | Stub brain returns `Admit`; fake disk at `95% ≥ 90` → outcome is `Defer` (hard-rail override), `success = true`, no spawn. |
 | `hard_rail_inert_below_ceiling` | Stub brain `Admit`; fake disk at `70%` → outcome is `Admit` (proceed). |
-| `brain_error_fails_closed` | Stub brain returns `Err` → outcome is `Defer`, loud error logged, `success = true`. Never `Admit`. |
+| `brain_error_fails_closed` | Stub brain returns `Err` (e.g. an absent/invalid record) → outcome is `Defer`, loud error logged, `success = true`. Never `Admit`. |
 | `defer_is_benign` | Stub brain `Defer` → `success = true`; a separate cycle-loop test confirms `goal_failure_counts` is **not** incremented and the scaler is **not** signalled. |
 | `reclaim_first_invokes_reclaim_then_defers` | Stub brain `ReclaimFirst` → reclaim hook invoked once, then `Defer`, `success = true`. Reclaim error → still `Defer`. |
 | `unknown_disk_admits_on_reasoning` | Fake provider returns `total = 0` → rail inert; brain `Admit` honored. |
 | `ceiling_env_parse_and_clamp` | `configured_admission_ceiling_pct()` parses valid, clamps `0`/`100`, defaults on garbage. |
 | `default_brain_admits` | The defaulted trait method returns `Admit`; hard rail still fires at the ceiling. |
 | `kill_switch_off_skips_reasoning_keeps_rail` | `SIMARD_RESOURCE_ADMISSION=off` → no brain call, but disk at `95%` still `Defer`s via the rail. |
+| `record_roundtrip_and_fail_closed_read` | Each `ResourceAdmissionDecision` round-trips through `record-resource-admission`; the R1–R7 matrix for `read_verified_resource_admission` (see [the CLI reference](ooda-record-admission-cli.md#regression-tests)) each yields `Err` → the seam's fail-closed `Defer`. |
 
 ## See also
 
@@ -482,3 +500,4 @@ the tests prove the **seam** and the **hard rail**.
 - [Adaptive scaling API](adaptive-scaling-api.md) — the AIMD count control this augments.
 - [Disk health API](disk-health-api.md) — the reclaim capability and `disk_pressure` plumbing this reuses.
 - [Engineer-admission API](engineer-admission-api.md) — the sibling overlap gate at the same seam.
+- [`simard ooda record-resource-admission` (typed admission tool)](ooda-record-admission-cli.md) — the tool the recipe calls and the fail-closed record reader.
