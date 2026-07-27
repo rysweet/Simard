@@ -229,24 +229,37 @@ fn run_gate(binary: &Path, gate: RelaunchGate, config: &RelaunchConfig) -> GateR
 /// Argument vector the RpcHealth canary gate runs against the **candidate**
 /// binary to genuinely dial the running memory daemon.
 ///
-/// `simard memory stats` routes through `dispatch_operator_cli` →
-/// `dispatch_memory_command` → `run_stats` → `open_reader_client`. When the live
-/// daemon's socket is present (the self-deploy scenario: the current daemon is
-/// running while the canary is verified), `open_reader_client` performs a real
-/// stats **RPC round-trip** over that socket. Crucially, a socket that is
-/// present but unconnectable **fails closed** (`SimardError::RpcSpawnFailed`,
-/// bug #2896) → non-zero exit → this gate reddens — the exact reachability
-/// signal the gate must assert.
+/// `simard memory ping` routes through `dispatch_operator_cli` →
+/// `dispatch_memory_command` → `run_ping` → `RemoteCognitiveMemory::connect`.
+/// When the live daemon's socket is present (the self-deploy scenario: the
+/// current daemon is running while the canary is verified), `connect` performs a
+/// real lock-free `Ping`/`Pong` **RPC round-trip** over that socket. Crucially,
+/// a socket that is present but unconnectable **fails closed**
+/// (`SimardError::RpcSpawnFailed`, bug #2896) → non-zero exit → this gate
+/// reddens — the exact reachability signal the gate must assert.
+///
+/// Why `memory ping` and not `memory stats` (issue #2896/#4639): `memory stats`
+/// dials the daemon but then does a full-graph `build_report` scan; on the large
+/// production cognitive store (~30.8k nodes) that round-trip does not return
+/// within `config.health_timeout` (30s), so `ProbeOutcome::TimedOut` reddened
+/// EVERY self-deploy and wedged the daemon at 0.38.0. `memory ping` reuses the
+/// existing O(1), lock-free `Ping`/`Pong` handshake (see
+/// `memory_ipc::server` — `Ping` is answered without touching the store lock or
+/// scanning the graph), so the probe returns promptly against a healthy live
+/// daemon while preserving the same fail-closed reachability guarantees.
 ///
 /// Why not the previous `["probe", "rpc", "--timeout", N]`: `probe` is **not a
 /// dispatched subcommand** (`dispatch_operator_cli`'s default arm returns
 /// `unsupported command 'probe'`), so the old gate never dialed anything — it
 /// errored on an unknown subcommand for *every* candidate regardless of RPC
-/// health. `memory stats` is read-only, so unlike `memory remember` (a write
-/// that can pollute/quarantine the store) it verifies reachability without any
-/// side effect on the live store. The R5 unit test pins that this argv resolves
-/// to a dispatched subcommand and is not the `unsupported command` regression.
-const RPC_HEALTH_PROBE_ARGS: &[&str] = &["memory", "stats"];
+/// health. `memory ping` is read-only and side-effect free, so unlike `memory
+/// remember` (a write that can pollute/quarantine the store) it verifies
+/// reachability without any side effect on the live store. It also NEVER falls
+/// back to a tier-2 on-disk open (unlike `memory stats` via `open_reader_client`),
+/// so it cannot green a dead daemon. The R5 unit test pins that this argv
+/// resolves to a dispatched subcommand and is not the `unsupported command`
+/// regression, greens against a live daemon, and fails closed with none present.
+const RPC_HEALTH_PROBE_ARGS: &[&str] = &["memory", "ping"];
 
 fn run_smoke_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
     let mut cmd = scrubbed_command(binary, config);
@@ -609,19 +622,21 @@ fn probe_socket_path(config: &RelaunchConfig) -> std::path::PathBuf {
 
 /// Verify the candidate can reach the running memory daemon over RPC.
 ///
-/// Runs `simard memory stats` (see [`RPC_HEALTH_PROBE_ARGS`]) against the
+/// Runs `simard memory ping` (see [`RPC_HEALTH_PROBE_ARGS`]) against the
 /// **candidate** binary under the scrubbed canary env, which re-injects the
-/// allow-listed `SIMARD_STATE_ROOT` so `memory stats` resolves the SAME state
+/// allow-listed `SIMARD_STATE_ROOT` so `memory ping` resolves the SAME state
 /// root — and therefore the SAME daemon socket — as the live daemon. A present
-/// socket makes `open_reader_client` perform a real stats RPC round-trip that
-/// fails closed if the socket is unconnectable (#2896).
+/// socket makes `RemoteCognitiveMemory::connect` perform a real lock-free
+/// `Ping`/`Pong` RPC round-trip that fails closed if the socket is unconnectable
+/// (#2896). The round-trip is O(1) and never scans the graph, so it returns far
+/// inside `health_timeout` even on a large store (the #2896/#4639 fix).
 ///
-/// LIVENESS PRE-FLIGHT (#4639 review F2): `memory stats` falls through to a
-/// tier-2 on-disk store when the socket is **absent**, so it would exit 0 and
-/// GREEN this gate without ever proving the daemon is reachable — defeating the
-/// gate's entire purpose. Require the socket the candidate will dial to be
-/// present before probing; a genuinely absent daemon reddens here. A socket that
-/// is present but unconnectable still reaches the probe and reddens via #2896.
+/// LIVENESS PRE-FLIGHT (#4639 review F2): require the socket the candidate will
+/// dial to be present before probing, so a genuinely absent daemon reddens here
+/// (defense-in-depth alongside `connect`'s own absent-socket check). A socket
+/// that is present but unconnectable still reaches the probe and reddens via
+/// #2896. Unlike the old `memory stats` probe, `memory ping` never falls back to
+/// a tier-2 on-disk open, so it cannot green a dead daemon.
 ///
 /// FAIL CLOSED: an absent socket, a non-zero exit, a spawn error, or exhausting
 /// `config.health_timeout` all yield `passed: false`. Only a clean exit (a
@@ -660,7 +675,7 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
         ProbeOutcome::Exited { status, .. } if status.success() => GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: true,
-            detail: "rpc health check passed (memory stats round-trip)".to_string(),
+            detail: "rpc health check passed (memory ping round-trip)".to_string(),
         },
         ProbeOutcome::Exited { status, stderr } => GateResult {
             gate: RelaunchGate::RpcHealth,
@@ -677,7 +692,7 @@ fn run_rpc_health_gate(binary: &Path, config: &RelaunchConfig) -> GateResult {
             gate: RelaunchGate::RpcHealth,
             passed: false,
             detail: format!(
-                "rpc health timed out after {}s (memory stats did not return)",
+                "rpc health timed out after {}s (memory ping did not return)",
                 config.health_timeout.as_secs()
             ),
         },
@@ -861,39 +876,106 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn rpc_health_probe_args_resolve_to_a_dispatched_subcommand() {
-        // R5: the rpc-health gate must run a REAL dispatched subcommand, not the
-        // old `probe rpc` which `dispatch_operator_cli` rejects as an unknown
-        // command (so the gate never dialed anything).
+        use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+        use crate::memory_ipc::spawn_server;
+        use std::sync::Arc;
+
+        // Force `<state_root>/memory.sock` resolution (clear any ambient socket
+        // override) so both the spawned daemon and the dispatched probe agree.
+        // Restored on drop; env mutation is serialized by the cognitive_memory key.
+        struct SockEnvGuard(Option<std::ffi::OsString>);
+        impl SockEnvGuard {
+            fn clear() -> Self {
+                let prev = std::env::var_os("SIMARD_MEMORY_SOCKET");
+                // SAFETY: serialized by the cognitive_memory serial key.
+                unsafe { std::env::remove_var("SIMARD_MEMORY_SOCKET") };
+                Self(prev)
+            }
+        }
+        impl Drop for SockEnvGuard {
+            fn drop(&mut self) {
+                if let Some(v) = &self.0 {
+                    // SAFETY: serialized by the cognitive_memory serial key.
+                    unsafe { std::env::set_var("SIMARD_MEMORY_SOCKET", v) };
+                }
+            }
+        }
+        let _sock_env = SockEnvGuard::clear();
+
+        // R5, REPOINTED for #2896/#4639: the rpc-health gate must dial the LIVE
+        // daemon via the new bounded `memory ping` liveness handshake — NOT the
+        // heavy `memory stats` full-graph round-trip that timed out on the large
+        // cognitive store (~30.8k nodes) and reddened every self-deploy.
         assert_eq!(
             RPC_HEALTH_PROBE_ARGS,
-            &["memory", "stats"],
-            "the rpc-health probe must dial via `memory stats`"
+            &["memory", "ping"],
+            "the rpc-health probe must dial via the bounded `memory ping` liveness check"
         );
 
-        // The NEW argv dispatches: `memory stats <state-root>` resolves through
-        // dispatch_operator_cli → dispatch_memory_command → run_stats and opens a
-        // hermetic tier-2 store in the temp root (no live socket present), so it
-        // returns Ok(()). Assert the POSITIVE outcome (#4639 review F5): the prior
-        // `if let Err` guard was vacuous on the Ok path and accepted any non-
-        // "unsupported" error. A real dispatched read-only subcommand against an
-        // empty hermetic store must succeed.
-        let root = tempfile::tempdir().expect("tempdir");
-        let mut argv: Vec<String> = RPC_HEALTH_PROBE_ARGS
+        // POSITIVE: against a REAL live daemon socket, the probe argv dispatches
+        // through dispatch_operator_cli → dispatch_memory_command → run_ping and
+        // completes a Ping/Pong round-trip → Ok. Proves the canary GREENS for a
+        // healthy live daemon so self-deploy can proceed (the whole point of the
+        // fix). Contrast the old `memory stats`, which greened even with NO live
+        // daemon via its tier-2 on-disk fallback.
+        let live_dir = tempfile::tempdir().expect("tempdir");
+        let live_root = live_dir.path().to_path_buf();
+        let sock = socket_path_for(&live_root);
+        let _ = std::fs::remove_file(&sock);
+        let mem: Arc<dyn CognitiveMemoryOps> =
+            Arc::new(LibraryCognitiveMemory::in_memory().expect("in-memory db"));
+        let _handle = spawn_server(sock.clone(), mem).expect("spawn live daemon");
+        for _ in 0..200 {
+            if sock.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            sock.exists(),
+            "live daemon socket never appeared at {sock:?}"
+        );
+
+        let mut live_argv: Vec<String> = RPC_HEALTH_PROBE_ARGS
             .iter()
             .map(|s| s.to_string())
             .collect();
-        argv.push(root.path().display().to_string());
-        let dispatched = crate::operator_cli::dispatch_operator_cli(argv);
+        live_argv.push(live_root.display().to_string());
+        let green = crate::operator_cli::dispatch_operator_cli(live_argv);
         assert!(
-            dispatched.is_ok(),
-            "rpc-health argv must dispatch and succeed against a hermetic tier-2 \
-             store (no live socket), proving it is a real dispatched subcommand \
-             and not the unsupported-command regression; got: {dispatched:?}"
+            green.is_ok(),
+            "rpc-health argv must GREEN against a live daemon via `memory ping`; got: {green:?}"
         );
 
-        // Guard/documentation: the OLD `probe` argv is exactly the regression the
-        // fix removes — an unknown subcommand that reddened every candidate.
+        // FAIL-CLOSED (the load-bearing #2896/#4639 guard, and the behavioural
+        // flip vs `memory stats`): against a state root with NO live daemon
+        // socket, the SAME argv must ERROR — `memory ping` must NOT fall through
+        // to a tier-2 on-disk open and green a dead daemon. The error must be a
+        // real liveness failure, never the pre-impl `unsupported command`.
+        let dead_dir = tempfile::tempdir().expect("tempdir");
+        let dead_root = dead_dir.path().to_path_buf();
+        let _ = std::fs::remove_file(socket_path_for(&dead_root));
+        assert!(
+            !socket_path_for(&dead_root).exists(),
+            "precondition: the dead root must have no live daemon socket"
+        );
+        let mut dead_argv: Vec<String> = RPC_HEALTH_PROBE_ARGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        dead_argv.push(dead_root.display().to_string());
+        let red = crate::operator_cli::dispatch_operator_cli(dead_argv);
+        let red_err =
+            red.expect_err("`memory ping` must fail closed with no live daemon (no tier-2 green)");
+        assert!(
+            !red_err.to_string().contains("unsupported command"),
+            "`memory ping` must be a real dispatched liveness subcommand, not unsupported: {red_err}"
+        );
+
+        // Guard/documentation: the OLD `probe rpc` argv is the original
+        // regression — an unknown subcommand that reddened every candidate.
         let old =
             crate::operator_cli::dispatch_operator_cli(["probe".to_string(), "rpc".to_string()]);
         let old_err = old.expect_err("`probe` must not be a dispatched command");
@@ -1420,6 +1502,46 @@ mod convergence_tests {
             result.detail.contains("rpc dial refused: connection reset"),
             "the red verdict must surface the candidate's stderr for diagnosability; got: {}",
             result.detail
+        );
+    }
+
+    // Fail-closed on a HUNG daemon for the `memory ping` probe path (#2896
+    // requirement): even with a present socket (so the F2 liveness pre-flight
+    // passes and the gate proceeds to spawn), a candidate whose `memory ping`
+    // never returns MUST be killed at `health_timeout` and reddened — never left
+    // to block the deploy loop forever. This models the wedged-daemon dial the
+    // ping fix must still bound. A short `health_timeout` forces the kill path
+    // deterministically; the argv the gate appends is [`RPC_HEALTH_PROBE_ARGS`]
+    // (`memory ping`), so this locks that the repoint keeps the timeout backstop.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn rpc_health_gate_fails_closed_on_hung_ping_probe() {
+        let (dir, _env) = state_root_with_live_socket("rpc-ping-hung");
+        // Candidate ignores the appended `memory ping …` argv and hangs, standing
+        // in for a wedged daemon whose liveness round-trip never returns. `exec`
+        // replaces the shell so the hung process is the direct child the gate
+        // kills (no orphaned grandchild left holding the captured stderr pipe).
+        let bin = write_exe(&dir, "candidate", "#!/bin/sh\nexec sleep 30\n");
+        let config = RelaunchConfig {
+            health_timeout: Duration::from_secs(1),
+            ..RelaunchConfig::default()
+        };
+
+        let start = Instant::now();
+        let result = run_rpc_health_gate(&bin, &config);
+        assert!(
+            !result.passed,
+            "a hung ping probe must fail closed (TimedOut), not hang the deploy loop; got: {}",
+            result.detail
+        );
+        assert!(
+            result.detail.contains("timed out"),
+            "the red verdict must name the timeout: {}",
+            result.detail
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "the gate must return promptly after the deadline (bounded), not wait for the child"
         );
     }
 
