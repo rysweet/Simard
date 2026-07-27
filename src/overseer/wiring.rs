@@ -576,12 +576,14 @@ fn observed_details_from(cycle: &CycleReport) -> Vec<String> {
     // is never a silent no-op at the OPERATOR surface — not just on the
     // `ObservedState` field. A HEALTHY pass (zero decisions) still leaves a
     // `health-review: <verdict>` breadcrumb in the `simard status` / TUI /
-    // dashboard feed (via `humanize_tick_details`), and a DEGRADED pass is
-    // surfaced LOUD rather than vanishing. `NotRun` (rail unwired / disabled /
-    // off cadence) stays quiet — the same "explain what ran, stay quiet on what
-    // didn't" discipline the rest of this feed follows. The recipe-authored
-    // `summary` may echo journal-derived text, so it is sanitised like every
-    // other observed line.
+    // dashboard feed (via `humanize_tick_details`), a DEGRADED pass is surfaced
+    // LOUD rather than vanishing, and an operator OPT-OUT (`Disabled`) is
+    // surfaced LOUD too — naming the knob — so the self-heal reflex being off is
+    // never silent (#4097), exactly as its status field. Only `NotRun` (rail
+    // unwired / off cadence) stays quiet — the same "explain what ran, stay quiet
+    // on what genuinely didn't" discipline the rest of this feed follows. The
+    // recipe-authored `summary` may echo journal-derived text, so it is sanitised
+    // like every other observed line.
     match &cycle.observed.health_review_status {
         HealthReviewStatus::Reviewed { summary, .. } => {
             out.push(sanitize_detail(&format!("health-review: {summary}")));
@@ -590,6 +592,11 @@ fn observed_details_from(cycle: &CycleReport) -> Vec<String> {
             out.push(
                 "health-review: degraded — no verdict this pass, took no remediation".to_string(),
             );
+        }
+        HealthReviewStatus::Disabled { reason } => {
+            out.push(sanitize_detail(&format!(
+                "health-review: disabled — {reason}"
+            )));
         }
         HealthReviewStatus::NotRun => {}
     }
@@ -2552,9 +2559,33 @@ mod tests {
     }
 
     #[test]
+    fn health_review_disabled_surfaces_loud_in_the_operator_feed() {
+        // An operator OPT-OUT (dedicated knob or the shared gap-scan throttle)
+        // must be LOUD in the feed too — naming WHY the self-heal reflex is off —
+        // never a silent gap that reads identical to a healthy-but-quiet tick.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Disabled {
+            reason: format!(
+                "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV
+            ),
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("disabled"),
+            "a disabled pass must surface a loud `health-review: disabled` line: {joined:?}"
+        );
+        assert!(
+            joined.contains(crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+            "the disabled line must name the knob that turned the reflex off: {joined:?}"
+        );
+    }
+
+    #[test]
     fn health_review_not_run_stays_quiet_in_the_operator_feed() {
-        // An unwired / disabled / off-cadence tick must NOT spam the feed with a
-        // health-review line — only a pass that RAN earns a breadcrumb.
+        // An unwired / off-cadence tick must NOT spam the feed with a
+        // health-review line — only a pass that RAN (or an explicit opt-out,
+        // rendered as `Disabled`) earns a line; a bare `NotRun` stays quiet.
         let cycle = cycle_with_health_review(HealthReviewStatus::NotRun);
         let details = observed_details_from(&cycle);
         assert!(

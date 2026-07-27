@@ -1117,23 +1117,40 @@ impl Overseer {
     /// [`Intervention`] through the SAME gate (budget / launch-cap / sequencer /
     /// in-flight-dedup / recursion guard) every other action uses.
     ///
-    /// Fail-closed: an unwired reviewer, a disabled rail, an off cadence, a
-    /// `HEALTHY` verdict, or a degraded/failed recipe run all leave the plan
-    /// unchanged — never a fabricated launch or escalation.
+    /// Fail-closed: an unwired reviewer, an off-cadence tick, a `HEALTHY`
+    /// verdict, or a degraded/failed recipe run all leave the plan unchanged —
+    /// never a fabricated launch or escalation.
     ///
     /// The pass's verdict is also SURFACED on `observed.health_review_status`
     /// (never discarded): a pass that ran sets `Reviewed { summary, decisions }`
     /// (so a HEALTHY pass is an observable `Reviewed { decisions: 0 }`, not a
-    /// silent no-op), a degraded/faulted pass sets `Degraded`, and an
-    /// unwired/disabled/off-cadence tick leaves the additive `NotRun` default —
-    /// the same "no silent OFF" discipline `merge_reasoning_status` applies.
+    /// silent no-op), a degraded/faulted pass sets `Degraded`, an operator
+    /// OPT-OUT (the dedicated knob or the shared gap-scan throttle) sets
+    /// `Disabled { reason }` naming the knob — never a silent hard-OFF (#4097),
+    /// exactly as `observe_merge_queue` surfaces the SAME opt-out — and only an
+    /// unwired/off-cadence tick leaves the additive `NotRun` default. The same
+    /// "no silent OFF" discipline `merge_reasoning_status` applies.
     fn health_review(
         &mut self,
         observed: &mut ObservedState,
         launches: &mut usize,
         plan: &mut Vec<PlannedIntervention>,
     ) {
-        if self.health_reviewer.is_none() || !self.health_review_enabled {
+        // Unwired: the build could not resolve the recipe/runner. Nothing ran and
+        // there is no operator intent to report — leave the additive `NotRun`.
+        if self.health_reviewer.is_none() {
+            return;
+        }
+        // Dedicated opt-out (SIMARD_OVERSEER_HEALTH_REVIEW): make it VISIBLE, never
+        // a silent OFF (#4097). Checked before the master throttle so an operator
+        // who disabled THIS pass specifically sees that named as the reason.
+        if !self.health_review_enabled {
+            observed.health_review_status = HealthReviewStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables the agentic health-review pass",
+                    config::SIMARD_OVERSEER_HEALTH_REVIEW_ENV
+                ),
+            };
             return;
         }
         // Cadence: reuse the shared gap-scan enable throttle + the dedicated
@@ -1141,11 +1158,24 @@ impl Overseer {
         // the tick FIRST so a disabled/held pass still keeps the counter monotonic.
         let tick = self.health_review_tick;
         self.health_review_tick = self.health_review_tick.wrapping_add(1);
-        if !ecosystem_observe::should_observe(
-            self.gap_scan_enabled,
-            self.health_review_every_n,
-            tick,
-        ) {
+        // Shared resource opt-out (SIMARD_OVERSEER_GAP_SCAN): the throttle for ALL
+        // agentic overseer scans. Honor it, but surface WHY the self-heal reflex
+        // stopped rather than leaving a silent `NotRun` — exactly as
+        // `observe_merge_queue` does for the SAME opt-out (#4097). (No one-time
+        // NotifyOperator: the operator set this opt-out themselves, so the status
+        // breadcrumb is enough.)
+        if !self.gap_scan_enabled {
+            observed.health_review_status = HealthReviewStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                    config::SIMARD_OVERSEER_GAP_SCAN_ENV
+                ),
+            };
+            return;
+        }
+        // Cadence only: a non-due tick is NOT disabled — skip silently and leave
+        // the last due tick's status untouched (enablement is already decided).
+        if !ecosystem_observe::should_observe(true, self.health_review_every_n, tick) {
             return;
         }
         // Borrow the reviewer only for the call; the returned outcome is owned, so
@@ -4467,17 +4497,25 @@ mod tests {
     }
 
     #[test]
-    fn health_review_skipped_when_gap_scan_disabled() {
+    fn health_review_disabled_when_gap_scan_disabled_surfaces_loud_status() {
+        // The shared SIMARD_OVERSEER_GAP_SCAN throttle disables ALL agentic
+        // overseer scans, health-review included. It must do so LOUD: the
+        // reviewer is never invoked, the plan gains nothing, AND the observed
+        // status is `Disabled { reason }` naming the gap-scan knob — never a
+        // silent `NotRun` that an operator cannot distinguish from "never wired".
+        let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
         let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
             .with_high_risk_autonomy(true)
             .with_gap_scan_enabled(false) // shared throttle disables the rail
             .with_goal_health_enabled(true)
-            .with_health_reviewer(
-                Box::new(FakeHealthReviewer::returning(Ok(vec![launch_iv("fix")]))),
-                1,
-            )
+            .with_health_reviewer(Box::new(reviewer), 1)
             .with_health_review_enabled(true);
         let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a gap-scan-disabled rail never invokes the reviewer"
+        );
         assert!(
             report
                 .plan
@@ -4485,11 +4523,20 @@ mod tests {
                 .all(|p| p.intervention.label() != "launch_recipe"),
             "the gap-scan opt-out also disables the health-review rail"
         );
+        match report.observed.health_review_status {
+            HealthReviewStatus::Disabled { ref reason } => assert!(
+                reason.contains(config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+                "the disable breadcrumb names the gap-scan knob, got {reason:?}"
+            ),
+            other => panic!("expected a LOUD Disabled status, got {other:?}"),
+        }
     }
 
     #[test]
-    fn health_review_skipped_when_dedicated_flag_disabled() {
-        // Reviewer wired, gap-scan on, but the dedicated opt-out is off.
+    fn health_review_disabled_when_dedicated_flag_disabled_surfaces_loud_status() {
+        // Reviewer wired, gap-scan on, but the dedicated opt-out is off. The pass
+        // never invokes the reviewer, contributes nothing, and surfaces a LOUD
+        // `Disabled { reason }` naming the dedicated knob (never silent NotRun).
         let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
         let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
             .with_high_risk_autonomy(true)
@@ -4510,6 +4557,13 @@ mod tests {
                 .all(|p| p.intervention.label() != "launch_recipe"),
             "a disabled rail contributes nothing"
         );
+        match report.observed.health_review_status {
+            HealthReviewStatus::Disabled { ref reason } => assert!(
+                reason.contains(config::SIMARD_OVERSEER_HEALTH_REVIEW_ENV),
+                "the disable breadcrumb names the dedicated knob, got {reason:?}"
+            ),
+            other => panic!("expected a LOUD Disabled status, got {other:?}"),
+        }
     }
 
     #[test]
