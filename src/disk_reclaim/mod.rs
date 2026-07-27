@@ -32,8 +32,9 @@ pub mod recipe;
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
 pub use executor::{
-    PathRemover, RealPathRemover, ReclaimFailure, ReclaimReport, RemovedPath, SkippedPath,
-    exec_reclaim,
+    BuildArtifactPruneReport, PathRemover, REGENERABLE_BUILD_ARTIFACTS, RealPathRemover,
+    ReclaimFailure, ReclaimReport, RemovedPath, SkippedPath, exec_reclaim,
+    prune_build_tree_artifacts, prune_regenerable_build_artifacts,
 };
 pub use guard::{
     CachingSizeMeasurer, DuSizeMeasurer, GuardContext, ProtectedDenySet, ReclaimPrimitive,

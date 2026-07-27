@@ -12,11 +12,14 @@ use std::process::Command;
 use serde::Serialize;
 
 use crate::disk_pressure::check::{DiskStatProvider, used_pct};
+use crate::worktree_gc::liveness::LiveProcessProbe;
 use crate::worktree_gc::under_any_root;
 
 use super::ReclaimMode;
 use super::candidate::{CandidateKind, ReclaimCandidate};
-use super::guard::{GuardContext, ReclaimPrimitive, RejectReason, Verdict, vet_candidate};
+use super::guard::{
+    GuardContext, ReclaimPrimitive, RejectReason, SizeMeasurer, Verdict, vet_candidate,
+};
 
 /// A path the executor removed (or would remove, in dry-run).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -243,6 +246,233 @@ pub fn exec_reclaim(
 
     report.used_pct_after = read_used_pct(disk, disk_path);
     report
+}
+
+/// The regenerable Cargo build-artifact subpaths (relative to a build tree) that
+/// routine reclaim proactively prunes **below** the emergency threshold.
+///
+/// Root cause of issue #4825: these directories live under the daemon's
+/// protected working dir (`worktrees/main`), so the worktree rails
+/// ([`vet_candidate`]) reject them as [`RejectReason::ProtectedPath`] and only
+/// the ≥95% Tier-1 emergency net (`disk_health::emergency_cleanup`) ever removed
+/// them — after `/home` had already oscillated up to 99%. Each entry is fully
+/// reconstructable by `cargo build`, so removing it frees GiB without the crash
+/// risk of removing the working directory itself.
+///
+/// Deliberately a **closed, non-operator-widenable** allow-list: the carve-out
+/// from the protected deny-set can never grow to cover non-regenerable data.
+pub const REGENERABLE_BUILD_ARTIFACTS: [&str; 2] = ["target/debug", "target/llvm-cov-target"];
+
+/// The structured outcome of one proactive build-artifact prune pass. Mirrors
+/// the shape of [`ReclaimReport`] so telemetry and logs stay consistent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuildArtifactPruneReport {
+    pub mode: ReclaimMode,
+    /// Artifacts actually removed (apply mode only).
+    pub removed: Vec<RemovedPath>,
+    /// Artifacts that would be removed (dry-run mode only).
+    pub would_remove: Vec<RemovedPath>,
+    /// Artifacts skipped because a live process referenced them (fail-closed).
+    pub skipped_live: Vec<PathBuf>,
+    /// Individual removals that failed (does not abort the pass).
+    pub failures: Vec<ReclaimFailure>,
+    pub bytes_freed: u64,
+}
+
+impl BuildArtifactPruneReport {
+    fn new(mode: ReclaimMode) -> Self {
+        Self {
+            mode,
+            removed: Vec::new(),
+            would_remove: Vec::new(),
+            skipped_live: Vec::new(),
+            failures: Vec::new(),
+            bytes_freed: 0,
+        }
+    }
+
+    /// Whether this pass removed anything.
+    pub fn pruned_any(&self) -> bool {
+        self.bytes_freed > 0 || !self.removed.is_empty()
+    }
+
+    /// Daemon one-liner summary.
+    pub fn summary(&self) -> String {
+        format!(
+            "build-artifact prune: freed {} bytes, {} removed, {} would-remove, {} live-skipped, {} failed",
+            self.bytes_freed,
+            self.removed.len(),
+            self.would_remove.len(),
+            self.skipped_live.len(),
+            self.failures.len(),
+        )
+    }
+}
+
+/// Proactively prune the [`REGENERABLE_BUILD_ARTIFACTS`] under `build_tree`
+/// through the injectable `remover` seam (tests record; production `rm -rf`s).
+///
+/// This is intentionally **separate** from [`vet_candidate`]: those artifacts
+/// deliberately sit under the protected working dir, so routing them through the
+/// worktree deny-set would (correctly, for every other path) reject them. This
+/// pass applies its own tight, fail-closed policy for the closed artifact
+/// allow-list only, leaving protected-path vetting fully intact for all
+/// non-build paths:
+///   - the path must be a **real directory** — never a symlink (a symlinked
+///     `target/debug` could redirect the removal outside the build tree);
+///   - a **live-PID veto** (fail-closed) skips any artifact a running process
+///     still references;
+///   - dry-run performs zero destructive ops (records `would_remove`).
+pub fn prune_regenerable_build_artifacts(
+    build_tree: &Path,
+    mode: ReclaimMode,
+    live_probe: &dyn LiveProcessProbe,
+    measurer: &dyn SizeMeasurer,
+    remover: &dyn PathRemover,
+) -> BuildArtifactPruneReport {
+    let mut report = BuildArtifactPruneReport::new(mode);
+
+    for rel in REGENERABLE_BUILD_ARTIFACTS {
+        let path = build_tree.join(rel);
+
+        // Fail-closed existence/type check via `symlink_metadata` (does NOT
+        // follow the final symlink): must be a real directory. Absent → nothing
+        // to prune; a symlink or non-dir → refuse (never chase a redirection).
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            tracing::warn!(
+                target: "simard::disk_reclaim",
+                path = %path.display(),
+                "skipping build-artifact prune: not a real directory (symlink or non-dir)",
+            );
+            continue;
+        }
+
+        // Live-PID veto (fail-closed): never yank a build dir a live process
+        // still holds; the ≥95% emergency net remains the backstop.
+        if live_probe.worktree_has_live_process(&path) {
+            tracing::warn!(
+                target: "simard::disk_reclaim",
+                path = %path.display(),
+                "skipping build-artifact prune: live process references the path",
+            );
+            report.skipped_live.push(path);
+            continue;
+        }
+
+        let bytes = measurer.measure(&path);
+        let entry = RemovedPath {
+            path: path.clone(),
+            kind: CandidateKind::StaleBuildCache,
+            bytes,
+            primitive: ReclaimPrimitive::RemoveDir,
+        };
+
+        match mode {
+            ReclaimMode::DryRun => {
+                tracing::info!(
+                    target: "simard::disk_reclaim",
+                    path = %path.display(),
+                    bytes,
+                    "build-artifact prune (dry-run): would remove regenerable Cargo artifact",
+                );
+                report.would_remove.push(entry);
+            }
+            ReclaimMode::Apply => match remover.remove(ReclaimPrimitive::RemoveDir, &path) {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "simard::disk_reclaim",
+                        path = %path.display(),
+                        bytes,
+                        "build-artifact prune: removed regenerable Cargo artifact",
+                    );
+                    report.bytes_freed = report.bytes_freed.saturating_add(bytes);
+                    report.removed.push(entry);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "simard::disk_reclaim",
+                        path = %path.display(),
+                        error = %error,
+                        "build-artifact prune failed",
+                    );
+                    report.failures.push(ReclaimFailure { path, error });
+                }
+            },
+        }
+    }
+
+    report
+}
+
+/// Production entry for the daemon's Tier-3 coordination: prune the regenerable
+/// build artifacts under `build_tree`, wiring the live probe, size measurer, and
+/// a hardened [`RealPathRemover`] whose allow-roots are scoped to **exactly**
+/// those artifact directories (so the TOCTOU containment re-assert passes for
+/// the carve-out without widening any other allow-root). Refuses to delete as
+/// root (defense in depth, mirroring [`super::reclaim_candidates`]).
+pub fn prune_build_tree_artifacts(
+    build_tree: &Path,
+    mode: ReclaimMode,
+) -> BuildArtifactPruneReport {
+    let effective_mode = if mode == ReclaimMode::Apply && super::is_root() {
+        tracing::warn!(
+            target: "simard::disk_reclaim",
+            "refusing build-artifact prune apply as root (euid 0); downgraded to dry-run \
+             — deletion would nullify the path-ownership policy",
+        );
+        ReclaimMode::DryRun
+    } else {
+        mode
+    };
+
+    let allow_roots: Vec<PathBuf> = REGENERABLE_BUILD_ARTIFACTS
+        .iter()
+        .map(|rel| build_tree.join(rel))
+        .collect();
+    let remover = RealPathRemover {
+        // `RemoveDir` never consults `parent_repo`.
+        parent_repo: PathBuf::new(),
+        allow_roots,
+    };
+    let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
+    let du = super::guard::DuSizeMeasurer;
+    let measurer = super::guard::CachingSizeMeasurer::new(&du);
+
+    let report =
+        prune_regenerable_build_artifacts(build_tree, effective_mode, &live, &measurer, &remover);
+    emit_build_artifact_prune_telemetry(&report);
+    report
+}
+
+/// Emit the `simard.disk.reclaim.*` counters for one build-artifact prune,
+/// reusing the existing reclaim series (source = `daemon`, kind =
+/// `stale_build_cache`) so dashboards need no new instruments.
+fn emit_build_artifact_prune_telemetry(report: &BuildArtifactPruneReport) {
+    use crate::telemetry::{names, registry};
+
+    const SRC: &str = "daemon";
+
+    if report.bytes_freed > 0 {
+        registry::counter_add(
+            names::DISK_RECLAIM_BYTES_FREED,
+            report.bytes_freed,
+            &[(names::ATTR_SOURCE, SRC)],
+        );
+    }
+    for _removed in &report.removed {
+        registry::counter_add(
+            names::DISK_RECLAIM_PATHS_REMOVED,
+            1,
+            &[
+                (names::ATTR_SOURCE, SRC),
+                (names::ATTR_KIND, "stale_build_cache"),
+            ],
+        );
+    }
 }
 
 #[cfg(test)]
@@ -595,6 +825,180 @@ mod tests {
         assert_eq!(
             report.summary(),
             "disk reclaim: 88% -> 84% used, freed 12026531840 bytes, 0 paths removed, 0 skipped for review",
+        );
+    }
+
+    // ---- issue #4825: regenerable build-artifact prune ----------------
+
+    /// Create `build_tree/target/debug` and `build_tree/target/llvm-cov-target`
+    /// as real dirs; return the tempdir + the two artifact paths.
+    fn build_tree_with_artifacts() -> (TempDir, PathBuf, PathBuf) {
+        let root = TempDir::new().unwrap();
+        let debug = root.path().join("target/debug");
+        let cov = root.path().join("target/llvm-cov-target");
+        std::fs::create_dir_all(&debug).unwrap();
+        std::fs::create_dir_all(&cov).unwrap();
+        (root, debug, cov)
+    }
+
+    #[test]
+    fn prune_removes_both_regenerable_artifacts_in_apply() {
+        let (root, debug, cov) = build_tree_with_artifacts();
+        let live = FakeLiveProcessProbe::default();
+        let measurer = MapMeasurer::default();
+        measurer.set(&debug, 2_000_000_000);
+        measurer.set(&cov, 600_000_000);
+        let remover = RecordingRemover::default();
+
+        let report = prune_regenerable_build_artifacts(
+            root.path(),
+            ReclaimMode::Apply,
+            &live,
+            &measurer,
+            &remover,
+        );
+
+        assert_eq!(report.removed.len(), 2, "both artifacts must be removed");
+        assert_eq!(report.bytes_freed, 2_600_000_000);
+        assert!(report.pruned_any());
+        assert!(report.skipped_live.is_empty());
+        assert!(report.failures.is_empty());
+        let calls = remover.calls.borrow();
+        assert!(calls.iter().all(|(p, _)| *p == ReclaimPrimitive::RemoveDir));
+        let removed_paths: Vec<_> = calls.iter().map(|(_, p)| p.clone()).collect();
+        assert!(removed_paths.contains(&debug));
+        assert!(removed_paths.contains(&cov));
+    }
+
+    #[test]
+    fn prune_dry_run_deletes_nothing() {
+        let (root, debug, _cov) = build_tree_with_artifacts();
+        let live = FakeLiveProcessProbe::default();
+        let measurer = MapMeasurer::default();
+        measurer.set(&debug, 1_000);
+        let remover = RecordingRemover::default();
+
+        let report = prune_regenerable_build_artifacts(
+            root.path(),
+            ReclaimMode::DryRun,
+            &live,
+            &measurer,
+            &remover,
+        );
+
+        assert!(report.removed.is_empty(), "dry-run must not remove");
+        assert_eq!(report.bytes_freed, 0);
+        assert_eq!(report.would_remove.len(), 2);
+        assert!(!report.pruned_any());
+        assert!(
+            remover.calls.borrow().is_empty(),
+            "dry-run must never call the destructive remover",
+        );
+    }
+
+    #[test]
+    fn prune_live_process_veto_skips_that_artifact_only() {
+        let (root, debug, cov) = build_tree_with_artifacts();
+        let live = FakeLiveProcessProbe::default();
+        live.mark_live(debug.clone());
+        let measurer = MapMeasurer::default();
+        measurer.set(&cov, 500);
+        let remover = RecordingRemover::default();
+
+        let report = prune_regenerable_build_artifacts(
+            root.path(),
+            ReclaimMode::Apply,
+            &live,
+            &measurer,
+            &remover,
+        );
+
+        // The live-held debug dir is vetoed (fail-closed); cov is still reclaimed.
+        assert_eq!(report.skipped_live, vec![debug.clone()]);
+        assert_eq!(report.removed.len(), 1);
+        assert_eq!(report.removed[0].path, cov);
+        let calls = remover.calls.borrow();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the vetoed path must never reach the remover"
+        );
+        assert_eq!(calls[0].1, cov);
+    }
+
+    #[test]
+    fn prune_refuses_a_symlinked_artifact() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("target")).unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        // target/debug is a SYMLINK to an unrelated dir — must never be chased.
+        std::os::unix::fs::symlink(elsewhere.path(), root.path().join("target/debug")).unwrap();
+        let live = FakeLiveProcessProbe::default();
+        let measurer = MapMeasurer::default();
+        let remover = RecordingRemover::default();
+
+        let report = prune_regenerable_build_artifacts(
+            root.path(),
+            ReclaimMode::Apply,
+            &live,
+            &measurer,
+            &remover,
+        );
+
+        assert!(
+            report.removed.is_empty(),
+            "a symlinked artifact must be refused"
+        );
+        assert!(report.skipped_live.is_empty());
+        assert!(
+            remover.calls.borrow().is_empty(),
+            "a symlinked artifact must never reach the remover",
+        );
+        assert!(
+            elsewhere.path().exists(),
+            "the symlink target must be untouched",
+        );
+    }
+
+    #[test]
+    fn prune_missing_artifacts_is_a_noop() {
+        let root = TempDir::new().unwrap(); // no target/ at all
+        let live = FakeLiveProcessProbe::default();
+        let measurer = MapMeasurer::default();
+        let remover = RecordingRemover::default();
+
+        let report = prune_regenerable_build_artifacts(
+            root.path(),
+            ReclaimMode::Apply,
+            &live,
+            &measurer,
+            &remover,
+        );
+
+        assert!(!report.pruned_any());
+        assert!(report.removed.is_empty());
+        assert!(report.would_remove.is_empty());
+        assert!(remover.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn prune_summary_is_stable() {
+        let report = BuildArtifactPruneReport {
+            mode: ReclaimMode::Apply,
+            removed: vec![RemovedPath {
+                path: PathBuf::from("/b/target/debug"),
+                kind: CandidateKind::StaleBuildCache,
+                bytes: 2_600_000_000,
+                primitive: ReclaimPrimitive::RemoveDir,
+            }],
+            would_remove: vec![],
+            skipped_live: vec![],
+            failures: vec![],
+            bytes_freed: 2_600_000_000,
+        };
+        assert_eq!(
+            report.summary(),
+            "build-artifact prune: freed 2600000000 bytes, 1 removed, 0 would-remove, 0 live-skipped, 0 failed",
         );
     }
 }

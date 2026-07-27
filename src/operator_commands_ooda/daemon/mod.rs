@@ -1197,6 +1197,22 @@ pub fn run_ooda_daemon(
                 match used_now {
                     Some(used) if crate::disk_reclaim::daemon_should_trigger(used, reclaim_pct) => {
                         let mode = crate::disk_reclaim::daemon_apply_from_env();
+                        // Issue #4825: deterministically prune the regenerable
+                        // Cargo build artifacts (target/debug, target/llvm-cov-target)
+                        // under the daemon's build tree HERE, at the routine
+                        // threshold — BELOW the ≥95% Tier-1 emergency threshold.
+                        // These sit under the protected working dir, so the
+                        // worktree rails reject them and only the emergency net
+                        // ever removed them, after `/home` had oscillated to 99%.
+                        // Pruning them proactively stops the oscillation and the
+                        // per-cycle emergency-branch firing (the emergency net
+                        // above remains the backstop). Same apply-gating as the
+                        // agentic reclaim below.
+                        let prune = crate::disk_reclaim::prune_build_tree_artifacts(
+                            &memories.repo_root,
+                            mode,
+                        );
+                        daemon_log(&state_root, &format!("[simard] {}", prune.summary()));
                         match crate::disk_reclaim::run_disk_reclaim(
                             &memories.repo_root,
                             &state_root,
