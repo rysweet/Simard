@@ -23,7 +23,6 @@
 //!   `run_token` mismatch. A safety-critical rail must never act on a stale,
 //!   foreign, or corrupt verdict.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -163,49 +162,14 @@ pub fn record_path(state_root: &Path, repo: &str, pr: u32) -> Result<PathBuf, St
 
 /// Atomically write `rec` to its deterministic path, creating parent dirs.
 ///
-/// Writes to a temp sibling then `rename`s over the final path (last writer
-/// wins), so a concurrent reader never sees a partial record and no temp file
-/// is left beside the record.
+/// Delegates the temp-write + `rename` + owner-only `0o600` to the shared
+/// [`super::record_io::atomic_write_0600`], so a concurrent reader never sees a
+/// partial record and no temp file is left beside the record.
 pub fn write_record(state_root: &Path, rec: &MergeVerdictRecord) -> Result<(), String> {
     let path = record_path(state_root, &rec.repo, rec.pr)?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("record path {path:?} has no parent directory"))?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all {dir:?} failed: {e}"))?;
-
     let json =
         serde_json::to_vec_pretty(rec).map_err(|e| format!("serialize verdict record: {e}"))?;
-
-    // Temp name is hidden (leading dot) and uniquified by pid+nanos so parallel
-    // writers to distinct PRs never collide; the rename below erases it.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".{}.tmp.{}.{nanos}", rec.pr, std::process::id()));
-    {
-        let mut f =
-            std::fs::File::create(&tmp).map_err(|e| format!("create temp {tmp:?} failed: {e}"))?;
-        f.write_all(&json)
-            .map_err(|e| format!("write temp {tmp:?} failed: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("fsync temp {tmp:?} failed: {e}"))?;
-        // Owner-only (0o600): a merge verdict is safety-critical state — no group
-        // or world access. Applied on the temp file so the atomic rename lands an
-        // already-restricted record (no permissions window).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("chmod 0o600 temp {tmp:?} failed: {e}"))?;
-        }
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        // Best-effort cleanup so a failed rename never strands a temp file.
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename {tmp:?} -> {path:?} failed: {e}")
-    })?;
-    Ok(())
+    super::record_io::atomic_write_0600(&path, &json)
 }
 
 /// Read the record for `(repo, pr)` and verify it belongs to THIS run.

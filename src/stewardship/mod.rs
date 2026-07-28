@@ -27,6 +27,7 @@ mod merge_verdict_store_rework_tests;
 #[cfg(test)]
 mod merge_verdict_store_tests;
 pub mod recipe_merge_judge;
+pub mod record_io;
 pub mod routing;
 #[cfg(test)]
 mod tests;

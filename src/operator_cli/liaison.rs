@@ -297,44 +297,18 @@ fn stage_context_file(
     message_id: &str,
     context: &str,
 ) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
+    use crate::stewardship::record_io::{atomic_write_0600, sha256_hex};
 
-    let mut hasher = Sha256::new();
-    hasher.update(group_id.as_bytes());
-    let group_seg = format!("{:x}", hasher.finalize());
+    let group_seg = sha256_hex(group_id.as_bytes());
     // Keep the message id path-safe by hashing it too (it is validated elsewhere
     // but this staging path is defensive).
-    let mut mh = Sha256::new();
-    mh.update(message_id.as_bytes());
-    let msg_seg = format!("{:x}", mh.finalize());
+    let msg_seg = sha256_hex(message_id.as_bytes());
 
-    let dir = state_root.join("liaison_directive_context").join(group_seg);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all {dir:?} failed: {e}"))?;
-    let path = dir.join(format!("{msg_seg}.txt"));
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".ctx.tmp.{}.{nanos}", std::process::id()));
-    {
-        let mut f =
-            std::fs::File::create(&tmp).map_err(|e| format!("create temp {tmp:?} failed: {e}"))?;
-        f.write_all(context.as_bytes())
-            .map_err(|e| format!("write temp {tmp:?} failed: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("fsync temp {tmp:?} failed: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("chmod 0o600 temp {tmp:?} failed: {e}"))?;
-        }
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename {tmp:?} -> {path:?} failed: {e}")
-    })?;
+    let path = state_root
+        .join("liaison_directive_context")
+        .join(group_seg)
+        .join(format!("{msg_seg}.txt"));
+    atomic_write_0600(&path, context.as_bytes())?;
     Ok(path.to_string_lossy().into_owned())
 }
 

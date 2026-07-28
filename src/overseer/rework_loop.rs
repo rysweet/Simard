@@ -22,16 +22,15 @@
 //! The loop itself is emergent: the SAME judge re-reviews the reworked PR on the
 //! next Overseer tick. There is no bespoke state machine.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::overseer::intervention::Intervention;
 use crate::stewardship::merge_verdict_store::{
     ReadOutcome, VerdictKind, read_verified, validate_repo_slug,
 };
+use crate::stewardship::record_io::{atomic_write_0600, sha256_hex};
 
 /// The three terminal shapes of one `poll_rework`.
 #[derive(Debug)]
@@ -212,18 +211,14 @@ fn concern_file_path(state_root: &Path, repo: &str, pr: u32) -> Result<PathBuf, 
 }
 
 /// Fingerprint a `(run_token, concern)` pair into a compact, path-free key used
-/// for in-flight dedup.
+/// for in-flight dedup. A NUL separator domain-separates the two fields so
+/// distinct `(token, concern)` splits can never collide.
 fn dispatch_key(run_token: &str, concern: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(run_token.as_bytes());
-    hasher.update([0u8]);
-    hasher.update(concern.as_bytes());
-    let digest = hasher.finalize();
-    let mut s = String::with_capacity(digest.len() * 2);
-    for b in digest.iter() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    let mut buf = Vec::with_capacity(run_token.len() + 1 + concern.len());
+    buf.extend_from_slice(run_token.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(concern.as_bytes());
+    sha256_hex(&buf)
 }
 
 /// Read the durable attempt state. `Ok(None)` when absent; `Err` when a record
@@ -268,7 +263,7 @@ fn write_attempt_state(
     };
     let json =
         serde_json::to_vec_pretty(&rec).map_err(|e| format!("serialize attempt state: {e}"))?;
-    atomic_write(&path, &json)
+    atomic_write_0600(&path, &json)
 }
 
 /// Write the recorded concern to its durable ContextFile and return the path.
@@ -279,39 +274,8 @@ fn write_concern_file(
     concern: &str,
 ) -> Result<PathBuf, String> {
     let path = concern_file_path(state_root, repo, pr)?;
-    atomic_write(&path, concern.as_bytes())?;
+    atomic_write_0600(&path, concern.as_bytes())?;
     Ok(path)
-}
-
-/// Atomic temp-write + rename, creating parent dirs, owner-only `0o600`.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("path {path:?} has no parent directory"))?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all {dir:?} failed: {e}"))?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".rework.tmp.{}.{nanos}", std::process::id()));
-    {
-        let mut f =
-            std::fs::File::create(&tmp).map_err(|e| format!("create temp {tmp:?} failed: {e}"))?;
-        f.write_all(bytes)
-            .map_err(|e| format!("write temp {tmp:?} failed: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("fsync temp {tmp:?} failed: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("chmod 0o600 temp {tmp:?} failed: {e}"))?;
-        }
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename {tmp:?} -> {path:?} failed: {e}")
-    })
 }
 
 /// One held PR the [`ReworkPort`] surfaced this tick as a rework candidate,

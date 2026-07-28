@@ -14,15 +14,14 @@
 //!
 //! There is no classifier, no prose parsing, and no second scheduler here.
 
-use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::overseer::capabilities::RecipeBrief;
 use crate::overseer::intervention::Intervention;
 use crate::stewardship::liaison_decision_store::LiaisonDecisionRecord;
+use crate::stewardship::record_io::{atomic_write_0600, sha256_hex};
 
 /// The pure acceptance filter: a received message is acted on **iff** it is from
 /// the configured operator, in the configured group, is not a self-echo, and is
@@ -51,12 +50,7 @@ struct HighWaterMark {
 /// a base64 group id (which may hold `/`, `+`, `=`) never appears verbatim in
 /// the path and can never escape the subtree.
 fn group_id_segment(group_id: &str) -> String {
-    let digest = Sha256::digest(group_id.as_bytes());
-    let mut s = String::with_capacity(digest.len() * 2);
-    for b in digest.iter() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    sha256_hex(group_id.as_bytes())
 }
 
 /// Path to the durable high-water-mark for `group_id`:
@@ -94,37 +88,10 @@ pub fn record_high_water_mark(
     let current = read_mark(state_root, group_id);
     let next = current.max(marker);
     let path = hwm_path(state_root, group_id);
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("hwm path {path:?} has no parent directory"))?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all {dir:?} failed: {e}"))?;
 
     let rec = HighWaterMark { mark: next };
     let json = serde_json::to_vec_pretty(&rec).map_err(|e| format!("serialize hwm: {e}"))?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".hwm.tmp.{}.{nanos}", std::process::id()));
-    {
-        let mut f =
-            std::fs::File::create(&tmp).map_err(|e| format!("create temp {tmp:?} failed: {e}"))?;
-        f.write_all(&json)
-            .map_err(|e| format!("write temp {tmp:?} failed: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("fsync temp {tmp:?} failed: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("chmod 0o600 temp {tmp:?} failed: {e}"))?;
-        }
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename {tmp:?} -> {path:?} failed: {e}")
-    })?;
-    Ok(())
+    atomic_write_0600(&path, &json)
 }
 
 /// Whether `marker` is strictly above the durable high-water-mark for

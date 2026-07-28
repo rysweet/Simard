@@ -26,11 +26,9 @@
 //!   `run_token` mismatch. The liaison rail must never act on a stale, foreign,
 //!   or corrupt decision.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The only record schema this build understands. Any other value fails closed
 /// on read (forward/backward compatibility is intentionally NOT silent).
@@ -119,12 +117,7 @@ pub enum ReadOutcome {
 /// may contain `/`, `+`, `=`; the hash never does and never reveals the id
 /// verbatim in the path.
 fn group_id_segment(group_id: &str) -> String {
-    let digest = Sha256::digest(group_id.as_bytes());
-    let mut s = String::with_capacity(digest.len() * 2);
-    for b in digest.iter() {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    super::record_io::sha256_hex(group_id.as_bytes())
 }
 
 /// Validate a `message_id` so it can never escape the store subtree: rejects
@@ -160,43 +153,14 @@ pub fn record_path(state_root: &Path, group_id: &str, message_id: &str) -> Resul
 }
 
 /// Atomically write `rec` to its deterministic path, creating parent dirs, and
-/// set owner-only `0o600`. Writes to a temp sibling then `rename`s over the final
-/// path (last writer wins), so a concurrent reader never sees a partial record
-/// and no temp file is left beside it.
+/// set owner-only `0o600`. Delegates the temp-write + `rename` to the shared
+/// [`super::record_io::atomic_write_0600`] (last writer wins), so a concurrent
+/// reader never sees a partial record and no temp file is left beside it.
 pub fn write_record(state_root: &Path, rec: &LiaisonDecisionRecord) -> Result<(), String> {
     let path = record_path(state_root, &rec.group_id, &rec.message_id)?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| format!("record path {path:?} has no parent directory"))?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all {dir:?} failed: {e}"))?;
-
     let json =
         serde_json::to_vec_pretty(rec).map_err(|e| format!("serialize liaison record: {e}"))?;
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".liaison.tmp.{}.{nanos}", std::process::id()));
-    {
-        let mut f =
-            std::fs::File::create(&tmp).map_err(|e| format!("create temp {tmp:?} failed: {e}"))?;
-        f.write_all(&json)
-            .map_err(|e| format!("write temp {tmp:?} failed: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("fsync temp {tmp:?} failed: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("chmod 0o600 temp {tmp:?} failed: {e}"))?;
-        }
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("rename {tmp:?} -> {path:?} failed: {e}")
-    })?;
-    Ok(())
+    super::record_io::atomic_write_0600(&path, &json)
 }
 
 /// Read the record for `(group_id, message_id)` and verify it belongs to THIS
