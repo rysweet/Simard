@@ -854,11 +854,12 @@ pub fn promote_to_active(
         last_progress_update_at: None,
         labels: vec![promoted_source.to_string()],
     };
-    // Centralized, fail-closed admission validation (issue #4930): every path
-    // that inserts into `board.active` — `add_active_goal`, `add_backlog_item`,
-    // and this promotion — must run the same required-field/priority gate. Prior
-    // to this, promotion only checked `validate_priority`, silently admitting a
-    // goal with an empty id/description that the two direct-add paths reject.
+    // Centralized, fail-closed admission validation (issue #4930): every seam
+    // that admits a record — `add_active_goal` (direct active add),
+    // `add_backlog_item` (backlog admission), and this backlog→active promotion
+    // — must run the same required-field/priority gate. Prior to this, promotion
+    // only checked `validate_priority`, silently admitting into `board.active` a
+    // goal with an empty id/description that the direct-add path rejects.
     // Validated BEFORE removing the item from the backlog so a rejected
     // promotion leaves the board untouched (no goal silently lost).
     validate_active_goal(&goal)?;

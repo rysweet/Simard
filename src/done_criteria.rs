@@ -110,29 +110,64 @@ pub fn matched_criteria_heading(scan: &str) -> Option<&'static str> {
     CRITERIA_HEADINGS.iter().copied().find(|h| scan.contains(h))
 }
 
-/// The shared predicate: does `description` carry a checkable, machine-verifiable
-/// finish condition?
+/// Which positive signal made a goal's done-criteria machine-checkable.
 ///
-/// True when **either**:
+/// Returned by [`detect_measurable_criteria`] so every consumer — the admission
+/// predicate ([`has_measurable_criteria`]) and the no-progress classifier
+/// (`ooda_loop::no_progress::derive_criteria`) — agrees on *whether* a goal is
+/// measurable **and** on *why*, from one shared scan. The `why` is surfaced only
+/// as a constant token (never raw goal text) in the classifier's evidence line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CriteriaSignal {
+    /// The description states an explicit self-contained criteria section: a
+    /// recognised [`CRITERIA_HEADINGS`] heading (the payload) with at least one
+    /// concrete [`has_checkable_item`] item.
+    Heading(&'static str),
+    /// The description carries an operator done-gate finish line
+    /// ([`DONE_WHEN_MARKER_LOWER`]) — it was repaired by a
+    /// [`crate::goal_board_store::DoneGatePin`], so its finish condition is a
+    /// machine-checkable anchor the completion gate certifies.
+    DoneGateFinishLine,
+}
+
+/// The single shared detector: does `description` carry a checkable,
+/// machine-verifiable finish condition, and if so which signal proves it?
+///
+/// Returns `Some` when **either**:
 /// * the description states an explicit self-contained criteria section — a
 ///   recognised [`CRITERIA_HEADINGS`] heading **and** at least one concrete
-///   [`has_checkable_item`] item; **or**
+///   [`has_checkable_item`] item ([`CriteriaSignal::Heading`]); **or**
 /// * the description carries an operator done-gate finish line
 ///   ([`DONE_WHEN_MARKER_LOWER`]), i.e. it was repaired by a
-///   [`crate::goal_board_store::DoneGatePin`] binding a measurable PR/issue anchor.
+///   [`crate::goal_board_store::DoneGatePin`] ([`CriteriaSignal::DoneGateFinishLine`]).
 ///
-/// The second arm is what keeps this predicate consistent with the repair
-/// mechanism (issue #4930): a `goal set-done-gate` repair now genuinely satisfies
-/// the detector instead of only passing through an unrelated code path.
+/// The second arm is what keeps admission/classification consistent with the
+/// repair mechanism (issue #4930): a `goal set-done-gate` repair genuinely
+/// satisfies the detector on the SAME code path the no-progress breaker consults,
+/// so a repaired goal is no longer silently re-blocked as `UNCLEAR-CRITERIA`.
+///
+/// Totality/safety: never panics; single length-capped scan; no regex.
+#[must_use]
+pub fn detect_measurable_criteria(description: &str) -> Option<CriteriaSignal> {
+    let scan = capped_lowercase_scan(description);
+    if let Some(heading) = matched_criteria_heading(&scan)
+        && has_checkable_item(&scan)
+    {
+        return Some(CriteriaSignal::Heading(heading));
+    }
+    if scan.contains(DONE_WHEN_MARKER_LOWER) {
+        return Some(CriteriaSignal::DoneGateFinishLine);
+    }
+    None
+}
+
+/// The shared predicate: does `description` carry a checkable, machine-verifiable
+/// finish condition? Thin boolean view over [`detect_measurable_criteria`].
 ///
 /// Totality/safety: never panics; length-capped scan; no regex.
 #[must_use]
 pub fn has_measurable_criteria(description: &str) -> bool {
-    let scan = capped_lowercase_scan(description);
-    if matched_criteria_heading(&scan).is_some() && has_checkable_item(&scan) {
-        return true;
-    }
-    scan.contains(DONE_WHEN_MARKER_LOWER)
+    detect_measurable_criteria(description).is_some()
 }
 
 #[cfg(test)]
@@ -170,6 +205,25 @@ mod tests {
         let d = "Move the roster.\n\nDone when: roster is identity-owned \
                  (certified automatically when PR #4440 is merged).";
         assert!(has_measurable_criteria(d));
+    }
+
+    #[test]
+    fn detect_reports_which_signal_matched() {
+        // Heading arm carries the matched heading token…
+        assert_eq!(
+            detect_measurable_criteria("Acceptance criteria:\n- ship it"),
+            Some(CriteriaSignal::Heading("acceptance criteria"))
+        );
+        // …the done-gate finish line arm is reported distinctly so the no-progress
+        // classifier can emit the right evidence without re-scanning.
+        assert_eq!(
+            detect_measurable_criteria(
+                "Move the roster.\n\nDone when: roster is identity-owned \
+                 (certified automatically when PR #4440 is merged)."
+            ),
+            Some(CriteriaSignal::DoneGateFinishLine)
+        );
+        assert_eq!(detect_measurable_criteria("just prose"), None);
     }
 
     #[test]

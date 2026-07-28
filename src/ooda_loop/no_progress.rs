@@ -1646,47 +1646,51 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
 /// empty-artifact stall defaults to `UNCLEAR-CRITERIA`.
 ///
 /// Returns:
-/// * `Some(evidence)` — non-empty, bounded — when the description carries an
-///   explicit, self-contained criteria section (a recognized
-///   [`crate::done_criteria::CRITERIA_HEADINGS`] heading with at least one
-///   concrete [`crate::done_criteria::has_checkable_item`] item). The caller
-///   proceeds as `GENUINELY-STUCK` with this evidence, so the goal gets a real
-///   guided investigation instead of being misclassified structurally
-///   unmeasurable and swept into the storm-feeding `UNCLEAR-CRITERIA` population.
+/// * `Some(evidence)` — non-empty, bounded — when the description carries a
+///   machine-checkable finish condition: **either** an explicit, self-contained
+///   criteria section (a recognized [`crate::done_criteria::CRITERIA_HEADINGS`]
+///   heading with at least one concrete [`crate::done_criteria::has_checkable_item`]
+///   item) **or** an operator done-gate finish line
+///   ([`crate::goal_board_store::DONE_WHEN_MARKER`]) written by a
+///   [`crate::goal_board_store::DoneGatePin`] repair. The caller proceeds as
+///   `GENUINELY-STUCK` with this evidence, so a goal that already spelled out
+///   concrete done-criteria — or was *repaired* to have them — is not
+///   misclassified `UNCLEAR-CRITERIA` and swept into the storm-feeding
+///   population, and is not re-blocked cycle after cycle (issue #4930).
 /// * `None` — when nothing checkable can be derived. The caller falls to the
 ///   legacy `UNCLEAR-CRITERIA` classification (byte-identical to before).
 ///
-/// The heading/checkable-item detection is delegated to the shared, hardened
-/// [`crate::done_criteria`] module so admission and classification share exactly
-/// one definition (issue #4930): there is one length cap, one heading set, and
-/// one checkable-item scan — no drifting second copy.
+/// Both signals come from the single shared, hardened
+/// [`crate::done_criteria::detect_measurable_criteria`] detector so admission,
+/// classification and the done-gate repair path share exactly one definition
+/// (issue #4930): one length cap, one heading set, one checkable-item scan, and
+/// one finish-line marker — no drifting second copy, and the repair mechanism can
+/// never disagree with the classifier that consumes it.
 ///
 /// Totality/safety contract: never panics, never returns `Some(vec![])`, and
 /// bounds its work by [`crate::done_criteria::DERIVE_CRITERIA_MAX_SCAN`] so
 /// adversarial goal text cannot cause a panic or pathological scanning. The
-/// emitted evidence carries only the goal id and a constant heading token —
-/// never raw goal text — so nothing is smuggled into the WHY / log line.
+/// emitted evidence carries only the goal id and a constant token — never raw
+/// goal text — so nothing is smuggled into the WHY / log line.
 fn derive_criteria(goal: &ActiveGoal) -> Option<Vec<Evidence>> {
-    use crate::done_criteria::{
-        capped_lowercase_scan, has_checkable_item, matched_criteria_heading,
-    };
+    use crate::done_criteria::{CriteriaSignal, detect_measurable_criteria};
 
     // One length-capped, lower-cased pass over the untrusted description, shared
-    // by the heading match and the checkable-item scan.
-    let scan = capped_lowercase_scan(&goal.description);
+    // by admission and classification via the hardened `done_criteria` detector.
+    let why = match detect_measurable_criteria(&goal.description)? {
+        CriteriaSignal::Heading(heading) => {
+            format!("derivable: goal description states explicit {heading}")
+        }
+        // A `goal set-done-gate` repair (issue #4930): the finish line is a
+        // machine-checkable anchor an operator pinned, so the goal is genuinely
+        // stuck-with-criteria rather than UNCLEAR-CRITERIA — and must not be
+        // re-blocked on the next cycle even when it carries no markdown bullet.
+        CriteriaSignal::DoneGateFinishLine => {
+            "derivable: goal carries an operator-pinned done-gate finish line".to_string()
+        }
+    };
 
-    let heading = matched_criteria_heading(&scan)?;
-
-    // A bare heading with no concrete items is not derivable — stay conservative.
-    if !has_checkable_item(&scan) {
-        return None;
-    }
-
-    Some(vec![Evidence::new(
-        "done-criteria",
-        goal.id.clone(),
-        format!("derivable: goal description states explicit {heading}"),
-    )])
+    Some(vec![Evidence::new("done-criteria", goal.id.clone(), why)])
 }
 
 /// Evidence for an `UNCLEAR-CRITERIA` goal (issue #16 follow-up): a stalled goal
@@ -2350,5 +2354,58 @@ mod tests_derive_criteria {
         ] {
             let _ = derive_criteria(&goal_with_desc(pathological));
         }
+    }
+
+    #[test]
+    fn done_gate_pin_repair_is_derivable_even_without_a_markdown_bullet() {
+        // Issue #4930 core case: an operator repairs an UNCLEAR-CRITERIA goal with
+        // `goal set-done-gate`, which appends a prose finish line (no heading, no
+        // markdown bullet). Before the fix `derive_criteria` returned None here, so
+        // the reasoner re-classified the goal UNCLEAR-CRITERIA and re-blocked it
+        // every cycle. The finish line must now be recognised as derivable so the
+        // repair actually sticks.
+        let mut g = goal_with_desc("Move the governed repo roster out of the framework.");
+        assert!(
+            derive_criteria(&g).is_none(),
+            "unrepaired prose goal is not derivable (would fall to UNCLEAR-CRITERIA)"
+        );
+        crate::goal_board_store::DoneGatePin {
+            pr: Some("4440".into()),
+            issue: None,
+            criteria: Some("roster is identity-owned".into()),
+        }
+        .apply_to(&mut g);
+        let derived =
+            derive_criteria(&g).expect("a done-gate pin repair must be derivable (issue #4930)");
+        assert!(!derived.is_empty(), "never returns Some(empty)");
+        assert_eq!(derived[0].kind, "done-criteria");
+        assert_eq!(
+            derived[0].reference, "g",
+            "evidence references only the goal id, never raw goal text",
+        );
+    }
+
+    #[test]
+    fn criteria_only_pin_without_any_wip_ref_is_still_derivable() {
+        // The "unrepairable/flag" case the reviews flagged (B1/B4): a pin that
+        // binds NO measurable wip-ref (no pr/issue) still writes the finish line.
+        // stuck_evidence() would be empty for such a goal, so derive_criteria is
+        // the ONLY thing standing between it and an UNCLEAR-CRITERIA re-block — it
+        // must recognise the finish line marker.
+        let mut g = goal_with_desc("Improve the daemon's cognition somehow.");
+        crate::goal_board_store::DoneGatePin {
+            pr: None,
+            issue: None,
+            criteria: Some("the overseer signs off on the cognition rubric".into()),
+        }
+        .apply_to(&mut g);
+        assert!(
+            g.wip_refs.is_empty(),
+            "precondition: a criteria-only pin binds no wip-ref"
+        );
+        assert!(
+            derive_criteria(&g).is_some(),
+            "a criteria-only done-gate finish line must still un-stick the goal (B4)"
+        );
     }
 }
