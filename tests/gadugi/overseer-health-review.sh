@@ -103,6 +103,17 @@ require_test 'parse_missing_terminal_marker_is_error'
 # Fail-closed: malformed / missing-field decisions are dropped, never fabricated.
 require_test 'parse_skips_malformed_json_but_keeps_valid_decisions'
 require_test 'parse_skips_escalation_missing_plain_english_fields'
+# Robustness: a well-formed decision is DISPATCHED, not silently dropped, when the
+# agent wraps it in ordinary markdown/prose framing — trailing justification text
+# after the JSON object (the trailing-side sibling of the leading-decoration
+# fix) — while an unbalanced/truncated object is still skipped fail-closed and the
+# trailing clause never leaks into the parsed brief / operator-facing text.
+require_test 'parse_tolerates_trailing_text_after_launch_json'
+require_test 'parse_tolerates_trailing_text_after_escalate_json'
+require_test 'parse_tolerates_leading_decoration_and_trailing_text_together'
+require_test 'parse_trailing_text_never_ends_json_early_inside_a_string'
+require_test 'parse_still_skips_unbalanced_truncated_json_fail_closed'
+require_test 'extract_leading_json_object_basics'
 # The rail degrades safely on a runner error / a missing terminal marker.
 require_test 'review_degrades_to_empty_on_runner_error'
 require_test 'review_degrades_to_empty_on_missing_terminal_marker'
