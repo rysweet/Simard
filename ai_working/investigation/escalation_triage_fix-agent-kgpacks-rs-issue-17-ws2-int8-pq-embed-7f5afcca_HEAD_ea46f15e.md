@@ -56,7 +56,7 @@ therefore has two layers:
 
 | # | Evidence | What it proves |
 |---|----------|----------------|
-| 1 | **Issue #16** ("WS1: Full-pack CVE eval validation + real 2024/2025 eval questions") is **CLOSED / COMPLETED** (closed 2026-07-06), delivered by **merged PR #41** ("WS1: … (#16)", merged 2026-07-06). | The upstream recall-parity **baseline now exists and has landed.** The dependency that made the gate unmeasurable is **cleared.** |
+| 1 | **Issue #16** ("WS1: Full-pack CVE eval validation + extended real 2024/2025 eval questions") is **CLOSED / COMPLETED** (closed 2026-07-06), delivered by **merged PR #41** ("WS1: … (#16)", merged 2026-07-06). | The upstream recall-parity **baseline now exists and has landed.** The dependency that made the gate unmeasurable is **cleared.** |
 | 2 | **Issue #17** ("WS2: int8/PQ embedding quantization spike, gated on eval recall parity") is **CLOSED / COMPLETED** (closed 2026-07-07), delivered by **merged PR #40** ("WS2: int8 embedding quantization codec spike, disabled pending #16 parity (Closes #17)", merged 2026-07-07, merge commit `869b5c7`). | The goal's **own work is already delivered** by a merged PR that explicitly `Closes #17`. |
 | 3 | PR #40's title/scope: the codec shipped **behind a flag, disabled pending #16 parity** — matching issue #17's acceptance ("Ship behind a flag ONLY if parity holds … otherwise leave DISABLED and commit spike findings"). #16 (the parity baseline) landed one day *before* #40. | The delivered PR **honored the recall-parity gate as written** — it is a correct, complete delivery, not a bypass. |
 
