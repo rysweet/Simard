@@ -236,3 +236,22 @@ verify decision.
 - **OTel-only audit** — no `print!`/`println!`.
 - **Pure core** — `reconcile_doc_prs` and `is_auto_doc_pr` do no I/O and are
   exhaustively unit-tested on fixture PR lists.
+
+## Scope and out-of-scope (deliberate fail-safe boundary)
+
+Reconciliation acts **only** on PRs that pass the full identity gate:
+correctly-labeled auto-doc **drafts** authored by the resolved auto-doc identity
+(`SIMARD_AUTOMERGE_AUTHOR`).
+
+**Out of scope (by design):** legacy title-marker PRs that are non-draft or
+unlabeled are intentionally left untouched. The strict gate is the
+security-critical guard that guarantees a human (or otherwise non-auto-doc) PR is
+never auto-closed, so the pass prefers leaving an ambiguous historical PR open
+over ever closing one it cannot positively attribute. When title-marker PRs exist
+but none pass the gate, the executor emits a LOUD `warn` (naming the likely
+cause: unset/mismatched `SIMARD_AUTOMERGE_AUTHOR`, missing label, or non-draft) so
+a silently inert pass never hides recurring churn.
+
+Draining the legacy unlabeled/non-draft backlog is a possible future enhancement
+tracked as a follow-up; it is **not** required for the single-open invariant on
+newly-generated auto-doc drafts, which this module enforces.

@@ -17,6 +17,20 @@
 //! draft flag, and the auto-doc label ALL hold — so a human PR (or one with an
 //! empty/absent author) is never a candidate.
 //!
+//! ## Scope (deliberate fail-safe boundary)
+//!
+//! Reconciliation acts ONLY on PRs that pass the full identity gate — i.e.
+//! correctly-labeled auto-doc *drafts* authored by the resolved auto-doc
+//! identity. Legacy title-marker PRs that are non-draft or unlabeled are
+//! **intentionally left untouched**: the strict gate is the security guard that
+//! guarantees a human (or otherwise non-auto-doc) PR is never auto-closed, so
+//! the module prefers leaving an ambiguous historical PR open over ever closing
+//! one it cannot positively attribute. Draining that legacy, unlabeled/non-draft
+//! backlog is deliberately out of scope here and is tracked as a follow-up (see
+//! the reference doc); the LOUD inert-gate `warn` in
+//! [`run_doc_pr_reconcile_with_author`] surfaces the case where title-marker PRs
+//! exist but none pass the gate.
+//!
 //! See `docs/reference/auto-doc-pr-reconciliation-api.md` for the full contract.
 
 use crate::error::SimardResult;
@@ -46,8 +60,10 @@ pub const AUTO_DOC_PR_LABEL: &str = SIMARD_ENGINEER_PR_LABEL;
 const DOC_PR_LIST_LIMIT: u32 = 200;
 
 /// Maximum closes executed per cycle — a bounded batch so a large accumulated
-/// backlog is drained over several cycles rather than in one unbounded storm of
-/// `gh pr close` mutations. The canonical PR is always preserved regardless.
+/// backlog of *reconciliation candidates* (labeled auto-doc drafts that pass the
+/// full identity gate) is drained over several cycles rather than in one
+/// unbounded storm of `gh pr close` mutations. Non-candidate historical PRs are
+/// never in this set. The canonical PR is always preserved regardless.
 const MAX_CLOSES_PER_CYCLE: usize = 25;
 
 /// Why a duplicate auto-doc PR is being closed.
