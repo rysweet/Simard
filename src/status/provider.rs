@@ -35,6 +35,11 @@ pub struct AssembleOptions {
     pub service_unit: String,
     /// Optional allowlist of section names to assemble; `None` = all.
     pub sections: Option<Vec<String>>,
+    /// Override for the `daemon_health.json` heartbeat path used when the
+    /// systemd unit is not loaded. `None` resolves the real process-global
+    /// path (`data_local_dir()/simard/daemon_health.json`). Tests inject a
+    /// hermetic path so they never read the host's live daemon heartbeat.
+    pub daemon_health_path: Option<PathBuf>,
 }
 
 impl Default for AssembleOptions {
@@ -43,6 +48,7 @@ impl Default for AssembleOptions {
             state_root: crate::state_root::simard_state_root(),
             service_unit: "simard.service".to_string(),
             sections: None,
+            daemon_health_path: None,
         }
     }
 }
@@ -119,7 +125,7 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
     // process-agnostic in non-systemd deployments (dev / worktree / container).
     match assemble_daemon_from_systemctl(opts) {
         Some(env) => env,
-        None => assemble_daemon_from_heartbeat(),
+        None => assemble_daemon_from_heartbeat(opts),
     }
 }
 
@@ -199,8 +205,15 @@ fn daemon_health_path() -> PathBuf {
 /// Fail-visible: a missing / unreadable / unparseable heartbeat degrades this
 /// one section to `absent` with the honest `systemctl: unit not loaded` note
 /// (never panics, never fabricates a running daemon).
-fn assemble_daemon_from_heartbeat() -> SectionEnvelope<Daemon> {
-    read_daemon_heartbeat(&daemon_health_path(), chrono::Utc::now())
+///
+/// The heartbeat path comes from `opts.daemon_health_path` when set (hermetic
+/// tests inject a path), otherwise the real process-global [`daemon_health_path`].
+fn assemble_daemon_from_heartbeat(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
+    let path = opts
+        .daemon_health_path
+        .clone()
+        .unwrap_or_else(daemon_health_path);
+    read_daemon_heartbeat(&path, chrono::Utc::now())
 }
 
 /// Read + map the heartbeat at `path` as of `now`. Split from
