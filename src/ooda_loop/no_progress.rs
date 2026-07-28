@@ -1640,55 +1640,6 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
-/// Maximum number of characters of untrusted goal `description` that
-/// [`derive_criteria`] scans. Goal text is untrusted (very long, control chars,
-/// `--`-prefixed); the cap bounds the work so no adversarial description can
-/// cause a panic or pathological scanning. Bytes past the cap are ignored.
-const DERIVE_CRITERIA_MAX_SCAN: usize = 8192;
-
-/// Recognized done-criteria section headings. Their presence (with at least one
-/// concrete checkable item, see [`has_checkable_item`]) is the positive signal
-/// that a goal's done-criteria are *derivable from its own description* — the
-/// goal is not criteria-unclear, it spelled its criteria out. Matched
-/// case-insensitively as substrings of the length-capped description.
-const CRITERIA_HEADINGS: &[&str] = &[
-    "acceptance criteria",
-    "definition of done",
-    "success criteria",
-    "completion criteria",
-    "done criteria",
-    "done-criteria",
-    "exit criteria",
-];
-
-/// True when `text` contains at least one line that reads as a concrete,
-/// checkable list item — a markdown bullet (`- `, `* `, `• `), a checkbox
-/// (`[ ]` / `[x]`), or an ordered item (`1.` / `2)`). Total and panic-free; used
-/// to reject a bare criteria heading with no items (conservative derivation).
-fn has_checkable_item(text: &str) -> bool {
-    fn starts_with_ordered_item(t: &str) -> bool {
-        let mut saw_digit = false;
-        for c in t.chars() {
-            if c.is_ascii_digit() {
-                saw_digit = true;
-                continue;
-            }
-            return saw_digit && (c == '.' || c == ')');
-        }
-        false
-    }
-    text.lines().any(|line| {
-        let t = line.trim_start();
-        t.starts_with("- ")
-            || t.starts_with("* ")
-            || t.starts_with("• ")
-            || t.starts_with("[ ]")
-            || t.starts_with("[x]")
-            || t.starts_with("[X]")
-            || starts_with_ordered_item(t)
-    })
-}
-
 /// Attempt to derive checkable done-criteria for a stalled goal from its OWN
 /// `description` — no external clarification, no brain call. Consulted at the
 /// terminal rung of [`DeterministicNoProgressReasoner::investigate`] *before* an
@@ -1696,34 +1647,35 @@ fn has_checkable_item(text: &str) -> bool {
 ///
 /// Returns:
 /// * `Some(evidence)` — non-empty, bounded — when the description carries an
-///   explicit, self-contained criteria section (a recognized [`CRITERIA_HEADINGS`]
-///   heading with at least one concrete [`has_checkable_item`] item). The caller
+///   explicit, self-contained criteria section (a recognized
+///   [`crate::done_criteria::CRITERIA_HEADINGS`] heading with at least one
+///   concrete [`crate::done_criteria::has_checkable_item`] item). The caller
 ///   proceeds as `GENUINELY-STUCK` with this evidence, so the goal gets a real
 ///   guided investigation instead of being misclassified structurally
 ///   unmeasurable and swept into the storm-feeding `UNCLEAR-CRITERIA` population.
 /// * `None` — when nothing checkable can be derived. The caller falls to the
 ///   legacy `UNCLEAR-CRITERIA` classification (byte-identical to before).
 ///
+/// The heading/checkable-item detection is delegated to the shared, hardened
+/// [`crate::done_criteria`] module so admission and classification share exactly
+/// one definition (issue #4930): there is one length cap, one heading set, and
+/// one checkable-item scan — no drifting second copy.
+///
 /// Totality/safety contract: never panics, never returns `Some(vec![])`, and
-/// bounds its work by [`DERIVE_CRITERIA_MAX_SCAN`] so adversarial goal text
-/// cannot cause a panic or pathological scanning. Goal text is treated as
-/// untrusted: it is length-capped and lower-cased for matching, and the emitted
-/// evidence carries only the goal id and a constant heading token — never raw
-/// goal text — so nothing is smuggled into the WHY / log line.
+/// bounds its work by [`crate::done_criteria::DERIVE_CRITERIA_MAX_SCAN`] so
+/// adversarial goal text cannot cause a panic or pathological scanning. The
+/// emitted evidence carries only the goal id and a constant heading token —
+/// never raw goal text — so nothing is smuggled into the WHY / log line.
 fn derive_criteria(goal: &ActiveGoal) -> Option<Vec<Evidence>> {
-    // One length-capped, lower-cased pass over the untrusted description. The
-    // heading match and the checkable-item scan both read this same buffer:
-    // bullets, checkboxes and ordered markers are case-invariant (and
-    // `has_checkable_item` already accepts either checkbox case), so a second
-    // original-case allocation is unnecessary.
-    let scan: String = goal
-        .description
-        .chars()
-        .take(DERIVE_CRITERIA_MAX_SCAN)
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
+    use crate::done_criteria::{
+        capped_lowercase_scan, has_checkable_item, matched_criteria_heading,
+    };
 
-    let heading = CRITERIA_HEADINGS.iter().find(|h| scan.contains(**h))?;
+    // One length-capped, lower-cased pass over the untrusted description, shared
+    // by the heading match and the checkable-item scan.
+    let scan = capped_lowercase_scan(&goal.description);
+
+    let heading = matched_criteria_heading(&scan)?;
 
     // A bare heading with no concrete items is not derivable — stay conservative.
     if !has_checkable_item(&scan) {
@@ -2321,7 +2273,8 @@ mod tests_storm_suppression {
 /// bare-heading rejection.
 #[cfg(test)]
 mod tests_derive_criteria {
-    use super::{DERIVE_CRITERIA_MAX_SCAN, derive_criteria};
+    use super::derive_criteria;
+    use crate::done_criteria::DERIVE_CRITERIA_MAX_SCAN;
     use crate::goal_curation::ActiveGoal;
 
     fn goal_with_desc(desc: &str) -> ActiveGoal {
