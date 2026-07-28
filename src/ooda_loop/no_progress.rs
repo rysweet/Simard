@@ -22,10 +22,9 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
 };
 use crate::goal_curation::no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
-    SURFACED_INVESTIGATION_FAILURE_LIMIT, needs_reinvestigation,
-    no_progress_blocked_reason_with_why, obsolescence_reason, resolution_for_why,
-    surfaced_failure_escalation_issue, verify_stuck_goal,
+    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker, is_quarantined,
+    needs_reinvestigation, no_progress_blocked_reason_with_why, obsolescence_reason,
+    quarantine_marker, resolution_for_why, surfaced_failure_escalation_issue, verify_stuck_goal,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -366,6 +365,15 @@ pub(crate) struct NoProgressBreakerReport {
     /// SIGNAL. It stays **fail-closed**: the goal is never blocked/killed/parked,
     /// and this is deliberately NOT a [`fired`](Self::fired) firing.
     pub research_idle_faults: Vec<String>,
+    /// Goals **terminally quarantined** (process_health): an `UNCLEAR-CRITERIA` /
+    /// `GENUINELY-STUCK` goal that stayed evidence-less past
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`](crate::goal_curation::no_progress_breaker::SURFACED_INVESTIGATION_FAILURE_LIMIT)
+    /// surfaced failures. It is Blocked WITH the surfaced count as evidence, the
+    /// durable [`quarantine_marker`](crate::goal_curation::no_progress_breaker::quarantine_marker)
+    /// is written, and it is thereafter skipped by
+    /// [`reinvestigate_bare_blocked_goals`] — ending the re-schedule/re-file
+    /// churn. A terminal firing.
+    pub quarantined: Vec<String>,
 }
 
 impl NoProgressBreakerReport {
@@ -380,6 +388,7 @@ impl NoProgressBreakerReport {
             || !self.healed.is_empty()
             || !self.deferred.is_empty()
             || !self.engineer_spawned.is_empty()
+            || !self.quarantined.is_empty()
     }
 
     /// Compact one-line summary for the cycle log.
@@ -387,7 +396,7 @@ impl NoProgressBreakerReport {
         format!(
             "done={} dropped={} escalated={} healed={} deferred={} engineer={} \
              auto_cleared={} reinvestigated={} errors={} perpetual_idled={} \
-             research_faults={}",
+             research_faults={} quarantined={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
@@ -399,6 +408,7 @@ impl NoProgressBreakerReport {
             self.investigation_errors.len(),
             self.perpetual_idled.len(),
             self.research_idle_faults.len(),
+            self.quarantined.len(),
         )
     }
 
@@ -904,7 +914,8 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
             NoProgressResolution::Heal { .. }
             | NoProgressResolution::Defer { .. }
             | NoProgressResolution::SpawnEngineer { .. }
-            | NoProgressResolution::SurfaceInvestigationFailure { .. } => {
+            | NoProgressResolution::SurfaceInvestigationFailure { .. }
+            | NoProgressResolution::QuarantineTerminal { .. } => {
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,
@@ -1050,7 +1061,9 @@ pub(crate) fn apply_no_progress_breaker_investigated(
         };
 
         let guided_retry_used = tracker.guided_retry_used(goal_id);
-        let resolution = resolution_for_why(consecutive, why, guided_retry_used);
+        let class = why.class;
+        let surfaced_failures = tracker.surfaced_failures(goal_id);
+        let resolution = resolution_for_why(consecutive, why, guided_retry_used, surfaced_failures);
 
         // On-transition path: the goal is not in a Blocked state, so the
         // non-terminal `Heal` / `SpawnEngineer` rungs leave its status untouched
@@ -1059,6 +1072,7 @@ pub(crate) fn apply_no_progress_breaker_investigated(
             state,
             goal_id,
             consecutive,
+            class,
             resolution,
             healer,
             dispatcher,
@@ -1090,6 +1104,9 @@ pub(crate) fn apply_no_progress_breaker_investigated(
 /// re-investigation pass ([`reinvestigate_bare_blocked_goals`], issue #17) so the
 /// class → action mapping can never drift between the two populations.
 /// `consecutive` renders into any authored block reason / clone-error escalation.
+/// `class` is the investigated root-cause classification; it authors the WHY on
+/// the terminal [`NoProgressResolution::QuarantineTerminal`] block reason and its
+/// single deduplicated escalation issue.
 ///
 /// `unblock_nonterminal` distinguishes the callers' starting state. The
 /// on-transition path acts on a goal that is *not* Blocked, so the non-terminal
@@ -1105,6 +1122,7 @@ fn apply_resolution_side_effects(
     state: &mut OodaState,
     goal_id: &str,
     consecutive: u32,
+    class: NoProgressClass,
     resolution: NoProgressResolution,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
@@ -1297,64 +1315,24 @@ fn apply_resolution_side_effects(
             );
         }
         NoProgressResolution::SurfaceInvestigationFailure { class, reason } => {
-            // Bound the evidence-less re-investigation (issue #16 follow-up). The
-            // first fix (#4096) made this rung non-terminal so a goal is never
-            // parked with a bare `evidence=[(none)]` block — but an *unbounded*
-            // re-investigation is its own livelock: a goal whose done-criteria are
-            // permanently unclear surfaces → resets → forever, making no shippable
-            // progress and never reaching a human. After
-            // `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive surfaced failures,
-            // stop spinning and escalate to a human WITH the re-investigation count
-            // as concrete evidence (so the never-`evidence=[(none)]` invariant
-            // holds — the count is real evidence, not `(none)`) and a measurable
-            // "make the done-criteria machine-checkable" ask.
-            let surfaced = tracker.record_surfaced_failure(goal_id);
-            if surfaced >= SURFACED_INVESTIGATION_FAILURE_LIMIT {
-                let why = NoProgressWhy::new(
-                    class,
-                    vec![Evidence::new(
-                        "re-investigation",
-                        goal_id,
-                        format!("{surfaced} consecutive evidence-less investigations"),
-                    )],
-                );
-                let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
-                let (issue_title, issue_body) =
-                    surfaced_failure_escalation_issue(goal_id, class, surfaced);
-                escalate_with_tracking_issue(
-                    state,
-                    goal_id,
-                    blocked_reason,
-                    &issue_title,
-                    &issue_body,
-                    filer,
-                );
-                tracker.clear_surfaced_failures(goal_id);
-                tracker.reset_count(goal_id);
-                report.escalated.push(goal_id.to_string());
-                tracing::warn!(
-                    target: "simard::ooda",
-                    goal = %goal_id,
-                    why = %class.token(),
-                    surfaced_failures = surfaced,
-                    "no-progress breaker: evidence-less re-investigation bounded out after \
-                     {surfaced} surfaced failures — BLOCKED WITH re-investigation count as \
-                     evidence + human triage issue filed and linked to make the done-criteria measurable",
-                );
-                return;
-            }
-
-            // Below the bound: the independent investigation reached the terminal
-            // rung with NO evidence. A goal must NEVER be parked with
+            // The independent investigation reached the terminal rung with NO
+            // evidence, but the goal has NOT yet exhausted its bounded
+            // re-investigation budget (the routing in
+            // [`resolution_for_why`] returns [`NoProgressResolution::QuarantineTerminal`]
+            // once the PRE-bump surfaced count reaches
+            // `SURFACED_INVESTIGATION_FAILURE_LIMIT`, so reaching THIS arm means we
+            // are still below the bound). A goal must NEVER be parked with
             // `evidence=[(none)]`, so this is a SURFACED failure — not a bare
-            // block. Take no terminal action: record it in `investigation_errors`
-            // (fail visible) and leave the goal retriable so the next investigation
-            // can recover real evidence (fail closed). The guided-retry flag is
-            // preserved, so a future terminal rung goes straight here again rather
-            // than spawning a second engineer. On the re-investigation path the
-            // goal starts in a bare / `(none)` Blocked state, so un-block it to
-            // `NotStarted` so the brain can re-select it and a later cycle can
-            // re-investigate.
+            // block. Take no terminal action: bump the surfaced-failure counter,
+            // record it in `investigation_errors` (fail visible) and leave the goal
+            // retriable so the next investigation can recover real evidence (fail
+            // closed). The guided-retry flag is preserved, so a future terminal
+            // rung goes straight here again rather than spawning a second engineer.
+            // On the re-investigation path the goal starts in a bare / `(none)`
+            // Blocked state, so un-block it to `NotStarted` so the brain can
+            // re-select it and a later cycle can re-investigate.
+            let surfaced = tracker.record_surfaced_failure(goal_id);
+            let _ = class;
             if unblock_nonterminal
                 && let Some(g) = state
                     .active_goals
@@ -1373,6 +1351,68 @@ fn apply_resolution_side_effects(
                 surfaced_failures = surfaced,
                 "no-progress breaker: evidence-less terminal outcome SURFACED as an \
                  investigation failure (never parked with evidence=[(none)]) — retriable",
+            );
+        }
+        NoProgressResolution::QuarantineTerminal { surfaced_count } => {
+            // Terminal quarantine (process_health, HIGH). An evidence-less goal
+            // whose done-criteria are permanently UNCLEAR-CRITERIA /
+            // GENUINELY-STUCK has now exhausted its bounded re-investigation budget
+            // (`surfaced_count >= SURFACED_INVESTIGATION_FAILURE_LIMIT`). The old
+            // behaviour escalated (filed an issue) EVERY time it re-crossed the
+            // bound, and `reinvestigate_bare_blocked_goals` kept re-selecting the
+            // goal — so each cycle re-blocked and re-filed a near-identical
+            // `ooda-stuck` issue: unbounded churn. Quarantine ends the churn by
+            // (a) blocking WITH the surfaced count as concrete evidence (so the
+            // never-`evidence=[(none)]` invariant still holds), (b) filing exactly
+            // ONE deduplicated triage issue, (c) writing a durable
+            // [`quarantine_marker`] onto the goal, after which
+            // [`reinvestigate_bare_blocked_goals`] skips it permanently — no more
+            // re-schedule, no more re-file. A human must make the done-criteria
+            // machine-checkable and clear the marker to revive it.
+            let why = NoProgressWhy::new(
+                class,
+                vec![Evidence::new(
+                    "re-investigation",
+                    goal_id,
+                    format!("{surfaced_count} consecutive evidence-less investigations"),
+                )],
+            );
+            let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
+            let (issue_title, issue_body) =
+                surfaced_failure_escalation_issue(goal_id, class, surfaced_count);
+            escalate_with_tracking_issue(
+                state,
+                goal_id,
+                blocked_reason,
+                &issue_title,
+                &issue_body,
+                filer,
+            );
+            // Idempotently mark the goal quarantined so the re-investigation pass
+            // stops re-selecting it. Only push the marker once — a goal that trips
+            // this arm again (e.g. a stale in-flight cycle) must not accrete
+            // duplicate markers.
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+                && !is_quarantined(g)
+            {
+                g.wip_refs.push(quarantine_marker());
+            }
+            tracker.clear_surfaced_failures(goal_id);
+            tracker.reset_count(goal_id);
+            report.quarantined.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                why = %class.token(),
+                surfaced_failures = surfaced_count,
+                "no-progress breaker: evidence-less re-investigation bounded out after \
+                 {surfaced_count} surfaced failures — TERMINALLY QUARANTINED (blocked WITH \
+                 re-investigation count as evidence, one triage issue filed, goal removed from \
+                 re-scheduling); a human must make the done-criteria measurable to revive it",
             );
         }
     }
@@ -1443,6 +1483,21 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         .collect();
 
     for goal_id in bare_ids {
+        // Churn-stopper (process_health, HIGH): a durably quarantined goal is
+        // NEVER re-investigated, re-classified, re-escalated, or re-filed again —
+        // even if a restart re-parked it in a bare block. Short-circuit BEFORE the
+        // reasoner is consulted so the terminal quarantine truly ends the
+        // re-schedule/re-file loop (the reasoner is a `PanicReasoner` in the
+        // churn test to prove it is never reached).
+        if state
+            .active_goals
+            .active
+            .iter()
+            .any(|g| g.id == goal_id && is_quarantined(g))
+        {
+            continue;
+        }
+
         // Investigate the bare goal ONCE. Fail closed on error: no terminal
         // action, marker left exactly as-is, nothing recorded in the dedupe set.
         let why = {
@@ -1517,7 +1572,8 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         }
 
         let guided_retry_used = tracker.guided_retry_used(&goal_id);
-        let resolution = resolution_for_why(threshold, why, guided_retry_used);
+        let surfaced_failures = tracker.surfaced_failures(&goal_id);
+        let resolution = resolution_for_why(threshold, why, guided_retry_used, surfaced_failures);
 
         // An evidence-less terminal outcome takes NO terminal action (it is
         // surfaced + retried), so it must NOT be recorded in the (goal, class)
@@ -1531,6 +1587,7 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
             state,
             &goal_id,
             threshold,
+            class,
             resolution,
             healer,
             dispatcher,

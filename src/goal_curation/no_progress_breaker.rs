@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::completion_gate::{CompletionEvidenceGate, CompletionVerdict, EvidenceSource};
 use super::no_progress_why::{Evidence, NoProgressClass, NoProgressWhy};
-use super::types::ActiveGoal;
+use super::types::{ActiveGoal, WipRef};
 
 /// Consecutive no-action cycles on one goal before the breaker fires. Kept
 /// deliberately small (2–3) so a livelock is broken quickly, matching the
@@ -297,6 +297,27 @@ pub enum NoProgressResolution {
         class: NoProgressClass,
         reason: String,
     },
+    /// `UNCLEAR-CRITERIA` / `GENUINELY-STUCK`, **terminal quarantine** rung
+    /// (process_health): the goal has spent its guided retry AND surfaced an
+    /// evidence-less terminal failure at least
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] times — its done-criteria are
+    /// *permanently* unclear. Surfacing-and-retrying forever is the churn this
+    /// ends (~13 `ooda-stuck` "goal stuck after guided retry (UNCLEAR-CRITERIA)"
+    /// issues in a single field day). Instead of surfacing again the breaker
+    /// terminally quarantines the goal: the caller Blocks it with a WHY-bearing
+    /// reason that renders `surfaced_count` as REAL evidence (never
+    /// `evidence=[(none)]`), writes the durable, injection-safe
+    /// [`quarantine_marker`] so [`is_quarantined`] reads `true`, and files exactly
+    /// one deduplicated tracking issue. A quarantined goal is thereafter never
+    /// re-scheduled, re-classified, or re-filed by
+    /// [`reinvestigate_bare_blocked_goals`](crate::ooda_loop::no_progress::reinvestigate_bare_blocked_goals),
+    /// so the duplicate-issue storm stops. This **replaces** the adapter's prior
+    /// inline escalate-at-limit branch — the two must not coexist.
+    ///
+    /// `surfaced_count` is the goal's persisted consecutive surfaced-failure count
+    /// (`>= SURFACED_INVESTIGATION_FAILURE_LIMIT`), carried so the authored block
+    /// reason renders a concrete, positive count as evidence.
+    QuarantineTerminal { surfaced_count: u32 },
 }
 
 /// How many **consecutive** evidence-less
@@ -318,6 +339,50 @@ pub enum NoProgressResolution {
 /// spin is broken and a human is finally asked to make the done-criteria
 /// measurable.
 pub const SURFACED_INVESTIGATION_FAILURE_LIMIT: u32 = 3;
+
+/// The `WipRef.kind` of the durable OODA breaker **terminal-quarantine** marker
+/// (process_health). A novel kind string that no other `wip_refs` consumer
+/// matches (they fall through their `kind` `match` arms), so attaching it is
+/// inert to every other subsystem — it exists solely for [`is_quarantined`].
+pub const NO_PROGRESS_QUARANTINE_MARKER_KIND: &str = "ooda-breaker-quarantine";
+
+/// The `WipRef.ref_id` of the quarantine marker: a **fixed compile-time
+/// sentinel**, never derived from goal text. [`is_quarantine_ref`] keys on this
+/// exact value, so a goal description / activity can neither forge a quarantine
+/// for itself nor smuggle attacker-controlled content into a marker — the
+/// injection-safety invariant the tests pin.
+pub const NO_PROGRESS_QUARANTINE_MARKER_REF_ID: &str = "ooda-breaker-quarantine::terminal-sentinel";
+
+/// Build the durable [`WipRef`] that marks a goal terminally quarantined by the
+/// no-progress breaker. The `ref_id` is the fixed
+/// [`NO_PROGRESS_QUARANTINE_MARKER_REF_ID`] sentinel (never goal-derived) and the
+/// `kind` is [`NO_PROGRESS_QUARANTINE_MARKER_KIND`], so the marker is recognised
+/// only by [`is_quarantine_ref`] and can never be forged from goal text.
+pub fn quarantine_marker() -> WipRef {
+    WipRef {
+        kind: NO_PROGRESS_QUARANTINE_MARKER_KIND.to_string(),
+        ref_id: NO_PROGRESS_QUARANTINE_MARKER_REF_ID.to_string(),
+        label: "OODA breaker terminal quarantine (UNCLEAR-CRITERIA after guided retry)".to_string(),
+        url: None,
+    }
+}
+
+/// True when `wip` is the breaker-authored quarantine marker. Keys on BOTH the
+/// fixed [`NO_PROGRESS_QUARANTINE_MARKER_KIND`] and the fixed sentinel
+/// [`NO_PROGRESS_QUARANTINE_MARKER_REF_ID`] `ref_id` — never on goal-derived
+/// text — so a `WipRef` carrying the right `kind` but a goal-supplied `ref_id`
+/// can never be mistaken for a quarantine marker (injection-safe).
+pub fn is_quarantine_ref(wip: &WipRef) -> bool {
+    wip.kind == NO_PROGRESS_QUARANTINE_MARKER_KIND
+        && wip.ref_id == NO_PROGRESS_QUARANTINE_MARKER_REF_ID
+}
+
+/// True when `goal` carries the durable quarantine marker in its `wip_refs`.
+/// Only the breaker-authored fixed-sentinel marker counts — no goal-derived
+/// `WipRef` can forge a quarantine.
+pub fn is_quarantined(goal: &ActiveGoal) -> bool {
+    goal.wip_refs.iter().any(is_quarantine_ref)
+}
 
 impl NoProgressResolution {
     /// `true` for every resolution that removes the goal from the no-action loop
@@ -549,10 +614,21 @@ pub(crate) fn surfaced_failure_escalation_issue(
 /// engineer ([`NoProgressResolution::SpawnEngineer`]); only once that retry is
 /// spent and the goal is *still* stuck does it [`Escalate`](NoProgressResolution::Escalate)
 /// — always WITH the concrete WHY + evidence attached.
+///
+/// `surfaced_failures` is the goal's persisted consecutive evidence-less
+/// surfaced-failure count (process_health). At the evidence-less terminal rung,
+/// once it reaches [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] the breaker returns
+/// [`NoProgressResolution::QuarantineTerminal`] instead of surfacing again — the
+/// terminal stop that ends the `UNCLEAR-CRITERIA` re-schedule/re-file churn.
+/// Below the bound the rung is byte-for-byte unchanged
+/// ([`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)),
+/// and the parameter is ignored for every other class and for evidence-backed
+/// stalls.
 pub fn resolution_for_why(
     consecutive: u32,
     why: NoProgressWhy,
     guided_retry_used: bool,
+    surfaced_failures: u32,
 ) -> NoProgressResolution {
     match why.class {
         NoProgressClass::AlreadyComplete => NoProgressResolution::MarkDone,
@@ -573,10 +649,16 @@ pub fn resolution_for_why(
                 // and the goal is still stuck. NEVER author a bare
                 // `evidence=[(none)]` block — the exact live-daemon defect. If the
                 // investigation produced concrete evidence, escalate WITH it;
-                // otherwise surface the evidence-less outcome as an investigation
-                // failure (fail visible + retriable), taking no bare terminal
-                // action.
+                // otherwise the outcome is evidence-less: quarantine terminally
+                // once the surfaced-failure bound is reached (process_health —
+                // ends the re-schedule/re-file churn), else surface it as a
+                // retriable investigation failure exactly as before.
                 if why.evidence.is_empty() {
+                    if surfaced_failures >= SURFACED_INVESTIGATION_FAILURE_LIMIT {
+                        return NoProgressResolution::QuarantineTerminal {
+                            surfaced_count: surfaced_failures,
+                        };
+                    }
                     return NoProgressResolution::SurfaceInvestigationFailure {
                         class: why.class,
                         reason: format!(

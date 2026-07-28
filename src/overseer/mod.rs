@@ -54,6 +54,7 @@ pub mod conflict;
 pub mod deploy;
 pub mod deploy_trigger;
 pub mod diagnosis;
+pub mod doc_pr_reconcile;
 pub mod ecosystem_observe;
 pub mod failure_sink;
 pub mod guardrails;
@@ -102,6 +103,16 @@ mod tests_merge_queue_reasoning;
 mod tests_rework_loop;
 #[cfg(test)]
 mod tests_root_cause;
+// process_health (TDD): reblock-issue signature stabilization — two re-block
+// observations of the same cause that differ only by a volatile goal id must
+// dedup to ONE stewardship signature (`fold_volatile_goal_ids`).
+#[cfg(test)]
+mod tests_reblock_signature;
+// goal_hygiene (TDD): the auto-generated documentation-PR reconciliation pass —
+// composite fail-closed identity gate, single-open canonical selection, and the
+// by-number close executor.
+#[cfg(test)]
+mod tests_doc_pr_reconcile;
 #[cfg(test)]
 mod tests_self_healing;
 #[cfg(test)]
@@ -341,6 +352,18 @@ pub struct Overseer {
     /// status field + a single dual-channel NotifyOperator), never re-sent every
     /// tick while it stays disabled.
     merge_reasoning_disabled_notified: bool,
+    /// The `gh` client for the additive **auto-doc PR reconciliation** pass
+    /// (goal_hygiene): each due tick it lists open PRs across the governed
+    /// [`merge_queue_roster`](Self::merge_queue_roster) and closes stale /
+    /// superseded auto-generated `"Update documentation with …"` drafts so at
+    /// most one stays open ([`doc_pr_reconcile::run_doc_pr_reconcile`]). `None`
+    /// by default (bare constructor / tests) so the pass is skipped and the
+    /// Overseer performs NO `gh` I/O — existing `run_cycle` tests are unaffected;
+    /// `build_overseer` wires the production [`crate::stewardship::RealPrGhClient`].
+    doc_pr_reconcile_gh: Option<Box<dyn crate::stewardship::merge_authority::PrGhClient>>,
+    /// Monotonic tick counter driving the auto-doc PR reconciliation every-N
+    /// cadence (reuses the shared gap-scan cadence knob).
+    doc_pr_reconcile_tick: u64,
     /// The agentic **health-review** rail ([standing]): the thin
     /// [`health_review::HealthReviewer`] seam that invokes the
     /// `overseer-health-review` recipe on the Overseer cadence — an AGENT reads
@@ -551,6 +574,8 @@ impl Overseer {
             merge_queue_every_n: 1,
             merge_queue_tick: 0,
             merge_reasoning_disabled_notified: false,
+            doc_pr_reconcile_gh: None,
+            doc_pr_reconcile_tick: 0,
             health_reviewer: None,
             health_review_enabled: false,
             health_review_every_n: 1,
@@ -665,6 +690,68 @@ impl Overseer {
         self.merge_queue_reasoner = Some(reasoner);
         self.merge_queue_every_n = every_n;
         self
+    }
+
+    /// Wire the `gh` client for the additive auto-doc PR reconciliation pass
+    /// (goal_hygiene). Absent by default (the pass is skipped and NO `gh` I/O is
+    /// performed); `build_overseer` wires the production
+    /// [`crate::stewardship::RealPrGhClient`]. The reconciliation scope is the
+    /// governed [`merge_queue_roster`](Self::merge_queue_roster). Gated at run
+    /// time by [`Self::with_gap_scan_enabled`] (the shared scan opt-out) and an
+    /// every-N cadence.
+    pub fn with_doc_pr_reconcile_client(
+        mut self,
+        gh: Box<dyn crate::stewardship::merge_authority::PrGhClient>,
+    ) -> Self {
+        self.doc_pr_reconcile_gh = Some(gh);
+        self
+    }
+
+    /// Reconcile stale/superseded auto-generated documentation PRs across the
+    /// governed roster so at most one stays open (goal_hygiene). Additive and
+    /// fully **fail-closed**: skipped entirely unless a `gh` client is wired
+    /// AND the shared gap-scan opt-out is enabled AND the every-N cadence is due;
+    /// a per-repo listing/close error is logged and contained — it never aborts
+    /// the cycle or changes any merge/verify decision. Mirrors the gating of the
+    /// merge-queue observe pass.
+    fn reconcile_auto_doc_prs(&mut self) {
+        let tick = self.doc_pr_reconcile_tick;
+        self.doc_pr_reconcile_tick = self.doc_pr_reconcile_tick.wrapping_add(1);
+
+        let Some(gh) = self.doc_pr_reconcile_gh.as_ref() else {
+            return;
+        };
+        if !self.gap_scan_enabled || self.merge_queue_roster.is_empty() {
+            return;
+        }
+        if !ecosystem_observe::should_observe(true, self.merge_queue_every_n, tick) {
+            return;
+        }
+
+        for repo in &self.merge_queue_roster {
+            match doc_pr_reconcile::run_doc_pr_reconcile(repo, gh.as_ref()) {
+                Ok(report) => {
+                    tracing::info!(
+                        target: "simard::overseer",
+                        repo = %repo,
+                        canonical = report.canonical.map(|n| n as i64).unwrap_or(-1),
+                        closed = report.closed.len(),
+                        skipped = report.skipped,
+                        errors = report.errors.len(),
+                        "auto-doc PR reconciliation pass complete for repo",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "simard::overseer",
+                        repo = %repo,
+                        error = %e,
+                        "auto-doc PR reconciliation skipped for repo (list failed) — \
+                         fail-closed, no PRs closed this cycle",
+                    );
+                }
+            }
+        }
     }
 
     /// Enable/disable the whisperer (config opt-out). Off by default; the daemon
@@ -924,6 +1011,15 @@ impl Overseer {
         // other observation uses. Fail-closed: an unwired rail / off cadence /
         // empty scope / degraded recipe leaves the observation unchanged.
         self.observe_merge_queue(&mut observed, &in_flight);
+
+        // Additive auto-doc PR reconciliation (goal_hygiene): enforce the
+        // single-open invariant for auto-generated `"Update documentation with …"`
+        // PRs by closing stale / superseded drafts. Fully fail-closed and inert
+        // unless a `gh` client is wired (production only) — see
+        // [`reconcile_auto_doc_prs`]. Placed alongside the merge-queue observe
+        // pass (the PR/merge reconciliation surface); it changes no merge/verify
+        // decision.
+        self.reconcile_auto_doc_prs();
 
         // Drain diagnosed step failures (#2640, PART 2) from the process-global
         // failure sink into this Observe pass, so a caught decision-cycle /

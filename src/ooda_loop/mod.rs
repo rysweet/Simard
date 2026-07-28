@@ -54,6 +54,13 @@ mod tests_no_progress_investigation;
 #[cfg(test)]
 mod tests_no_progress_reinvestigation;
 
+// process_health (TDD): the churn-stopping side effects of the terminal-quarantine
+// rung — the re-investigation pass skips quarantined goals (never re-investigates,
+// re-schedules, or re-files them) and an at-bound evidence-less UNCLEAR-CRITERIA
+// stall is durably marked + blocked with real evidence.
+#[cfg(test)]
+mod tests_quarantine_churn;
+
 // Issue #16 (follow-up, TDD): direct unit tests for the production
 // `DeterministicNoProgressReasoner` — pin the terminal-rung invariant that it
 // never returns an empty-evidence WHY, so the breaker can never author a bare
