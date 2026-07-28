@@ -67,11 +67,59 @@ impl RemoteCognitiveMemory {
             .stream
             .lock()
             .map_err(|e| ipc_err("lock-poisoned", e))?;
-        write_frame(&mut *guard, &bytes)?;
-        let resp_bytes = read_frame(&mut *guard)?;
+
+        match Self::exchange(&mut guard, &bytes) {
+            Ok(resp) => Ok(resp),
+            Err(first_err) => {
+                // At-most-once reconnect on a transport failure (broken pipe,
+                // EOF, reset) — issue #4929. The daemon journal used to fill
+                // with `write-len: Broken pipe` because a severed `UnixStream`
+                // poisoned this client permanently. Reset the stream, reconnect
+                // ONCE to the same socket path, and retry the single in-flight
+                // request. A second failure surfaces `Err` — no retry loop, no
+                // silent fallback.
+                tracing::warn!(
+                    endpoint = "memory-ipc",
+                    socket_path = %self.socket_path.display(),
+                    error = %first_err,
+                    "memory-ipc call failed; attempting single reconnect + retry"
+                );
+                let fresh = Self::reconnect(&self.socket_path)?;
+                *guard = fresh;
+                Self::exchange(&mut guard, &bytes).map_err(|retry_err| {
+                    tracing::error!(
+                        endpoint = "memory-ipc",
+                        socket_path = %self.socket_path.display(),
+                        error = %retry_err,
+                        "memory-ipc reconnect retry also failed; surfacing error"
+                    );
+                    retry_err
+                })
+            }
+        }
+    }
+
+    /// Write one framed request and read one framed response on `stream`,
+    /// surfacing any transport or parse failure as `Err`.
+    fn exchange(stream: &mut UnixStream, bytes: &[u8]) -> SimardResult<MemoryResponse> {
+        write_frame(stream, bytes)?;
+        let resp_bytes = read_frame(stream)?;
         let resp: MemoryResponse =
             serde_json::from_slice(&resp_bytes).map_err(|e| ipc_err("parse-response", e))?;
         Ok(resp)
+    }
+
+    /// Open a fresh connection to `socket_path` for the single allowed reconnect
+    /// (no handshake — the retried request is re-sent directly). Timeouts mirror
+    /// [`connect`](Self::connect) so a wedged daemon cannot hang the retry.
+    fn reconnect(socket_path: &Path) -> SimardResult<UnixStream> {
+        let stream = UnixStream::connect(socket_path).map_err(|e| SimardError::RpcSpawnFailed {
+            endpoint: "memory-ipc-client".into(),
+            reason: format!("reconnect {}: {e}", socket_path.display()),
+        })?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+        Ok(stream)
     }
 
     fn unexpected(name: &str, got: MemoryResponse) -> SimardError {

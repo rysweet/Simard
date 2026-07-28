@@ -33,6 +33,12 @@ mod tests_launcher_fail_closed_2896;
 // implementation step; until then the unresolved paths are the red signal.
 #[cfg(test)]
 mod tests_gated_write_2679;
+// TDD (RED) for issue #4929: the memory-ipc client must transparently recover
+// from a broken pipe with a single reconnect + retry (F2b). Until `call` grows
+// that path, the broken-pipe round-trip returns Err instead of Ok — the red
+// signal.
+#[cfg(test)]
+mod tests_reconnect_4929;
 #[cfg(test)]
 mod tests_shared_store_2320;
 #[cfg(test)]

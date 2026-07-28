@@ -1493,6 +1493,10 @@ pub fn run_ooda_daemon(
                 "cycle_number": state.cycle_count + 1,
                 "status": "running",
                 "cycle_phase": state.current_phase.to_string(),
+                // Additive, observability-only (issue #4929): stamp the daemon's
+                // own PID so `simard status` can sample /proc/<pid> RSS + CPU
+                // instead of rendering "daemon CPU / RSS absent".
+                "main_pid": std::process::id(),
                 "cycle_start_epoch": cycle_start_epoch,
                 "interval_secs": interval_secs,
                 "actions_taken": format!("Starting cycle #{}", state.cycle_count + 1),
@@ -1619,6 +1623,9 @@ pub fn run_ooda_daemon(
                         "cycle_number": state.cycle_count,
                         "status": "healthy",
                         "cycle_phase": "sleep",
+                        // Additive, observability-only (issue #4929): see the
+                        // cycle-start heartbeat above.
+                        "main_pid": std::process::id(),
                         "cycle_start_epoch": cycle_start_epoch,
                         "cycle_duration_secs": cycle_elapsed.as_secs(),
                         "interval_secs": interval_secs,
@@ -1636,6 +1643,35 @@ pub fn run_ooda_daemon(
                 // Collect self-improvement metrics at end of each cycle.
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
+                }
+
+                // Bounded WAL-retention cadence (issue #4929): checkpoint the
+                // cognitive store every N cycles so the LadybugDB WAL is
+                // compacted into the main file regularly instead of growing for
+                // the daemon's whole uptime (which inflates replay work and the
+                // `cognitive.wal.corrupt` rotation surface). Adapter-scoped —
+                // `amplihack-memory-lib` is untouched. Failures are surfaced via
+                // structured tracing, never silently swallowed.
+                {
+                    const WAL_CHECKPOINT_EVERY_CYCLES: u32 = 20;
+                    if state.cycle_count > 0
+                        && state
+                            .cycle_count
+                            .is_multiple_of(WAL_CHECKPOINT_EVERY_CYCLES)
+                    {
+                        match shared_mem.checkpoint() {
+                            Ok(()) => tracing::debug!(
+                                cycle = state.cycle_count,
+                                cadence = WAL_CHECKPOINT_EVERY_CYCLES,
+                                "cognitive-store WAL checkpoint (bounded retention cadence)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                cycle = state.cycle_count,
+                                error = %e,
+                                "cognitive-store WAL checkpoint failed; WAL retention not compacted this cadence"
+                            ),
+                        }
+                    }
                 }
 
                 // Issue #2528: emit unified cycle telemetry (OTel + in-process

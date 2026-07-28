@@ -320,6 +320,7 @@ nav:
     - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
+    - OODA Daemon Bounded Steady-State Memory: reference/ooda-daemon-bounded-memory.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - Overseer Tick Details: reference/overseer-tick-details.md

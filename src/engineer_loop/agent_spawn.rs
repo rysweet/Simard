@@ -36,10 +36,14 @@ use super::types::RepoInspection;
 /// `amplihack RustyClawd --auto --max-turns` complex-task guidance.
 pub(crate) const DEFAULT_MAX_TURNS: u32 = 30;
 
-/// Maximum number of summary bytes returned to callers. The full subprocess
-/// stdout/stderr are streamed to Simard's own stdout/stderr (via inherit) for
-/// operator visibility; only this trailing window is captured for the
-/// in-process summary string used by `run_optional_review` and persistence.
+/// Maximum number of summary bytes retained per child pipe. The child's
+/// stdout/stderr are drained through fixed-capacity rings (see
+/// [`capture_bounded_tail`]) that keep only this trailing window in RAM; the
+/// retained tail is the in-process summary string used by `run_optional_review`
+/// and persistence. This bounds capture RAM to O(cap) regardless of how much an
+/// unbounded-runtime agent emits (issue #4929) — the previous full-buffering
+/// `wait_with_output` grew the daemon heap without limit for the life of a
+/// cycle.
 pub(crate) const SUMMARY_TAIL_BYTES: usize = 8 * 1024;
 
 /// Resolve the amplihack binary. Defaults to `amplihack` (PATH lookup); can be
@@ -252,18 +256,108 @@ pub(crate) fn rustyclawd_argv(prompt: &str, max_turns: u32) -> Vec<String> {
     engineer_argv(AgentKind::RustyClawd, prompt, max_turns)
 }
 
+#[cfg(test)]
 fn keep_summary_tail(buf: &[u8]) -> String {
-    let len = buf.len();
-    let start = len.saturating_sub(SUMMARY_TAIL_BYTES);
-    let slice = &buf[start..];
-    let mut s = String::from_utf8_lossy(slice).into_owned();
-    if start > 0 {
+    let (tail, dropped) = capture_bounded_tail(std::io::Cursor::new(buf), SUMMARY_TAIL_BYTES)
+        .expect("in-memory cursor reads are infallible");
+    summary_from_tail(&tail, dropped)
+}
+
+/// Drain `reader` fully while retaining only the trailing `cap` bytes in a
+/// fixed-capacity ring. Returns `(tail, dropped_bytes)` where `tail.len() <=
+/// cap` always holds — the O(1)-heap invariant that bounds capture RAM no
+/// matter how much the child emits (issue #4929) — and `dropped_bytes` counts
+/// the bytes evicted from the front, surfaced (never silently swallowed) so the
+/// truncation banner can report them.
+///
+/// A read error surfaces as `Err`; there is no silent swallow and no partial
+/// success masquerading as success.
+pub(crate) fn capture_bounded_tail<R: std::io::Read>(
+    mut reader: R,
+    cap: usize,
+) -> SimardResult<(Vec<u8>, usize)> {
+    use std::collections::VecDeque;
+
+    let mut ring: VecDeque<u8> = VecDeque::with_capacity(cap.min(64 * 1024));
+    let mut dropped: usize = 0;
+    let mut chunk = [0u8; 8 * 1024];
+
+    loop {
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| SimardError::ActionExecutionFailed {
+                action: "engineer-subprocess-capture".to_string(),
+                reason: format!("failed to read child output stream: {e}"),
+            })?;
+        if n == 0 {
+            break;
+        }
+        push_bounded_tail(&mut ring, &mut dropped, &chunk[..n], cap);
+    }
+
+    Ok((ring.into_iter().collect(), dropped))
+}
+
+/// Append `data` to a bounded ring, evicting from the front so the ring never
+/// exceeds `cap`; every evicted byte is counted in `dropped`. Chunk-wise (not
+/// byte-wise) so a multi-gigabyte child stream costs O(total/chunk) work, not
+/// O(total).
+fn push_bounded_tail(
+    ring: &mut std::collections::VecDeque<u8>,
+    dropped: &mut usize,
+    data: &[u8],
+    cap: usize,
+) {
+    if cap == 0 {
+        *dropped += data.len();
+        return;
+    }
+    if data.len() >= cap {
+        // The incoming chunk alone fills the ring: everything currently held is
+        // dropped, plus every byte of the chunk before its last `cap` bytes.
+        *dropped += ring.len();
+        ring.clear();
+        let keep_from = data.len() - cap;
+        *dropped += keep_from;
+        ring.extend(&data[keep_from..]);
+        return;
+    }
+    let overflow = (ring.len() + data.len()).saturating_sub(cap);
+    for _ in 0..overflow {
+        ring.pop_front();
+    }
+    *dropped += overflow;
+    ring.extend(data);
+}
+
+/// Build the human-facing summary string from a bounded tail + dropped count,
+/// mirroring [`keep_summary_tail`]'s banner so the returned-summary contract is
+/// unchanged while capture is now O(1) in RAM.
+fn summary_from_tail(tail: &[u8], dropped: usize) -> String {
+    let mut s = String::from_utf8_lossy(tail).into_owned();
+    if dropped > 0 {
         s.insert_str(
             0,
-            &format!("[truncated {start} earlier bytes; tail follows]\n\n"),
+            &format!("[truncated {dropped} earlier bytes; tail follows]\n\n"),
         );
     }
     s
+}
+
+/// Join a bounded-capture thread, surfacing a read error or a thread panic
+/// loudly (no silent fallback).
+fn join_capture(
+    handle: thread::JoinHandle<SimardResult<(Vec<u8>, usize)>>,
+    which: &str,
+    action_label: &str,
+) -> SimardResult<(Vec<u8>, usize)> {
+    match handle.join() {
+        Ok(res) => res,
+        Err(_) => Err(SimardError::ActionExecutionFailed {
+            action: action_label.to_string(),
+            reason: format!("{which} capture thread panicked"),
+        }),
+    }
 }
 
 /// Run the `amplihack <agent>` subprocess and return its trailing output.
@@ -324,9 +418,27 @@ pub fn run_engineer_subprocess(
             reason: format!("failed to spawn `{bin}`: {e}"),
         })?;
 
-    // Stream the Copilot prompt on stdin from a feeder thread before we block on
-    // the child's output; the feeder closes stdin on completion so copilot reads
-    // EOF and starts work.
+    // Concurrently drain stdout AND stderr through fixed-capacity rings BEFORE
+    // waiting on the child (issue #4929). Full-buffering (`wait_with_output`)
+    // previously retained an unbounded-runtime agent's entire output in RAM for
+    // the life of the cycle — the primary source of the daemon's runaway swap.
+    // Bounded-tail capture keeps at most `SUMMARY_TAIL_BYTES` per pipe. Draining
+    // both pipes concurrently also prevents the classic pipe-buffer deadlock
+    // (child blocks writing stderr while the parent only reads stdout).
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_capture = thread::spawn(move || match stdout_pipe {
+        Some(r) => capture_bounded_tail(r, SUMMARY_TAIL_BYTES),
+        None => Ok((Vec::new(), 0usize)),
+    });
+    let stderr_capture = thread::spawn(move || match stderr_pipe {
+        Some(r) => capture_bounded_tail(r, SUMMARY_TAIL_BYTES),
+        None => Ok((Vec::new(), 0usize)),
+    });
+
+    // Stream the Copilot prompt on stdin from a feeder thread while the capture
+    // threads drain output; the feeder closes stdin on completion so copilot
+    // reads EOF and starts work.
     let feeder = prompt_feed.map(|applied| {
         let stdin = child.stdin.take();
         thread::spawn(move || applied.feed(stdin))
@@ -334,11 +446,11 @@ pub fn run_engineer_subprocess(
 
     // Wait unbounded. Engineer subprocesses are agentic and must run to
     // natural completion or natural failure; do NOT SIGKILL on a wall clock.
-    let output = child
-        .wait_with_output()
+    let status = child
+        .wait()
         .map_err(|e| SimardError::ActionExecutionFailed {
             action: action_label.clone(),
-            reason: format!("failed to collect child output: {e}"),
+            reason: format!("failed to wait for child: {e}"),
         })?;
 
     // Surface a stdin-feed failure loudly — no silent fallback (issue #2640).
@@ -360,16 +472,20 @@ pub fn run_engineer_subprocess(
         }
     }
 
-    let stdout_tail = keep_summary_tail(&output.stdout);
-    let stderr_tail = keep_summary_tail(&output.stderr);
+    // Join the bounded-capture threads and surface any read/panic failure.
+    let (stdout_bytes, stdout_dropped) = join_capture(stdout_capture, "stdout", &action_label)?;
+    let (stderr_bytes, stderr_dropped) = join_capture(stderr_capture, "stderr", &action_label)?;
 
-    if !output.status.success() {
+    let stdout_tail = summary_from_tail(&stdout_bytes, stdout_dropped);
+    let stderr_tail = summary_from_tail(&stderr_bytes, stderr_dropped);
+
+    if !status.success() {
         return Err(SimardError::ActionExecutionFailed {
             action: action_label,
             reason: format!(
                 "{} exited with status {}; stderr_tail=\n{}",
                 kind.subcommand(),
-                output.status,
+                status,
                 stderr_tail.trim()
             ),
         });
