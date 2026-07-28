@@ -638,9 +638,24 @@ is legitimate string content
 whitespace *between* tokens is left untouched.
 
 Sites routed through it in `src/ooda_brain/recipe_brain.rs`:
-`parse_admission_decision`, `parse_resource_admission_decision`,
-`parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
-`extract_decision_envelope` (the decide path), and `extract_orient_envelope`.
+`parse_outcome_decision` (and the shared JSON-recovery machinery used by
+Group D's not-yet-converted seams).
+
+!!! note "Converted seams no longer route through the scraper"
+    The decide/orient path ([#4719](https://github.com/rysweet/Simard/issues/4719)
+    Group A), the engineer/resource admission path (Group B), and the
+    creative-ideas semantic-dedup + consolidation path (Group C) have been
+    converted to the typed-record pattern: the recipe **acts via a gated `simard
+    ooda record-*` tool** and RecipeBrain reads a typed, `0o600`,
+    freshness-checked record fail-closed — it no longer scrapes their stdout. The
+    former Group C scrapers `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+    `IdeaDedupEnvelope`, and `IdeaConsolidationEnvelope` are **deleted**; the two
+    seams now read
+    [`IdeaDedupDecisionRecord` / `IdeaConsolidationRecord`](./ooda-record-idea-dedup-consolidation-cli.md)
+    via `read_verified_idea_dedup` / `read_verified_idea_consolidation`. The
+    shared `extract_and_parse_json` family is **retained** only for Group D
+    (`cognitive_threads`, `memory_consolidation`, `stewardship`, outcome-verify)
+    until those seams are converted too.
 
 Leniency never widens beyond these six named defects: an unquoted key, an
 elided array element, a missing value, a lone `/` that is not a comment, a

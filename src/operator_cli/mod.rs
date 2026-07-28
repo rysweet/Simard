@@ -29,6 +29,8 @@ mod tests_record_admission;
 #[cfg(test)]
 mod tests_record_decision;
 #[cfg(test)]
+mod tests_record_idea_dedup_consolidation;
+#[cfg(test)]
 mod tests_record_orient_decide;
 mod worktree_gc;
 

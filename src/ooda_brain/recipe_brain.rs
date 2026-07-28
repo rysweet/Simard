@@ -1284,46 +1284,87 @@ impl OodaBrain for RecipeBrain {
         super::read_verified_resource_admission(&record_path, &ctx.goal_id, REASONER_RECORD_CYCLE)
     }
 
-    /// Semantic dedup + enhance for one candidate creative idea (issue #2925).
-    /// Resolves the `creative-idea-dedup.yaml` recipe (hot-reload order:
-    /// `~/.simard/…` then the repo asset), renders the candidate + shortlist as
-    /// sanitised `-c` vars, runs the recipe, and parses the
-    /// `{"choice", "target_node_id"?, "rationale"}` envelope from the recipe's
-    /// **clean result channel** (never stdout scraping) into an
-    /// [`IdeaDedupDecision`].
+    /// Semantic dedup + enhance for one candidate creative idea (issue #2925;
+    /// Group C rework, epic #4719). The reasoner ACTS by calling the gated
+    /// `simard ooda record-idea-dedup` tool, which validates the closed
+    /// [`IdeaDedupDecision`] enum + per-variant field ownership and atomically
+    /// writes one typed [`IdeaDedupDecisionRecord`](super::IdeaDedupDecisionRecord).
+    /// This method runs that recipe over a fresh, UNIQUE per-call temp dir, then
+    /// reads the typed record back with
+    /// [`read_verified_idea_dedup`](super::read_verified_idea_dedup) — it NEVER
+    /// scrapes the agent's prose stdout.
     ///
-    /// NO-FALLBACK: a recipe invocation failure OR an unparseable / unknown
-    /// decision surfaces as an explicit `Err`. The dedup-gate seam turns that
-    /// into a fail-CLOSED drop (the candidate is not persisted this cycle) —
-    /// never a silent duplicate and never an `EnhanceExisting` on a guess.
+    /// FAIL-**CLOSED** polarity: a recipe invocation failure OR any
+    /// read-verification failure (absent / malformed / wrong-schema /
+    /// out-of-enum / enhance-without-target / empty-rationale / goal- or
+    /// cycle-mismatch) surfaces as an `Err`, which the dedup-gate seam turns into
+    /// a fail-CLOSED drop (the candidate is not persisted this cycle) — never a
+    /// silent duplicate and never an `EnhanceExisting` on a guess.
     fn decide_idea_dedup(&self, ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
-        let raw = self.invoke_idea_dedup_raw(ctx)?;
-        parse_idea_dedup_decision(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
-            base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
-            reason: format!(
-                "creative-idea-dedup recipe output had no parseable decision envelope: {}",
-                truncate(&raw, MAX_RATIONALE_CHARS)
-            ),
-        })
+        let tempdir = tempfile::Builder::new()
+            .prefix("simard-ooda-idea-dedup-")
+            .tempdir()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
+                reason: format!("could not allocate a per-call idea-dedup temp dir: {e}"),
+            })?;
+        let record_path = tempdir.path().join("idea_dedup.json");
+
+        // The agent records its verdict by calling `simard ooda record-idea-dedup`
+        // (writing `record_path`); its stdout is IGNORED.
+        self.run_idea_dedup_recipe(ctx, &record_path)?;
+
+        // Read the TYPED record — never scrape prose. Every failure mode is an
+        // Err → the dedup gate fails CLOSED. `goal_id` binds to the seam
+        // sentinel; `cycle_number` to the REASONER_RECORD_CYCLE sentinel (the
+        // fresh per-call temp dir already defeats cross-cycle replay).
+        super::read_verified_idea_dedup(
+            &record_path,
+            super::IDEA_DEDUP_GOAL_SENTINEL,
+            REASONER_RECORD_CYCLE,
+        )
     }
 
     /// Cluster the existing pool by semantic duplication for the one-time
-    /// consolidation pass (issue #2925). Runs `creative-ideas-consolidation.yaml`
-    /// over the whole pool and parses the `{"clusters": [...]}` envelope.
-    /// NO-FALLBACK: an invocation failure or unparseable output is an `Err`, so
-    /// the consolidation seam writes nothing and surfaces the error.
+    /// consolidation pass (issue #2925; Group C rework, epic #4719). The
+    /// reasoner ACTS by calling the gated `simard ooda record-idea-consolidation`
+    /// tool, which validates each [`IdeaCluster`] through the shared chokepoint
+    /// and atomically writes one typed
+    /// [`IdeaConsolidationRecord`](super::IdeaConsolidationRecord). This method
+    /// runs that recipe over a fresh per-call temp dir (threading a
+    /// `clusters_path` the agent writes its cluster array to), then reads the
+    /// typed record back with
+    /// [`read_verified_idea_consolidation`](super::read_verified_idea_consolidation)
+    /// — it NEVER scrapes the agent's prose stdout.
+    ///
+    /// NO-FALLBACK: an invocation failure or any read-verification failure is an
+    /// `Err`, so the consolidation seam writes nothing and surfaces the error.
+    /// A present-but-empty cluster list reads back `Ok(vec![])` ("nothing to
+    /// consolidate"), preserving the `Some(vec![])` vs `None` distinction exactly.
     fn decide_idea_consolidation(
         &self,
         ctx: &IdeaConsolidationCtx,
     ) -> SimardResult<Vec<IdeaCluster>> {
-        let raw = self.invoke_idea_consolidation_raw(ctx)?;
-        parse_idea_consolidation(&raw).ok_or_else(|| SimardError::AdapterInvocationFailed {
-            base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
-            reason: format!(
-                "creative-ideas-consolidation recipe output had no parseable clusters envelope: {}",
-                truncate(&raw, MAX_RATIONALE_CHARS)
-            ),
-        })
+        let tempdir = tempfile::Builder::new()
+            .prefix("simard-ooda-idea-consolidation-")
+            .tempdir()
+            .map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
+                reason: format!("could not allocate a per-call idea-consolidation temp dir: {e}"),
+            })?;
+        let record_path = tempdir.path().join("idea_consolidation.json");
+        let clusters_path = tempdir.path().join("clusters.json");
+
+        // The agent writes its cluster array to `clusters_path`, then records the
+        // verdict by calling `simard ooda record-idea-consolidation`; stdout is
+        // IGNORED.
+        self.run_idea_consolidation_recipe(ctx, &record_path, &clusters_path)?;
+
+        super::read_verified_idea_consolidation(
+            &record_path,
+            super::IDEA_CONSOLIDATION_GOAL_SENTINEL,
+            REASONER_RECORD_CYCLE,
+        )
     }
 }
 
@@ -1790,11 +1831,29 @@ impl RecipeBrain {
         Ok(())
     }
 
-    /// Invoke the creative-idea dedup recipe once and return the raw decision
-    /// text from the recipe's clean result channel (issue #2925). Errors surface
-    /// loudly (NO-FALLBACK); the dedup-gate seam fails CLOSED on `Err`.
-    fn invoke_idea_dedup_raw(&self, ctx: &IdeaDedupCtx) -> SimardResult<String> {
+    /// Run the creative-idea dedup recipe once over a fresh temp dir, threading
+    /// the typed-record seam context vars (`record_path`, `simard_bin`,
+    /// `goal_id`, `cycle_number`) plus the existing reasoning render vars
+    /// (candidate idea/rationale + the sanitized existing shortlist). The recipe
+    /// is resolved as a sibling of this brain's recipe path (hot-reload order
+    /// already baked in). The agent records its verdict by calling
+    /// `simard ooda record-idea-dedup`; stdout is intentionally IGNORED. Every
+    /// untrusted ctx field is routed through [`sanitize_context_var`] before it
+    /// becomes a `-c` arg. A recipe-runner failure propagates as `Err` (the
+    /// dedup gate then fails CLOSED).
+    fn run_idea_dedup_recipe(&self, ctx: &IdeaDedupCtx, record_path: &Path) -> SimardResult<()> {
         let recipe = self.sibling_recipe(IDEA_DEDUP_RECIPE_FILENAME, IDEA_DEDUP_ADAPTER_TAG)?;
+
+        // Resolve THIS binary so the recipe sandbox can invoke the
+        // `record-idea-dedup` tool deterministically (never a bare PATH name).
+        // If it cannot be resolved, no record is written and the reader fails
+        // CLOSED at R1 (a dropped candidate).
+        let simard_bin =
+            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
+                reason: format!("could not resolve the running simard binary: {e}"),
+            })?;
+
         let shortlist = render_existing_shortlist(&ctx.existing_shortlist);
 
         let output = Command::new("recipe-runner-rs")
@@ -1802,6 +1861,18 @@ impl RecipeBrain {
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            // The typed-dedup seam: where to write the record and which binary
+            // records it. Paths are trusted (a daemon-owned per-call temp dir +
+            // the resolved current_exe); the goal_id is a fixed literal sentinel.
+            // All three are passed verbatim (sanitizing would fold/truncate them).
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
+            .arg("-c")
+            .arg(format!("goal_id={}", super::IDEA_DEDUP_GOAL_SENTINEL))
+            .arg("-c")
+            .arg(format!("cycle_number={REASONER_RECORD_CYCLE}"))
             .arg("-c")
             .arg(format!(
                 "candidate_idea={}",
@@ -1836,16 +1907,38 @@ impl RecipeBrain {
                 ),
             });
         }
-        extract_recipe_decision_output(&output.stdout, IDEA_DEDUP_ADAPTER_TAG)
+
+        // The verdict lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored; the caller reads and
+        // verifies `record_path`.
+        Ok(())
     }
 
-    /// Invoke the consolidation clustering recipe once over the whole pool and
-    /// return the raw clusters text (issue #2925). NO-FALLBACK on error.
-    fn invoke_idea_consolidation_raw(&self, ctx: &IdeaConsolidationCtx) -> SimardResult<String> {
+    /// Run the creative-ideas consolidation recipe once over the whole pool,
+    /// threading the typed-record seam context vars (`record_path`,
+    /// `clusters_path`, `simard_bin`, `goal_id`, `cycle_number`) plus the
+    /// sanitized `existing_pool`. The agent writes its cluster JSON array to
+    /// `clusters_path` (a file, never argv — avoids E2BIG for large lists), then
+    /// records the verdict by calling `simard ooda record-idea-consolidation`;
+    /// stdout is intentionally IGNORED. A recipe-runner failure propagates as
+    /// `Err` (the seam writes nothing).
+    fn run_idea_consolidation_recipe(
+        &self,
+        ctx: &IdeaConsolidationCtx,
+        record_path: &Path,
+        clusters_path: &Path,
+    ) -> SimardResult<()> {
         let recipe = self.sibling_recipe(
             IDEA_CONSOLIDATION_RECIPE_FILENAME,
             IDEA_CONSOLIDATION_ADAPTER_TAG,
         )?;
+
+        let simard_bin =
+            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
+                reason: format!("could not resolve the running simard binary: {e}"),
+            })?;
+
         let pool = render_existing_shortlist(&ctx.pool);
 
         let output = Command::new("recipe-runner-rs")
@@ -1853,6 +1946,19 @@ impl RecipeBrain {
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("clusters_path={}", clusters_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
+            .arg("-c")
+            .arg(format!(
+                "goal_id={}",
+                super::IDEA_CONSOLIDATION_GOAL_SENTINEL
+            ))
+            .arg("-c")
+            .arg(format!("cycle_number={REASONER_RECORD_CYCLE}"))
             .arg("-c")
             .arg(format!("existing_pool={pool}"))
             .output();
@@ -1877,7 +1983,11 @@ impl RecipeBrain {
                 ),
             });
         }
-        extract_recipe_decision_output(&output.stdout, IDEA_CONSOLIDATION_ADAPTER_TAG)
+
+        // The verdict lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored; the caller reads and
+        // verifies `record_path`.
+        Ok(())
     }
 
     /// Resolve a recipe filename as a sibling of this brain's recipe path
@@ -1941,7 +2051,7 @@ fn render_admission_engineers(engineers: &[EngineerAdmissionSignalView]) -> Stri
 type EngineerAdmissionSignalView = super::LiveEngineerSignal;
 
 // ---------------------------------------------------------------------------
-// Creative-ideas semantic dedup + consolidation envelopes (issue #2925)
+// Creative-ideas semantic dedup + consolidation rendering (issue #2925)
 // ---------------------------------------------------------------------------
 
 /// Render an existing-idea shortlist/pool into a single bounded, sanitised block
@@ -1964,77 +2074,6 @@ fn render_existing_shortlist(views: &[super::ExistingIdeaView]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// A structured creative-idea dedup decision envelope (issue #2925). Reads the
-/// `choice` token, optional `target_node_id`, and `rationale`.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct IdeaDedupEnvelope {
-    choice: String,
-    #[serde(default)]
-    target_node_id: String,
-    #[serde(default)]
-    rationale: String,
-}
-
-/// Parse the dedup recipe output into an [`IdeaDedupDecision`], or `None` when no
-/// balanced JSON object with a known `choice` is present, or when
-/// `enhance_existing` omits `target_node_id` (the caller surfaces `None` as an
-/// `Err`, which the seam fails CLOSED). Routes through the shared sanitising
-/// chokepoint so a banner-polluted envelope still parses — no stdout scraping.
-fn parse_idea_dedup_decision(text: &str) -> Option<IdeaDedupDecision> {
-    let env: IdeaDedupEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    let choice = env.choice.trim();
-    if choice.is_empty() {
-        return None;
-    }
-    let rationale = {
-        let r = env.rationale.trim();
-        if r.is_empty() {
-            truncate(choice, MAX_RATIONALE_CHARS)
-        } else {
-            truncate(r, MAX_RATIONALE_CHARS)
-        }
-    };
-    if choice.eq_ignore_ascii_case("create_new") {
-        Some(IdeaDedupDecision::CreateNew { rationale })
-    } else if choice.eq_ignore_ascii_case("skip") {
-        Some(IdeaDedupDecision::Skip { rationale })
-    } else if choice.eq_ignore_ascii_case("enhance_existing") {
-        let target = env.target_node_id.trim();
-        if target.is_empty() {
-            // enhance without a target is unactionable → fail closed.
-            None
-        } else {
-            Some(IdeaDedupDecision::EnhanceExisting {
-                target_node_id: target.to_string(),
-                rationale,
-            })
-        }
-    } else {
-        None
-    }
-}
-
-/// A structured consolidation clusters envelope (issue #2925).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct IdeaConsolidationEnvelope {
-    #[serde(default)]
-    clusters: Vec<IdeaCluster>,
-}
-
-/// Parse the consolidation recipe output into a list of [`IdeaCluster`]s, or
-/// `None` when no balanced JSON object with a `clusters` array is present.
-/// Clusters missing a `canonical_id` are dropped. `Some(vec![])` is a valid
-/// "nothing to consolidate" result and is distinct from an unparseable `None`.
-fn parse_idea_consolidation(text: &str) -> Option<Vec<IdeaCluster>> {
-    let env: IdeaConsolidationEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    Some(
-        env.clusters
-            .into_iter()
-            .filter(|c| !c.canonical_id.trim().is_empty())
-            .collect(),
-    )
 }
 
 /// Render the gathered live signals into a single bounded, sanitized string for
@@ -2869,89 +2908,6 @@ mod tests {
             msg.contains("recipe-engineer-admission-brain"),
             "error should contain the admission adapter tag; got: {msg}"
         );
-    }
-
-    // --- creative-idea dedup envelope (issue #2925) ------------------------
-
-    #[test]
-    fn parse_idea_dedup_create_new_envelope() {
-        let d = parse_idea_dedup_decision(
-            r#"{"choice": "create_new", "target_node_id": "", "rationale": "novel idea"}"#,
-        );
-        assert!(matches!(d, Some(IdeaDedupDecision::CreateNew { .. })));
-    }
-
-    #[test]
-    fn parse_idea_dedup_skip_envelope() {
-        let d = parse_idea_dedup_decision(r#"{"choice": "skip", "rationale": "restatement"}"#);
-        assert!(matches!(d, Some(IdeaDedupDecision::Skip { .. })));
-    }
-
-    #[test]
-    fn parse_idea_dedup_enhance_requires_target() {
-        let ok = parse_idea_dedup_decision(
-            r#"{"choice": "enhance_existing", "target_node_id": "node-42", "rationale": "adds evidence"}"#,
-        );
-        match ok {
-            Some(IdeaDedupDecision::EnhanceExisting { target_node_id, .. }) => {
-                assert_eq!(target_node_id, "node-42");
-            }
-            other => panic!("expected EnhanceExisting, got {other:?}"),
-        }
-        // enhance_existing without a target is unactionable ⇒ None (fail closed).
-        assert!(
-            parse_idea_dedup_decision(
-                r#"{"choice": "enhance_existing", "target_node_id": "", "rationale": "x"}"#
-            )
-            .is_none()
-        );
-        assert!(
-            parse_idea_dedup_decision(r#"{"choice": "enhance_existing", "rationale": "x"}"#)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn parse_idea_dedup_strips_banner_prose() {
-        let d = parse_idea_dedup_decision(
-            "Recipe: creative-idea-dedup ... SUCCESS\n```json\n{\"choice\": \"skip\", \"rationale\": \"dupe\"}\n```\n",
-        );
-        assert!(matches!(d, Some(IdeaDedupDecision::Skip { .. })));
-    }
-
-    #[test]
-    fn parse_idea_dedup_unknown_or_empty_is_none() {
-        assert!(parse_idea_dedup_decision(r#"{"choice": "merge"}"#).is_none());
-        assert!(parse_idea_dedup_decision(r#"{"choice": ""}"#).is_none());
-        assert!(parse_idea_dedup_decision("not json at all").is_none());
-    }
-
-    #[test]
-    fn parse_idea_consolidation_reads_clusters_and_drops_headless() {
-        let clusters = parse_idea_consolidation(
-            r#"{"clusters": [
-                {"canonical_id": "n1", "redundant_ids": ["n2","n3"], "merged_rationale": "same", "evidence": ["e"]},
-                {"canonical_id": "", "redundant_ids": ["n9"]}
-            ]}"#,
-        )
-        .expect("parses");
-        assert_eq!(
-            clusters.len(),
-            1,
-            "a cluster without a canonical_id is dropped"
-        );
-        assert_eq!(clusters[0].canonical_id, "n1");
-        assert_eq!(clusters[0].redundant_ids, vec!["n2", "n3"]);
-    }
-
-    #[test]
-    fn parse_idea_consolidation_empty_is_some_and_bad_is_none() {
-        assert_eq!(
-            parse_idea_consolidation(r#"{"clusters": []}"#),
-            Some(Vec::new()),
-            "empty clusters is a valid 'nothing to consolidate' result"
-        );
-        assert!(parse_idea_consolidation("not json").is_none());
     }
 
     #[test]
