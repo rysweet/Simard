@@ -184,12 +184,13 @@ fn sanitize_summary_strips_control_and_folds_whitespace() {
 
 #[test]
 fn sanitize_summary_scrubs_secrets() {
-    let s = sanitize_reasoning_summary(
-        "leaked token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 while ranking goals",
-    )
-    .expect("the surrounding sentence is otherwise valid");
+    // Synthetic, non-functional value shaped like a GitHub PAT (the `ghp_`
+    // prefix is what the scrubber anchors on) — NOT a real credential.
+    let fake_token = "ghp_FAKEexampleTOKENnotarealsecret00";
+    let s = sanitize_reasoning_summary(&format!("leaked token {fake_token} while ranking goals"))
+        .expect("the surrounding sentence is otherwise valid");
     assert!(
-        !s.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+        !s.contains(fake_token) && !s.contains("ghp_"),
         "a GitHub token must be scrubbed before it can reach a durable record or log"
     );
 }
