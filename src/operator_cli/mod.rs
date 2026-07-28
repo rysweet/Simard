@@ -32,6 +32,8 @@ mod tests_record_decision;
 mod tests_record_idea_dedup_consolidation;
 #[cfg(test)]
 mod tests_record_orient_decide;
+#[cfg(test)]
+mod tests_record_outcome;
 mod worktree_gc;
 
 use std::path::PathBuf;

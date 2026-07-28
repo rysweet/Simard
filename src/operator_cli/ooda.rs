@@ -25,6 +25,15 @@ Commands:
                   [--task-hint <TEXT> | --task-hint-path <FILE>]
                               Record exactly one typed, validated per-goal-cycle
                               decision (the reasoner's tool; zero privilege).
+  record-outcome  --choice <mark_achieved|reopen|replan|keep_open_and_report>
+                  (--reason <TEXT> | --reason-path <FILE>)
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                  [--replan-hint <TEXT> | --replan-hint-path <FILE>]
+                              Record exactly one typed, validated goal-outcome-
+                              verification decision (the reasoner's tool; zero
+                              privilege). --replan-hint is OWNED by replan
+                              (optional even there), REJECTED on every other
+                              choice.
   record-orient   --adjusted-urgency <F> --confidence <F> --demotion-applied <F>
                   --base-urgency <F> (--reason <TEXT> | --reason-path <FILE>)
                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
@@ -116,6 +125,7 @@ pub(super) fn dispatch_ooda_command(
         "fixture" => dispatch_fixture(args),
         "terminal" => dispatch_terminal(args),
         "record-decision" => dispatch_record_decision(args),
+        "record-outcome" => dispatch_record_outcome(args),
         "record-orient" => dispatch_record_orient(args),
         "record-decide" => dispatch_record_decide(args),
         "record-admission" => dispatch_record_admission(args),
@@ -201,6 +211,80 @@ fn dispatch_record_decision(
     // Validate-all-then-write-once: this atomic, owner-only (0o600) write is the
     // tool's ONLY side effect. It runs only after EVERY check above passed.
     crate::persistence::persist_json("ooda-per-goal-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-outcome` — the zero-privilege tool the OODA closed-loop
+/// OUTCOME-VERIFICATION reasoner calls to record EXACTLY ONE typed, validated
+/// decision (Group D of epic #4719).
+///
+/// It validates the closed 4-variant `--choice` enum + non-empty `--reason`
+/// through the SINGLE shared
+/// [`GoalOutcomeDecision::from_choice_fields`](crate::ooda_brain::GoalOutcomeDecision::from_choice_fields)
+/// chokepoint, hardens `--record-path` (absolute, no `..`), then writes exactly
+/// one atomic `0o600`
+/// [`OutcomeDecisionRecord`](crate::ooda_brain::OutcomeDecisionRecord). Any
+/// validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). `--replan-hint` is OWNED by `replan`
+/// (optional even there) and REJECTED on every other choice by the chokepoint.
+/// `RecipeBrain` reads the record back with `read_verified_outcome` — it never
+/// scrapes the agent's stdout.
+fn dispatch_record_outcome(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "reason",
+        "reason-path",
+        "replan-hint",
+        "replan-hint-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let reason = resolve_field(&parsed, "reason", "reason-path")?
+        .ok_or("an outcome decision requires --reason or --reason-path")?;
+    // Optional variant-owned free text (single field). The chokepoint enforces
+    // that only `replan` may carry a non-empty hint — a hint supplied on any
+    // other choice is rejected there, before any write.
+    let replan_hint =
+        resolve_field(&parsed, "replan-hint", "replan-hint-path")?.unwrap_or_default();
+
+    let decision =
+        crate::ooda_brain::GoalOutcomeDecision::from_choice_fields(choice, &reason, &replan_hint)
+            .ok_or_else(|| {
+            format!(
+                "invalid outcome decision: unknown --choice {choice:?}, empty --reason, or a \
+                     --replan-hint on a non-replan choice (choice must be one of \
+                     mark_achieved|reopen|replan|keep_open_and_report; --replan-hint is owned by \
+                     replan)"
+            )
+        })?;
+
+    let record = crate::ooda_brain::OutcomeDecisionRecord {
+        schema: crate::ooda_brain::OUTCOME_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision,
+    };
+
+    crate::persistence::persist_json("ooda-goal-outcome-decision", record_path, &record)?;
     Ok(())
 }
 

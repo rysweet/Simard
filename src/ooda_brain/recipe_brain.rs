@@ -746,14 +746,12 @@ impl OodaDecideBrain for RecipeBrain {
     /// cycle-mismatch) surfaces as an explicit `Err`; the Decide caller records
     /// it and SKIPS the priority — never a fabricated `advance_goal`.
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-decide-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not allocate a per-call decide temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("decide.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-decide-",
+            "per-call decide",
+            "decide.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-decide`
         // (writing `record_path`); its stdout is IGNORED.
@@ -784,14 +782,12 @@ impl OodaOrientBrain for RecipeBrain {
     /// caller records it and KEEPS the goal's BASE urgency — never a fabricated
     /// demotion.
     fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-orient-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not allocate a per-call orient temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("orient.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-orient-",
+            "per-call orient",
+            "orient.json",
+        )?;
 
         self.run_orient_recipe(ctx, &record_path)?;
 
@@ -814,11 +810,7 @@ impl RecipeBrain {
     /// calling `simard ooda record-decide`; stdout is intentionally ignored.
     /// Genuine recipe-runner failures propagate as `Err` (no silent fallback).
     fn run_decide_recipe(&self, ctx: &DecideContext, record_path: &Path) -> SimardResult<()> {
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag)?;
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
@@ -873,11 +865,7 @@ impl RecipeBrain {
     /// is passed so the tool can persist it for the reader's self-consistent
     /// no-escalation re-check. Genuine recipe-runner failures propagate as `Err`.
     fn run_orient_recipe(&self, ctx: &OrientContext, record_path: &Path) -> SimardResult<()> {
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag)?;
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
@@ -1137,31 +1125,49 @@ impl OodaBrain for RecipeBrain {
         )
     }
 
-    /// Closed-loop outcome verification (issue #2751). Runs the
-    /// `ooda-goal-outcome-verification.yaml` recipe over the goal's real success
-    /// criteria, the artifact-level signals (INPUT), and the freshly-gathered
-    /// live signals, then parses the `{"decision", "rationale"[, "replan_hint"]}`
-    /// envelope into a [`GoalOutcomeDecision`].
+    /// Closed-loop outcome verification (issue #2751; Group D rework, #4967).
+    /// The reasoner ACTS by calling the gated `simard ooda record-outcome` tool,
+    /// which validates the closed [`GoalOutcomeDecision`](super::GoalOutcomeDecision)
+    /// enum (+ `replan_hint` ownership) and atomically writes one typed
+    /// [`OutcomeDecisionRecord`](super::OutcomeDecisionRecord). This method runs
+    /// the `ooda-goal-outcome-verification.yaml` recipe over a fresh, UNIQUE
+    /// per-call temp dir, then reads the typed record back with
+    /// [`read_verified_outcome`](super::read_verified_outcome) — it NEVER scrapes
+    /// the agent's prose stdout (WS-4 pattern, #2573/#2658).
     ///
-    /// NO-FALLBACK (operator zero-fallback contract, #2580 / #1711): a recipe
-    /// invocation failure OR an unparseable decision surfaces as an explicit
-    /// `Err`. The seam records it as a visible cycle failure and keeps the goal
-    /// open — never a silent `keep_open_and_report` masquerading as a reasoned
-    /// decision. A genuine "it is really achieved, live" answer is a real,
-    /// model-emitted `mark_achieved` (which the Rust Rail-3 then still gates on
-    /// >=1 verified live signal).
+    /// NO-FALLBACK, FAIL-CLOSED (operator zero-fallback contract, #2580 / #1711):
+    /// a recipe invocation failure OR any read-verification failure (absent /
+    /// malformed / wrong-schema / out-of-enum / empty-rationale / replan-hint-on-
+    /// wrong-variant / goal- or cycle-mismatch) surfaces as an explicit `Err`.
+    /// The seam records it as a visible cycle failure and keeps the goal open —
+    /// never a silent `keep_open_and_report` masquerading as a reasoned decision.
+    /// A genuine "it is really achieved, live" answer is a real, model-recorded
+    /// `mark_achieved` (which the Rust Rail-3 then still gates on >=1 verified
+    /// live signal).
     fn decide_goal_outcome_verification(
         &self,
         ctx: &GoalOutcomeCtx,
     ) -> SimardResult<GoalOutcomeDecision> {
-        let raw = self.invoke_outcome_verify_raw(ctx)?;
-        parse_outcome_decision(&raw).ok_or_else(|| SimardError::VerificationFailed {
-            reason: format!(
-                "{}: outcome-verify recipe output had no parseable decision envelope: {}",
-                self.adapter_tag,
-                truncate(&raw, MAX_RATIONALE_CHARS)
-            ),
-        })
+        // Fresh, UNIQUE per-call temp dir (owner-only, auto-removed on drop). A
+        // stale record from a prior cycle can never live at this path — and the
+        // reader still independently re-checks goal_id/cycle_number (R6/R7).
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-outcome-",
+            "per-call outcome",
+            "outcome.json",
+        )?;
+
+        // The agent records its verdict by calling `simard ooda record-outcome`
+        // (writing `record_path`); its stdout is IGNORED.
+        self.run_outcome_verify_recipe(ctx, &record_path)?;
+
+        // Read the TYPED record — never scrape prose. Every failure mode is an
+        // Err → a NO-FALLBACK cycle failure that keeps the goal open (#1711).
+        // The fresh per-call temp dir already defeats cross-cycle replay;
+        // `cycle_number` binds to the REASONER_RECORD_CYCLE sentinel (the outcome
+        // ctx carries no cycle number), `goal_id` to the live ctx.
+        super::read_verified_outcome(&record_path, &ctx.goal_id, REASONER_RECORD_CYCLE)
     }
 
     /// Per-goal, per-cycle agentic decision (issue #4453). Runs the
@@ -1185,14 +1191,12 @@ impl OodaBrain for RecipeBrain {
         // Fresh, UNIQUE per-cycle temp dir (owner-only, auto-removed on drop). A
         // stale record from a prior cycle can never live at this path — and the
         // reader still independently re-checks goal_id/cycle_number (R6/R7).
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-decision-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-cycle decision temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("decision.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            PER_GOAL_CYCLE_ADAPTER_TAG,
+            "simard-ooda-decision-",
+            "per-cycle decision",
+            "decision.json",
+        )?;
 
         // Run the reasoner recipe. Its agent records its verdict by calling the
         // `simard ooda record-decision` tool (writing `record_path`); the agent's
@@ -1227,14 +1231,12 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &EngineerAdmissionCtx,
     ) -> SimardResult<EngineerAdmissionDecision> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-admission-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call admission temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("admission.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            ADMISSION_ADAPTER_TAG,
+            "simard-ooda-admission-",
+            "per-call admission",
+            "admission.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-admission`
         // (writing `record_path`); its stdout is IGNORED.
@@ -1270,14 +1272,12 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &ResourceAdmissionCtx,
     ) -> SimardResult<ResourceAdmissionDecision> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-resource-admission-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call resource-admission temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("resource_admission.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            RESOURCE_ADMISSION_ADAPTER_TAG,
+            "simard-ooda-resource-admission-",
+            "per-call resource-admission",
+            "resource_admission.json",
+        )?;
 
         self.run_resource_admission_recipe(ctx, &record_path)?;
 
@@ -1301,14 +1301,12 @@ impl OodaBrain for RecipeBrain {
     /// a fail-CLOSED drop (the candidate is not persisted this cycle) — never a
     /// silent duplicate and never an `EnhanceExisting` on a guess.
     fn decide_idea_dedup(&self, ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-idea-dedup-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call idea-dedup temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("idea_dedup.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            IDEA_DEDUP_ADAPTER_TAG,
+            "simard-ooda-idea-dedup-",
+            "per-call idea-dedup",
+            "idea_dedup.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-idea-dedup`
         // (writing `record_path`); its stdout is IGNORED.
@@ -1345,15 +1343,13 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &IdeaConsolidationCtx,
     ) -> SimardResult<Vec<IdeaCluster>> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-idea-consolidation-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call idea-consolidation temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("idea_consolidation.json");
-        let clusters_path = tempdir.path().join("clusters.json");
+        let (record_tempdir, record_path) = super::alloc_record_tempdir(
+            IDEA_CONSOLIDATION_ADAPTER_TAG,
+            "simard-ooda-idea-consolidation-",
+            "per-call idea-consolidation",
+            "idea_consolidation.json",
+        )?;
+        let clusters_path = record_tempdir.path().join("clusters.json");
 
         // The agent writes its cluster array to `clusters_path`, then records the
         // verdict by calling `simard ooda record-idea-consolidation`; stdout is
@@ -1369,9 +1365,28 @@ impl OodaBrain for RecipeBrain {
 }
 
 impl RecipeBrain {
-    /// Invoke the outcome-verification recipe once and return the raw decision
-    /// text (the recipe's final step output). Errors surface loudly (NO-FALLBACK).
-    fn invoke_outcome_verify_raw(&self, ctx: &GoalOutcomeCtx) -> SimardResult<String> {
+    /// Run the outcome-verification recipe once over a fresh temp dir, threading
+    /// the typed-record seam context vars (`record_path`, `simard_bin`,
+    /// `goal_id`, `cycle_number`) plus the existing outcome render vars (goal
+    /// title, success criteria, artifact signals, live signals, reverify count).
+    /// The recipe is `self.recipe_path` (this brain is constructed with the
+    /// outcome-verification recipe as its primary recipe). The agent records its
+    /// verdict by calling `simard ooda record-outcome`; stdout is intentionally
+    /// IGNORED. Every model-controlled ctx field is routed through
+    /// [`sanitize_context_var`] before it becomes a `-c` arg. Genuine
+    /// recipe-runner failures propagate as `Err` (the seam fails CLOSED).
+    fn run_outcome_verify_recipe(
+        &self,
+        ctx: &GoalOutcomeCtx,
+        record_path: &Path,
+    ) -> SimardResult<()> {
+        // Resolve THIS binary so the recipe sandbox can invoke the
+        // `record-outcome` tool deterministically — resolved the same way
+        // `recipe-runner-rs` is (via the running executable), never a bare name
+        // that depends on PATH. If it cannot be resolved, no record is written
+        // and the reader fails CLOSED at R1 (a NO-FALLBACK cycle failure).
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag)?;
+
         let artifact = format!(
             "pr_merged={} issue_closed={} self_affecting={} deployed={}",
             ctx.artifact_signals.pr_merged,
@@ -1386,6 +1401,16 @@ impl RecipeBrain {
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            // The typed-outcome seam: where to write the record and which binary
+            // records it. Paths are trusted (a daemon-owned per-call temp dir +
+            // the resolved current_exe), so they are passed verbatim — never
+            // sanitized (which would fold/truncate a path).
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
+            .arg("-c")
+            .arg(format!("cycle_number={REASONER_RECORD_CYCLE}"))
             .arg("-c")
             .arg(format!(
                 "goal_id={}",
@@ -1437,7 +1462,10 @@ impl RecipeBrain {
             });
         }
 
-        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
+        // The verdict lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored; the caller reads and
+        // verifies `record_path`.
+        Ok(())
     }
 
     /// Invoke the per-goal, per-cycle recipe once and return the raw decision
@@ -1470,11 +1498,7 @@ impl RecipeBrain {
         // `recipe-runner-rs` is (via the running executable), never a bare name
         // that depends on PATH. If it cannot be resolved, no record is written
         // and the reader fails CLOSED at R1.
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(PER_GOAL_CYCLE_ADAPTER_TAG)?;
 
         let stale = match ctx.stale_claim_secs {
             Some(secs) => secs.to_string(),
@@ -1611,11 +1635,7 @@ impl RecipeBrain {
         // `recipe-runner-rs` is (via the running executable), never a bare name
         // that depends on PATH. If it cannot be resolved, no record is written
         // and the reader fails CLOSED at R1 (surfaced as a loud Admit).
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(ADMISSION_ADAPTER_TAG)?;
 
         let scope = ctx.candidate.predicted_scope.join(", ");
         let live = render_admission_engineers(&ctx.live_engineers);
@@ -1721,11 +1741,7 @@ impl RecipeBrain {
                 ),
             })?;
 
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(RESOURCE_ADMISSION_ADAPTER_TAG)?;
 
         let opt = |v: Option<String>| v.unwrap_or_else(|| "unknown".to_string());
         let disk_used = opt(ctx.disk_used_pct.map(|p| format!("{p:.0}")));
@@ -1848,11 +1864,7 @@ impl RecipeBrain {
         // `record-idea-dedup` tool deterministically (never a bare PATH name).
         // If it cannot be resolved, no record is written and the reader fails
         // CLOSED at R1 (a dropped candidate).
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(IDEA_DEDUP_ADAPTER_TAG)?;
 
         let shortlist = render_existing_shortlist(&ctx.existing_shortlist);
 
@@ -1933,11 +1945,7 @@ impl RecipeBrain {
             IDEA_CONSOLIDATION_ADAPTER_TAG,
         )?;
 
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(IDEA_CONSOLIDATION_ADAPTER_TAG)?;
 
         let pool = render_existing_shortlist(&ctx.pool);
 
@@ -2097,68 +2105,6 @@ fn render_live_signals(signals: &[crate::goal_curation::live_signal::LiveSignal]
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// A structured outcome-verification decision envelope. Unlike the shared
-/// [`DecisionEnvelope`], this reads the optional `replan_hint` explicitly so a
-/// `replan` decision carries its load-bearing re-scope guidance (the shared shim
-/// would default every struct-variant field to empty — see #2751 API reference).
-#[derive(Debug, Clone, serde::Deserialize)]
-struct OutcomeEnvelope {
-    decision: String,
-    #[serde(default)]
-    rationale: String,
-    #[serde(default)]
-    replan_hint: String,
-}
-
-/// Parse the outcome-verify recipe output into a [`GoalOutcomeDecision`], or
-/// `None` when no balanced JSON object with a known `decision` variant is
-/// present (the caller surfaces that as a NO-FALLBACK `Err`). Routes through the
-/// shared sanitizing chokepoint so a banner-polluted envelope still parses.
-fn parse_outcome_decision(text: &str) -> Option<GoalOutcomeDecision> {
-    let env: OutcomeEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    if env.decision.trim().is_empty() {
-        return None;
-    }
-    let rationale = {
-        let r = env.rationale.trim();
-        if r.is_empty() {
-            truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
-        } else {
-            truncate(r, MAX_RATIONALE_CHARS)
-        }
-    };
-    outcome_decision_from_variant(
-        &env.decision,
-        rationale,
-        truncate(env.replan_hint.trim(), MAX_RATIONALE_CHARS),
-    )
-}
-
-/// Map an outcome-verify decision variant token (case-insensitive) to a
-/// [`GoalOutcomeDecision`]; `None` for an unknown token. `replan_hint` is only
-/// carried by the `replan` variant.
-fn outcome_decision_from_variant(
-    word: &str,
-    rationale: String,
-    replan_hint: String,
-) -> Option<GoalOutcomeDecision> {
-    let w = word.trim();
-    if w.eq_ignore_ascii_case("mark_achieved") {
-        Some(GoalOutcomeDecision::MarkAchieved { rationale })
-    } else if w.eq_ignore_ascii_case("reopen") {
-        Some(GoalOutcomeDecision::Reopen { rationale })
-    } else if w.eq_ignore_ascii_case("replan") {
-        Some(GoalOutcomeDecision::Replan {
-            rationale,
-            replan_hint,
-        })
-    } else if w.eq_ignore_ascii_case("keep_open_and_report") {
-        Some(GoalOutcomeDecision::KeepOpenAndReport { rationale })
-    } else {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2872,18 +2818,6 @@ mod tests {
     }
 
     // ===================================================================
-    #[test]
-    fn parse_outcome_recovers_trailing_comma() {
-        // The outcome seam fails NO-FALLBACK on a parse miss, so recovering a
-        // trailing-comma body is what keeps a genuine reasoner verdict from
-        // being discarded.
-        let d = parse_outcome_decision(r#"{"decision": "mark_achieved", "rationale": "done",}"#);
-        assert!(
-            d.is_some(),
-            "a trailing-comma outcome envelope must still parse"
-        );
-    }
-
     #[test]
     fn extract_decision_envelope_recovers_trailing_comma() {
         let env =
