@@ -19,7 +19,12 @@ pub fn normalize(msg: &str) -> String {
 /// Replace volatile tokens (paths, ISO timestamps, run IDs, long hex blobs,
 /// UUIDs) with stable placeholders so two runs of the same underlying failure
 /// produce identical signatures.
-fn redact_token(t: &str) -> String {
+///
+/// `pub(crate)` so the OODA no-progress breaker (in `goal_curation`) can reuse
+/// the same redaction before embedding goal-derived free-text in an escalation
+/// body (SR3/SR6). Non-breaking visibility widening — no signature/behaviour
+/// change.
+pub(crate) fn redact_token(t: &str) -> String {
     if t.starts_with('/') {
         return "<PATH>".to_string();
     }
@@ -53,7 +58,10 @@ fn redact_token(t: &str) -> String {
 /// strict — exactly `8-4-4-4-12` hex digits with hyphens only at the four fixed
 /// offsets — so a hyphenated hex run of any other shape (e.g. a git range or an
 /// ISO date) is never mistaken for a UUID.
-fn redact_uuids(t: &str) -> String {
+///
+/// `pub(crate)` for reuse by the OODA breaker's body redaction (see
+/// [`redact_token`]).
+pub(crate) fn redact_uuids(t: &str) -> String {
     // UUIDs are ASCII, so a byte scan is correct and index-safe.
     let bytes = t.as_bytes();
     let mut out = String::with_capacity(t.len());
