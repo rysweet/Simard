@@ -1062,6 +1062,13 @@ pub(crate) fn apply_no_progress_breaker_investigated(
 
         let guided_retry_used = tracker.guided_retry_used(goal_id);
         let class = why.class;
+        // PRE-bump read: this is the surfaced-failure count as it stands ENTERING
+        // this cycle. `resolution_for_why` compares it `>= LIMIT` before the surface
+        // arm below records this cycle's own failure via `record_surfaced_failure`,
+        // so the evidence-less stall is surfaced for its first LIMIT observations and
+        // quarantine fires on the (LIMIT + 1)th — a deliberate one-observation shift
+        // from the old post-bump escalate-at-LIMIT trigger, pinned by
+        // `quarantine_fires_on_the_cycle_after_the_limit_th_surface`.
         let surfaced_failures = tracker.surfaced_failures(goal_id);
         let resolution = resolution_for_why(consecutive, why, guided_retry_used, surfaced_failures);
 

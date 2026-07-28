@@ -616,14 +616,24 @@ pub(crate) fn surfaced_failure_escalation_issue(
 /// — always WITH the concrete WHY + evidence attached.
 ///
 /// `surfaced_failures` is the goal's persisted consecutive evidence-less
-/// surfaced-failure count (process_health). At the evidence-less terminal rung,
-/// once it reaches [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] the breaker returns
-/// [`NoProgressResolution::QuarantineTerminal`] instead of surfacing again — the
-/// terminal stop that ends the `UNCLEAR-CRITERIA` re-schedule/re-file churn.
-/// Below the bound the rung is byte-for-byte unchanged
-/// ([`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)),
-/// and the parameter is ignored for every other class and for evidence-backed
-/// stalls.
+/// surfaced-failure count as it stands **entering** this cycle — i.e. the
+/// PRE-bump count, BEFORE this cycle records its own surfaced failure
+/// (process_health). The bound is checked pre-bump
+/// (`surfaced_failures >= SURFACED_INVESTIGATION_FAILURE_LIMIT`), which gives an
+/// exact firing timing worth spelling out so the doc never reads as
+/// fire-at-LIMIT: the evidence-less stall is
+/// [`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)d
+/// (retriable, one recorded surfaced failure per cycle) for its first
+/// `SURFACED_INVESTIGATION_FAILURE_LIMIT` observations, and only the NEXT
+/// (`LIMIT + 1`)th observation — where the pre-bump count has finally reached the
+/// bound — returns [`NoProgressResolution::QuarantineTerminal`], the terminal
+/// stop that ends the `UNCLEAR-CRITERIA` re-schedule/re-file churn. This is a
+/// DELIBERATE one-observation shift from the old post-bump escalate-at-LIMIT
+/// trigger (which fired ON the LIMIT-th observation); it is pinned end-to-end by
+/// `quarantine_fires_on_the_cycle_after_the_limit_th_surface`. Below the bound
+/// the surfacing rung's *action* is unchanged (still a plain surfaced failure);
+/// only the trigger observation moved by one. The parameter is ignored for every
+/// other class and for evidence-backed stalls.
 pub fn resolution_for_why(
     consecutive: u32,
     why: NoProgressWhy,
