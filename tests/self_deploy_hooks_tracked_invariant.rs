@@ -103,7 +103,7 @@ fn hooks_manifest_and_scripts_are_git_tracked() {
     assert!(ok, "git ls-files {HOOKS_DIR} must succeed");
     let tracked_files: Vec<&str> = listed.lines().filter(|l| !l.is_empty()).collect();
     assert!(
-        tracked_files.iter().any(|f| *f == MANIFEST_REL),
+        tracked_files.contains(&MANIFEST_REL),
         "the manifest must appear in `git ls-files {HOOKS_DIR}`"
     );
     assert!(
