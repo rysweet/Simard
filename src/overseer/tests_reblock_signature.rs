@@ -151,3 +151,81 @@ fn genuinely_different_reblock_causes_keep_distinct_signatures() {
         "distinct re-block causes must keep distinct signatures (no over-collapse)"
     );
 }
+
+// === MEDIUM (Step 17b review): verify the fold against the REAL, production ===
+// === dedup_key shapes `classify_signal` actually emits ======================
+//
+// The prior fold tests used illustrative `"recurring_goal_reblock <id>"` keys.
+// The reviewer asked to pin the fold against a CAPTURED real reblock dedup_key.
+// The production keys carrying a volatile goal id are emitted verbatim by
+// `crate::overseer::mod::classify_signal`:
+//   * GoalBlocked  => `format!("goal:blocked:{goal_id}")`
+//   * StaleGoal    => `format!("goal:stale:{goal_id}")`
+//   * LoopDetected => `format!("loop:{goal_id}")`
+//   * DriftCorrection => `format!("drift:{goal_id}")`
+// and the goal_id itself is a volatile `simard-identity-<slug>` or `goal-<n>`.
+// These tests assert the fold folds exactly those real shapes (and only the
+// volatile suffix), so recurrences of the same cause collapse to ONE signature.
+
+#[test]
+fn folds_real_goal_blocked_dedup_key_shape() {
+    // Real production key: `goal:blocked:<goal_id>`.
+    assert_eq!(
+        fold_volatile_goal_ids("goal:blocked:simard-identity-luxe-coastal-lighting"),
+        "goal:blocked:simard-identity-*",
+        "the real GoalBlocked key must fold its volatile identity slug"
+    );
+    assert_eq!(
+        fold_volatile_goal_ids("goal:blocked:goal-4087"),
+        "goal:blocked:goal-*",
+        "the real GoalBlocked key must fold its volatile positional id"
+    );
+    // Two re-block recurrences of the SAME cause (differing only by the volatile
+    // goal id) collapse to ONE folded key across BOTH identity shapes.
+    assert_eq!(
+        fold_volatile_goal_ids("goal:blocked:simard-identity-atelier-furniture-de"),
+        fold_volatile_goal_ids("goal:blocked:simard-identity-luxe-coastal-lighting"),
+    );
+    assert_eq!(
+        fold_volatile_goal_ids("goal:blocked:goal-12"),
+        fold_volatile_goal_ids("goal:blocked:goal-4087"),
+    );
+}
+
+#[test]
+fn folds_real_loop_stale_and_drift_dedup_key_shapes() {
+    // `loop:<goal_id>`, `goal:stale:<goal_id>`, `drift:<goal_id>` — the other
+    // real classify_signal shapes that embed a volatile goal id.
+    assert_eq!(
+        fold_volatile_goal_ids("loop:simard-identity-nordic-hearth-ceramics"),
+        "loop:simard-identity-*",
+    );
+    assert_eq!(
+        fold_volatile_goal_ids("goal:stale:goal-9871"),
+        "goal:stale:goal-*",
+    );
+    assert_eq!(fold_volatile_goal_ids("drift:goal-3"), "drift:goal-*");
+    // The stable `goal:blocked:` / `goal:stale:` prefixes contain the substring
+    // "goal" but NOT the `goal-<digit>` shape, so they are preserved untouched —
+    // only the trailing volatile id is folded (no over-collapse of the prefix).
+    assert_eq!(
+        fold_volatile_goal_ids("goal:stale:simard-identity-x1"),
+        "goal:stale:simard-identity-*",
+    );
+}
+
+#[test]
+fn real_reblock_keys_of_different_goals_dedup_to_one_signature_end_to_end() {
+    // End-to-end through the Decide seam using the REAL `goal:blocked:<id>` key
+    // shape: two blocked-goal recurrences differing only by the volatile goal id
+    // must file ONE stewardship signature.
+    let a = reblock_problem("goal:blocked:simard-identity-atelier-furniture-de");
+    let b = reblock_problem("goal:blocked:simard-identity-luxe-coastal-lighting");
+    assert_ne!(a.dedup_key, b.dedup_key, "the raw keys genuinely differ");
+    assert_eq!(
+        dedup_signature(&a),
+        dedup_signature(&b),
+        "real GoalBlocked re-block keys differing only by the volatile identity slug must \
+         collapse to ONE stewardship signature"
+    );
+}

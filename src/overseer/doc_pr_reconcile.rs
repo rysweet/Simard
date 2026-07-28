@@ -20,7 +20,7 @@
 //! See `docs/reference/auto-doc-pr-reconciliation-api.md` for the full contract.
 
 use crate::error::SimardResult;
-use crate::overseer::config::{DEFAULT_OVERSEER_AUTHOR_LOGIN, SIMARD_ENGINEER_PR_LABEL};
+use crate::overseer::config::{SIMARD_ENGINEER_PR_LABEL, automerge_author};
 use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient};
 
 /// Title-prefix a candidate PR's title must start with. A durable cross-system
@@ -28,11 +28,13 @@ use crate::stewardship::merge_authority::{OpenPrSummary, PrGhClient};
 /// contract.
 pub const AUTO_DOC_PR_TITLE_MARKER: &str = "Update documentation with";
 
-/// The exact author login a candidate's `pr.author` must equal. A compile-time
-/// constant so the gate stays pure (no env/I/O). An empty/absent author can
-/// never equal it, so a human PR fails closed. The auto-doc PRs are opened under
-/// the overseer bot identity.
-pub const AUTO_DOC_PR_AUTHOR: &str = DEFAULT_OVERSEER_AUTHOR_LOGIN;
+// NOTE: the author gate no longer keys on a compile-time author constant. The
+// auto-doc PRs are authored under Simard's engineer / OODA gh identity
+// (`crate::overseer::config::automerge_author`) — NOT the `simard-overseer[bot]`
+// login — so the expected author is resolved at the I/O boundary
+// (`run_doc_pr_reconcile`) and threaded into the pure gate. An empty/absent
+// expected author (e.g. `SIMARD_AUTOMERGE_AUTHOR` unset) matches nothing, so the
+// pass stays fail-closed.
 
 /// The label a candidate must carry. Simard's own autonomous PRs (including the
 /// auto-doc drafts) are tagged with this durable label.
@@ -96,12 +98,21 @@ pub struct DocPrReconcileReport {
 const CONFLICTING_MERGEABLE: &str = "CONFLICTING";
 
 /// True only when EVERY signal marks `pr` an auto-generated doc-drift PR. Fails
-/// closed: any missing signal — including an empty/absent author — returns
-/// `false`, so a human PR is never a reconciliation candidate.
-pub fn is_auto_doc_pr(pr: &OpenPrSummary) -> bool {
-    pr.title.starts_with(AUTO_DOC_PR_TITLE_MARKER)
+/// closed: any missing signal — including an empty/absent author, or an
+/// `expected_author` that is empty (unresolved identity) — returns `false`, so a
+/// human PR (or a mis-resolved identity) is never a reconciliation candidate.
+///
+/// `expected_author` is the auto-doc author identity resolved at the I/O
+/// boundary from [`crate::overseer::config::automerge_author`]. Keeping the
+/// author identity a mandatory conjunct is the security-critical guard: an
+/// external attacker cannot spoof `pr.author.login` (GitHub-authoritative) and
+/// cannot apply the auto-doc label without repo triage/write, so a crafted PR
+/// can never become a close candidate.
+pub fn is_auto_doc_pr(pr: &OpenPrSummary, expected_author: &str) -> bool {
+    !expected_author.is_empty()
+        && pr.title.starts_with(AUTO_DOC_PR_TITLE_MARKER)
         && !pr.author.is_empty()
-        && pr.author == AUTO_DOC_PR_AUTHOR
+        && pr.author == expected_author
         && pr.is_draft == Some(true)
         && pr.labels.iter().any(|l| l == AUTO_DOC_PR_LABEL)
 }
@@ -113,8 +124,14 @@ pub fn is_auto_doc_pr(pr: &OpenPrSummary) -> bool {
 /// The canonical PR is the newest (highest number) auto-doc candidate and is
 /// NEVER placed in the close set, so the decision can never close every
 /// candidate. Zero or one candidate ⇒ the invariant already holds (no closes).
-pub fn reconcile_doc_prs(open_prs: &[OpenPrSummary]) -> DocPrReconcileDecision {
-    let candidates: Vec<&OpenPrSummary> = open_prs.iter().filter(|pr| is_auto_doc_pr(pr)).collect();
+pub fn reconcile_doc_prs(
+    open_prs: &[OpenPrSummary],
+    expected_author: &str,
+) -> DocPrReconcileDecision {
+    let candidates: Vec<&OpenPrSummary> = open_prs
+        .iter()
+        .filter(|pr| is_auto_doc_pr(pr, expected_author))
+        .collect();
 
     let Some(canonical) = candidates.iter().map(|pr| pr.number).max() else {
         return DocPrReconcileDecision {
@@ -170,11 +187,63 @@ pub fn reconcile_doc_prs(open_prs: &[OpenPrSummary]) -> DocPrReconcileDecision {
 /// hygiene convenience, not a correctness gate). A bounded number of closes
 /// ([`MAX_CLOSES_PER_CYCLE`]) is executed per cycle.
 pub fn run_doc_pr_reconcile(repo: &str, gh: &dyn PrGhClient) -> SimardResult<DocPrReconcileReport> {
+    // Resolve the auto-doc author identity at this I/O boundary. The auto-doc
+    // PRs are authored under Simard's engineer / OODA gh login
+    // (`SIMARD_AUTOMERGE_AUTHOR`), which is DISTINCT from the `simard-overseer[bot]`
+    // login. Unset => empty => the gate matches nothing (fail-closed).
+    let expected_author = automerge_author().unwrap_or_default();
+    run_doc_pr_reconcile_with_author(repo, gh, &expected_author)
+}
+
+/// Testable executor core: the auto-doc author identity is INJECTED (resolved by
+/// the caller — [`run_doc_pr_reconcile`] — from
+/// [`crate::overseer::config::automerge_author`]) so this stays free of env
+/// access; its only I/O is the injected `gh` client.
+///
+/// Emits a LOUD `warn` when title-marker auto-doc PRs are present but NONE pass
+/// the full identity gate: that is the signature of a mis-resolved identity
+/// (e.g. `SIMARD_AUTOMERGE_AUTHOR` unset or not matching the real auto-doc
+/// author), a missing label, or non-draft PRs — an inert reconciler must never
+/// fail silently.
+pub fn run_doc_pr_reconcile_with_author(
+    repo: &str,
+    gh: &dyn PrGhClient,
+    expected_author: &str,
+) -> SimardResult<DocPrReconcileReport> {
     let open_prs = gh.list_open_prs(repo, DOC_PR_LIST_LIMIT)?;
-    let candidate_count = open_prs.iter().filter(|pr| is_auto_doc_pr(pr)).count();
+    let title_marker_count = open_prs
+        .iter()
+        .filter(|pr| pr.title.starts_with(AUTO_DOC_PR_TITLE_MARKER))
+        .count();
+    let candidate_count = open_prs
+        .iter()
+        .filter(|pr| is_auto_doc_pr(pr, expected_author))
+        .count();
     let skipped = open_prs.len().saturating_sub(candidate_count);
 
-    let decision = reconcile_doc_prs(&open_prs);
+    // LOUD inert-gate surfacing: title-marker PRs exist but NONE passed the gate,
+    // so reconciliation will take no action this cycle. Name the likely cause so
+    // a misconfigured author identity / missing label / non-draft never fails
+    // silently (a silent inert pass would let the stale-PR churn recur unseen).
+    if title_marker_count > 0 && candidate_count == 0 {
+        let author_display = if expected_author.is_empty() {
+            "<unset SIMARD_AUTOMERGE_AUTHOR>"
+        } else {
+            expected_author
+        };
+        tracing::warn!(
+            target: "simard::overseer",
+            repo = %repo,
+            title_marker_prs = title_marker_count,
+            expected_author = %author_display,
+            auto_doc_label = AUTO_DOC_PR_LABEL,
+            "auto-doc PR reconciliation: title-marker PR(s) present but NONE passed the identity \
+             gate — reconciliation is INERT this cycle. Verify SIMARD_AUTOMERGE_AUTHOR matches the \
+             auto-doc PR author, and that the PRs are drafts carrying the auto-doc label.",
+        );
+    }
+
+    let decision = reconcile_doc_prs(&open_prs, expected_author);
 
     tracing::info!(
         target: "simard::overseer",

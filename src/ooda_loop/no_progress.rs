@@ -1314,7 +1314,7 @@ fn apply_resolution_side_effects(
                 "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed and linked",
             );
         }
-        NoProgressResolution::SurfaceInvestigationFailure { class, reason } => {
+        NoProgressResolution::SurfaceInvestigationFailure { class: _, reason } => {
             // The independent investigation reached the terminal rung with NO
             // evidence, but the goal has NOT yet exhausted its bounded
             // re-investigation budget (the routing in
@@ -1332,7 +1332,6 @@ fn apply_resolution_side_effects(
             // Blocked state, so un-block it to `NotStarted` so the brain can
             // re-select it and a later cycle can re-investigate.
             let surfaced = tracker.record_surfaced_failure(goal_id);
-            let _ = class;
             if unblock_nonterminal
                 && let Some(g) = state
                     .active_goals
