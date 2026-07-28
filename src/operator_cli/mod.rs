@@ -124,6 +124,7 @@ Product modes:
   gym compare <scenario-id>
   gym run-suite <suite-id>
   gym recall-precision
+  gym reliability-gate
   gym enrichment-ablation
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]

@@ -318,6 +318,7 @@ nav:
     - Coverage Comment Resilience: reference/coverage-comment-resilience.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
+    - Reliability-Gate Benchmark: reference/reliability-gate-benchmark.md
     - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
