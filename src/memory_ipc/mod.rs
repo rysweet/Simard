@@ -318,7 +318,60 @@ pub enum MemoryRequest {
     GetStatistics,
 }
 
-/// Response types matching each request.
+impl MemoryRequest {
+    /// Whether it is safe to re-apply this request after a *possible* prior
+    /// application (issue #4929 single-reconnect retry). This governs the
+    /// POST-delivery retry decision only: when the request bytes were already
+    /// delivered and the server may have applied them, a blind re-send must not
+    /// duplicate or corrupt state.
+    ///
+    /// Safe (`true`): pure reads, `Ping`, effect-idempotent mutations
+    /// (`PruneExpiredSensory`, `ClearWorking`), and `StoreFactGated` (the server
+    /// dedups it against an equal-or-stronger prior — issue #2679).
+    ///
+    /// Unsafe (`false`): writes that mint a fresh row (`StoreEpisode`,
+    /// `StoreFact`, `RecordSensory`, `PushWorking`, `StoreProcedure`,
+    /// `StoreProcedureProvenance`, `StoreProspective`), the fire-once
+    /// `CheckTriggers` (mutates matched prospectives to "triggered"),
+    /// `ResolveProspective` and `ConsolidateEpisodes` (state transitions with
+    /// side effects), and the destructive `DrainPassLedger` (a re-drain returns
+    /// a wrong count). Re-sending any of these could duplicate or corrupt state,
+    /// so a post-delivery failure surfaces `Err` without re-sending.
+    pub(crate) fn is_retry_safe(&self) -> bool {
+        match self {
+            // Pure reads + liveness probe.
+            MemoryRequest::Ping
+            | MemoryRequest::GetWorking { .. }
+            | MemoryRequest::SearchFacts { .. }
+            | MemoryRequest::RecallFactsRanked { .. }
+            | MemoryRequest::RecallProcedure { .. }
+            | MemoryRequest::ListProspectiveByTrigger { .. }
+            | MemoryRequest::SearchEpisodesByKeywords { .. }
+            | MemoryRequest::ListAllEpisodes { .. }
+            | MemoryRequest::ListAllProspective { .. }
+            | MemoryRequest::GetStatistics
+            // Effect-idempotent mutations: re-running reaches the same end state.
+            | MemoryRequest::PruneExpiredSensory
+            | MemoryRequest::ClearWorking { .. }
+            // Server-deduped write (issue #2679).
+            | MemoryRequest::StoreFactGated { .. } => true,
+
+            // Row-minting / fire-once / destructive: re-sending would duplicate
+            // or corrupt state.
+            MemoryRequest::RecordSensory { .. }
+            | MemoryRequest::PushWorking { .. }
+            | MemoryRequest::StoreEpisode { .. }
+            | MemoryRequest::ConsolidateEpisodes { .. }
+            | MemoryRequest::StoreFact { .. }
+            | MemoryRequest::StoreProcedure { .. }
+            | MemoryRequest::StoreProcedureProvenance { .. }
+            | MemoryRequest::StoreProspective { .. }
+            | MemoryRequest::CheckTriggers { .. }
+            | MemoryRequest::ResolveProspective { .. }
+            | MemoryRequest::DrainPassLedger { .. } => false,
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "ok", content = "value", rename_all = "snake_case")]
 pub enum MemoryResponse {

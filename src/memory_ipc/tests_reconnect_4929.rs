@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
 
-use super::{MemoryResponse, RemoteCognitiveMemory, read_frame, write_frame};
+use super::{MemoryRequest, MemoryResponse, RemoteCognitiveMemory, read_frame, write_frame};
 
 /// Accept the next connection within `budget`, or return `None`. Polls a
 /// non-blocking listener so a reconnect that never arrives cannot wedge the
@@ -177,4 +177,161 @@ fn call_does_not_retry_forever_when_reconnect_also_breaks() {
         is_err,
         "a second broken pipe after the one allowed reconnect must surface Err, not Ok"
     );
+}
+
+/// A NON-idempotent request (`store_episode`) whose bytes were already delivered
+/// must NOT be re-sent on the heal reconnect (issue #4929 review). The server
+/// reads the request (i.e. it may have applied it) and then severs before
+/// responding; a blind re-send would mint a SECOND episode. The client must
+/// reconnect to heal the poisoned stream but surface `Err` WITHOUT writing a
+/// second request frame.
+///
+/// The server thread reports whether a frame arrived on the reconnect. A frame
+/// there is a regression (duplicate write); a timeout/EOF is the correct
+/// "reconnected but did not re-send" behavior.
+#[test]
+fn non_idempotent_post_delivery_failure_is_not_resent() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("memory.sock");
+    let listener = UnixListener::bind(&sock).expect("bind flaky server");
+
+    let (resent_tx, resent_rx) = mpsc::channel::<bool>();
+    let server = thread::spawn(move || {
+        // conn1: Ping/Pong handshake, read the StoreEpisode request (the server
+        // may now have applied it), then SEVER without responding.
+        let mut c1 =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept conn1 (handshake)");
+        serve_one(&mut c1, &MemoryResponse::Pong);
+        read_then_sever(&mut c1);
+        drop(c1);
+
+        // conn2: the client may reconnect to HEAL the stream, but must not
+        // re-send. If any frame arrives here the client duplicated the write.
+        match accept_within(&listener, Duration::from_secs(3)) {
+            Some(mut c2) => {
+                c2.set_read_timeout(Some(Duration::from_millis(500)))
+                    .expect("set conn2 read timeout");
+                let resent = read_frame(&mut c2).is_ok();
+                let _ = resent_tx.send(resent);
+            }
+            // No reconnect at all is also acceptable — nothing was re-sent.
+            None => {
+                let _ = resent_tx.send(false);
+            }
+        }
+    });
+
+    let client = RemoteCognitiveMemory::connect(&sock).expect("connect + Ping handshake");
+
+    // `store_episode` mints a fresh episode id per call → non-idempotent. Its
+    // first attempt is delivered then severed, so the client must surface Err
+    // WITHOUT re-sending (which would duplicate the episode).
+    let res = client.store_episode("payload", "test", None);
+    assert!(
+        res.is_err(),
+        "a non-idempotent post-delivery failure must surface Err, not a retried Ok"
+    );
+
+    let resent = resent_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("server thread reported an outcome");
+    assert!(
+        !resent,
+        "client must NOT re-send a non-idempotent request after a post-delivery failure (would duplicate the write)"
+    );
+    server.join().expect("flaky server thread");
+}
+
+/// Lock the idempotency classification that governs the post-delivery retry
+/// decision (issue #4929 review): reads/`Ping`/effect-idempotent mutations and
+/// the server-deduped `StoreFactGated` are retry-safe; row-minting, fire-once,
+/// and destructive requests are not.
+#[test]
+fn retry_safe_classification_matches_request_semantics() {
+    // Retry-safe: pure reads, liveness, effect-idempotent mutations, deduped write.
+    for req in [
+        MemoryRequest::Ping,
+        MemoryRequest::PruneExpiredSensory,
+        MemoryRequest::GetWorking {
+            task_id: "t".into(),
+        },
+        MemoryRequest::ClearWorking {
+            task_id: "t".into(),
+        },
+        MemoryRequest::SearchFacts {
+            query: "q".into(),
+            limit: 1,
+            min_confidence: 0.0,
+        },
+        MemoryRequest::ListAllEpisodes { limit: 1 },
+        MemoryRequest::GetStatistics,
+        MemoryRequest::StoreFactGated {
+            concept: "c".into(),
+            content: "x".into(),
+            confidence: 0.5,
+            tags: vec![],
+            source_id: "s".into(),
+            source_episode_ids: vec![],
+            pass_id: "p".into(),
+        },
+    ] {
+        assert!(
+            req.is_retry_safe(),
+            "{req:?} should be retry-safe (idempotent / server-deduped)"
+        );
+    }
+
+    // NOT retry-safe: row-minting writes, fire-once trigger check, state
+    // transitions with side effects, and the destructive ledger drain.
+    for req in [
+        MemoryRequest::RecordSensory {
+            modality: "m".into(),
+            raw_data: "d".into(),
+            ttl_seconds: 1,
+        },
+        MemoryRequest::PushWorking {
+            slot_type: "s".into(),
+            content: "c".into(),
+            task_id: "t".into(),
+            relevance: 0.5,
+        },
+        MemoryRequest::StoreEpisode {
+            content: "c".into(),
+            source_label: "s".into(),
+            metadata: None,
+        },
+        MemoryRequest::ConsolidateEpisodes { batch_size: 1 },
+        MemoryRequest::StoreFact {
+            concept: "c".into(),
+            content: "x".into(),
+            confidence: 0.5,
+            tags: vec![],
+            source_id: "s".into(),
+        },
+        MemoryRequest::StoreProcedure {
+            name: "n".into(),
+            steps: vec![],
+            prerequisites: vec![],
+        },
+        MemoryRequest::StoreProspective {
+            description: "d".into(),
+            trigger_condition: "t".into(),
+            action_on_trigger: "a".into(),
+            priority: 0,
+        },
+        MemoryRequest::CheckTriggers {
+            content: "c".into(),
+        },
+        MemoryRequest::ResolveProspective {
+            node_id: "n".into(),
+        },
+        MemoryRequest::DrainPassLedger {
+            pass_id: "p".into(),
+        },
+    ] {
+        assert!(
+            !req.is_retry_safe(),
+            "{req:?} should NOT be retry-safe (row-minting / fire-once / destructive)"
+        );
+    }
 }
