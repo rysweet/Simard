@@ -59,6 +59,7 @@ pub mod failure_sink;
 pub mod guardrails;
 pub mod health_review;
 pub mod intervention;
+pub mod issue_cooldown;
 pub mod launch;
 pub mod meeting_ops;
 pub mod merge_ops;
@@ -113,6 +114,10 @@ mod tests_whisper;
 mod tests_signal_liaison;
 #[cfg(test)]
 mod tests_thread_oversight;
+// Issue #4930: contract tests for the durable issue-cooldown ledger that stops
+// the OODA-core auto-issue storm.
+#[cfg(test)]
+mod tests_issue_cooldown;
 
 pub use capabilities::{
     Auditor, BlockedGoal, Deployer, GoalCurator, HealthReviewStatus, IssueFiler, IssuePriority,

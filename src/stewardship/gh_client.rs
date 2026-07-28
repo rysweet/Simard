@@ -28,6 +28,17 @@ pub trait GhClient {
     fn search_issues(&self, repo: &str, signature: &str) -> SimardResult<Vec<GhIssue>>;
     /// Create a new issue in `repo`.
     fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue>;
+
+    /// Add a comment to an existing issue `number` in `repo` (issue #4930).
+    ///
+    /// Used by the durable issue-cooldown "comment-and-throttle" path to keep a
+    /// still-observed finding alive on its ONE canonical tracking issue instead
+    /// of filing a duplicate. The default implementation is a no-op (`Ok(())`)
+    /// so backends without comment support — and existing test fakes — keep
+    /// compiling; only [`RealGhClient`] actually posts the comment.
+    fn comment_on_issue(&self, _repo: &str, _number: u64, _body: &str) -> SimardResult<()> {
+        Ok(())
+    }
 }
 
 /// Production implementation that shells out to the `gh` binary.
@@ -341,6 +352,52 @@ impl GhClient for RealGhClient {
 
     fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
         create_issue_with(OsStr::new("gh"), execute_create_issue, repo, title, body)
+    }
+
+    fn comment_on_issue(&self, repo: &str, number: u64, body: &str) -> SimardResult<()> {
+        // Pass the body via stdin (`--body-file -`) so an arbitrarily large or
+        // metacharacter-bearing body is never expanded on the argv, mirroring the
+        // create-issue path's stdin discipline.
+        let mut child = Command::new("gh")
+            .args([
+                "issue",
+                "comment",
+                &number.to_string(),
+                "--repo",
+                repo,
+                "--body-file",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SimardError::StewardshipGhCommandFailed {
+                reason: format!("`gh issue comment` spawn failed: {e}"),
+            })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(body.as_bytes()).map_err(|e| {
+                SimardError::StewardshipGhCommandFailed {
+                    reason: format!("`gh issue comment` stdin write failed: {e}"),
+                }
+            })?;
+        }
+        let output =
+            child
+                .wait_with_output()
+                .map_err(|e| SimardError::StewardshipGhCommandFailed {
+                    reason: format!("`gh issue comment` wait failed: {e}"),
+                })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::StewardshipGhCommandFailed {
+                reason: format!(
+                    "`gh issue comment {number} -R {repo}` exited {} with stderr:\n{stderr}",
+                    output.status
+                ),
+            });
+        }
+        Ok(())
     }
 }
 

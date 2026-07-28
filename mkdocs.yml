@@ -98,6 +98,7 @@ nav:
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
+    - Durable Issue-Cooldown Ledger (stops the auto-issue storm): concepts/durable-issue-cooldown-ledger.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
@@ -333,6 +334,7 @@ nav:
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Gap-Scan Durable Open-Issue Dedup: reference/overseer-gap-scan-durable-dedup.md
+    - Issue-Cooldown Ledger API: reference/issue-cooldown-ledger-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Escalation-Triage API &amp; Output Contract: reference/escalation-triage-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md

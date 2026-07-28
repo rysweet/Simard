@@ -189,6 +189,48 @@ pub const DEFAULT_OVERSEER_BACKOFF_MULTIPLIER: i64 = 2;
 /// bounded so a real recurring gap always resurfaces within a day.
 pub const DEFAULT_OVERSEER_BACKOFF_MAX_SECS: i64 = 86_400;
 
+/// Opt-out flag (issue #4930) for the durable **issue-cooldown ledger** that
+/// de-duplicates the OODA-core auto-issue filers (`ooda-stuck`,
+/// `recurring_goal_reblock`, `workstream_gap:issue`) across daemon exec-reload,
+/// restart, and cross-client goal-board merges. ENABLED by default; only an
+/// explicit falsey value (`0`/`false`/`no`/`off`) disables it, in which case
+/// each filer falls back to its prior per-path dedup. Kept default-ON so the
+/// storm-suppression safety mechanism is never lost by stealth.
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_ENV: &str = "SIMARD_OVERSEER_ISSUE_COOLDOWN";
+
+/// Env var (issue #4930) setting the BASE cooldown window (seconds) of the
+/// [`crate::overseer::issue_cooldown::IssueCooldownLedger`]. Clamped UP to at
+/// least one full OODA cycle ([`overseer_interval_secs`]) so the same
+/// `(goal, finding)` can never re-file every cycle — the storm's defining
+/// symptom. Unset/empty/unparseable/zero/negative fall back to
+/// [`DEFAULT_ISSUE_COOLDOWN_BASE_SECS`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS";
+
+/// Env var (issue #4930) setting the hard CAP (seconds) on the issue-cooldown
+/// window. Clamped UP to `>= base` so the window can never be negative. A
+/// still-open finding therefore re-surfaces at least once per cap. Unset/empty/
+/// unparseable/zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_MAX_SECS`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS";
+
+/// Env var (issue #4930) setting the rolling-hour emit budget shared with the
+/// [`crate::overseer::guardrails::WhisperGate`] semantics. Unset/empty/
+/// unparseable/zero fall back to [`DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR";
+
+/// Default base issue-cooldown window: 6 h — already well above the one-OODA-cycle
+/// hard floor, favouring quiet-by-default while still re-surfacing daily.
+pub const DEFAULT_ISSUE_COOLDOWN_BASE_SECS: i64 = 21_600;
+
+/// Default issue-cooldown window cap: 24 h, so a still-open finding is never
+/// permanently silenced.
+pub const DEFAULT_ISSUE_COOLDOWN_MAX_SECS: i64 = 86_400;
+
+/// Default rolling-hour emit budget for the issue-cooldown ledger.
+pub const DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR: usize = 20;
+
 /// Resolve the Overseer master flag from an env resolver. Fail-safe: only an
 /// explicit truthy value (`1`/`true`/`yes`/`on`, case-insensitive) enables the
 /// Overseer; everything else — including an unset var — leaves it OFF.
@@ -463,6 +505,96 @@ pub fn overseer_backoff_max_secs_from(lookup: impl Fn(&str) -> Option<String>) -
 /// Production entry point: read the real process environment.
 pub fn overseer_backoff_max_secs() -> i64 {
     overseer_backoff_max_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the durable issue-cooldown ledger (issue #4930) is enabled
+/// from an env resolver. Opt-out: ENABLED unless an explicit falsey value
+/// (`0`/`false`/`no`/`off`) is set. Unset/empty/garbage all leave the ledger ON
+/// so the storm-suppression mechanism is never lost by stealth.
+pub fn issue_cooldown_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(
+        lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_ENV)
+            .as_deref()
+            .map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_enabled() -> bool {
+    issue_cooldown_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown BASE window (seconds) from an env resolver,
+/// clamped UP to at least one full OODA cycle ([`resolve_interval_secs`]) so the
+/// same `(goal, finding)` can never re-file every cycle. Unset/empty/unparseable/
+/// zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_BASE_SECS`]; the cycle
+/// floor is then applied regardless.
+pub fn issue_cooldown_base_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    let requested = match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_BASE_SECS),
+        _ => DEFAULT_ISSUE_COOLDOWN_BASE_SECS,
+    };
+    // Never drop below one OODA cycle — the storm's defining symptom.
+    requested.max(resolve_interval_secs(&lookup) as i64)
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_base_secs() -> i64 {
+    issue_cooldown_base_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown window CAP (seconds) from an env resolver, clamped
+/// UP to `>= base` so the window is never negative. Unset/empty/unparseable/
+/// zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_MAX_SECS`].
+pub fn issue_cooldown_cap_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    let requested = match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_MAX_SECS),
+        _ => DEFAULT_ISSUE_COOLDOWN_MAX_SECS,
+    };
+    requested.max(issue_cooldown_base_secs_from(&lookup))
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_cap_secs() -> i64 {
+    issue_cooldown_cap_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown rolling-hour emit budget from an env resolver.
+/// Unset/empty/unparseable/zero fall back to
+/// [`DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR`] — a bad value never collapses the
+/// budget to `0` and permanently silences a finding.
+pub fn issue_cooldown_cap_per_hour_from(lookup: impl Fn(&str) -> Option<String>) -> usize {
+    match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR),
+        _ => DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_cap_per_hour() -> usize {
+    issue_cooldown_cap_per_hour_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve whether the stale-engineer-claim reaper (issue #4099) is enabled.

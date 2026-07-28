@@ -838,14 +838,14 @@ pub fn promote_to_active(
             field: "backlog_id".to_string(),
             reason: format!("backlog item '{backlog_id}' not found"),
         })?;
-    let item = board.backlog.remove(position);
-    let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
-    board.active.push(ActiveGoal {
+    let promoted_source =
+        crate::goal_curation::labels::source_for_backlog(&board.backlog[position].source);
+    let goal = ActiveGoal {
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
-        id: item.id,
-        description: item.description,
+        id: board.backlog[position].id.clone(),
+        description: board.backlog[position].description.clone(),
         priority,
         status: GoalProgress::NotStarted,
         assigned_to,
@@ -853,7 +853,18 @@ pub fn promote_to_active(
         wip_refs: vec![],
         last_progress_update_at: None,
         labels: vec![promoted_source.to_string()],
-    });
+    };
+    // Centralized, fail-closed admission validation (issue #4930): every seam
+    // that admits a record — `add_active_goal` (direct active add),
+    // `add_backlog_item` (backlog admission), and this backlog→active promotion
+    // — must run the same required-field/priority gate. Prior to this, promotion
+    // only checked `validate_priority`, silently admitting into `board.active` a
+    // goal with an empty id/description that the direct-add path rejects.
+    // Validated BEFORE removing the item from the backlog so a rejected
+    // promotion leaves the board untouched (no goal silently lost).
+    validate_active_goal(&goal)?;
+    board.backlog.remove(position);
+    board.active.push(goal);
     Ok(())
 }
 
