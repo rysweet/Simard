@@ -227,6 +227,8 @@ pub fn build_send_request_group(id: u64, account: &str, group_id: &str, text: &s
     });
     req.to_string()
 }
+
+/// A newline-delimited JSON-RPC line transport to the signal-cli daemon.
 ///
 /// Kept deliberately minimal (read a line, write a line) so the [`SignalConversation`](super::SignalConversation)
 /// channel owns all Signal semantics and can be tested against [`MockTransport`]

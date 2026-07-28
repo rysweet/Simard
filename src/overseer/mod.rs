@@ -1372,6 +1372,9 @@ impl Overseer {
             plan.push(planned);
         }
     }
+
+    /// One live agentic health-review pass ([standing]), appended to the cycle
+    /// plan when the rail is wired and due on the cadence.
     ///
     /// The observation AND the remediation judgment are entirely agentic: the
     /// thin rail invokes the `overseer-health-review` recipe, whose agent reads
