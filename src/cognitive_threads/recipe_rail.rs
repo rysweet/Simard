@@ -418,8 +418,13 @@ fn looks_high_entropy(run: &str) -> bool {
             '0'..='9' => has_digit = true,
             _ => {}
         }
+        // Both classes seen — the verdict can no longer change, so stop
+        // scanning the rest of a potentially long blob.
+        if has_alpha && has_digit {
+            return true;
+        }
     }
-    has_alpha && has_digit
+    false
 }
 
 /// Validate + normalize an LLM-derived concept key (SR-7). Returns `Some(key)`
