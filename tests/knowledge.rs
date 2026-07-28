@@ -93,6 +93,8 @@ fn mock_knowledge_transport() -> InMemoryRpcTransport {
                     "description": "Rust programming language ownership borrowing lifetimes",
                     "article_count": 150,
                     "section_count": 520,
+                    "db_exists": true,
+                    "urls_file_exists": true,
                 })),
                 "python-expert" => Ok(serde_json::json!({
                     "name": "python-expert",
@@ -192,6 +194,10 @@ fn pack_info_returns_metadata() {
     );
     assert_eq!(info.article_count, 150);
     assert_eq!(info.section_count, 520);
+    // Computed on-disk status fields (KGP-M2 / issue #4321 F2), at parity with
+    // upstream agent-kgpacks `mcp_server.pack_info`.
+    assert!(info.db_exists);
+    assert!(info.urls_file_exists);
 }
 
 #[test]
@@ -301,11 +307,17 @@ fn knowledge_pack_info_serializes_roundtrip() {
         description: "Test pack".to_string(),
         article_count: 42,
         section_count: 100,
+        db_exists: true,
+        urls_file_exists: false,
     };
     let json = serde_json::to_string(&info).unwrap();
     let parsed: KnowledgePackInfo = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.name, "test-pack");
     assert_eq!(parsed.article_count, 42);
+    // The computed on-disk status fields (KGP-M2 / issue #4321 F2) survive a
+    // serialize→deserialize roundtrip.
+    assert!(parsed.db_exists);
+    assert!(!parsed.urls_file_exists);
 }
 
 #[test]

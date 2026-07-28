@@ -1,0 +1,74 @@
+name: kgpacks-rs-pack-info-computed-fields
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-M2** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`) — the F2 row of the done-gate issue
+  #4321 that was flagged "⚠️ verify computed fields present".
+
+  The upstream agent-kgpacks `mcp_server.pack_info` returns the pack manifest
+  **plus** two computed on-disk status fields:
+
+      manifest["db_exists"]        = (pack_dir / "pack.db").exists()
+      manifest["urls_file_exists"] = (pack_dir / "urls.txt").exists()
+
+  Before this fix the Rust `knowledge.pack_info` handler returned only
+  `name`/`description`/`article_count`/`section_count`, omitting both computed
+  fields, so a caller could not distinguish a manifest-only pack (metadata
+  present, not yet built/installed) from a fully materialised one — a genuine
+  parity gap with the original runtime.
+
+  The corrected contract appends `db_exists` (from the discovered pack's
+  `pack.db` path) and `urls_file_exists` (resolving `<pack_dir>/urls.txt`),
+  matching the upstream computed fields. The typed client `KnowledgePackInfo`
+  decodes both (`#[serde(default)]`, so `list_packs` — which, like upstream,
+  does not compute them — still deserializes to `false`).
+
+  This scenario drives the hermetic, in-process `native_knowledge` +
+  `knowledge_client` unit tests that pin the corrected contract:
+    - `native_knowledge_transport_pack_info` — db present, urls absent
+      (`db_exists: true`, `urls_file_exists: false`);
+    - `native_knowledge_transport_pack_info_reports_computed_file_flags` —
+      both `pack.db` and `urls.txt` materialised → both flags `true`;
+    - `native_knowledge_transport_pack_info_manifest_only_pack_reports_missing_db`
+      — a known-but-unbuilt pack → `db_exists: false`;
+    - `pack_info_returns_metadata` — the typed client decodes the flags;
+    - `list_packs_defaults_computed_fields_to_false` — absent fields default
+      to `false` rather than failing to deserialize.
+  The same run re-asserts the pre-existing KGP-M1/M3 discovery + the unknown
+  pack error contract are unregressed. No network, no live host mutation. The
+  CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge handler contract, including the new KGP-M2 computed
+  # on-disk status fields and the pre-existing discovery / not-found behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level typed client suite proves the computed fields are decoded
+  # end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

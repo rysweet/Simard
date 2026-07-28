@@ -307,6 +307,7 @@ mod tests {
             description: "Rust programming language".to_string(),
             article_count: 100,
             section_count: 400,
+            ..Default::default()
         };
         let score = relevance_score("Fix Rust ownership issue", &pack);
         assert!(score >= 1, "expected match on 'rust', got {score}");
@@ -319,6 +320,7 @@ mod tests {
             description: "Docker containers".to_string(),
             article_count: 80,
             section_count: 300,
+            ..Default::default()
         };
         let score = relevance_score("Fix Rust ownership issue", &pack);
         assert_eq!(score, 0);
@@ -335,6 +337,7 @@ mod tests {
             description: "Sorting category latest algorithm".to_string(),
             article_count: 10,
             section_count: 20,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("go test", &pack),
@@ -347,6 +350,7 @@ mod tests {
             description: "Go test tooling".to_string(),
             article_count: 10,
             section_count: 20,
+            ..Default::default()
         };
         assert_eq!(relevance_score("go test", &go_pack), 2);
     }
@@ -360,6 +364,7 @@ mod tests {
             description: "Rust programming language".to_string(),
             article_count: 100,
             section_count: 400,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("rust rust rust programming", &pack),
@@ -379,6 +384,7 @@ mod tests {
             description: "Docker containers images".to_string(),
             article_count: 80,
             section_count: 300,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("fix docker container image caching", &pack),
@@ -391,6 +397,7 @@ mod tests {
             description: "Container runtime".to_string(),
             article_count: 10,
             section_count: 20,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("debug containers", &singular_pack),
@@ -408,6 +415,7 @@ mod tests {
             description: "Python libraries categories".to_string(),
             article_count: 200,
             section_count: 800,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("pick a python library by category", &pack),
@@ -428,6 +436,7 @@ mod tests {
             description: "class focus status".to_string(),
             article_count: 10,
             section_count: 20,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("class focus status", &self_match_pack),
@@ -439,6 +448,7 @@ mod tests {
             description: "clang tooling".to_string(),
             article_count: 10,
             section_count: 20,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("class hierarchy", &unrelated_pack),
@@ -457,6 +467,7 @@ mod tests {
             description: "Sorting category latest algorithm".to_string(),
             article_count: 10,
             section_count: 20,
+            ..Default::default()
         };
         assert_eq!(
             relevance_score("go test", &pack),

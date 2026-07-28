@@ -49,7 +49,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | ID | Criterion | Acceptance check | Status | Evidence |
 |----|-----------|------------------|--------|----------|
 | KGP-M1 | `knowledge.list_packs` returns installed packs with name/description/article/section counts | `native_knowledge_transport_list_packs` green | DONE | `native_knowledge.rs::discover_packs`, `register_knowledge_handlers` |
-| KGP-M2 | `knowledge.pack_info` returns one pack's metadata; errors on unknown pack | `native_knowledge_transport_pack_info`, `native_knowledge_transport_pack_not_found` green | DONE | `native_knowledge.rs` `knowledge.pack_info` handler |
+| KGP-M2 | `knowledge.pack_info` returns one pack's metadata **plus computed on-disk status** (`db_exists`, `urls_file_exists`); errors on unknown pack | `native_knowledge_transport_pack_info`, `native_knowledge_transport_pack_info_reports_computed_file_flags`, `native_knowledge_transport_pack_info_manifest_only_pack_reports_missing_db`, `native_knowledge_transport_pack_not_found` green | DONE | `native_knowledge.rs` `knowledge.pack_info` handler + `pack_urls_file_exists` |
 | KGP-M3 | `manifest.json` (`graph_stats`) parsed with directory-name fallback | `discover_packs_finds_packs_with_manifests` green | DONE | `native_knowledge.rs::PackManifest`, `discover_packs` |
 
 ### Query & retrieval
@@ -298,3 +298,29 @@ multi-hop retrieval — closed 2026-07-21. KGP-T3 — reuse an open `Connection`
   its configured weight). With this, **every in-scope parity criterion is
   DONE** and both done-gate commands (`cargo test --lib native_knowledge` +
   `cargo test --lib knowledge_client`) are green.
+- **2026-07-28** — **KGP-M2 completed to full F2 parity** (metadata *plus*
+  computed on-disk status). The done-gate issue #4321 flagged F2 (`pack_info`)
+  as "⚠️ verify computed fields present": upstream agent-kgpacks
+  `mcp_server.pack_info` returns the manifest **plus** two computed fields —
+  `manifest["db_exists"] = (pack_dir/"pack.db").exists()` and
+  `manifest["urls_file_exists"] = (pack_dir/"urls.txt").exists()` — but the Rust
+  `knowledge.pack_info` handler returned only `name`/`description`/
+  `article_count`/`section_count`, omitting both. A caller therefore could not
+  tell a manifest-only pack (metadata present, not yet built/installed) from a
+  fully materialised one. The handler now appends `db_exists`
+  (`DiscoveredPack::db_path.exists()`) and `urls_file_exists` (a new
+  `pack_urls_file_exists` helper resolving `<pack_dir>/urls.txt` from the pack's
+  `db_path` parent, gated by the `PACK_URLS_FILE` constant), matching the
+  upstream contract. The typed client `KnowledgePackInfo` gained the two fields
+  (`#[serde(default)]`, so `list_packs` — which, like upstream, does not compute
+  them — still deserializes). Acceptance tests:
+  `native_knowledge_transport_pack_info` (db present, urls absent),
+  `native_knowledge_transport_pack_info_reports_computed_file_flags` (both
+  materialised → both `true`),
+  `native_knowledge_transport_pack_info_manifest_only_pack_reports_missing_db`
+  (known-but-unbuilt pack → `db_exists: false`), plus client-side
+  `pack_info_returns_metadata` (decodes the flags) and
+  `list_packs_defaults_computed_fields_to_false`. Both done-gate commands
+  (`cargo test --lib native_knowledge` + `cargo test --lib knowledge_client`)
+  remain green. This closes the last "⚠️ verify" row in the #4321 equivalence
+  matrix; every in-scope feature (F1–F11) is now at equivalent-or-better parity.

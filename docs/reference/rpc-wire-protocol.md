@@ -334,8 +334,14 @@ Get details about a specific pack.
 
 **Result**:
 ```json
-{"name": "rust-expert", "description": "...", "article_count": 150, "section_count": 890}
+{"name": "rust-expert", "description": "...", "article_count": 150, "section_count": 890,
+ "db_exists": true, "urls_file_exists": true}
 ```
+
+`db_exists` / `urls_file_exists` are computed on-disk status flags (whether the
+pack's `pack.db` and `urls.txt` are present under the pack directory), at parity
+with upstream agent-kgpacks `mcp_server.pack_info` (KGP-M2 / issue #4321 F2).
+They are computed only by `pack_info`; `list_packs` omits them.
 
 ---
 

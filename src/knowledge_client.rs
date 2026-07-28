@@ -44,7 +44,7 @@ pub struct KnowledgeSource {
 }
 
 /// Metadata about an installed knowledge pack.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct KnowledgePackInfo {
     /// Pack name (e.g. "rust-expert", "python-expert").
     pub name: String,
@@ -54,6 +54,21 @@ pub struct KnowledgePackInfo {
     pub article_count: u32,
     /// Number of sections across all articles.
     pub section_count: u32,
+    /// Whether the pack's SQLite database (`pack.db`) exists on disk.
+    ///
+    /// A computed on-disk status field returned by `knowledge.pack_info` (at
+    /// parity with upstream agent-kgpacks `mcp_server.pack_info`; KGP-M2 /
+    /// issue #4321 F2). `knowledge.list_packs` does not compute it, so it
+    /// defaults to `false` there — read it only from [`KnowledgeClient::pack_info`].
+    #[serde(default)]
+    pub db_exists: bool,
+    /// Whether the pack's source-URL manifest (`urls.txt`) exists on disk.
+    ///
+    /// Companion computed field to [`Self::db_exists`] (same source and
+    /// caveat): populated by `knowledge.pack_info`, defaults to `false` from
+    /// `knowledge.list_packs`.
+    #[serde(default)]
+    pub urls_file_exists: bool,
 }
 
 /// Typed client for the knowledge graph pack knowledge.
@@ -198,6 +213,8 @@ mod tests {
                     "description": format!("{pack} knowledge"),
                     "article_count": 120,
                     "section_count": 450,
+                    "db_exists": true,
+                    "urls_file_exists": false,
                 }))
             }
             _ => Err(RpcErrorPayload {
@@ -251,6 +268,22 @@ mod tests {
         let info = knowledge.pack_info("rust-expert").unwrap();
         assert_eq!(info.name, "rust-expert");
         assert_eq!(info.article_count, 120);
+        // Computed on-disk status fields (KGP-M2 / issue #4321 F2) are decoded
+        // from the wire response, at parity with upstream agent-kgpacks.
+        assert!(info.db_exists);
+        assert!(!info.urls_file_exists);
+    }
+
+    #[test]
+    fn list_packs_defaults_computed_fields_to_false() {
+        // `knowledge.list_packs` does not compute the on-disk status fields
+        // (matching upstream, which only adds them in `pack_info`), so the
+        // shared `KnowledgePackInfo` must decode those absent fields as `false`
+        // via `#[serde(default)]` rather than failing to deserialize.
+        let knowledge = KnowledgeClient::new(Box::new(mock_transport()));
+        let packs = knowledge.list_packs().unwrap();
+        assert!(!packs[0].db_exists);
+        assert!(!packs[0].urls_file_exists);
     }
 
     #[test]

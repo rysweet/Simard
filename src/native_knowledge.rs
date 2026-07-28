@@ -109,6 +109,24 @@ fn discover_packs(packs_dir: &Path) -> Vec<DiscoveredPack> {
     packs
 }
 
+/// Name of the per-pack source-URL manifest, at parity with upstream
+/// agent-kgpacks (`pack_dir/"urls.txt"`). Its presence is surfaced by
+/// `knowledge.pack_info` as `urls_file_exists` (KGP-M2 / issue #4321 F2).
+const PACK_URLS_FILE: &str = "urls.txt";
+
+/// Whether the pack's source-URL manifest ([`PACK_URLS_FILE`]) exists on disk.
+///
+/// The pack directory is the parent of the pack's `pack.db` (see
+/// [`discover_packs`], which joins `pack.db` onto each pack directory), so the
+/// urls file is resolved as `<pack_dir>/urls.txt`. Mirrors the upstream
+/// `mcp_server.pack_info` computed field `(pack_dir/"urls.txt").exists()`.
+fn pack_urls_file_exists(pack: &DiscoveredPack) -> bool {
+    pack.db_path
+        .parent()
+        .map(|dir| dir.join(PACK_URLS_FILE).exists())
+        .unwrap_or(false)
+}
+
 /// Open a pack database read-only and answer `question` against it.
 ///
 /// This is now a **test-only** convenience wrapper: production queries go
@@ -1345,6 +1363,15 @@ pub fn register_knowledge_handlers(transport: &mut NativeRpcTransport, packs_dir
                     "description": p.description,
                     "article_count": p.article_count,
                     "section_count": p.section_count,
+                    // Computed on-disk status fields, at parity with the upstream
+                    // agent-kgpacks `mcp_server.pack_info` (KGP-M2 / issue #4321
+                    // F2), which appends:
+                    //   manifest["db_exists"]        = (pack_dir/"pack.db").exists()
+                    //   manifest["urls_file_exists"] = (pack_dir/"urls.txt").exists()
+                    // so a caller can tell a manifest-only pack (metadata present,
+                    // not yet built/installed) from a fully materialised one.
+                    "db_exists": p.db_path.exists(),
+                    "urls_file_exists": pack_urls_file_exists(p),
                 })),
                 None => Err(RpcErrorPayload {
                     code: ERROR_INTERNAL,
@@ -1809,6 +1836,77 @@ mod tests {
         let result = response.result.unwrap();
         assert_eq!(result["name"], "test-pack");
         assert_eq!(result["article_count"], 10);
+        // Computed on-disk status fields (KGP-M2 / issue #4321 F2): `create_test_pack`
+        // materialises `pack.db` but no `urls.txt`.
+        assert_eq!(result["db_exists"], true);
+        assert_eq!(result["urls_file_exists"], false);
+    }
+
+    #[test]
+    fn native_knowledge_transport_pack_info_reports_computed_file_flags() {
+        // At parity with upstream agent-kgpacks `mcp_server.pack_info`
+        // (issue #4321 F2), `knowledge.pack_info` must surface whether the
+        // pack's `pack.db` and `urls.txt` are present on disk. Here we
+        // materialise BOTH so both flags are `true`, distinguishing a fully
+        // built/installed pack from a manifest-only one.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = create_test_pack(tmp.path(), "with-urls");
+        fs::write(
+            pack_dir.join("urls.txt"),
+            "https://doc.rust-lang.org/book/\n",
+        )
+        .unwrap();
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let request = crate::rpc::RpcRequest {
+            id: crate::rpc::new_request_id(),
+            method: "knowledge.pack_info".to_string(),
+            params: serde_json::json!({"pack_name": "with-urls"}),
+        };
+        let response = crate::rpc::RpcTransport::call(&transport, request).unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["db_exists"], true, "pack.db was materialised");
+        assert_eq!(
+            result["urls_file_exists"], true,
+            "urls.txt was materialised"
+        );
+    }
+
+    #[test]
+    fn native_knowledge_transport_pack_info_manifest_only_pack_reports_missing_db() {
+        // A manifest-only pack (metadata present, not yet built) must report
+        // `db_exists: false` so a caller can tell it apart from a materialised
+        // pack rather than seeing identical metadata. `pack_not_found` still
+        // covers the unknown-pack error path; this covers the known-but-unbuilt
+        // pack.
+        let tmp = TempDir::new().unwrap();
+        let pack_dir = tmp.path().join("manifest-only");
+        fs::create_dir_all(&pack_dir).unwrap();
+        fs::write(
+            pack_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": "manifest-only",
+                "description": "not yet built",
+                "graph_stats": { "articles": 0, "entities": 0, "relationships": 0, "size_mb": 0.0 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut transport = NativeRpcTransport::new("simard-knowledge");
+        register_knowledge_handlers(&mut transport, tmp.path().to_path_buf());
+
+        let request = crate::rpc::RpcRequest {
+            id: crate::rpc::new_request_id(),
+            method: "knowledge.pack_info".to_string(),
+            params: serde_json::json!({"pack_name": "manifest-only"}),
+        };
+        let response = crate::rpc::RpcTransport::call(&transport, request).unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["db_exists"], false, "no pack.db was built");
+        assert_eq!(result["urls_file_exists"], false, "no urls.txt");
     }
 
     #[test]
