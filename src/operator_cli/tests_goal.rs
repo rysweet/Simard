@@ -739,6 +739,129 @@ fn simard_goal_label_add_rejects_empty_tag_and_unknown_goal() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
+fn simard_goal_wip_add_list_remove_round_trips_on_persisted_board() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(&root, vec![active_goal("wip-me", GoalProgress::NotStarted)]);
+
+    // Bind an issue anchor with a label and url.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "wip".to_string(),
+        "wip-me".to_string(),
+        "add".to_string(),
+        "issue".to_string(),
+        "4616".to_string(),
+        "coverage-audit".to_string(),
+        "anchor".to_string(),
+        "--url".to_string(),
+        "https://github.com/rysweet/Simard/issues/4616".to_string(),
+    ]);
+    assert!(
+        r.is_ok(),
+        "wip add must exit 0: {:?}",
+        r.err().map(|e| e.to_string())
+    );
+    let board = load_board(&root);
+    let goal = board.active.iter().find(|g| g.id == "wip-me").unwrap();
+    assert_eq!(goal.wip_refs.len(), 1, "one wip-ref persisted");
+    assert_eq!(goal.wip_refs[0].kind, "issue");
+    assert_eq!(goal.wip_refs[0].ref_id, "4616");
+    assert_eq!(goal.wip_refs[0].label, "coverage-audit anchor");
+    assert_eq!(
+        goal.wip_refs[0].url.as_deref(),
+        Some("https://github.com/rysweet/Simard/issues/4616"),
+    );
+
+    // Idempotent on (kind, ref_id): re-adding updates in place (no duplicate).
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "wip".to_string(),
+        "wip-me".to_string(),
+        "add".to_string(),
+        "issue".to_string(),
+        "4616".to_string(),
+        "updated".to_string(),
+        "label".to_string(),
+    ]);
+    assert!(r.is_ok(), "idempotent wip re-add must exit 0");
+    let board = load_board(&root);
+    let goal = board.active.iter().find(|g| g.id == "wip-me").unwrap();
+    assert_eq!(goal.wip_refs.len(), 1, "re-add does not duplicate");
+    assert_eq!(goal.wip_refs[0].label, "updated label", "label updated");
+    assert_eq!(goal.wip_refs[0].url, None, "url reset when omitted");
+
+    // remove by ref-id lands.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "wip".to_string(),
+        "wip-me".to_string(),
+        "remove".to_string(),
+        "4616".to_string(),
+    ]);
+    assert!(r.is_ok(), "wip remove must exit 0");
+    let board = load_board(&root);
+    assert!(
+        board
+            .active
+            .iter()
+            .find(|g| g.id == "wip-me")
+            .unwrap()
+            .wip_refs
+            .is_empty(),
+        "wip-ref removed",
+    );
+
+    // remove of an absent ref-id is a no-op that still exits 0.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "wip".to_string(),
+        "wip-me".to_string(),
+        "remove".to_string(),
+        "4616".to_string(),
+    ]);
+    assert!(
+        r.is_ok(),
+        "removing an absent wip-ref is a no-op that exits 0"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn simard_goal_wip_add_rejects_bad_kind_and_unknown_goal() {
+    let (_tmp, root) = isolated_state_root();
+    seed_board(
+        &root,
+        vec![active_goal("present", GoalProgress::NotStarted)],
+    );
+
+    // An unknown kind is rejected (non-zero exit).
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "wip".to_string(),
+        "present".to_string(),
+        "add".to_string(),
+        "bogus".to_string(),
+        "1".to_string(),
+    ]);
+    assert!(r.is_err(), "an invalid wip kind must be rejected");
+
+    // Binding to an unknown goal id is a non-zero exit.
+    let r = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "wip".to_string(),
+        "ghost".to_string(),
+        "add".to_string(),
+        "issue".to_string(),
+        "1".to_string(),
+    ]);
+    assert!(
+        r.is_err(),
+        "binding a wip-ref to an unknown goal must exit non-zero"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
 fn simard_goal_list_with_tag_filter_exits_zero() {
     let (_tmp, root) = isolated_state_root();
     let mut g = active_goal("filtered", GoalProgress::NotStarted);
