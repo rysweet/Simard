@@ -344,6 +344,19 @@ fn summary_from_tail(tail: &[u8], dropped: usize) -> String {
     s
 }
 
+/// Spawn a thread that drains `pipe` through a bounded-tail ring (issue #4929),
+/// keeping at most [`SUMMARY_TAIL_BYTES`] in RAM. A missing pipe yields an empty
+/// capture (the child produced no output on that stream). Draining stdout and
+/// stderr on separate threads also avoids the classic pipe-buffer deadlock.
+fn spawn_bounded_capture<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> thread::JoinHandle<SimardResult<(Vec<u8>, usize)>> {
+    thread::spawn(move || match pipe {
+        Some(r) => capture_bounded_tail(r, SUMMARY_TAIL_BYTES),
+        None => Ok((Vec::new(), 0usize)),
+    })
+}
+
 /// Join a bounded-capture thread, surfacing a read error or a thread panic
 /// loudly (no silent fallback).
 fn join_capture(
@@ -427,14 +440,8 @@ pub fn run_engineer_subprocess(
     // (child blocks writing stderr while the parent only reads stdout).
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_capture = thread::spawn(move || match stdout_pipe {
-        Some(r) => capture_bounded_tail(r, SUMMARY_TAIL_BYTES),
-        None => Ok((Vec::new(), 0usize)),
-    });
-    let stderr_capture = thread::spawn(move || match stderr_pipe {
-        Some(r) => capture_bounded_tail(r, SUMMARY_TAIL_BYTES),
-        None => Ok((Vec::new(), 0usize)),
-    });
+    let stdout_capture = spawn_bounded_capture(stdout_pipe);
+    let stderr_capture = spawn_bounded_capture(stderr_pipe);
 
     // Stream the Copilot prompt on stdin from a feeder thread while the capture
     // threads drain output; the feeder closes stdin on completion so copilot
