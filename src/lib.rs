@@ -71,6 +71,9 @@ pub mod error;
 pub mod eval_watchdog;
 pub mod evidence;
 pub mod fact_reliability;
+pub mod fact_reliability_bench;
+#[cfg(test)]
+mod fact_reliability_bench_tests;
 #[cfg(test)]
 mod fact_reliability_tests;
 pub mod git_guardrails;
