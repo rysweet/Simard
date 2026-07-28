@@ -148,10 +148,14 @@ require_test 'health_review_off_cadence_leaves_status_not_run'
 # pass is LOUD, and a NotRun tick stays quiet.
 require_test 'health_review_verdict_surfaces_in_the_operator_feed'
 require_test 'health_review_degraded_surfaces_loud_in_the_operator_feed'
+require_test 'health_review_disabled_surfaces_loud_in_the_operator_feed'
 require_test 'health_review_not_run_stays_quiet_in_the_operator_feed'
-# The shared gap-scan throttle AND the dedicated opt-out each disable the rail.
-require_test 'health_review_skipped_when_gap_scan_disabled'
-require_test 'health_review_skipped_when_dedicated_flag_disabled'
+# The shared gap-scan throttle AND the dedicated opt-out each disable the rail,
+# and each does so LOUD: the reviewer is never invoked and the observed status is
+# `Disabled { reason }` naming the knob — never a silent `NotRun` (#4097), exactly
+# as `observe_merge_queue` surfaces the SAME `SIMARD_OVERSEER_GAP_SCAN` opt-out.
+require_test 'health_review_disabled_when_gap_scan_disabled_surfaces_loud_status'
+require_test 'health_review_disabled_when_dedicated_flag_disabled_surfaces_loud_status'
 # Cadence: the rail honors its every-N knob.
 require_test 'health_review_respects_every_n_cadence'
 # An unwired rail is a pure no-op (bare constructor / tests behave as before).

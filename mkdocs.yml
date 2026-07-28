@@ -101,6 +101,7 @@ nav:
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
+    - Triage &amp; Course-Correct a Blocked Goal Before Escalating: concepts/escalation-triage-before-human.md
     - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
@@ -201,6 +202,7 @@ nav:
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Diagnose a No-Progress Breaker Issue Storm: howto/diagnose-a-no-progress-breaker-issue-storm.md
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
+    - Triage a Blocked-Goal Escalation (Before It Reaches You): howto/triage-a-blocked-goal-escalation.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
     - Steer a Standing Research Goal Toward Novelty: howto/steer-a-standing-research-goal-toward-novelty.md
@@ -330,6 +332,7 @@ nav:
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Gap-Scan Durable Open-Issue Dedup: reference/overseer-gap-scan-durable-dedup.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
+    - Escalation-Triage API &amp; Output Contract: reference/escalation-triage-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
     - Overseer Signal Operator-Liaison: reference/overseer-signal-liaison.md
     - Overseer Autonomous PR Rework Loop: reference/overseer-rework-loop.md
@@ -382,6 +385,7 @@ nav:
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
     - OODA Record-Orient/Decide Tools: reference/ooda-record-orient-decide-cli.md
+    - OODA Record-Admission Tools: reference/ooda-record-admission-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md

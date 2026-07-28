@@ -7,10 +7,10 @@ description: >
   via the recipe runner, never by writing brittle imperative code or one-off
   heuristics. Imperative code is confined to the thin deterministic rails
   (dispatch, I/O, storage, scheduling ticks); the reasoning itself lives in
-  agentic recipe steps. The block is embedded in all nine OODA / Overseer /
+  agentic recipe steps. The block is embedded in all ten OODA / Overseer /
   planning reasoners, references (does not duplicate) engineer_system.md's G3,
   and is pinned in place by a drift-guard test.
-last_updated: 2026-07-20
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -28,8 +28,8 @@ related:
 
 > **Status: implemented.** This page is the source-of-truth description of the
 > principle. It defines, in one place, the canonical block that is embedded in
-> the reasoning assets, the nine assets that carry it, and the drift-guard test
-> that pins the copies byte-identical. The block is present in all nine assets
+> the reasoning assets, the ten assets that carry it, and the drift-guard test
+> that pins the copies byte-identical. The block is present in all ten assets
 > and `tests/prompt_agentic_recipes_principle.rs` enforces it — that test fails
 > closed if any copy is missing, altered, or mis-ordered. Sections below describe
 > the enforced target state.
@@ -80,7 +80,7 @@ deterministic rails**, not as imperative code or hand-tuned heuristics. Every
 counter and threshold added imperatively is a place where judgment ossifies into
 a brittle constant that cannot adapt to a situation its author did not foresee.
 
-## Where the block lives (nine reasoning assets)
+## Where the block lives (ten reasoning assets)
 
 The block must be embedded advisorily — after each prompt's ROLE / guideline
 preamble and **before** any `OPTIONS` / `DECISION` / output-contract section, so
@@ -94,6 +94,7 @@ it frames *how to reason* without touching *what to emit*.
 | Overseer — Observe | `prompt_assets/simard/overseer/observe.md` |
 | Overseer — Escalation triage | `prompt_assets/simard/overseer/escalation_triage.md` |
 | Overseer — Deploy gate | `prompt_assets/simard/overseer/deploy_gate.md` |
+| Overseer — Health review | `prompt_assets/simard/overseer/health_review.md` |
 | Planning — Goal decomposition | `prompt_assets/simard/goal_decomposition.md` |
 | Planning — Improvement curator | `prompt_assets/simard/improvement_curator_system.md` |
 | Planning — Engineer planning | `prompt_assets/simard/engineer_planning.md` |
@@ -102,7 +103,7 @@ it frames *how to reason* without touching *what to emit*.
 recipe-runner enforcement and guideline **G3** ("prefer agentic steps over
 brittle parsing; prefer recipes/prompts over code"). The canonical block
 **references and extends** G3 rather than restating it — there is one source of
-truth for the engineering guideline, and the nine reasoners point at it.
+truth for the engineering guideline, and the ten reasoners point at it.
 
 ## Why per-file embedding, not a shared-injection seam
 
@@ -113,8 +114,8 @@ single principle fragment be injected into every reasoner at load time, and
 plumbing this principle discourages, and forbidden by the "thin rail only"
 constraint for this change.
 
-So the block must be embedded statically and identically in all nine assets. To
-keep nine copies from drifting apart, the byte-consistency guarantee is moved
+So the block must be embedded statically and identically in all ten assets. To
+keep ten copies from drifting apart, the byte-consistency guarantee is moved
 onto a thin deterministic rail: a test (see below). This is itself an
 application of the principle — the *judgment* (what the block says) lives in the
 prompt; only the *mechanical invariant* (all copies match, in the right place)
@@ -127,7 +128,7 @@ asserts that:
 
 1. the pinned canonical sentence — "When a problem requires intelligence or
    judgment, solve it by composing, reusing, or inventing deterministic recipes
-   of agentic steps run via the recipe runner" — appears in **all nine** target
+   of agentic steps run via the recipe runner" — appears in **all ten** target
    assets;
 2. the keyword invariants `recipe runner` and the thin-deterministic-rail phrase
    appear alongside it in each file;
