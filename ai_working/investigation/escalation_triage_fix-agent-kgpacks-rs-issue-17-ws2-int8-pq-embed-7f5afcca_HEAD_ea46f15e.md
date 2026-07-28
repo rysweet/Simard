@@ -157,10 +157,15 @@ path (`src/overseer/notify.rs`) — plain English only, no internal markers.
 
 ### Marker-leak scan (policy gate — every operator-facing string)
 
-Scanned all strings in §4 JSON and the three messages above for forbidden tokens.
-**Result: zero leaks.**
+Scanned the operator-facing prose — the §4 `problem` / `next_step` / `root_cause`
+fields and the three Signal messages above — for the procedure's forbidden marker
+tokens. **Result: zero leaks.** (The §4 `action_taken` field carries the runnable
+`simard goal complete <goal_id>` command, so it necessarily contains the raw goal
+id. Per the procedure the goal id is an INPUT to translate, not one of the
+forbidden markers, and it is never surfaced as operator prose or in any Signal
+message — so it is out of scope for this leak gate.)
 
-| Forbidden token | Present in operator output? |
+| Forbidden token | Present in operator prose / Signal messages? |
 |---|---|
 | `OODA-SAFEGUARD` | No |
 | `UNCLEAR-CRITERIA` | No |
@@ -170,7 +175,7 @@ Scanned all strings in §4 JSON and the three messages above for forbidden token
 | `why=` | No |
 | `evidence=[` | No |
 | 🔒 (lock token) | No |
-| goal id / issue-marker jargon | No |
+| raw goal id / issue-marker jargon | No |
 
 ---
 
