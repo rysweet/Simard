@@ -637,9 +637,9 @@ is legitimate string content
 (a URL, a glob, a quoted sentence) is preserved, and a raw newline/tab used as JSON
 whitespace *between* tokens is left untouched.
 
-Sites routed through it in `src/ooda_brain/recipe_brain.rs`:
-`parse_outcome_decision` (and the shared JSON-recovery machinery used by
-Group D's not-yet-converted seams).
+Sites routed through it in `src/ooda_brain/recipe_brain.rs`: the engineer
+**lifecycle** `DecisionEnvelope` path (`extract_decision_envelope`, ~L2187) — the
+last remaining stdout-scraping seam, out of scope for Group D.
 
 !!! note "Converted seams no longer route through the scraper"
     The decide/orient path ([#4719](https://github.com/rysweet/Simard/issues/4719)
@@ -652,10 +652,15 @@ Group D's not-yet-converted seams).
     `IdeaDedupEnvelope`, and `IdeaConsolidationEnvelope` are **deleted**; the two
     seams now read
     [`IdeaDedupDecisionRecord` / `IdeaConsolidationRecord`](./ooda-record-idea-dedup-consolidation-cli.md)
-    via `read_verified_idea_dedup` / `read_verified_idea_consolidation`. The
-    shared `extract_and_parse_json` family is **retained** only for Group D
-    (`cognitive_threads`, `memory_consolidation`, `stewardship`, outcome-verify)
-    until those seams are converted too.
+    via `read_verified_idea_dedup` / `read_verified_idea_consolidation`. Group D
+    (#4967) converted the **outcome-verify** and **RustyClawd** seams the same way
+    (the former `parse_outcome_decision`, `outcome_decision_from_variant`,
+    `OutcomeEnvelope`, `PerGoalAction::from_recipe_envelope`, and `PerGoalEnvelope`
+    are **deleted**; the seams now read `OutcomeDecisionRecord` /
+    `PerGoalDecisionRecord` via `read_verified_outcome` / `read_verified`). The
+    shared `extract_and_parse_json` family is **retained** only for the engineer
+    **lifecycle** `DecisionEnvelope` path, which remains stdout-scraped and is not
+    part of Group D — so epic #4719 is **not** yet complete.
 
 Leniency never widens beyond these six named defects: an unquoted key, an
 elided array element, a missing value, a lone `/` that is not a comment, a
