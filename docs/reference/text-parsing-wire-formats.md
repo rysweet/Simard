@@ -67,6 +67,18 @@ Used by: **every** recipe-backed parser below, before it runs.
 > and the distill-private ANSI/launcher stripper now delegate to it. Extending
 > the one `is_noise_line` predicate re-hardens **every** consumer — decide,
 > orient, engineer-lifecycle, merge-judge, progress checker, distill — at once.
+>
+> **User-facing PR titles** ([#1093](https://github.com/rysweet/Simard/issues/1093)):
+> the daily journal's `plainify_pr_title` (`src/journal/pr_source.rs`) also routes
+> a PR title through `strip_recipe_noise` before rendering it as a layperson
+> "what changed & why it matters" phrase. When the orchestrator's fallback
+> commit-message generator lifts the agent's first stdout line verbatim, a PR
+> title occasionally **is** the `ℹ NODE_OPTIONS=… (saved preference)` launch
+> banner (observed on leaked commits, e.g. `9a7e88ec8 fix: ℹ NODE_OPTIONS=…`).
+> Reusing the shared predicate collapses such a title to the neutral "A code
+> change." fallback instead of surfacing launcher noise; a title that merely
+> *mentions* `NODE_OPTIONS` in prose is preserved (the banner arm anchors on
+> `ℹ` + `NODE_OPTIONS=` + `(saved preference)`).
 
 ### Functions
 
