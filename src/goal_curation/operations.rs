@@ -407,7 +407,27 @@ pub(super) fn read_latest_snapshot(memory: &dyn CognitiveMemoryOps) -> Option<Go
         .filter(|f| f.concept == "goal-board:snapshot")
         .max_by(|a, b| a.node_id.cmp(&b.node_id))?;
     match serde_json::from_str::<GoalBoard>(&latest.content) {
-        Ok(board) => Some(board),
+        // Defensive tombstone filter on the READ path (issue: roster-goal
+        // escalation storm). A tombstoned goal removed from the board can
+        // still linger inside an older `goal-board:snapshot` fact in
+        // cognitive memory. The OODA cycle loads the board via
+        // `load_goal_board` -> `read_latest_snapshot` and, until now, never
+        // consulted the tombstone set on this hot path — so every cycle
+        // re-materialised the dead goal, the no-progress breaker saw it as
+        // blocked-with-no-progress, and it filed a fresh duplicate
+        // escalation issue. `filter_tombstoned` was only applied on the
+        // operator-command daemon path (`simard goal list`), which is why
+        // the goal appeared gone there while the OODA loop kept resurrecting
+        // it. Filtering here (the shared read used by both `load_goal_board`
+        // and the save merge-read) guarantees a tombstoned goal can never be
+        // read back from memory on any path.
+        Ok(board) => {
+            let tombstones = crate::ooda_loop::load_tombstones(&simard_state_root());
+            Some(crate::goal_board_store::filter_tombstoned(
+                board,
+                &tombstones,
+            ))
+        }
         Err(e) => {
             warn!(
                 concept = "goal-board:snapshot",
