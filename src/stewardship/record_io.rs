@@ -23,10 +23,15 @@ use sha2::{Digest, Sha256};
 /// segment (no `/`, `+`, `=`, or other separators), so an opaque/base64 input
 /// can never appear verbatim in a path or escape a subtree.
 pub fn sha256_hex(data: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(data);
     let mut s = String::with_capacity(digest.len() * 2);
-    for b in digest.iter() {
-        s.push_str(&format!("{b:02x}"));
+    for &b in digest.iter() {
+        // Encode each byte's two nibbles directly into the preallocated buffer.
+        // These pushes cannot reallocate (capacity is exact) and avoid the
+        // per-byte temporary `String` that `format!("{b:02x}")` would allocate.
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
 }
