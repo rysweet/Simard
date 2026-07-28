@@ -10,6 +10,7 @@ mod disk_reclaim;
 mod engineer;
 mod goal;
 mod gym;
+mod liaison;
 mod meeting;
 mod memory;
 mod merge;
@@ -21,6 +22,8 @@ mod self_deploy;
 mod self_health;
 mod signal;
 mod status;
+#[cfg(test)]
+mod tests_liaison_and_rework_cli;
 #[cfg(test)]
 mod tests_record_admission;
 #[cfg(test)]
@@ -277,6 +280,7 @@ where
         "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge" => merge::dispatch_merge_command(args),
+        "liaison" => liaison::dispatch_liaison_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
         "disk-reclaim" => disk_reclaim::dispatch_disk_reclaim_command(args),

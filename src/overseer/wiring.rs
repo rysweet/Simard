@@ -643,6 +643,7 @@ fn intervention_target(iv: &Intervention) -> String {
             pr,
             duplicate_of,
         } => format!("close duplicate PR {repo}#{pr} (dup of #{duplicate_of})"),
+        Intervention::ReworkPr { repo, pr, .. } => format!("rework PR {repo}#{pr}"),
     }
 }
 

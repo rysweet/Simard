@@ -290,6 +290,7 @@ nav:
     - Configure Overseer Gap-Scan Backoff: howto/configure-overseer-gap-scan-backoff.md
     - Configure Overseer Gap-Scan Durable Dedup: howto/configure-overseer-gap-scan-durable-dedup.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
+    - Configure Overseer Signal Liaison &amp; PR Rework Loop: howto/configure-overseer-signal-liaison-and-rework.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Cognitive-Thread Batch: howto/configure-cognitive-thread-batch.md
@@ -333,6 +334,8 @@ nav:
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Escalation-Triage API &amp; Output Contract: reference/escalation-triage-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
+    - Overseer Signal Operator-Liaison: reference/overseer-signal-liaison.md
+    - Overseer Autonomous PR Rework Loop: reference/overseer-rework-loop.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
