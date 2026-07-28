@@ -224,6 +224,25 @@ pub trait PrGhClient {
             reason: "run_gh not wired on this PrGhClient (fail-closed)".to_string(),
         })
     }
+
+    /// `gh pr close <pr> --repo <repo> --comment <comment>`.
+    ///
+    /// Added for the overseer's auto-doc-PR reconciliation pass (goal_hygiene):
+    /// it closes stale / superseded auto-generated `"Update documentation with
+    /// …"` drafts so at most one stays open. The `comment` is authored by the
+    /// reconciler (never operator-supplied free text) and explains WHY the PR was
+    /// closed (superseded by the canonical PR / stale CONFLICTING draft).
+    ///
+    /// The default impl is a **no-op** returning `Ok(())` so every existing
+    /// fake / unwired client performs NO mutation without needing a stub;
+    /// [`RealPrGhClient`] overrides it to shell out to `gh pr close` (argv-only,
+    /// never shell-interpolated). A no-op default (rather than the fail-closed
+    /// [`run_gh`](Self::run_gh) posture) is safe here because closing is a
+    /// hygiene convenience, not a correctness gate — a client that cannot close
+    /// simply leaves the duplicates open rather than erroring the cycle.
+    fn close_pr(&self, _repo: &str, _pr_number: u32, _comment: &str) -> SimardResult<()> {
+        Ok(())
+    }
 }
 
 /// Max retry attempts for *transient* `gh` read failures (network blips,
@@ -479,6 +498,18 @@ impl PrGhClient for RealPrGhClient {
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let label = format!("gh {}", refs.join(" "));
         run_gh_checked(&label, &refs)?;
+        Ok(())
+    }
+
+    /// Close a PR with an explanatory comment. Single attempt (a close is a
+    /// mutation, like [`squash_merge`](Self::squash_merge)); fail-visible on a
+    /// non-zero exit. Argv is positional / never shell-interpolated.
+    fn close_pr(&self, repo: &str, pr_number: u32, comment: &str) -> SimardResult<()> {
+        let pr = pr_number.to_string();
+        run_gh_checked(
+            &format!("gh pr close {pr} --repo {repo}"),
+            &["pr", "close", &pr, "--repo", repo, "--comment", comment],
+        )?;
         Ok(())
     }
 }

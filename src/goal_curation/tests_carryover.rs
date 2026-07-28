@@ -278,3 +278,42 @@ fn latest_carryover_record_wins() {
         other => panic!("expected Verified, got {other:?}"),
     }
 }
+
+// ─── tombstone filter on the board READ path ─────────────────────────────
+//
+// Regression for the roster-goal escalation storm: a goal removed from the
+// board and tombstoned could still linger inside an older
+// `goal-board:snapshot` fact in cognitive memory. The OODA cycle loads via
+// `load_goal_board` -> `read_latest_snapshot`, which historically did NOT
+// consult the tombstone set on this hot path — so the dead goal was
+// re-materialised every cycle and the no-progress breaker filed a fresh
+// duplicate escalation issue forever. `load_goal_board` must now drop any
+// tombstoned goal on read.
+#[test]
+#[serial(cognitive_memory)]
+fn load_goal_board_filters_tombstoned_goals_from_snapshot() {
+    let (_tmp, root) = isolated_state_root();
+    let memory = launch_writer_client(&root).expect("writer memory");
+
+    // Persist a snapshot that still contains a since-tombstoned goal.
+    let mut board = GoalBoard::new();
+    add_active_goal(&mut board, active_goal("goal-keep", 1)).unwrap();
+    add_active_goal(&mut board, active_goal("goal-doomed", 2)).unwrap();
+    save_goal_board(&board, memory.ops()).expect("save board");
+
+    // Tombstone the doomed goal (as `simard goal remove/complete` does).
+    crate::ooda_loop::tombstone_goals(&root, &["goal-doomed".to_string()])
+        .expect("tombstone doomed goal");
+
+    // The OODA read path must not resurrect the tombstoned goal.
+    let loaded = load_goal_board(memory.ops()).expect("load");
+    let ids: Vec<&str> = loaded.active.iter().map(|g| g.id.as_str()).collect();
+    assert!(
+        ids.contains(&"goal-keep"),
+        "live goal must survive the tombstone filter, got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"goal-doomed"),
+        "tombstoned goal must be filtered from the loaded board, got {ids:?}"
+    );
+}

@@ -1321,6 +1321,16 @@ pub fn build_overseer(
         None => overseer,
     };
 
+    // Auto-doc PR reconciliation client (goal_hygiene): wire the production
+    // `gh` client so the additive reconciliation pass can enforce the
+    // single-open invariant for auto-generated `"Update documentation with …"`
+    // PRs across the governed roster (closing stale / superseded drafts). Always
+    // wired here; the pass itself is gated at run time behind the governed roster
+    // being non-empty, the shared gap-scan opt-out, and the every-N cadence, and
+    // is fully fail-closed per repo.
+    let overseer =
+        overseer.with_doc_pr_reconcile_client(Box::new(crate::stewardship::RealPrGhClient));
+
     // Live agentic health-review rail ([standing]): on the Overseer cadence the
     // thin rail invokes the `overseer-health-review` recipe — an AGENT reads the
     // OODA journal + `simard status` + `simard goal list`, detects crash-loops /

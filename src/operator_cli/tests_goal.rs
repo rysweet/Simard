@@ -192,6 +192,57 @@ fn simard_goal_unblock_clears_any_blocked_reason_unconditionally() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
+fn simard_goal_unblock_clears_the_ooda_quarantine_marker() {
+    // Recovery contract (see docs/howto/quarantine-and-recover-an-unclear-ooda-goal.md
+    // Option B and docs/concepts/steerable-ooda-daemon.md): a single-id
+    // `goal unblock` on a terminally-quarantined goal must clear the durable
+    // `ooda-breaker-quarantine` WipRef, not merely reset the status — otherwise
+    // the goal is restored to NotStarted while `reinvestigate_bare_blocked_goals`
+    // still skips it forever, and the documented "fresh bounded window" never
+    // materialises.
+    let (_tmp, root) = isolated_state_root();
+    let mut quarantined = active_goal(
+        "quarantined-goal",
+        GoalProgress::Blocked("[OODA-SAFEGUARD] why=UNCLEAR-CRITERIA".into()),
+    );
+    quarantined
+        .wip_refs
+        .push(crate::goal_curation::quarantine_marker());
+    seed_board(&root, vec![quarantined]);
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "unblock".to_string(),
+        "quarantined-goal".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "`simard goal unblock quarantined-goal` must exit 0; got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let board = load_board(&root);
+    let g = board
+        .active
+        .iter()
+        .find(|g| g.id == "quarantined-goal")
+        .expect("goal must survive unblock");
+    assert_eq!(
+        g.status,
+        GoalProgress::NotStarted,
+        "unblock must restore a quarantined goal to NotStarted; got {:?}",
+        g.status
+    );
+    assert!(
+        !crate::goal_curation::is_quarantined(g),
+        "unblock must clear the durable ooda-breaker-quarantine marker so the goal \
+         is no longer skipped by the re-investigation pass; wip_refs={:?}",
+        g.wip_refs
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
 fn simard_goal_unblock_unknown_id_returns_error() {
     let (_tmp, _root) = isolated_state_root();
     let result = dispatch_operator_cli(vec![
