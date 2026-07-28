@@ -30,6 +30,7 @@ tags: ["simard", "cognitive-thread", "salience"]
 
 context:
   state_root: ""
+  record_path: ""
   active_goals_path: ""
   health_facts_path: ""
 
@@ -106,3 +107,24 @@ steps:
       `simard memory remember` and `simard cognition salience-signal` calls ARE
       the effect. If nothing is salient, still write the numeric signal (an empty
       ranking is a valid, fail-closed "nothing pressing" signal) and finish.
+
+      ## Record your reasoning (REQUIRED final ACT step)
+
+      Before you finish, record your natural-language reasoning EXACTLY ONCE by
+      running the gated tool below. This is the ONLY channel through which your
+      reasoning reaches the operator log — do not print JSON, and do not skip it.
+      Fill `--reasoning-summary` with one to three plain sentences explaining what
+      you appraised and why it matters right now.
+
+      ```
+      simard cognition record-thread-reasoning \
+        --thread salience \
+        --domain salience \
+        --reasoning-summary "<1-3 sentence natural-language appraisal>" \
+        --top-signal "<one salient signal>" \
+        --priority "<low|normal|high>" \
+        --written-at-epoch <current unix epoch seconds> \
+        --record-path {{record_path}}
+      ```
+
+      Pass at most five `--top-signal` flags, one per salient signal.

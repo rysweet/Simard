@@ -28,6 +28,7 @@ tags: ["simard", "cognitive-thread", "values"]
 
 context:
   state_root: ""
+  record_path: ""
   identity_path: ""
   prior_values_path: ""
 
@@ -88,3 +89,23 @@ steps:
 
       Your `simard …` invocations ARE the effect. If there is no genuine hard
       tradeoff to weigh, run no commands and finish successfully.
+
+      ## Record your reasoning (REQUIRED final ACT step)
+
+      Before you finish, record your natural-language reasoning EXACTLY ONCE by
+      running the gated tool below. This is the ONLY channel through which your
+      reasoning reaches the operator log — do not print JSON, and do not skip it.
+      Fill `--reasoning-summary` with one to three plain sentences explaining
+      what you concluded and why it matters.
+
+      ```
+      simard cognition record-thread-reasoning \
+        --thread values_deliberation \
+        --domain notes \
+        --reasoning-summary "<1-3 sentence natural-language conclusion>" \
+        --note "<a salient supporting point>" \
+        --written-at-epoch <current unix epoch seconds> \
+        --record-path {{record_path}}
+      ```
+
+      Pass at most five `--note` flags, one per key point.

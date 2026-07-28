@@ -221,3 +221,184 @@ fn operator_cli_dispatches_the_cognition_command() {
          cognition salience-signal`)"
     );
 }
+
+// ===========================================================================
+// WS-A (issue #4970) — the boolean `"{recipe}: ok"` collapse is REPLACED by a
+// typed `ThreadReasoningRecord` whose natural-language `reasoning_summary` the
+// rail surfaces. These source-/recipe-shape checks are authored tests-first;
+// they fail RED against the pre-WS-A tree and turn GREEN only once the typed
+// reasoning-record handoff lands. (Behavioural coverage lives in
+// `tests_thread_reasoning_record` and `operator_cli::tests_record_thread_reasoning`.)
+// ===========================================================================
+
+/// The full 13-thread roster — every one must be recipe-backed and route its
+/// outcome through `run_reflective_thread` after WS-A/B/C.
+const ALL_RECIPE_BACKED_THREADS: &[&str] = &[
+    "salience",
+    "metacognition",
+    "reflection",
+    "prospection",
+    "operator_model",
+    "analogy",
+    "narrative",
+    "values_deliberation",
+    "consolidation",
+    "creative_ideas",
+    "engineer_log_analysis",
+    "interoception",
+    "maintenance",
+];
+
+/// The four NEW recipe YAMLs converting the last pure-Rust threads (WS-B/WS-C).
+const NEW_THREAD_RECIPES: &[&str] = &[
+    "interoception-sense",
+    "maintenance-housekeep",
+    "engineer-log-triage",
+    "creative-ideate",
+];
+
+#[test]
+fn recipe_rail_no_longer_collapses_to_the_boolean_ok_string() {
+    // Definition-of-Done grep gate: the `"{recipe}: ok"` collapse is deleted.
+    let src = read_rel("src/cognitive_threads/recipe_rail.rs");
+    for forbidden in ["{recipe_name}: ok", "{recipe}: ok", "{RECIPE}: ok"] {
+        assert!(
+            !src.contains(forbidden),
+            "recipe_rail.rs must not contain the boolean `{forbidden}` collapse — the \
+             rail surfaces the record's reasoning_summary instead"
+        );
+    }
+}
+
+#[test]
+fn recipe_rail_reads_the_typed_reasoning_record_fail_closed() {
+    let src = read_rel("src/cognitive_threads/recipe_rail.rs");
+    assert!(
+        src.contains("fn run_reflective_thread"),
+        "recipe_rail.rs must define `run_reflective_thread` (compute path → pre-truncate → \
+         invoke → read record fail-closed → surface reasoning_summary)"
+    );
+    assert!(
+        src.contains("read_verified_thread_reasoning"),
+        "run_reflective_thread must read the typed record via `read_verified_thread_reasoning` \
+         (never scrape stdout)"
+    );
+    assert!(
+        src.contains("record_path"),
+        "the rail must pass `-c record_path=<abs>` so the recipe's ACT step writes there"
+    );
+}
+
+#[test]
+fn recipe_rail_emits_the_canonical_failure_log_format() {
+    // The normative failure line pinned by the reference doc:
+    //   `cognitive-thread: <thread>: FAILED — R{n} <reason>`
+    let src = read_rel("src/cognitive_threads/recipe_rail.rs");
+    assert!(
+        src.contains("FAILED — R"),
+        "recipe_rail.rs must log the canonical `FAILED — R{{n}} <reason>` format on a \
+         fail-closed record read"
+    );
+}
+
+#[test]
+fn thread_reasoning_record_module_pins_the_contract() {
+    // The shared type/reader module must exist with its pinned constants + API.
+    let src = read_rel("src/ooda_brain/thread_reasoning_record.rs");
+    for needle in [
+        "THREAD_REASONING_SCHEMA",
+        "\"thread-reasoning/v1\"",
+        "MAX_AGE_SECS",
+        "300",
+        "enum ThreadName",
+        "enum ThreadDomain",
+        "fn sanitize_reasoning_summary",
+        "fn read_verified_thread_reasoning",
+    ] {
+        assert!(
+            src.contains(needle),
+            "thread_reasoning_record.rs must pin `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn ooda_brain_reexports_the_thread_reasoning_surface() {
+    let src = read_rel("src/ooda_brain/mod.rs");
+    assert!(
+        src.contains("thread_reasoning_record"),
+        "ooda_brain/mod.rs must declare the `thread_reasoning_record` module"
+    );
+    for reexport in [
+        "ThreadReasoningRecord",
+        "ThreadName",
+        "ThreadDomain",
+        "read_verified_thread_reasoning",
+        "sanitize_reasoning_summary",
+    ] {
+        assert!(
+            src.contains(reexport),
+            "ooda_brain must re-export `{reexport}` for the rail + CLI to share"
+        );
+    }
+}
+
+#[test]
+fn cognition_cli_dispatches_record_thread_reasoning() {
+    let src = read_rel("src/operator_cli/cognition.rs");
+    assert!(
+        src.contains("record-thread-reasoning"),
+        "cognition dispatch must route the `record-thread-reasoning` subcommand"
+    );
+    assert!(
+        src.contains("dispatch_record_thread_reasoning"),
+        "cognition.rs must define `dispatch_record_thread_reasoning` (the gated writer verb)"
+    );
+}
+
+#[test]
+fn all_thirteen_threads_route_through_run_reflective_thread() {
+    for thread in ALL_RECIPE_BACKED_THREADS {
+        let src = read_rel(&format!("src/cognitive_threads/threads/{thread}.rs"));
+        assert!(
+            src.contains("run_reflective_thread"),
+            "threads/{thread}.rs must route its tick through `run_reflective_thread` so it emits \
+             a natural-language reasoning_summary from a typed record"
+        );
+    }
+}
+
+#[test]
+fn interoception_is_no_longer_recipe_free() {
+    // Tests-first, deliberate: interoception is converted to a recipe-backed
+    // thread (its deterministic sensing stays in the recipe/tooling).
+    let src = read_rel("src/cognitive_threads/threads/interoception.rs");
+    assert!(
+        src.contains("run_reflective_thread"),
+        "interoception must be recipe-backed after WS-B (no longer a pure-Rust, recipe-free rail)"
+    );
+}
+
+#[test]
+fn every_existing_recipe_writes_the_reasoning_record() {
+    // The nine already-agentic recipes gain a final ACT step calling the tool.
+    for recipe in REFLECTIVE_RECIPES {
+        let yaml = read_rel(&format!("prompt_assets/simard/recipes/{recipe}.yaml"));
+        assert!(
+            yaml.contains("record-thread-reasoning"),
+            "{recipe}.yaml must call `simard cognition record-thread-reasoning` as its ACT step \
+             so its reasoning surfaces via a typed record"
+        );
+    }
+}
+
+#[test]
+fn the_four_new_thread_recipes_exist_and_record_reasoning() {
+    for recipe in NEW_THREAD_RECIPES {
+        let yaml = read_rel(&format!("prompt_assets/simard/recipes/{recipe}.yaml"));
+        assert!(
+            yaml.contains("simard cognition record-thread-reasoning"),
+            "{recipe}.yaml must record its reasoning via the shared `record-thread-reasoning` tool"
+        );
+    }
+}

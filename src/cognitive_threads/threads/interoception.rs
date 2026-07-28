@@ -25,10 +25,15 @@ use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
+use crate::ooda_brain::ThreadName;
 use crate::stewardship::gh_client::{GhClient, RealGhClient};
 
 /// Stable telemetry id.
 pub const ID: &str = "interoception";
+/// The agentic narration recipe this rail invokes (production only) to surface a
+/// natural-language `reasoning_summary` from a typed record. Its deterministic
+/// sensing/gates stay in Rust; the recipe narrates what was sensed.
+pub const RECIPE: &str = "interoception-sense";
 /// Per-thread env gate (paired with the master `SIMARD_COGNITIVE_THREADS_ENABLED`).
 pub const GATE_ENV: &str = "SIMARD_THREAD_INTEROCEPTION_ENABLED";
 
@@ -60,6 +65,11 @@ impl Default for InteroceptionConfig {
 pub struct InteroceptionThread {
     cfg: InteroceptionConfig,
     gh: Box<dyn GhClient + Send>,
+    /// Production-only: when true, after deterministic sensing the tick invokes
+    /// the `interoception-sense` recipe to surface a natural-language
+    /// `reasoning_summary` from a typed record (via `run_reflective_thread`).
+    /// Off under the test constructors so offline unit tests spawn no recipe.
+    narrate: bool,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -75,7 +85,10 @@ impl InteroceptionThread {
         }
         // Apply the global interval-scale knob (SIMARD_THREAD_INTERVAL_SCALE).
         cfg.interval_secs = schedule::scale_and_clamp_interval_secs(cfg.interval_secs);
-        Self::with_client(cfg, Box::new(RealGhClient::new()))
+        let mut thread = Self::with_client(cfg, Box::new(RealGhClient::new()));
+        // Production surfaces a natural-language reasoning_summary via the recipe.
+        thread.narrate = true;
+        thread
     }
 
     /// Build from an explicit config with an injected [`GhClient`] (test seam —
@@ -84,6 +97,7 @@ impl InteroceptionThread {
         Self {
             cfg,
             gh,
+            narrate: false,
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -238,6 +252,44 @@ impl CognitiveThread for InteroceptionThread {
         }
 
         self.note_run(ctx.now_epoch, true);
+
+        // Production-only narration: after deterministic sensing (which owns
+        // every durable side-effect above), invoke the recipe to surface a
+        // natural-language reasoning_summary from a typed record. Never runs
+        // under the offline test constructors (narrate=false) or in dry-run.
+        if self.narrate && !dry_run {
+            let invoker = super::super::recipe_rail::RecipeRunnerInvoker::new(
+                ctx.repo_root.to_path_buf(),
+                ctx.state_root.to_path_buf(),
+            );
+            let observations = format!(
+                "sensed {facts} probe(s); breach={breach}; {breach_detail}",
+                breach_detail = if breach_detail.is_empty() {
+                    "no threshold breach"
+                } else {
+                    breach_detail.as_str()
+                }
+            );
+            let ctx_vars: Vec<(&str, String)> = vec![
+                ("state_root", ctx.state_root.display().to_string()),
+                (
+                    "observations",
+                    super::super::recipe_rail::fence_untrusted(&observations),
+                ),
+            ];
+            let narrated = super::super::recipe_rail::run_reflective_thread(
+                &invoker,
+                RECIPE,
+                ThreadName::Interoception,
+                ctx.state_root,
+                ctx_vars,
+                start,
+            );
+            if narrated.success {
+                return narrated;
+            }
+        }
+
         ThreadOutcome::ok(
             format!("interoception: {facts} probe(s), breach={breach}"),
             start.elapsed(),

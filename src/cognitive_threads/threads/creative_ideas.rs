@@ -35,10 +35,14 @@ use crate::creative_ideas::dedup_gate::{self, PlannedAction};
 use crate::creative_ideas::pipeline::{AgenticIdeaPipeline, IdeaPipeline, RouteOutcome};
 use crate::creative_ideas::source::AgenticIdeaSource;
 use crate::error::{SimardError, SimardResult};
-use crate::ooda_brain::{DeterministicLifecycleBrain, OodaBrain};
+use crate::ooda_brain::{DeterministicLifecycleBrain, OodaBrain, ThreadName};
 
 /// Stable telemetry id.
 pub const CREATIVE_IDEAS_ID: &str = "creative_ideas";
+/// The agentic narration recipe this rail invokes (production only) to surface a
+/// natural-language `reasoning_summary` from a typed record. The generation +
+/// semantic-dedup + routing gates stay in Rust; the recipe narrates the batch.
+pub const RECIPE: &str = "creative-ideate";
 
 /// How many recent episodes/entries to fold into the observation window.
 const OBSERVATION_LIMIT: usize = 20;
@@ -143,6 +147,10 @@ pub struct CreativeIdeasThread {
     semantic_enabled: bool,
     /// Stage-1 coarse-shortlist size fed to the reasoner per candidate.
     shortlist_k: usize,
+    /// Production-only: surface a natural-language `reasoning_summary` via the
+    /// `creative-ideate` recipe after a successful generation batch. Off under
+    /// the test seams so offline unit tests spawn no recipe.
+    narrate: bool,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -195,6 +203,7 @@ impl CreativeIdeasThread {
             brain,
             semantic_enabled,
             shortlist_k: dedup_gate::shortlist_k_from_env(),
+            narrate: false,
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -207,13 +216,16 @@ impl CreativeIdeasThread {
     #[must_use]
     pub fn from_env() -> Self {
         let (brain, semantic_enabled) = build_dedup_brain();
-        Self::with_pipeline_and_brain(
+        let mut thread = Self::with_pipeline_and_brain(
             CreativeIdeasConfig::from_env(),
             Box::new(AgenticIdeaSource::from_env()),
             Box::new(AgenticIdeaPipeline::from_env()),
             brain,
             semantic_enabled,
-        )
+        );
+        // Production surfaces a natural-language reasoning_summary via the recipe.
+        thread.narrate = true;
+        thread
     }
 
     /// The core, fallible tick body. `tick` wraps this and folds any `Err` into
@@ -625,6 +637,37 @@ impl CognitiveThread for CreativeIdeasThread {
                     "dedup_errors": report.dedup_errors,
                     "dry_run": report.dry_run,
                 });
+
+                // Production-only narration: after the generation + semantic-dedup
+                // + routing pass (which owns every durable idea/goal/issue effect,
+                // extending the #4959 typed records), invoke the recipe to surface
+                // a natural-language reasoning_summary from a typed record. Never
+                // runs under the offline test seams (narrate=false) or in dry-run.
+                if self.narrate && !report.dry_run {
+                    let invoker = super::super::recipe_rail::RecipeRunnerInvoker::new(
+                        ctx.repo_root.to_path_buf(),
+                        ctx.state_root.to_path_buf(),
+                    );
+                    let ctx_vars: Vec<(&str, String)> = vec![
+                        ("state_root", ctx.state_root.display().to_string()),
+                        (
+                            "observations",
+                            super::super::recipe_rail::fence_untrusted(&summary),
+                        ),
+                    ];
+                    let narrated = super::super::recipe_rail::run_reflective_thread(
+                        &invoker,
+                        RECIPE,
+                        ThreadName::CreativeIdeas,
+                        ctx.state_root,
+                        ctx_vars,
+                        start,
+                    );
+                    if narrated.success {
+                        return narrated;
+                    }
+                }
+
                 ThreadOutcome::ok(summary, start.elapsed()).with_detail(detail)
             }
             Err(error) => {
@@ -712,13 +755,15 @@ fn build_dedup_brain() -> (Box<dyn OodaBrain>, bool) {
 /// inert even if it were registered directly.
 pub fn register(mind: &mut Mind, config: CreativeIdeasConfig) {
     let (brain, semantic_enabled) = build_dedup_brain();
-    let thread = CreativeIdeasThread::with_pipeline_and_brain(
+    let mut thread = CreativeIdeasThread::with_pipeline_and_brain(
         config,
         Box::new(AgenticIdeaSource::from_env()),
         Box::new(AgenticIdeaPipeline::from_env()),
         brain,
         semantic_enabled,
     );
+    // Production surfaces a natural-language reasoning_summary via the recipe.
+    thread.narrate = true;
     mind.register(Box::new(thread));
 }
 
