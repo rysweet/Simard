@@ -200,8 +200,8 @@ fn persist_step_keeps_most_recent_records_after_cap_exceeded() {
 // bounded-capture contract.
 //
 // ─── REQUIRED SEAM (implemented in Step 8) ────────────────────────────────
-// The tests below are RED until `agent_spawn` grows a private, crate-visible
-// bounded-tail capture helper with EXACTLY this contract:
+// The tests below pin the contract of `agent_spawn`'s private, crate-visible
+// bounded-tail capture helper:
 //
 //   pub(crate) fn capture_bounded_tail<R: std::io::Read>(
 //       reader: R,

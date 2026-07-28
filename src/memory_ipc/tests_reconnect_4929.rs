@@ -13,14 +13,15 @@
 //!
 //! These tests drive the real Unix-socket wire against a hand-rolled "flaky
 //! server" that deliberately severs connections, so they exercise the client's
-//! reconnect logic end-to-end (not a mock of it). `call_recovers_…` is **RED**
-//! until the reconnect path exists: with today's single-shot `call`, the
-//! broken-pipe request returns `Err` instead of transparently recovering.
+//! reconnect logic end-to-end (not a mock of it). `call_recovers_…` asserts the
+//! landed reconnect path: after the server severs the connection mid-frame, the
+//! single-shot reconnect + retry transparently recovers instead of returning
+//! `Err`.
 //!
 //! Robustness: every `accept` in the flaky server is **time-bounded**
-//! (`accept_within`), so when the client (correctly or, during RED, not) fails
-//! to reconnect, the server thread still terminates instead of blocking a
-//! `join` forever. That keeps RED a clean failure, never a hung test binary.
+//! (`accept_within`), so if the client ever regressed and failed to reconnect,
+//! the server thread still terminates instead of blocking a `join` forever.
+//! That keeps a regression a clean failure, never a hung test binary.
 //!
 //! Hermetic: each test binds its own `TempDir` socket, mutates no env, and
 //! touches no shared global state — so no `#[serial]` key is required.
@@ -76,9 +77,10 @@ fn read_then_sever(stream: &mut UnixStream) {
 /// A severed connection followed by a live listener on the SAME socket path is
 /// transparently recovered by a single reconnect + retry: the call returns Ok.
 ///
-/// RED until F2b lands: today's client returns Err on the broken pipe instead
-/// of reconnecting, so the `expect` below fails (cleanly — the server thread is
-/// time-bounded and never hangs the test).
+/// Exercises the landed F2b path: the client returns `Ok` on a broken pipe by
+/// reconnecting once and retrying, so the `expect` below holds (and if it ever
+/// regressed the failure is clean — the server thread is time-bounded and never
+/// hangs the test).
 #[test]
 fn call_recovers_from_broken_pipe_with_one_reconnect() {
     let dir = tempfile::tempdir().unwrap();
@@ -94,9 +96,9 @@ fn call_recovers_from_broken_pipe_with_one_reconnect() {
         read_then_sever(&mut c1); // client's prune_expired_sensory() first attempt
         drop(c1);
 
-        // conn2: the client's single reconnect + retry. If the client never
-        // reconnects (RED), this times out and the server reports "no reconnect"
-        // rather than blocking forever.
+        // conn2: the client's single reconnect + retry. If the client ever
+        // regressed and never reconnected, this times out and the server
+        // reports "no reconnect" rather than blocking forever.
         match accept_within(&listener, Duration::from_secs(3)) {
             Some(mut c2) => {
                 serve_one(&mut c2, &MemoryResponse::Count(0));

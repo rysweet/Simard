@@ -1464,8 +1464,8 @@ mod pure_helper_tests {
     // Before the fix, `daemon_from_heartbeat` hardcoded `main_pid: None`, so
     // status rendered daemon CPU/RSS as "absent" even with a fresh heartbeat.
 
-    /// RED: a heartbeat carrying `main_pid` must surface it on the daemon
-    /// section (defensive `as_u64`), so status can sample the live process.
+    /// A heartbeat carrying `main_pid` must surface it on the daemon section
+    /// (defensive `as_u64`), so status can sample the live process.
     #[test]
     fn daemon_from_heartbeat_reads_main_pid_when_present() {
         let now = chrono::Utc::now();
