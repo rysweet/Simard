@@ -37,6 +37,21 @@ Commands:
                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
                               Record exactly one typed, validated OODA Decide
                               action-routing (the reasoner's tool; zero privilege).
+  record-admission --choice <admit|defer|serialize_after>
+                   (--rationale <TEXT> | --rationale-path <FILE>)
+                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                   [--blocked-by <csv> --retry-after-secs <u64>
+                    --after-goal-id <ID> --overlap-files <csv>]
+                              Record exactly one typed, validated engineer-
+                              admission verdict (the reasoner's tool; zero
+                              privilege). Variant-owned fields: --blocked-by /
+                              --retry-after-secs (defer), --after-goal-id /
+                              --overlap-files (serialize_after).
+  record-resource-admission --choice <admit|defer|reclaim_first>
+                   (--rationale <TEXT> | --rationale-path <FILE>)
+                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated resource-
+                              admission verdict (the reasoner's tool; zero privilege).
   approvals issue --state-root <PATH> --effect-id <ID> --request-id <ID>
                               Issue a privileged merge/deploy approval from
                               the configured server principal and signing key.
@@ -89,6 +104,8 @@ pub(super) fn dispatch_ooda_command(
         "record-decision" => dispatch_record_decision(args),
         "record-orient" => dispatch_record_orient(args),
         "record-decide" => dispatch_record_decide(args),
+        "record-admission" => dispatch_record_admission(args),
+        "record-resource-admission" => dispatch_record_resource_admission(args),
         "approvals" => dispatch_approvals(args),
         other => Err(format!("unsupported command 'ooda {other}'").into()),
     }
@@ -315,6 +332,184 @@ fn dispatch_record_decide(
 
     crate::persistence::persist_json("ooda-decide-decision", record_path, &record)?;
     Ok(())
+}
+
+/// `simard ooda record-admission` — the zero-privilege tool the OODA
+/// engineer-admission reasoner calls to record EXACTLY ONE typed, validated
+/// verdict.
+///
+/// It validates the closed 3-variant `--choice` enum + non-empty `--rationale`
+/// AND the per-variant field ownership through the SINGLE shared
+/// [`EngineerAdmissionDecision::from_choice_fields`](crate::ooda_brain::EngineerAdmissionDecision::from_choice_fields)
+/// chokepoint, hardens `--record-path` (absolute, no `..`), then writes exactly
+/// one atomic `0o600` [`AdmissionDecisionRecord`](crate::ooda_brain::AdmissionDecisionRecord).
+/// Any validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). `--blocked-by` / `--overlap-files` are
+/// single-value CSV (a repeated flag is rejected by `parse_named_args`).
+///
+/// See `docs/reference/ooda-record-admission-cli.md` for the full contract.
+fn dispatch_record_admission(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "rationale",
+        "rationale-path",
+        "blocked-by",
+        "retry-after-secs",
+        "after-goal-id",
+        "overlap-files",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let rationale = resolve_field(&parsed, "rationale", "rationale-path")?
+        .ok_or("an admission verdict requires --rationale or --rationale-path")?;
+
+    // Optional variant-owned fields (single-value CSV for the two list flags).
+    // The chokepoint enforces which variant may carry which — a field supplied
+    // on the wrong variant is rejected there, before any write.
+    let blocked_by = parsed
+        .get("blocked-by")
+        .map(|v| split_csv(v))
+        .unwrap_or_default();
+    let overlap_files = parsed
+        .get("overlap-files")
+        .map(|v| split_csv(v))
+        .unwrap_or_default();
+    let after_goal_id = parsed
+        .get("after-goal-id")
+        .map(String::as_str)
+        .unwrap_or("");
+    let retry_after_secs = match parsed.get("retry-after-secs") {
+        Some(v) => Some(
+            v.parse::<u64>()
+                .map_err(|_| "invalid --retry-after-secs (expected a u64)")?,
+        ),
+        None => None,
+    };
+
+    let decision = crate::ooda_brain::EngineerAdmissionDecision::from_choice_fields(
+        choice,
+        &rationale,
+        &blocked_by,
+        after_goal_id,
+        &overlap_files,
+        retry_after_secs,
+    )
+    .ok_or_else(|| {
+        format!(
+            "invalid admission verdict: unknown --choice {choice:?}, empty --rationale, or a \
+             variant-owned field on the wrong variant (choice must be one of \
+             admit|defer|serialize_after; --blocked-by/--retry-after-secs are owned by defer, \
+             --after-goal-id/--overlap-files by serialize_after)"
+        )
+    })?;
+
+    let record = crate::ooda_brain::AdmissionDecisionRecord {
+        schema: crate::ooda_brain::ADMISSION_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision,
+    };
+
+    crate::persistence::persist_json("ooda-engineer-admission-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-resource-admission` — the zero-privilege tool the OODA
+/// resource-admission reasoner calls to record EXACTLY ONE typed, validated
+/// verdict.
+///
+/// It validates the closed 3-variant `--choice` enum + non-empty `--rationale`
+/// through the SINGLE shared
+/// [`ResourceAdmissionDecision::from_choice_fields`](crate::ooda_brain::ResourceAdmissionDecision::from_choice_fields)
+/// chokepoint, hardens `--record-path` (absolute, no `..`), then writes exactly
+/// one atomic `0o600`
+/// [`ResourceAdmissionDecisionRecord`](crate::ooda_brain::ResourceAdmissionDecisionRecord).
+/// All variants carry only `rationale`, so any engineer-admission-owned flag is
+/// unknown here and rejected against `KNOWN_FLAGS`. Any validation failure ⇒ a
+/// non-zero exit AND **no file on disk** (validate-all-then-write-once).
+///
+/// See `docs/reference/ooda-record-admission-cli.md` for the full contract.
+fn dispatch_record_resource_admission(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "rationale",
+        "rationale-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let rationale = resolve_field(&parsed, "rationale", "rationale-path")?
+        .ok_or("a resource-admission verdict requires --rationale or --rationale-path")?;
+
+    let decision =
+        crate::ooda_brain::ResourceAdmissionDecision::from_choice_fields(choice, &rationale)
+            .ok_or_else(|| {
+                format!(
+                    "invalid resource-admission verdict: unknown --choice {choice:?} or empty \
+                     --rationale (choice must be one of admit|defer|reclaim_first)"
+                )
+            })?;
+
+    let record = crate::ooda_brain::ResourceAdmissionDecisionRecord {
+        schema: crate::ooda_brain::RESOURCE_ADMISSION_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision,
+    };
+
+    crate::persistence::persist_json("ooda-resource-admission-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// Split a single comma-separated list-flag value into its trimmed, non-empty
+/// elements. The admission list flags (`--blocked-by`, `--overlap-files`) accept
+/// ONE comma-separated value because `parse_named_args` rejects a repeated flag;
+/// this keeps them consistent with that single-value contract. Empty elements
+/// (e.g. a trailing comma) are dropped; the chokepoint sanitizes each survivor.
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Maximum bytes read from a `--<field>-path` input file before failing closed.

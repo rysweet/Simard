@@ -268,3 +268,200 @@ fn orient_recipe_has_no_decimal_or_first_token_scrape() {
         "ooda-orient.yaml must not instruct the agent to `Return **only**` a value for scraping"
     );
 }
+
+// ===========================================================================
+// GROUP B — engineer- + resource-ADMISSION rework (issue #4906).
+//
+// The two admission seams must reason AND act through a typed
+// `simard ooda record-admission|record-resource-admission` tool + a fail-CLOSED
+// reader, exactly like Group A. These pin the *shape* of the post-rework sources
+// and recipes (the brief's acceptance greps). They fail RED against the current
+// tree (recipe_brain still owns `parse_admission_decision` /
+// `parse_resource_admission_decision` + `AdmissionEnvelope` /
+// `ResourceAdmissionEnvelope`, and the recipes still print a JSON envelope) and
+// turn GREEN once the rework lands.
+//
+// CRITICAL scope guard (A7): the rework deletes ONLY the SIX admission-EXCLUSIVE
+// scrape symbols. The SHARED `extract.rs` machinery
+// (`extract_and_parse_json` / `extract_json_payload`) is still used by the
+// lifecycle / per-goal / creative-ideas seams and MUST survive — asserted below.
+// ===========================================================================
+
+#[test]
+fn mod_reexports_the_admission_record_surface() {
+    let src = read_rel("src/ooda_brain/mod.rs");
+    for symbol in [
+        "ADMISSION_SCHEMA",
+        "RESOURCE_ADMISSION_SCHEMA",
+        "AdmissionDecisionRecord",
+        "ResourceAdmissionDecisionRecord",
+        "read_verified_admission",
+        "read_verified_resource_admission",
+    ] {
+        assert!(
+            src.contains(symbol),
+            "mod.rs must re-export `{symbol}` (the typed admission record surface)"
+        );
+    }
+}
+
+#[test]
+fn recipe_brain_has_no_admission_scrape_machinery() {
+    let src = read_rel("src/ooda_brain/recipe_brain.rs");
+    // The SIX admission-EXCLUSIVE scrape symbols the brief lists as
+    // safe-to-delete once the seams read a typed record.
+    for forbidden in [
+        "parse_admission_decision",
+        "admission_decision_from_variant",
+        "parse_resource_admission_decision",
+        "resource_admission_decision_from_variant",
+        "AdmissionEnvelope",
+        "ResourceAdmissionEnvelope",
+        "invoke_admission_raw",
+        "invoke_resource_admission_raw",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "recipe_brain.rs must not contain admission scrape symbol `{forbidden}` after the \
+             rework — the admission seams read a typed record, they scrape NOTHING from stdout"
+        );
+    }
+}
+
+#[test]
+fn recipe_brain_admission_seams_read_the_typed_record() {
+    let src = read_rel("src/ooda_brain/recipe_brain.rs");
+    for required in [
+        "run_admission_recipe",
+        "run_resource_admission_recipe",
+        "read_verified_admission",
+        "read_verified_resource_admission",
+    ] {
+        assert!(
+            src.contains(required),
+            "recipe_brain.rs must run the recipe then read the typed record via `{required}` \
+             (modelled on `run_per_goal_cycle_recipe` + `read_verified`)"
+        );
+    }
+}
+
+#[test]
+fn admission_seams_no_longer_scrape_json_from_stdout() {
+    // The two admission seams must not route through the shared JSON scraper any
+    // more. `extract_and_parse_json` survives in the tree for OTHER seams, but it
+    // must appear NOWHERE in the admission-specific writer/reader code — which,
+    // post-rework, no longer exists in recipe_brain as a scrape path. We assert
+    // the admission adapter tags no longer co-occur with a stdout-scrape call by
+    // requiring the deleted scrape helpers (above) to be gone; here we add the
+    // direct guard that the admission recipe-output extractor is gone too.
+    let src = read_rel("src/ooda_brain/recipe_brain.rs");
+    assert!(
+        !src.contains("extract_recipe_decision_output(&output.stdout, ADMISSION_ADAPTER_TAG)"),
+        "the engineer-admission seam must not scrape recipe stdout"
+    );
+    assert!(
+        !src.contains(
+            "extract_recipe_decision_output(&output.stdout, RESOURCE_ADMISSION_ADAPTER_TAG)"
+        ),
+        "the resource-admission seam must not scrape recipe stdout"
+    );
+}
+
+#[test]
+fn shared_recipe_output_extract_survives_group_b() {
+    // A7 retention guard: `extract.rs` + `extract_and_parse_json` /
+    // `extract_json_payload` still back the lifecycle / per-goal / creative-ideas
+    // seams. Group B deletes only the SIX admission-exclusive symbols.
+    let path = repo_root().join("src/recipe_output/extract.rs");
+    assert!(
+        path.is_file(),
+        "src/recipe_output/extract.rs MUST survive Group B — still used by non-admission seams"
+    );
+    let extract = read_rel("src/recipe_output/extract.rs");
+    for retained in ["extract_json_payload", "extract_and_parse_json"] {
+        assert!(
+            extract.contains(retained),
+            "extract.rs MUST retain shared helper `{retained}` — Group B deletes only the six \
+             admission-exclusive scrape symbols"
+        );
+    }
+}
+
+#[test]
+fn operator_cli_dispatches_the_record_admission_arms() {
+    let src = read_rel("src/operator_cli/ooda.rs");
+    assert!(
+        src.contains("\"record-admission\""),
+        "operator_cli must route the `ooda record-admission` command"
+    );
+    assert!(
+        src.contains("\"record-resource-admission\""),
+        "operator_cli must route the `ooda record-resource-admission` command"
+    );
+}
+
+#[test]
+fn engineer_admission_recipe_calls_the_record_admission_tool() {
+    let yaml = read_rel("prompt_assets/simard/recipes/ooda-engineer-admission.yaml");
+    assert!(
+        yaml.contains("ooda record-admission"),
+        "ooda-engineer-admission.yaml must record its verdict by calling `simard ooda \
+         record-admission`, exactly like ooda-per-goal-cycle.yaml calls `record-decision`"
+    );
+    for flag in ["--record-path", "--goal-id", "--cycle-number"] {
+        assert!(
+            yaml.contains(flag),
+            "ooda-engineer-admission.yaml's tool call must pass `{flag}` (binds the record to the live ctx)"
+        );
+    }
+}
+
+#[test]
+fn resource_admission_recipe_calls_the_record_resource_admission_tool() {
+    let yaml = read_rel("prompt_assets/simard/recipes/ooda-resource-admission.yaml");
+    assert!(
+        yaml.contains("ooda record-resource-admission"),
+        "ooda-resource-admission.yaml must record its verdict by calling `simard ooda \
+         record-resource-admission`"
+    );
+    for flag in ["--record-path", "--goal-id", "--cycle-number"] {
+        assert!(
+            yaml.contains(flag),
+            "ooda-resource-admission.yaml's tool call must pass `{flag}`"
+        );
+    }
+}
+
+#[test]
+fn admission_recipes_declare_no_stdout_scraping() {
+    for rel in [
+        "prompt_assets/simard/recipes/ooda-engineer-admission.yaml",
+        "prompt_assets/simard/recipes/ooda-resource-admission.yaml",
+    ] {
+        let lower = read_rel(rel).to_lowercase();
+        assert!(
+            lower.contains("none scraped from stdout") || lower.contains("no json"),
+            "{rel} must state plainly that NOTHING is scraped from stdout — its tool call IS the effect"
+        );
+    }
+}
+
+#[test]
+fn admission_recipes_have_no_json_decision_envelope() {
+    for rel in [
+        "prompt_assets/simard/recipes/ooda-engineer-admission.yaml",
+        "prompt_assets/simard/recipes/ooda-resource-admission.yaml",
+    ] {
+        let yaml = read_rel(rel);
+        assert!(
+            !yaml.contains("\"decision\""),
+            "{rel} must not instruct the agent to emit a `{{\"decision\": ...}}` envelope for \
+             Rust to scrape (the forbidden emit→parse→act pattern)"
+        );
+        assert!(
+            !yaml.contains("parse_admission_decision")
+                && !yaml.contains("parse_resource_admission_decision"),
+            "{rel} must not reference the deleted scrape helper in its header/prose"
+        );
+    }
+}

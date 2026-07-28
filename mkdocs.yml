@@ -382,6 +382,7 @@ nav:
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
     - OODA Record-Orient/Decide Tools: reference/ooda-record-orient-decide-cli.md
+    - OODA Record-Admission Tools: reference/ooda-record-admission-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
     - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
