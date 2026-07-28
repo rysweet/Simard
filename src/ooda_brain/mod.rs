@@ -100,6 +100,59 @@ pub use rustyclawd::{
 };
 
 // ---------------------------------------------------------------------------
+// Shared reasoner-seam plumbing (typed-record pattern, epic #4719)
+//
+// Every reasoner seam (RecipeBrain's decide/orient/outcome/per-goal-cycle/
+// admission/resource-admission/idea-dedup/idea-consolidation and RustyClawd's
+// per-goal-cycle) does the SAME two setup steps before running its recipe/tool:
+// resolve THIS binary so the gated `simard ooda record-*` tool can be invoked
+// deterministically, and allocate a fresh owner-only temp dir for the typed
+// record. These helpers give that boilerplate ONE definition so a seam is a
+// one-liner and the fail-CLOSED error shape can never drift between seams. The
+// caller passes its own adapter tag (`base_type`) so error attribution is
+// unchanged.
+// ---------------------------------------------------------------------------
+
+/// Resolve THIS running executable so a recipe sandbox or gated
+/// `simard ooda record-*` tool can invoke it deterministically — never a bare
+/// name that depends on `PATH`. Fail-CLOSED: if it cannot be resolved the caller
+/// writes no record and the matching `read_verified*` reader fails at R1 (a
+/// NO-FALLBACK cycle failure). Shared by every reasoner seam. `base_type` is the
+/// caller's adapter tag, preserved verbatim in the error for attribution.
+pub(super) fn resolve_simard_bin(base_type: &str) -> SimardResult<PathBuf> {
+    std::env::current_exe().map_err(|e| crate::error::SimardError::AdapterInvocationFailed {
+        base_type: base_type.to_string(),
+        reason: format!("could not resolve the running simard binary: {e}"),
+    })
+}
+
+/// Allocate a fresh, UNIQUE, owner-only temp dir (auto-removed when the returned
+/// [`tempfile::TempDir`] guard drops) plus the `record_path` inside it that a
+/// gated `simard ooda record-*` tool atomically writes its typed decision to. A
+/// stale record from a prior cycle can never live at this path; the reader still
+/// independently re-checks `goal_id`/`cycle_number`. Shared by every reasoner
+/// seam. `base_type` is the caller's adapter tag; `noun` names the seam in the
+/// error (e.g. `"per-call outcome"`); `filename` is the record file (e.g.
+/// `"outcome.json"`). The caller MUST keep the returned guard alive for as long
+/// as it needs the dir (through the recipe run and the verified read).
+pub(super) fn alloc_record_tempdir(
+    base_type: &str,
+    prefix: &str,
+    noun: &str,
+    filename: &str,
+) -> SimardResult<(tempfile::TempDir, PathBuf)> {
+    let tempdir = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .map_err(|e| crate::error::SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!("could not allocate a {noun} temp dir: {e}"),
+        })?;
+    let record_path = tempdir.path().join(filename);
+    Ok((tempdir, record_path))
+}
+
+// ---------------------------------------------------------------------------
 // Context fed to the brain
 // ---------------------------------------------------------------------------
 

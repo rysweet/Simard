@@ -746,14 +746,12 @@ impl OodaDecideBrain for RecipeBrain {
     /// cycle-mismatch) surfaces as an explicit `Err`; the Decide caller records
     /// it and SKIPS the priority — never a fabricated `advance_goal`.
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-decide-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not allocate a per-call decide temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("decide.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-decide-",
+            "per-call decide",
+            "decide.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-decide`
         // (writing `record_path`); its stdout is IGNORED.
@@ -784,14 +782,12 @@ impl OodaOrientBrain for RecipeBrain {
     /// caller records it and KEEPS the goal's BASE urgency — never a fabricated
     /// demotion.
     fn judge_orientation(&self, ctx: &OrientContext) -> SimardResult<OrientJudgment> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-orient-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not allocate a per-call orient temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("orient.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-orient-",
+            "per-call orient",
+            "orient.json",
+        )?;
 
         self.run_orient_recipe(ctx, &record_path)?;
 
@@ -814,11 +810,7 @@ impl RecipeBrain {
     /// calling `simard ooda record-decide`; stdout is intentionally ignored.
     /// Genuine recipe-runner failures propagate as `Err` (no silent fallback).
     fn run_decide_recipe(&self, ctx: &DecideContext, record_path: &Path) -> SimardResult<()> {
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag)?;
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
@@ -873,11 +865,7 @@ impl RecipeBrain {
     /// is passed so the tool can persist it for the reader's self-consistent
     /// no-escalation re-check. Genuine recipe-runner failures propagate as `Err`.
     fn run_orient_recipe(&self, ctx: &OrientContext, record_path: &Path) -> SimardResult<()> {
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag)?;
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
@@ -1163,14 +1151,12 @@ impl OodaBrain for RecipeBrain {
         // Fresh, UNIQUE per-call temp dir (owner-only, auto-removed on drop). A
         // stale record from a prior cycle can never live at this path — and the
         // reader still independently re-checks goal_id/cycle_number (R6/R7).
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-outcome-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not allocate a per-call outcome temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("outcome.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-outcome-",
+            "per-call outcome",
+            "outcome.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-outcome`
         // (writing `record_path`); its stdout is IGNORED.
@@ -1205,14 +1191,12 @@ impl OodaBrain for RecipeBrain {
         // Fresh, UNIQUE per-cycle temp dir (owner-only, auto-removed on drop). A
         // stale record from a prior cycle can never live at this path — and the
         // reader still independently re-checks goal_id/cycle_number (R6/R7).
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-decision-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-cycle decision temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("decision.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            PER_GOAL_CYCLE_ADAPTER_TAG,
+            "simard-ooda-decision-",
+            "per-cycle decision",
+            "decision.json",
+        )?;
 
         // Run the reasoner recipe. Its agent records its verdict by calling the
         // `simard ooda record-decision` tool (writing `record_path`); the agent's
@@ -1247,14 +1231,12 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &EngineerAdmissionCtx,
     ) -> SimardResult<EngineerAdmissionDecision> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-admission-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call admission temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("admission.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            ADMISSION_ADAPTER_TAG,
+            "simard-ooda-admission-",
+            "per-call admission",
+            "admission.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-admission`
         // (writing `record_path`); its stdout is IGNORED.
@@ -1290,14 +1272,12 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &ResourceAdmissionCtx,
     ) -> SimardResult<ResourceAdmissionDecision> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-resource-admission-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call resource-admission temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("resource_admission.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            RESOURCE_ADMISSION_ADAPTER_TAG,
+            "simard-ooda-resource-admission-",
+            "per-call resource-admission",
+            "resource_admission.json",
+        )?;
 
         self.run_resource_admission_recipe(ctx, &record_path)?;
 
@@ -1321,14 +1301,12 @@ impl OodaBrain for RecipeBrain {
     /// a fail-CLOSED drop (the candidate is not persisted this cycle) — never a
     /// silent duplicate and never an `EnhanceExisting` on a guess.
     fn decide_idea_dedup(&self, ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-idea-dedup-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call idea-dedup temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("idea_dedup.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            IDEA_DEDUP_ADAPTER_TAG,
+            "simard-ooda-idea-dedup-",
+            "per-call idea-dedup",
+            "idea_dedup.json",
+        )?;
 
         // The agent records its verdict by calling `simard ooda record-idea-dedup`
         // (writing `record_path`); its stdout is IGNORED.
@@ -1365,15 +1343,13 @@ impl OodaBrain for RecipeBrain {
         &self,
         ctx: &IdeaConsolidationCtx,
     ) -> SimardResult<Vec<IdeaCluster>> {
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-idea-consolidation-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-call idea-consolidation temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("idea_consolidation.json");
-        let clusters_path = tempdir.path().join("clusters.json");
+        let (record_tempdir, record_path) = super::alloc_record_tempdir(
+            IDEA_CONSOLIDATION_ADAPTER_TAG,
+            "simard-ooda-idea-consolidation-",
+            "per-call idea-consolidation",
+            "idea_consolidation.json",
+        )?;
+        let clusters_path = record_tempdir.path().join("clusters.json");
 
         // The agent writes its cluster array to `clusters_path`, then records the
         // verdict by calling `simard ooda record-idea-consolidation`; stdout is
@@ -1409,11 +1385,7 @@ impl RecipeBrain {
         // `recipe-runner-rs` is (via the running executable), never a bare name
         // that depends on PATH. If it cannot be resolved, no record is written
         // and the reader fails CLOSED at R1 (a NO-FALLBACK cycle failure).
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: self.adapter_tag.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag)?;
 
         let artifact = format!(
             "pr_merged={} issue_closed={} self_affecting={} deployed={}",
@@ -1526,11 +1498,7 @@ impl RecipeBrain {
         // `recipe-runner-rs` is (via the running executable), never a bare name
         // that depends on PATH. If it cannot be resolved, no record is written
         // and the reader fails CLOSED at R1.
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: PER_GOAL_CYCLE_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(PER_GOAL_CYCLE_ADAPTER_TAG)?;
 
         let stale = match ctx.stale_claim_secs {
             Some(secs) => secs.to_string(),
@@ -1667,11 +1635,7 @@ impl RecipeBrain {
         // `recipe-runner-rs` is (via the running executable), never a bare name
         // that depends on PATH. If it cannot be resolved, no record is written
         // and the reader fails CLOSED at R1 (surfaced as a loud Admit).
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(ADMISSION_ADAPTER_TAG)?;
 
         let scope = ctx.candidate.predicted_scope.join(", ");
         let live = render_admission_engineers(&ctx.live_engineers);
@@ -1777,11 +1741,7 @@ impl RecipeBrain {
                 ),
             })?;
 
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: RESOURCE_ADMISSION_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(RESOURCE_ADMISSION_ADAPTER_TAG)?;
 
         let opt = |v: Option<String>| v.unwrap_or_else(|| "unknown".to_string());
         let disk_used = opt(ctx.disk_used_pct.map(|p| format!("{p:.0}")));
@@ -1904,11 +1864,7 @@ impl RecipeBrain {
         // `record-idea-dedup` tool deterministically (never a bare PATH name).
         // If it cannot be resolved, no record is written and the reader fails
         // CLOSED at R1 (a dropped candidate).
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_DEDUP_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(IDEA_DEDUP_ADAPTER_TAG)?;
 
         let shortlist = render_existing_shortlist(&ctx.existing_shortlist);
 
@@ -1989,11 +1945,7 @@ impl RecipeBrain {
             IDEA_CONSOLIDATION_ADAPTER_TAG,
         )?;
 
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: IDEA_CONSOLIDATION_ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(IDEA_CONSOLIDATION_ADAPTER_TAG)?;
 
         let pool = render_existing_shortlist(&ctx.pool);
 

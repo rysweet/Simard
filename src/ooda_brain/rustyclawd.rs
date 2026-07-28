@@ -155,24 +155,18 @@ impl<S: LlmSubmitter> OodaBrain for RustyClawdBrain<S> {
         // Fresh, UNIQUE per-cycle temp dir (owner-only, auto-removed on drop). A
         // stale record from a prior cycle can never live at this path — and the
         // reader still independently re-checks goal_id/cycle_number (R6/R7).
-        let tempdir = tempfile::Builder::new()
-            .prefix("simard-ooda-rustyclawd-decision-")
-            .tempdir()
-            .map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: ADAPTER_TAG.to_string(),
-                reason: format!("could not allocate a per-cycle decision temp dir: {e}"),
-            })?;
-        let record_path = tempdir.path().join("decision.json");
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            ADAPTER_TAG,
+            "simard-ooda-rustyclawd-decision-",
+            "per-cycle decision",
+            "decision.json",
+        )?;
 
         // Resolve THIS binary so the agent can invoke `record-decision`
         // deterministically (never a bare name that depends on PATH). If it
         // cannot be resolved, no record is written and the reader fails CLOSED
         // at R1 — a NO-FALLBACK cycle failure.
-        let simard_bin =
-            std::env::current_exe().map_err(|e| SimardError::AdapterInvocationFailed {
-                base_type: ADAPTER_TAG.to_string(),
-                reason: format!("could not resolve the running simard binary: {e}"),
-            })?;
+        let simard_bin = super::resolve_simard_bin(ADAPTER_TAG)?;
 
         let rec_ctx = RecordDecisionContext {
             record_path: record_path.clone(),
