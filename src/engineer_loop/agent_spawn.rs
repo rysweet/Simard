@@ -295,7 +295,9 @@ pub(crate) fn capture_bounded_tail<R: std::io::Read>(
         push_bounded_tail(&mut ring, &mut dropped, &chunk[..n], cap);
     }
 
-    Ok((ring.into_iter().collect(), dropped))
+    // `Vec::from` converts the ring in one O(n) move (rotate + reuse of the
+    // deque's buffer) instead of re-collecting byte-by-byte through an iterator.
+    Ok((Vec::from(ring), dropped))
 }
 
 /// Append `data` to a bounded ring, evicting from the front so the ring never
@@ -323,9 +325,11 @@ fn push_bounded_tail(
         return;
     }
     let overflow = (ring.len() + data.len()).saturating_sub(cap);
-    for _ in 0..overflow {
-        ring.pop_front();
-    }
+    // Bulk front-eviction: a single `drain` adjusts the ring's head once,
+    // keeping the per-chunk cost truly O(1) in the eviction step rather than
+    // `overflow` individual `pop_front` calls (steady state evicts a full chunk
+    // every push, so the loop cost dominated the hot path — issue #4929).
+    ring.drain(..overflow);
     *dropped += overflow;
     ring.extend(data);
 }
