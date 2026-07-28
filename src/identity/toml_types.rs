@@ -66,6 +66,12 @@ pub(crate) struct TomlSeedGoal {
     pub description: String,
     #[serde(default)]
     pub repo: Option<String>,
+    /// Declares a standing/perpetual seed goal (issue #4927). `#[serde(default)]`
+    /// keeps every existing `seed_goals` entry (which omits it) valid as a
+    /// non-standing goal, while `deny_unknown_fields` still fails loud on a
+    /// typo'd flag rather than silently leaving a safety goal non-perpetual.
+    #[serde(default)]
+    pub standing: bool,
 }
 
 /// An optional `[identities.authority]` table (#3125 / #3067). The read-only

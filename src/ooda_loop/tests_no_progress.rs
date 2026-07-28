@@ -1275,3 +1275,148 @@ fn prune_never_touches_non_pr_refs() {
         "issue/branch refs must pass through the PR-liveness reconcile untouched"
     );
 }
+
+// ===========================================================================
+// #4927 end-to-end: a self-healed standing hygiene goal is breaker-exempt
+//
+// Reproduction + fix of the recurring-goal-reblock incident. The live
+// `articulate-repo-hygiene-backlog` goal sat on the cognitive-memory board with
+// an UNMARKED description, so the driver's `!is_perpetual()` exemption never
+// applied: it was re-parked and issue-filed every OODA cycle (#4927/#4930/#4934).
+// Once the standing seed declares it and `reconcile_standing_markers` self-heals
+// the persisted goal to perpetual, driving the breaker N+1 consecutive
+// no-action cycles must NEVER block it, escalate it, or file a tracking issue —
+// it is a benign perpetual idle. A companion test proves the SAME goal, left
+// unmarked (pre-fix), still escalates — so the fix is exactly the standing tag.
+// ===========================================================================
+
+fn hygiene_goal_unmarked() -> ActiveGoal {
+    let title = "Articulate repo-hygiene backlog";
+    let id = crate::goals::goal_slug(title);
+    let mut g = ActiveGoal::new(
+        id,
+        "Turn observations into prioritized repo-hygiene goals.",
+        2,
+    );
+    g.status = GoalProgress::NotStarted;
+    assert!(
+        !g.is_perpetual(),
+        "the pre-fix live goal must be unmarked (the #4927 defect)"
+    );
+    g
+}
+
+#[test]
+fn reconciled_standing_hygiene_goal_is_exempt_from_the_no_progress_breaker() {
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let goal = hygiene_goal_unmarked();
+    let id = goal.id.clone();
+
+    // Self-heal the persisted goal via the standing seed (the #4927 fix).
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+    let standing = crate::identity::SeedGoal::new(
+        2,
+        "Articulate repo-hygiene backlog",
+        "Turn observations into prioritized repo-hygiene goals.",
+        None,
+    )
+    .standing();
+    let healed = crate::goal_curation::reconcile_standing_markers(&mut board, &[standing]);
+    assert_eq!(
+        healed, 1,
+        "reconcile must self-heal the one matching live goal"
+    );
+    assert!(
+        board.active[0].is_perpetual(),
+        "post-reconcile the hygiene goal must read as perpetual (#4927)"
+    );
+
+    let mut state = OodaState::new(board);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    // N+1 consecutive no-action cycles — one past where a normal goal is parked.
+    for cycle in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(&id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(
+            !report.fired(),
+            "cycle {cycle}: a reconciled standing goal must not fire the breaker (#4927)"
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "cycle {cycle}: a reconciled standing goal must never be escalated"
+        );
+        assert_eq!(
+            report.perpetual_idled,
+            vec![id.clone()],
+            "cycle {cycle}: the idle must be recorded as a benign perpetual idle"
+        );
+        assert!(
+            !matches!(
+                state.active_goals.active[0].status,
+                GoalProgress::Blocked(_)
+            ),
+            "cycle {cycle}: a reconciled standing goal must never be Blocked"
+        );
+    }
+
+    assert!(
+        filer.calls.borrow().is_empty(),
+        "a reconciled standing goal must never file an [OODA-SAFEGUARD] tracking issue (#4927)"
+    );
+}
+
+#[test]
+fn unmarked_hygiene_goal_still_escalates_proving_the_tag_is_the_fix() {
+    // Control: the identical hygiene goal, left UNMARKED (no standing seed /
+    // reconcile), reproduces the pre-fix #4927 behaviour — the breaker fires,
+    // the goal is escalated with the sentinel, and exactly one issue is filed.
+    // This proves the exemption keys precisely on the standing tag.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let goal = hygiene_goal_unmarked();
+    let id = goal.id.clone();
+    let mut state = state_with(goal);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    let mut fired = false;
+    for _ in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(&id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "an unmarked goal must never be treated as a perpetual idle"
+        );
+        if report.fired() {
+            fired = true;
+        }
+    }
+    assert!(
+        fired,
+        "an unmarked hygiene goal must still trip the no-progress breaker"
+    );
+    assert!(
+        !filer.calls.borrow().is_empty(),
+        "the pre-fix unmarked goal must still file exactly the escalation issue"
+    );
+}

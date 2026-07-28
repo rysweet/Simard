@@ -24,6 +24,14 @@ pub struct SeedGoal {
     /// Target-repo slug. `None` means the identity's own repo; a slug scopes the
     /// goal to an ecosystem/target repo, exactly like `ActiveGoal.repo`.
     pub repo: Option<String>,
+    /// Declares this a standing/perpetual goal (issue #4927). A standing seed
+    /// produces a goal that reads as
+    /// [`crate::goal_curation::ActiveGoal::is_perpetual`], so the no-progress
+    /// breaker's `!is_perpetual()` exemption applies and the goal is never
+    /// re-parked or issue-filed for lack of convergence. Additive and
+    /// defaulting `false`, so every existing seed goal stays
+    /// convergence-required exactly as before.
+    pub standing: bool,
 }
 
 impl SeedGoal {
@@ -38,7 +46,20 @@ impl SeedGoal {
             title: title.into(),
             description: description.into(),
             repo,
+            standing: false,
         }
+    }
+
+    /// Builder: declare this seed a standing/perpetual goal (issue #4927).
+    /// Purely declarative — it flips the flag and never touches the
+    /// description; the standing marker is applied later at the seed→
+    /// [`crate::goal_curation::ActiveGoal`] conversion so
+    /// [`crate::goal_curation::ActiveGoal::is_perpetual`] stays the single
+    /// source of truth.
+    #[must_use]
+    pub fn standing(mut self) -> Self {
+        self.standing = true;
+        self
     }
 }
 

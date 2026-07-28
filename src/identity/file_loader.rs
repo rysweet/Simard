@@ -75,12 +75,13 @@ impl FileIdentityLoader {
             .seed_goals
             .iter()
             .map(|g| {
-                SeedGoal::new(
+                let seed = SeedGoal::new(
                     g.priority,
                     g.title.clone(),
                     g.description.clone(),
                     g.repo.clone(),
-                )
+                );
+                if g.standing { seed.standing() } else { seed }
             })
             .collect();
         let target_repos = identity.target_repos.clone();

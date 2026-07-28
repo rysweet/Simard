@@ -1382,7 +1382,7 @@ pub fn seed_board_from_seed_goals(
 
     for goal in goals {
         let id = crate::goals::goal_slug(&goal.title);
-        board.active.push(ActiveGoal {
+        let seeded = ActiveGoal {
             parent_goal_id: None,
             priority_explicit: false,
             id,
@@ -1395,10 +1395,59 @@ pub fn seed_board_from_seed_goals(
             wip_refs: vec![],
             last_progress_update_at: None,
             labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
+        };
+        // A `standing = true` seed produces a perpetual goal so the no-progress
+        // breaker's `!is_perpetual()` exemption applies (issue #4927). Applied
+        // via the single standing marker so `is_perpetual()` stays the source
+        // of truth; an ordinary seed is pushed unchanged (no reclassification).
+        board.active.push(if goal.standing {
+            seeded.mark_standing()
+        } else {
+            seeded
         });
     }
 
     goals.len()
+}
+
+/// Warm-board self-heal for standing seed declarations (issue #4927).
+///
+/// A `standing = true` seed only reaches a *cold* board via
+/// [`seed_board_from_seed_goals`] (which no-ops on a non-empty board). The live
+/// `articulate-repo-hygiene-backlog` goal, however, already sits on the
+/// cognitive-memory board with an UNMARKED description — the exact defect that
+/// re-parked it every OODA cycle and fed the `UNCLEAR-CRITERIA` issue storm
+/// (#4927/#4930/#4934), because the breaker's `!is_perpetual()` exemption never
+/// fired for it.
+///
+/// This stamps the standing marker onto each persisted active goal whose id
+/// matches a `standing` seed's normalized title slug, turning it perpetual in
+/// place. Matching is EXACT (by [`crate::goals::goal_slug`]), never by fuzzy
+/// prose — a non-matching or genuinely stuck goal must never be silently
+/// exempted from the safety breaker. It is idempotent (an already-perpetual
+/// goal is skipped, so a repeat pass heals nothing and never double-stamps) and
+/// a no-op when no seed is standing. Returns the number of goals healed.
+pub fn reconcile_standing_markers(
+    board: &mut GoalBoard,
+    seeds: &[crate::identity::SeedGoal],
+) -> usize {
+    let standing_ids: std::collections::BTreeSet<String> = seeds
+        .iter()
+        .filter(|seed| seed.standing)
+        .map(|seed| crate::goals::goal_slug(&seed.title))
+        .collect();
+    if standing_ids.is_empty() {
+        return 0;
+    }
+
+    let mut healed = 0;
+    for goal in &mut board.active {
+        if standing_ids.contains(&goal.id) && !goal.is_perpetual() {
+            goal.mark_standing_in_place();
+            healed += 1;
+        }
+    }
+    healed
 }
 
 // ---------------------------------------------------------------------------

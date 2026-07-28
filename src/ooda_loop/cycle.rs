@@ -156,6 +156,25 @@ fn run_ooda_cycle_inner(
         }
     }
 
+    // #4927: self-heal already-persisted goals that a `standing` seed declares
+    // perpetual. Cold seeding (above) marks fresh goals, but a warm board loaded
+    // from cognitive memory carries the live goal with an UNMARKED description,
+    // so the no-progress breaker's `!is_perpetual()` exemption never fired for
+    // it — the goal was re-parked and issue-filed every cycle. Reconciling here
+    // against the SAME resolved seed set stamps the standing marker onto the
+    // matching persisted goal in place. Idempotent and a no-op when no seed is
+    // standing, so Simard's default board is unaffected.
+    {
+        let resolved = crate::goal_curation::resolve_seed_goals(identity_seed_goals);
+        let healed =
+            crate::goal_curation::reconcile_standing_markers(&mut state.active_goals, &resolved);
+        if healed > 0 {
+            eprintln!(
+                "[simard] OODA start: reconciled {healed} persisted goal(s) to standing/perpetual (#4927)"
+            );
+        }
+    }
+
     // Ingest meeting handoff decisions as new goals.
     let handoff_dir = crate::meeting_facilitator::default_handoff_dir();
     match check_meeting_handoffs(

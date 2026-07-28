@@ -348,10 +348,21 @@ impl ActiveGoal {
     /// `simard goal add --standing`.
     #[must_use]
     pub fn mark_standing(mut self) -> Self {
+        self.mark_standing_in_place();
+        self
+    }
+
+    /// In-place variant of [`mark_standing`] for reconciling an
+    /// already-persisted goal on a warm board without moving it out of the
+    /// board vector (issue #4927). Idempotent — a goal that already reads as
+    /// standing is left byte-for-byte unchanged, so a repeated reconcile never
+    /// double-stamps the marker.
+    ///
+    /// [`mark_standing`]: ActiveGoal::mark_standing
+    pub fn mark_standing_in_place(&mut self) {
         if !self.is_perpetual() {
             self.description = format!("{STANDING_MARKER_PREFIX}{}", self.description);
         }
-        self
     }
 
     /// Roll a standing/perpetual goal into a fresh cycle after its current unit

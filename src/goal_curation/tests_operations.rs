@@ -1685,3 +1685,192 @@ fn board_write_lock_serializes_independent_acquirers() {
 
     handle.join().expect("lock thread should join cleanly");
 }
+
+// ===========================================================================
+// Standing/perpetual seed declaration + warm-board self-heal (issue #4927)
+//
+// TEST-FIRST for the un-shipped `standing` seed attribute and the
+// `reconcile_standing_markers` warm-board self-heal. The live standing goal
+// `articulate-repo-hygiene-backlog` was re-parked every OODA cycle and fed the
+// `UNCLEAR-CRITERIA` issue storm (#4927/#4930/#4934) purely because it was
+// never tagged perpetual — the no-progress breaker's `!is_perpetual()`
+// exemption never fired for it. The fix is entirely in the seed-declaration +
+// reconcile surface: a `standing = true` seed must produce a goal that reads as
+// `is_perpetual()`, and a persisted (already-live) goal matching a standing
+// seed must be self-healed idempotently, by exact id / normalized title-slug
+// only — never by fuzzy prose (which would wrongly exempt a genuinely stuck
+// goal from the safety breaker).
+// ===========================================================================
+
+const HYGIENE_TITLE: &str = "Articulate repo-hygiene backlog";
+const HYGIENE_DESC: &str = "Turn observations into prioritized, target-scoped repo-hygiene goals on this identity's own board.";
+
+fn standing_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
+    crate::identity::SeedGoal::new(2, title, desc, None).standing()
+}
+
+fn ordinary_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
+    crate::identity::SeedGoal::new(2, title, desc, None)
+}
+
+#[test]
+fn seed_board_from_seed_goals_marks_a_standing_seed_as_perpetual() {
+    // Cold start: a `standing = true` seed must produce an ActiveGoal that reads
+    // as standing/perpetual (the single `is_perpetual()` predicate the breaker
+    // exemption keys on), so #4927 never recurs on a fresh/re-seeded board.
+    let mut board = GoalBoard::new();
+    let added =
+        seed_board_from_seed_goals(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(added, 1);
+    assert_eq!(board.active.len(), 1);
+    assert!(
+        board.active[0].is_perpetual(),
+        "a standing=true seed must seed a perpetual goal (issue #4927)"
+    );
+}
+
+#[test]
+fn seed_board_from_seed_goals_leaves_an_ordinary_seed_non_perpetual() {
+    // Regression guard: an ordinary (standing omitted) seed must remain a
+    // convergence-required goal — the fix must NOT broadly reclassify goals.
+    let mut board = GoalBoard::new();
+    let added = seed_board_from_seed_goals(
+        &mut board,
+        &[ordinary_seed("Fix broken features", "audit specs")],
+    );
+    assert_eq!(added, 1);
+    assert!(
+        !board.active[0].is_perpetual(),
+        "an ordinary seed must stay non-perpetual (no broad reclassification)"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_self_heals_a_persisted_goal_by_id() {
+    // Warm board: the live `articulate-repo-hygiene-backlog` already sits on the
+    // cognitive-memory board with an UNMARKED description (the #4927 defect). A
+    // seed-only tag can't reach it (the empty-board guard no-ops), so a load-time
+    // reconcile must stamp the standing marker onto the persisted goal whose id
+    // matches the standing seed's slug — turning it perpetual in place.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut goal = ActiveGoal::new(id.clone(), HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    assert!(
+        !goal.is_perpetual(),
+        "precondition: the live goal starts unmarked — the exact #4927 defect"
+    );
+
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(
+        healed, 1,
+        "the matching persisted goal must be healed exactly once"
+    );
+    assert!(
+        board.active[0].is_perpetual(),
+        "reconcile must make the persisted hygiene goal read as perpetual (issue #4927)"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_matches_by_normalized_title_slug() {
+    // Matching is by the NORMALIZED slug, not a byte-exact title, so a persisted
+    // goal whose id came from a differently-cased/spaced title still self-heals.
+    let id = "articulate-repo-hygiene-backlog".to_string();
+    assert_eq!(
+        crate::goals::goal_slug("Articulate  Repo-Hygiene   Backlog"),
+        id,
+        "slug normalization must collapse case/whitespace"
+    );
+    let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed = reconcile_standing_markers(
+        &mut board,
+        &[standing_seed(
+            "Articulate  Repo-Hygiene   Backlog",
+            HYGIENE_DESC,
+        )],
+    );
+    assert_eq!(healed, 1);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_is_idempotent() {
+    // A second reconcile pass must be a no-op (returns 0) and must not
+    // double-prepend the marker — `mark_standing` is idempotent by design.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+    let seeds = [standing_seed(HYGIENE_TITLE, HYGIENE_DESC)];
+
+    assert_eq!(reconcile_standing_markers(&mut board, &seeds), 1);
+    let after_first = board.active[0].description.clone();
+    assert_eq!(
+        reconcile_standing_markers(&mut board, &seeds),
+        0,
+        "a second reconcile must heal nothing"
+    );
+    assert_eq!(
+        board.active[0].description, after_first,
+        "reconcile must not double-stamp the standing marker"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_ignores_unmatched_goals() {
+    // Exact-match-only safety property: a goal whose id does NOT match any
+    // standing seed must never be exempted from the no-progress breaker.
+    let mut goal = ActiveGoal::new("some-other-goal", "unrelated work", 3);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(healed, 0, "no non-matching goal may be stamped standing");
+    assert!(!board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_ignores_non_standing_seeds() {
+    // A seed with standing=false must NEVER stamp a matching persisted goal —
+    // otherwise every seed would silently become breaker-exempt.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[ordinary_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(
+        healed, 0,
+        "an ordinary (standing=false) seed must heal nothing"
+    );
+    assert!(!board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_skips_already_perpetual_goals() {
+    // A goal already reading as perpetual must not be re-counted or re-stamped.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let goal = ActiveGoal::new(id, HYGIENE_DESC, 2).mark_standing();
+    assert!(goal.is_perpetual());
+    let before = goal.description.clone();
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(healed, 0, "an already-perpetual goal is not healed again");
+    assert_eq!(board.active[0].description, before);
+}
