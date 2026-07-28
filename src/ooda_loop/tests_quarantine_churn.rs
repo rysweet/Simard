@@ -143,6 +143,20 @@ fn only_goal(state: &OodaState) -> &ActiveGoal {
     &state.active_goals.active[0]
 }
 
+/// Re-park an already-present goal back into a BARE no-progress block, modelling
+/// the brain re-selecting a surfaced (un-blocked) goal that stalls again and is
+/// re-parked bare by the completion gate. Used to drive the breaker cycle by
+/// cycle without minting a fresh goal each time.
+fn reblock_bare(state: &mut OodaState, id: &str) {
+    let g = state
+        .active_goals
+        .active
+        .iter_mut()
+        .find(|g| g.id == id)
+        .expect("goal still on the board");
+    g.status = GoalProgress::Blocked(no_progress_blocked_reason(NO_PROGRESS_BREAKER_THRESHOLD));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drive(
     state: &mut OodaState,
@@ -335,5 +349,78 @@ fn below_the_bound_the_goal_is_not_quarantined() {
     assert!(
         !is_quarantined(only_goal(&state)),
         "below the surfaced-failure bound the goal must stay retriable, never quarantined"
+    );
+}
+
+// === (5) EXACT cycle-of-fire: LIMIT surfaces, then quarantine (Step 18b) ======
+//
+// Regression pin for the DELIBERATE pre-bump bound in `resolution_for_why`
+// (`surfaced_failures >= SURFACED_INVESTIGATION_FAILURE_LIMIT`, evaluated BEFORE
+// this cycle records its own surfaced failure). The pure-ladder unit tests
+// already prove the `>=` boundary; what was missing is an END-TO-END assertion
+// that driving the real re-investigation adapter cycle by cycle surfaces the
+// evidence-less stall EXACTLY `SURFACED_INVESTIGATION_FAILURE_LIMIT` times
+// (leaving it retriable each time) and only quarantines on the *next* cycle —
+// the (LIMIT + 1)th observation. This locks the end-to-end timing so the
+// intentional pre-bump semantics can never silently drift by a cycle (the
+// off-by-one flagged in the Step 18a review).
+#[test]
+fn quarantine_fires_on_the_cycle_after_the_limit_th_surface() {
+    let id = "simard-identity-heritage-oak-joinery-lin";
+    let mut state = state_with(bare_blocked(id));
+    // Guided retry already spent, so the ladder reaches the evidence-less
+    // terminal rung instead of spawning a (second) engineer. The flag persists
+    // across surface cycles (SurfaceInvestigationFailure preserves it).
+    state.no_progress_tracker.mark_guided_retry(id);
+
+    let reasoner = CountingUnclearReasoner::default();
+    let dispatcher = CountingDispatcher::default();
+    let filer = CountingFiler::default();
+
+    // Cycles 1..=LIMIT: each re-investigation SURFACES (never quarantines) and
+    // un-blocks the goal to NotStarted. Re-park it bare before the next cycle to
+    // model the brain re-selecting and re-stalling it.
+    for cycle in 1..=SURFACED_INVESTIGATION_FAILURE_LIMIT {
+        let report = drive(&mut state, &reasoner, &dispatcher, &filer);
+        assert!(
+            !is_quarantined(only_goal(&state)),
+            "cycle {cycle}: at/below the pre-bump bound the goal must NOT yet be quarantined"
+        );
+        assert!(
+            report.quarantined.is_empty(),
+            "cycle {cycle}: nothing may be quarantined before the (LIMIT + 1)th observation"
+        );
+        assert_eq!(
+            report.investigation_errors,
+            vec![id.to_string()],
+            "cycle {cycle}: the evidence-less stall must be SURFACED (retriable), not parked"
+        );
+        assert_eq!(
+            state.no_progress_tracker.surfaced_failures(id),
+            cycle,
+            "cycle {cycle}: exactly one surfaced failure is recorded per surface cycle"
+        );
+        // The surface un-blocked the goal to NotStarted; re-park it bare for the
+        // next re-investigation pass.
+        reblock_bare(&mut state, id);
+    }
+
+    // Cycle LIMIT + 1: the PRE-bump surfaced count now equals the bound, so THIS
+    // observation quarantines terminally instead of surfacing a (LIMIT + 1)th
+    // time. This is the exact cycle of fire.
+    let report = drive(&mut state, &reasoner, &dispatcher, &filer);
+    assert!(
+        is_quarantined(only_goal(&state)),
+        "the (LIMIT + 1)th observation must terminally quarantine the goal"
+    );
+    assert_eq!(
+        report.quarantined,
+        vec![id.to_string()],
+        "quarantine fires on exactly the cycle AFTER the LIMIT-th surface — never earlier, \
+         never later"
+    );
+    assert!(
+        report.investigation_errors.is_empty(),
+        "the quarantine cycle is terminal: it must NOT also surface a retriable failure"
     );
 }

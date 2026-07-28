@@ -106,6 +106,59 @@ fn leaves_unrelated_text_byte_for_byte() {
     }
 }
 
+/// Edge / negative cases (Step 18b review, finding #4): pin the exact fold
+/// boundaries so a future refactor of the single-scan folder cannot silently
+/// over-collapse a distinct cause OR under-fold a real volatile id. Each case
+/// documents WHY the folder does (or does not) rewrite it.
+#[test]
+fn fold_boundaries_are_exact_and_utf8_safe() {
+    // `goal-` NOT followed by an ASCII digit is NOT the positional shape — it
+    // must survive untouched (a real goal-id run needs at least one digit).
+    for untouched in [
+        "goal-",              // trailing prefix, no slug at all
+        "goal-abc",           // letters, not digits
+        "goal-x1",            // starts with a letter, not a digit
+        "goal- 12",           // a space breaks the digit run immediately
+        "reblock goal-",      // trailing prefix mid-string
+        "simard-identity-",   // trailing identity prefix, EMPTY slug
+        "simard-identity- x", // space breaks the slug run immediately
+    ] {
+        assert_eq!(
+            fold_volatile_goal_ids(untouched),
+            untouched,
+            "a non-matching volatile-prefix shape must be returned byte-for-byte: {untouched:?}"
+        );
+    }
+
+    // Partial fold: the DIGIT run folds, trailing non-digits are preserved
+    // verbatim — the fold consumes exactly `goal-<digits>` and no more.
+    assert_eq!(
+        fold_volatile_goal_ids("goal-12abc"),
+        "goal-*abc",
+        "only the leading digit run of a positional id folds; the rest is preserved"
+    );
+
+    // Every occurrence in a key folds independently.
+    assert_eq!(
+        fold_volatile_goal_ids("goal-1 blocks goal-4087"),
+        "goal-* blocks goal-*",
+        "multiple positional ids in one key each fold to the stable placeholder"
+    );
+    assert_eq!(
+        fold_volatile_goal_ids("simard-identity-nordic-hearth and goal-9"),
+        "simard-identity-* and goal-*",
+        "identity and positional shapes fold together in the same key"
+    );
+
+    // UTF-8 safety: multibyte scalars adjacent to a fold must be copied whole
+    // (never split on a byte boundary), and the fold itself is unaffected.
+    assert_eq!(
+        fold_volatile_goal_ids("café goal-7 ☕ simard-identity-x1 ✓"),
+        "café goal-* ☕ simard-identity-* ✓",
+        "multibyte characters around a fold must survive intact (char-boundary safe)"
+    );
+}
+
 // === end-to-end dedup property (the churn stopper) ==========================
 
 #[test]
