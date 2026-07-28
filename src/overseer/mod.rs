@@ -164,9 +164,9 @@ pub use whisper_ops::{
 };
 pub use wiring::{
     BoardGoalCurator, MemoryRecallOps, OverseerCadence, OverseerTickReport, RefuseDeployer,
-    assemble_capabilities, build_overseer, overseer_identity, overseer_tick,
-    overseer_tick_detailed, overseer_tick_interval_secs, run_overseer_tick_isolated,
-    run_overseer_tick_isolated_detailed,
+    TickWatchdog, assemble_capabilities, build_overseer, guard_generation_matches,
+    overseer_identity, overseer_tick, overseer_tick_detailed, overseer_tick_interval_secs,
+    run_overseer_tick_isolated, run_overseer_tick_isolated_detailed,
 };
 
 pub use activity::ProblemEntry;

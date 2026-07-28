@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
@@ -1034,6 +1034,19 @@ pub fn run_ooda_daemon(
     let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
+    // Liveness watchdog (Observed Problem #3): the monotonic second the current
+    // in-flight tick was armed, plus a generation token. A tick that HANGS on a
+    // long gh/network call never clears `overseer_tick_running` via its Drop
+    // guard, so without a watchdog every later scheduled tick is silently
+    // dropped and the Overseer goes stale (the observed 86-minute gaps). The
+    // watchdog reclaims a tick that has exceeded its wall-clock budget; the
+    // generation token makes the reclaim race-free — a later-finishing hung tick
+    // sees a bumped generation and does NOT clear the fresh catch-up tick's
+    // guard. Bound: three cadence intervals, floored at 10 minutes.
+    let overseer_tick_armed_at = Arc::new(AtomicU64::new(0));
+    let overseer_tick_generation = Arc::new(AtomicU64::new(0));
+    let overseer_tick_watchdog =
+        crate::overseer::TickWatchdog::new(overseer_interval_secs.saturating_mul(3).max(600));
     // #893: running count of CONSECUTIVE transient (self-healable) cycle
     // failures, owned by the daemon across ticks (each tick rebuilds the
     // Overseer on a fresh thread). Reset to 0 on any completed tick; incremented
@@ -1867,12 +1880,49 @@ pub fn run_ooda_daemon(
         // never crashes the daemon.
         if overseer_acting_enabled {
             let now_secs = overseer_epoch.elapsed().as_secs();
+            // Liveness watchdog (Observed Problem #3): before scheduling, check
+            // whether a previously-armed tick has hung past its wall-clock
+            // budget. If so, reclaim its slot so a catch-up tick can run rather
+            // than letting the stuck guard drop every future tick. Bumping the
+            // generation token invalidates the hung tick's Drop guard (the
+            // stale-clear race), and we surface a clear staleness/liveness
+            // signal via structured tracing + the durable daemon log.
+            if overseer_tick_watchdog.should_reclaim(
+                overseer_tick_running.load(Ordering::SeqCst),
+                overseer_tick_armed_at.load(Ordering::SeqCst),
+                now_secs,
+            ) {
+                let inflight = overseer_tick_watchdog
+                    .inflight_secs(overseer_tick_armed_at.load(Ordering::SeqCst), now_secs);
+                overseer_tick_generation.fetch_add(1, Ordering::SeqCst);
+                overseer_tick_running.store(false, Ordering::SeqCst);
+                tracing::warn!(
+                    target: "simard.overseer.watchdog",
+                    inflight_secs = inflight,
+                    max_inflight_secs = overseer_tick_watchdog.max_inflight_secs(),
+                    "overseer tick hung past its budget; reclaiming the slot for a catch-up tick"
+                );
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] WARN: overseer tick hung {inflight}s (budget {}s) — \
+                         reclaiming the overlap guard so scheduled ticks resume (liveness watchdog)",
+                        overseer_tick_watchdog.max_inflight_secs(),
+                    ),
+                );
+            }
             if overseer_cadence.due(now_secs)
                 && overseer_tick_running
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
             {
+                // Record the arm time + this tick's generation so the watchdog
+                // can detect a hang and the Drop guard can clear the slot only
+                // while this tick still owns it.
+                overseer_tick_armed_at.store(now_secs, Ordering::SeqCst);
+                let tick_generation = overseer_tick_generation.load(Ordering::SeqCst);
                 let running = Arc::clone(&overseer_tick_running);
+                let generation_for_tick = Arc::clone(&overseer_tick_generation);
                 let consecutive_transient_counter = Arc::clone(&overseer_consecutive_transient);
                 let transient_ceiling = overseer_transient_ceiling;
                 let mem_for_tick = Arc::clone(&shared_mem);
@@ -1897,14 +1947,32 @@ pub fn run_ooda_daemon(
                 let spawn = std::thread::Builder::new()
                     .name("overseer-tick".to_string())
                     .spawn(move || {
-                        // Always clear the overlap guard, even on panic.
-                        struct ClearOnDrop(Arc<AtomicBool>);
+                        // Clear the overlap guard when this tick finishes (even
+                        // on panic) — but ONLY if this tick still owns the slot.
+                        // A liveness-watchdog reclaim bumps the generation, so a
+                        // hung tick that finishes AFTER being reclaimed must not
+                        // clear the fresh catch-up tick's guard (the stale-clear
+                        // race, pinned by `guard_generation_matches`).
+                        struct ClearOnDrop {
+                            running: Arc<AtomicBool>,
+                            generation: Arc<AtomicU64>,
+                            my_generation: u64,
+                        }
                         impl Drop for ClearOnDrop {
                             fn drop(&mut self) {
-                                self.0.store(false, Ordering::SeqCst);
+                                if crate::overseer::guard_generation_matches(
+                                    self.my_generation,
+                                    self.generation.load(Ordering::SeqCst),
+                                ) {
+                                    self.running.store(false, Ordering::SeqCst);
+                                }
                             }
                         }
-                        let _clear = ClearOnDrop(running);
+                        let _clear = ClearOnDrop {
+                            running,
+                            generation: generation_for_tick,
+                            my_generation: tick_generation,
+                        };
 
                         // Apply the gap-scan cadence for THIS tick on top of the
                         // config default build_overseer sets.

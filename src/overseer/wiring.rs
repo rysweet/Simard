@@ -105,6 +105,73 @@ impl OverseerCadence {
     }
 }
 
+// ─────────────────────────── tick watchdog ─────────────────────────────────
+
+/// Liveness watchdog for the periodic Overseer tick (Observed Problem #3).
+///
+/// The daemon spawns each Overseer tick on a background thread guarded by a
+/// single-slot overlap flag so ticks never stack. That flag is cleared by the
+/// tick thread's `Drop` guard — but only if the thread ACTUALLY finishes. A tick
+/// that HANGS on a long `gh`/network call therefore never clears the flag, and
+/// with no watchdog every subsequent scheduled tick is silently dropped: the
+/// Overseer goes stale and the tick history shows large gaps (the 86-minute gap
+/// this fixes).
+///
+/// This is a deliberately clock-free, side-effect-free decision component (it
+/// mirrors [`OverseerCadence`]): the caller feeds a monotonic `now_secs` and the
+/// second the in-flight tick was armed, and the watchdog decides whether that
+/// tick has exceeded its bounded wall-clock budget and must be reclaimed so a
+/// fresh catch-up tick can run. All the actual reclaiming (clearing the flag,
+/// bumping the generation token, emitting the staleness signal) is the daemon's
+/// job — this type only makes the pure, unit-testable decision.
+#[derive(Clone, Copy, Debug)]
+pub struct TickWatchdog {
+    max_inflight_secs: u64,
+}
+
+impl TickWatchdog {
+    /// A watchdog that reclaims an in-flight tick once it has been running for
+    /// `max_inflight_secs`. Floored at 1s so a pathological `0` can never
+    /// reclaim a tick the same second it was armed (which would busy-respawn).
+    pub fn new(max_inflight_secs: u64) -> Self {
+        Self {
+            max_inflight_secs: max_inflight_secs.max(1),
+        }
+    }
+
+    /// The wall-clock budget (seconds) a single tick may run before it is
+    /// considered hung.
+    pub fn max_inflight_secs(&self) -> u64 {
+        self.max_inflight_secs
+    }
+
+    /// Seconds the currently in-flight tick (armed at `armed_at_secs`) has been
+    /// running as of `now_secs`. Monotonic-safe: a backwards clock yields 0.
+    pub fn inflight_secs(&self, armed_at_secs: u64, now_secs: u64) -> u64 {
+        now_secs.saturating_sub(armed_at_secs)
+    }
+
+    /// Whether the in-flight tick should be reclaimed as hung.
+    ///
+    /// Returns `true` only when a tick IS in flight (`armed`) AND it has been
+    /// running for at least [`Self::max_inflight_secs`]. When no tick is in
+    /// flight there is nothing to reclaim, so this is always `false`.
+    pub fn should_reclaim(&self, armed: bool, armed_at_secs: u64, now_secs: u64) -> bool {
+        armed && self.inflight_secs(armed_at_secs, now_secs) >= self.max_inflight_secs
+    }
+}
+
+/// Whether a tick thread's overlap-guard `Drop` may still clear the shared
+/// running flag: only when the generation token it captured at spawn still
+/// matches the current generation. A watchdog reclaim bumps the generation, so a
+/// LATER-finishing hung tick sees a mismatch and must NOT clear the flag —
+/// otherwise it would clear the guard out from under the fresh catch-up tick
+/// that replaced it (the stale-clear race). Pure so the race-freedom is pinned
+/// by a unit test.
+pub fn guard_generation_matches(spawn_generation: u64, current_generation: u64) -> bool {
+    spawn_generation == current_generation
+}
+
 // ─────────────────────────── per-tick report ───────────────────────────────
 
 /// Structured tally of one Overseer tick. Every field is emitted as a
@@ -1589,6 +1656,145 @@ mod tests {
         let mut cadence = OverseerCadence::new(60, 100);
         assert!(!cadence.due(50), "clock moved backwards — never fires");
         assert!(cadence.due(160), "forward past the interval — fires");
+    }
+
+    // ── tick watchdog (Observed Problem #3) ───────────────────────────────
+
+    #[test]
+    fn watchdog_does_not_reclaim_a_tick_within_its_budget() {
+        let wd = TickWatchdog::new(900);
+        // No tick in flight → nothing to reclaim regardless of the clock.
+        assert!(!wd.should_reclaim(false, 0, 10_000));
+        // In flight but still well within budget.
+        assert!(!wd.should_reclaim(true, 1_000, 1_000), "0s in — not hung");
+        assert!(
+            !wd.should_reclaim(true, 1_000, 1_899),
+            "899s in — just under the 900s budget"
+        );
+    }
+
+    #[test]
+    fn watchdog_reclaims_a_tick_that_exceeds_its_budget() {
+        let wd = TickWatchdog::new(900);
+        assert!(
+            wd.should_reclaim(true, 1_000, 1_900),
+            "exactly at the budget — reclaim the hung tick"
+        );
+        assert!(
+            wd.should_reclaim(true, 1_000, 6_160),
+            "86 minutes in (the observed gap) — definitely reclaim"
+        );
+    }
+
+    #[test]
+    fn watchdog_budget_is_floored_to_avoid_same_second_respawn() {
+        // A pathological 0 budget must not reclaim a tick the instant it arms.
+        let wd = TickWatchdog::new(0);
+        assert_eq!(wd.max_inflight_secs(), 1);
+        assert!(
+            !wd.should_reclaim(true, 100, 100),
+            "same second — not yet hung"
+        );
+        assert!(
+            wd.should_reclaim(true, 100, 101),
+            "1s past the floor — hung"
+        );
+    }
+
+    #[test]
+    fn watchdog_inflight_is_monotonic_safe() {
+        let wd = TickWatchdog::new(900);
+        // Clock going backwards yields 0 elapsed, never a reclaim.
+        assert_eq!(wd.inflight_secs(1_000, 500), 0);
+        assert!(!wd.should_reclaim(true, 1_000, 500));
+    }
+
+    #[test]
+    fn generation_guard_prevents_the_stale_clear_race() {
+        // The fresh catch-up tick spawned after a reclaim owns generation 1.
+        // The earlier hung tick (spawned at generation 0) must NOT clear the
+        // guard when it finally finishes — its generation no longer matches.
+        assert!(
+            guard_generation_matches(1, 1),
+            "the current tick still owns the guard — its Drop may clear it"
+        );
+        assert!(
+            !guard_generation_matches(0, 1),
+            "a reclaimed (stale) tick must not clear the fresh tick's guard"
+        );
+    }
+
+    /// End-to-end liveness property (Observed Problem #3): a hung tick must not
+    /// permanently block later scheduled ticks. Models the daemon's overlap
+    /// guard + generation token + watchdog reclaim over a virtual clock and
+    /// asserts the schedule recovers instead of going stale forever.
+    #[test]
+    fn a_hung_tick_does_not_block_subsequent_ticks() {
+        let interval = 900u64;
+        let mut cadence = OverseerCadence::new(interval, 0);
+        // Reclaim a tick after 3 missed intervals of hang.
+        let wd = TickWatchdog::new(interval * 3);
+
+        // Guard state the daemon owns across iterations.
+        let mut running = false;
+        let mut armed_at = 0u64;
+        let mut generation = 0u64;
+        // The generation captured by the (still-hung) in-flight tick.
+        let mut inflight_gen = 0u64;
+
+        let mut ticks_started = 0usize;
+        let mut reclaims = 0usize;
+        // Generation captured by the FIRST tick (the one that hangs). After a
+        // reclaim it must become stale so its eventual Drop is a no-op.
+        let mut first_tick_gen: Option<u64> = None;
+
+        // t=900: first tick becomes due and starts (arms the guard), then HANGS
+        // — it never finishes, so its Drop never clears `running`.
+        for now in (1..=6000).step_by(1) {
+            // Watchdog runs first each iteration.
+            if wd.should_reclaim(running, armed_at, now as u64) {
+                // Reclaim: bump generation (invalidating the hung tick's Drop)
+                // and free the slot so a catch-up tick can run.
+                generation += 1;
+                running = false;
+                reclaims += 1;
+            }
+            let due = cadence.due(now as u64);
+            if due && !running {
+                // Arm a fresh tick.
+                running = true;
+                armed_at = now as u64;
+                inflight_gen = generation;
+                if first_tick_gen.is_none() {
+                    first_tick_gen = Some(generation);
+                }
+                ticks_started += 1;
+                // This modelled tick hangs forever — we never clear `running`
+                // here, exactly like a tick blocked on a network call.
+            }
+        }
+
+        // Without the watchdog the guard would latch after the first hang and
+        // `ticks_started` would be exactly 1 forever. With it, the hung tick is
+        // reclaimed and later ticks run.
+        assert!(
+            reclaims >= 1,
+            "the hung tick must be reclaimed at least once"
+        );
+        assert!(
+            ticks_started >= 2,
+            "later scheduled ticks must still run after a hang (got {ticks_started})"
+        );
+        // The FIRST (hung) tick's generation is now stale, so its eventual Drop
+        // is a no-op and can never clear the catch-up tick's guard.
+        let first_gen = first_tick_gen.expect("at least one tick started");
+        assert!(
+            !guard_generation_matches(first_gen, generation),
+            "the hung tick's generation must be invalidated by the reclaim"
+        );
+        // The current in-flight tick, by contrast, legitimately still owns the
+        // guard (its generation matches) — that is correct, not a leak.
+        assert!(guard_generation_matches(inflight_gen, generation));
     }
 
     // ── fakes for the tick driver ─────────────────────────────────────────
