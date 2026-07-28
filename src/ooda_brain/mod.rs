@@ -40,11 +40,15 @@ mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_group_c_contract;
+#[cfg(test)]
 mod tests_per_goal_cycle;
 #[cfg(test)]
 mod tests_record_admission;
 #[cfg(test)]
 mod tests_record_decision;
+#[cfg(test)]
+mod tests_record_idea_dedup_consolidation;
 #[cfg(test)]
 mod tests_record_orient_decide;
 #[cfg(test)]
@@ -1346,6 +1350,59 @@ impl IdeaDedupDecision {
             | Self::EnhanceExisting { rationale, .. } => rationale,
         }
     }
+
+    /// Construct a validated [`IdeaDedupDecision`] from already-separated
+    /// `choice` + field inputs — the SINGLE shared closed-enum validation
+    /// chokepoint reused by the `simard ooda record-idea-dedup` CLI writer AND
+    /// by [`read_verified_idea_dedup`], so writer and reader can never drift
+    /// (issue #2925, Group C of epic #4719).
+    ///
+    /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
+    /// * `reason` is sanitized (ANSI/C0 stripped, whitespace folded, bounded to
+    ///   [`IDEA_RATIONALE_MAX_CHARS`]) and MUST be non-empty afterwards ⇒ `None`
+    ///   otherwise (fail CLOSED — a rationale made entirely of control bytes
+    ///   collapses to empty and is rejected, not accepted).
+    /// * Per-variant field OWNERSHIP is enforced: `target_node_id` is owned ONLY
+    ///   by `enhance_existing`, where it is REQUIRED (non-empty after sanitize).
+    ///   `create_new` / `skip` REJECT any `target_node_id` (⇒ `None`). An
+    ///   `enhance_existing` without a target is unactionable — guessing a target
+    ///   is a wrong-node write, so it fails CLOSED here.
+    pub fn from_choice_fields(choice: &str, reason: &str, target_node_id: &str) -> Option<Self> {
+        let rationale = sanitize::sanitize_context_var(reason.trim(), IDEA_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        let target_present = !target_node_id.trim().is_empty();
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("create_new") => {
+                // `create_new` owns no target — any smuggled target fails CLOSED.
+                if target_present {
+                    return None;
+                }
+                Some(Self::CreateNew { rationale })
+            }
+            c if c.eq_ignore_ascii_case("skip") => {
+                // `skip` owns no target — any smuggled target fails CLOSED.
+                if target_present {
+                    return None;
+                }
+                Some(Self::Skip { rationale })
+            }
+            c if c.eq_ignore_ascii_case("enhance_existing") => {
+                let target =
+                    sanitize::sanitize_context_var(target_node_id.trim(), IDEA_RATIONALE_MAX_CHARS);
+                if target.is_empty() {
+                    // enhance without a target is unactionable → fail CLOSED.
+                    return None;
+                }
+                Some(Self::EnhanceExisting {
+                    target_node_id: target,
+                    rationale,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The whole existing pool, fed to the consolidation brain to cluster by
@@ -1371,6 +1428,305 @@ pub struct IdeaCluster {
     /// Optional supporting evidence text/links appended to the canonical.
     #[serde(default)]
     pub evidence: Vec<String>,
+}
+
+/// Max characters retained for an idea decision's free text (dedup `rationale`,
+/// cluster `merged_rationale`, and each list element) when validated through the
+/// shared [`IdeaDedupDecision::from_choice_fields`] / [`IdeaCluster::sanitized`]
+/// chokepoints. Mirrors the admission/per-goal reason bound — caps the blast
+/// radius of a runaway/hostile model response on operator logs and records.
+const IDEA_RATIONALE_MAX_CHARS: usize = 500;
+
+/// Max clusters retained in one consolidation record, and max elements retained
+/// in a cluster's `redundant_ids` / `evidence` lists. Mirrors the 64-entry
+/// prompt-cost DoS guard in `render_existing_shortlist` — an over-long list is
+/// capped (never trusted whole), never an error.
+const IDEA_CLUSTER_LIST_MAX: usize = 64;
+
+/// Sanitize every element of a cluster list (`redundant_ids` / `evidence`)
+/// through the same ANSI/C0-stripping, whitespace-folding, length-bounding
+/// chokepoint as the free text; drop elements that collapse to empty, and cap
+/// the list length. `node_id`s / evidence lines pass through unchanged; a
+/// hostile control-laden or empty element is dropped before it can reach an
+/// operator log or persisted record.
+fn sanitize_idea_list(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|s| sanitize::sanitize_context_var(s.trim(), IDEA_RATIONALE_MAX_CHARS))
+        .filter(|s| !s.is_empty())
+        .take(IDEA_CLUSTER_LIST_MAX)
+        .collect()
+}
+
+impl IdeaCluster {
+    /// Sanitize + validate one cluster — the SINGLE shared per-cluster
+    /// chokepoint reused by the `simard ooda record-idea-consolidation` CLI
+    /// writer AND by [`read_verified_idea_consolidation`], so writer and reader
+    /// can never drift (issue #2925).
+    ///
+    /// Returns `None` (⇒ the cluster is DROPPED, not an error) when
+    /// `canonical_id` is empty after sanitizing — a headless cluster names
+    /// nothing to keep. Otherwise sanitizes `merged_rationale` (ANSI/C0
+    /// stripped, whitespace folded, bounded) and sanitizes + drops-empty + caps
+    /// the `redundant_ids` / `evidence` lists.
+    pub fn sanitized(&self) -> Option<IdeaCluster> {
+        let canonical_id =
+            sanitize::sanitize_context_var(self.canonical_id.trim(), IDEA_RATIONALE_MAX_CHARS);
+        if canonical_id.is_empty() {
+            return None;
+        }
+        Some(IdeaCluster {
+            canonical_id,
+            redundant_ids: sanitize_idea_list(&self.redundant_ids),
+            merged_rationale: sanitize::sanitize_context_var(
+                self.merged_rationale.trim(),
+                IDEA_RATIONALE_MAX_CHARS,
+            ),
+            evidence: sanitize_idea_list(&self.evidence),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed, on-disk creative-ideas records + fail-CLOSED readers (issue #2925;
+// Group C of epic #4719). The reasoning recipe ACTS by calling a gated
+// `simard ooda record-idea-dedup` / `record-idea-consolidation` tool that writes
+// exactly one of these records; `RecipeBrain` reads it back with
+// `read_verified_idea_dedup` / `read_verified_idea_consolidation` instead of
+// scraping the agent's stdout. EVERY failure mode is an `Err`; HOW that `Err` is
+// surfaced is UNCHANGED — the dedup gate maps it to a fail-CLOSED drop, and the
+// consolidation applier maps it to "write nothing, retry later". The
+// `Some(vec![])` vs `None` distinction is preserved EXACTLY: a present-but-empty
+// consolidation record reads back `Ok(vec![])`, an absent/malformed/mismatched
+// record is `Err`.
+// ---------------------------------------------------------------------------
+
+/// Pinned on-disk schema string for an [`IdeaDedupDecisionRecord`]. The reader
+/// rejects any other value, so a future `…v2` writer can never be honored by a
+/// `…v1` reader (bumping this is a hard, coordinated change).
+pub const IDEA_DEDUP_SCHEMA: &str = "simard.creative.idea_dedup.v1";
+
+/// Pinned on-disk schema string for an [`IdeaConsolidationRecord`].
+pub const IDEA_CONSOLIDATION_SCHEMA: &str = "simard.creative.idea_consolidation.v1";
+
+/// The fixed synthetic per-seam `goal_id` sentinel for the semantic-dedup seam.
+/// Neither [`IdeaDedupCtx`] nor [`IdeaConsolidationCtx`] is naturally
+/// goal-scoped, so R6 enforces write/read self-consistency against these
+/// sentinels (the fresh per-call temp dir already defeats cross-cycle replay).
+pub const IDEA_DEDUP_GOAL_SENTINEL: &str = "creative-idea-dedup";
+
+/// The fixed synthetic per-seam `goal_id` sentinel for the consolidation seam.
+pub const IDEA_CONSOLIDATION_GOAL_SENTINEL: &str = "creative-idea-consolidation";
+
+/// One typed, on-disk creative-idea dedup verdict, written by the
+/// `simard ooda record-idea-dedup` tool and read by [`RecipeBrain`] via
+/// [`read_verified_idea_dedup`]. NEVER scraped from agent prose.
+///
+/// The `choice` discriminator + its per-variant fields come from
+/// [`IdeaDedupDecision`]'s existing `#[serde(tag = "choice",
+/// rename_all = "snake_case")]` representation, flattened into the record — so
+/// the tool and the enum can never disagree on the wire shape.
+///
+/// [`RecipeBrain`]: recipe_brain::RecipeBrain
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdeaDedupDecisionRecord {
+    /// Schema pin. Must equal [`IDEA_DEDUP_SCHEMA`].
+    pub schema: String,
+    /// The per-seam sentinel this verdict is for. Re-verified on read.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified on read.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + fields).
+    #[serde(flatten)]
+    pub decision: IdeaDedupDecision,
+}
+
+/// One typed, on-disk creative-ideas consolidation verdict, written by the
+/// `simard ooda record-idea-consolidation` tool and read by [`RecipeBrain`] via
+/// [`read_verified_idea_consolidation`]. NEVER scraped from agent prose.
+///
+/// Unlike the dedup record this carries a validated cluster `Vec` (NOT a
+/// flattened choice enum); a present-but-empty `clusters` is a VALID "nothing to
+/// consolidate" result, distinct from an absent record.
+///
+/// [`RecipeBrain`]: recipe_brain::RecipeBrain
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdeaConsolidationRecord {
+    /// Schema pin. Must equal [`IDEA_CONSOLIDATION_SCHEMA`].
+    pub schema: String,
+    /// The per-seam sentinel this verdict is for. Re-verified on read.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified on read.
+    pub cycle_number: u32,
+    /// The validated cluster list (re-sanitized + re-capped on read).
+    #[serde(default)]
+    pub clusters: Vec<IdeaCluster>,
+}
+
+/// Read and FULLY verify a creative-idea dedup record, returning the validated
+/// closed-enum decision.
+///
+/// Returns `Ok(IdeaDedupDecision)` ONLY when the record exists, deserializes
+/// into an [`IdeaDedupDecisionRecord`], pins [`IDEA_DEDUP_SCHEMA`], its embedded
+/// `goal_id` / `cycle_number` match the seam sentinels, and its fields
+/// re-validate through [`IdeaDedupDecision::from_choice_fields`]. EVERY other
+/// outcome is an `Err` — the caller (`decide_idea_dedup`) surfaces it and the
+/// dedup gate fails CLOSED (drops the candidate this cycle). This reader never
+/// picks a default; it only reports Ok/Err.
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R4 unknown choice / enhance-without-target,
+/// R5 missing/empty(-after-sanitize) rationale, R6 goal_id mismatch,
+/// R7 cycle_number mismatch. R8 (all pass) ⇒ `Ok`. Fields are re-sanitized on
+/// read through the same chokepoint the writer uses.
+pub fn read_verified_idea_dedup(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<IdeaDedupDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-idea-dedup-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED.
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "idea-dedup record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2 / R4(unknown-choice) / R5(missing-field) — malformed JSON, an unknown
+    // `choice`, or a missing required field all fail deserialization.
+    let record: IdeaDedupDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "idea-dedup record did not deserialize (malformed/unknown-choice/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != IDEA_DEDUP_SCHEMA {
+        return Err(fail(format!(
+            "idea-dedup record schema {:?} != expected {IDEA_DEDUP_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — seam identity (no other-seam replay).
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "idea-dedup record goal_id {:?} != seam sentinel {goal_id:?} (stale/other-seam; fail-CLOSED)",
+            record.goal_id
+        )));
+    }
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "idea-dedup record cycle_number {} != expected {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R4(enhance-without-target) + R5(empty-after-sanitize) — re-validate +
+    // re-sanitize through the SAME closed-enum chokepoint the writer uses,
+    // independently of the tool. `target_node_id` is extracted from the
+    // already-typed `record.decision`, so field ownership always matches its
+    // variant (serde dropped any non-owned field on deserialize).
+    let target: &str = match &record.decision {
+        IdeaDedupDecision::CreateNew { .. } | IdeaDedupDecision::Skip { .. } => "",
+        IdeaDedupDecision::EnhanceExisting { target_node_id, .. } => target_node_id.as_str(),
+    };
+    IdeaDedupDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+        target,
+    )
+    .ok_or_else(|| {
+        fail(
+            "idea-dedup record failed chokepoint re-validation (empty rationale after sanitize / \
+             enhance without a target; fail-CLOSED)"
+                .to_string(),
+        )
+    })
+}
+
+/// Read and FULLY verify a creative-ideas consolidation record, returning the
+/// validated (re-sanitized + re-capped) cluster list.
+///
+/// Returns `Ok(Vec<IdeaCluster>)` when the record exists, deserializes into an
+/// [`IdeaConsolidationRecord`], pins [`IDEA_CONSOLIDATION_SCHEMA`], and its
+/// embedded `goal_id` / `cycle_number` match the seam sentinels. A
+/// present-but-empty `clusters` reads back `Ok(vec![])` — a VALID "nothing to
+/// consolidate" result, distinct from an absent record. Each surviving cluster
+/// is re-run through [`IdeaCluster::sanitized`] (headless clusters dropped) and
+/// the list is re-capped at [`IDEA_CLUSTER_LIST_MAX`] on read (never trusted
+/// whole).
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R6 goal_id mismatch, R7 cycle_number mismatch.
+/// (There is no R4/R5 for consolidation — an empty list is valid, and headless
+/// clusters are dropped, not rejected.)
+pub fn read_verified_idea_consolidation(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<Vec<IdeaCluster>> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-idea-consolidation-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED (distinct from a
+    // present-but-empty Ok(vec![])).
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "idea-consolidation record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2 — malformed JSON / missing required field.
+    let record: IdeaConsolidationRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "idea-consolidation record did not deserialize (malformed/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != IDEA_CONSOLIDATION_SCHEMA {
+        return Err(fail(format!(
+            "idea-consolidation record schema {:?} != expected {IDEA_CONSOLIDATION_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — seam identity (no other-seam replay).
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "idea-consolidation record goal_id {:?} != seam sentinel {goal_id:?} (stale/other-seam; fail-CLOSED)",
+            record.goal_id
+        )));
+    }
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "idea-consolidation record cycle_number {} != expected {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // Re-sanitize + re-cap on read through the SAME per-cluster chokepoint the
+    // writer uses. Headless clusters are dropped (not an error); a present-empty
+    // list reads back Ok(vec![]).
+    Ok(record
+        .clusters
+        .iter()
+        .filter_map(IdeaCluster::sanitized)
+        .take(IDEA_CLUSTER_LIST_MAX)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

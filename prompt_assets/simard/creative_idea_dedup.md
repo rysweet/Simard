@@ -35,14 +35,15 @@ Pick exactly one `choice`:
 - `create_new` — The candidate targets a different problem, proposes a different
   mechanism, or is otherwise genuinely distinct from every entry above. THE
   DEFAULT WHEN UNSURE — never invent overlap; a wrong skip/enhance loses a real
-  idea. Leave `target_node_id` empty.
+  idea. Owns NO target node id.
 - `skip` — The candidate is essentially a restatement of one existing entry and
   adds NOTHING new — no new rationale, no new evidence, no new angle. Drop it.
-  Leave `target_node_id` empty.
+  Owns NO target node id.
 - `enhance_existing` — The candidate is the SAME underlying idea as ONE existing
   entry, but it adds something that entry lacks: a sharper rationale, a concrete
   piece of evidence, a new motivating example, or a different angle on why it
-  matters. Set `target_node_id` to that entry's `node_id` (exactly as shown).
+  matters. REQUIRES `--target-node-id` set to that entry's `node_id` (exactly as
+  shown).
 
 ## HOW TO JUDGE SEMANTIC EQUIVALENCE
 
@@ -63,36 +64,64 @@ Pick exactly one `choice`:
 - Judge each candidate against the shortlist ONLY; do not speculate about ideas
   not shown.
 
-## OUTPUT FORMAT
+## HOW TO RECORD YOUR DECISION (call the tool — do NOT print anything)
 
-Respond with a single JSON object (a fenced ```json block is fine):
+Record your verdict by calling the `simard ooda record-idea-dedup` tool EXACTLY
+ONCE, using your shell/bash tool. The daemon reads the typed record the tool
+writes; it does NOT read your prose. Anything you print to stdout is ignored.
 
-```json
-{"choice": "<create_new|skip|enhance_existing>", "target_node_id": "<node_id or empty>", "rationale": "<short reason>"}
+Run (substitute your chosen `<choice>` and a concrete `<rationale>`):
+
+```bash
+"{{simard_bin}}" ooda record-idea-dedup \
+  --choice <choice> \
+  --reason "<short concrete rationale>" \
+  --record-path "{{record_path}}" \
+  --goal-id "{{goal_id}}" \
+  --cycle-number {{cycle_number}}
 ```
 
-A genuine "this is new" answer is a REAL decision: emit `create_new` explicitly.
-If your output is unparseable, if `choice` is unknown/empty, or if
-`enhance_existing` omits `target_node_id`, the thread does NOT default on your
-behalf — it FAILS CLOSED: the candidate is dropped this cycle (never a silent
-duplicate) and retried next run.
+Per-choice fields (the tool enforces per-choice ownership — supplying a field a
+choice does not own is rejected):
 
-## EXAMPLES
+- `create_new`: no extra fields (do NOT pass `--target-node-id`).
+- `skip`: no extra fields (do NOT pass `--target-node-id`).
+- `enhance_existing`: add `--target-node-id <node_id>` (REQUIRED, non-empty;
+  exactly as shown in the shortlist).
+
+For a LARGE rationale, write it to a file first and pass `--reason-path <FILE>`
+instead of the inline flag.
+
+A genuine "this is new" answer is a REAL decision: call the tool with
+`--choice create_new`. If you do not record a valid decision — an unknown
+`--choice`, an empty `--reason`, or an `enhance_existing` missing
+`--target-node-id` — the thread does NOT default on your behalf: it FAILS CLOSED
+(the candidate is dropped this cycle, never a silent duplicate, and retried next
+run).
+
+## EXAMPLES (the command to run, one per situation)
 
 Genuinely novel — keep it:
 
-```json
-{"choice": "create_new", "target_node_id": "", "rationale": "proposes a new episodic-memory compaction pass; no existing entry targets memory compaction"}
+```bash
+"{{simard_bin}}" ooda record-idea-dedup --choice create_new \
+  --reason "proposes a new episodic-memory compaction pass; no existing entry targets memory compaction" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
 Same idea, adds a concrete benchmark — strengthen the existing one:
 
-```json
-{"choice": "enhance_existing", "target_node_id": "node-7a3f", "rationale": "same goal-board caching idea as node-7a3f, but adds a measured 12% fewer reads — append as evidence"}
+```bash
+"{{simard_bin}}" ooda record-idea-dedup --choice enhance_existing \
+  --target-node-id "node-7a3f" \
+  --reason "same goal-board caching idea as node-7a3f, but adds a measured 12% fewer reads — append as evidence" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
 Near-verbatim restatement that adds nothing — drop it:
 
-```json
-{"choice": "skip", "target_node_id": "", "rationale": "restates node-91cc ('cache goal-board reads') with no new rationale, evidence, or angle"}
+```bash
+"{{simard_bin}}" ooda record-idea-dedup --choice skip \
+  --reason "restates node-91cc ('cache goal-board reads') with no new rationale, evidence, or angle" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
