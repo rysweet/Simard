@@ -206,11 +206,14 @@ Overseer's existing [failure-signature dedup](./overseer-root-cause-why.md).
 ## Reversibility — quarantine is a park, not a grave
 
 Quarantine is **terminal for the daemon, reversible for a human**. When an
-operator un-blocks the goal (`simard goal unblock` / `simard goal unblock-all`,
-or by giving it a checkable finish condition), the quarantine marker is cleared
-and the goal earns a **fresh** bounded window: the surfaced-failure counter and
-quarantine state reset, so it is re-investigated like any newly-unblocked goal
-rather than re-quarantining immediately. See
+operator un-blocks the goal with the single-id escape hatch
+(`simard goal unblock <goal-id>`, or by giving it a checkable finish condition),
+the quarantine marker is cleared and the goal earns a **fresh** bounded window:
+the surfaced-failure counter and quarantine state reset, so it is re-investigated
+like any newly-unblocked goal rather than re-quarantining immediately.
+`simard goal unblock-all` is deliberately scoped to the brain-failure safeguard
+marker and does **not** mass-clear quarantines — quarantine is a considered
+terminal state, so clearing it is an explicit per-goal decision. See
 [Quarantine and recover an unclear OODA goal](../howto/quarantine-and-recover-an-unclear-ooda-goal.md).
 
 The right permanent fix for a quarantined goal is almost always to **make its
