@@ -176,6 +176,42 @@ fn plain_summary_strips_prefix_and_scrubs_jargon() {
     assert_eq!(plainify_pr_title("chore:"), "A code change.");
 }
 
+/// Issue #1093: when the orchestrator's fallback commit-message generator lifts
+/// the agent's first stdout line verbatim, a Copilot CLI launch-log banner
+/// (`ℹ NODE_OPTIONS=… (saved preference)`) can become the PR title. The journal
+/// must NOT surface that launcher noise to a layperson as "what changed" — it
+/// collapses to the same neutral phrase a content-free title yields.
+#[test]
+fn plain_summary_drops_node_options_launcher_banner_title() {
+    // The full, real-world shape: conventional prefix + banner (both `feat:` and
+    // `fix:` fallbacks were observed on leaked commits, e.g. `9a7e88ec8`).
+    let feat = plainify_pr_title(
+        "feat: \u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+         To change: /home/azureuser/.amplihack/config",
+    );
+    assert_eq!(feat, "A code change.", "banner leaked into journal: {feat}");
+
+    let fix = plainify_pr_title(
+        "fix: \u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+         To change: /home/azureuser/.amplihack/config",
+    );
+    assert_eq!(fix, "A code change.", "banner leaked into journal: {fix}");
+}
+
+/// Anti-weakening guard (issue #1093): the filter must match the launcher banner
+/// *only*. A genuine PR title that merely mentions `NODE_OPTIONS` in prose is a
+/// real change description and must survive verbatim — never collapsed to the
+/// neutral fallback.
+#[test]
+fn plain_summary_preserves_title_that_merely_mentions_node_options() {
+    let s = plainify_pr_title("fix: raise NODE_OPTIONS memory ceiling for large builds");
+    assert!(
+        s.to_lowercase().contains("node_options") && s.contains("memory ceiling"),
+        "prose mentioning NODE_OPTIONS must be preserved, got: {s}"
+    );
+    assert_ne!(s, "A code change.", "real title wrongly collapsed: {s}");
+}
+
 #[test]
 fn ci_failing_pr_is_not_ready() {
     let mut p = pr(1, "fix: patch a bug");

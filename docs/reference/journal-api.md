@@ -379,8 +379,10 @@ only in where the day's code-change proposals come from:
 - `run_journal_tick_with_prs` takes an injected `PrListSource`. In production the daemon
   passes a **`GhPrListSource`**, which wraps the `gh pr list` PR-readiness service (the same
   external view the dashboard's Merge Readiness panel uses) and maps each open PR into a
-  layperson row: the **what-changed summary** has its Conventional-Commits prefix stripped
-  and its jargon scrubbed (`plainify_pr_title`), and the **outcome** is a plain-language
+  layperson row: the **what-changed summary** has its Conventional-Commits prefix stripped,
+  any Copilot CLI launch-log banner (`ℹ NODE_OPTIONS=… (saved preference)`) dropped via the
+  shared `strip_recipe_noise` filter (issue #1093), and its jargon scrubbed
+  (`plainify_pr_title`), and the **outcome** is a plain-language
   readiness phrase ("still open — ready to combine into the main code", "…automated checks
   still running", "…not ready yet"), derived from the same objective gates the merge
   authority evaluates. A `gh` failure **degrades honestly** to an empty table (logged) so
