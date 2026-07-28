@@ -1094,9 +1094,18 @@ pub struct ResourceAdmissionDecisionRecord {
 /// picks a default; it only reports Ok/Err.
 ///
 /// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
-/// JSON, R3 wrong/missing schema, R4 unknown choice or non-owned field, R5
-/// missing/empty(-after-sanitize) rationale, R6 goal_id mismatch, R7
-/// cycle_number mismatch. R8 (all pass) ⇒ `Ok`.
+/// JSON, R3 wrong/missing schema, R4 unknown choice, R5 missing/empty(-after-
+/// sanitize) rationale, R6 goal_id mismatch, R7 cycle_number mismatch. R8 (all
+/// pass) ⇒ `Ok`.
+///
+/// Field ownership (e.g. a defer-only field smuggled onto an admit) is
+/// authoritatively enforced on the WRITE path via
+/// [`EngineerAdmissionDecision::from_choice_fields`]. The read path re-invokes
+/// that same chokepoint below as defense-in-depth, but its field-ownership arm
+/// is structurally unreachable here: serde tagged-enum deserialization drops any
+/// non-owned field, so `record.decision` only ever carries its own variant's
+/// fields, and the tuple fed back to `from_choice_fields` always matches. In
+/// practice only R5 (empty-after-sanitize) can reject at that step.
 pub fn read_verified_admission(
     path: &std::path::Path,
     goal_id: &str,
@@ -1147,9 +1156,13 @@ pub fn read_verified_admission(
         )));
     }
 
-    // R4(field-ownership)/R5(empty-after-sanitize) + defense-in-depth — extract
-    // the variant-owned fields and re-validate + re-sanitize through the SAME
-    // closed-enum chokepoint the writer uses, independently of the tool.
+    // R5(empty-after-sanitize) + defense-in-depth — extract the variant-owned
+    // fields and re-validate + re-sanitize through the SAME closed-enum chokepoint
+    // the writer uses, independently of the tool. The chokepoint's field-ownership
+    // arm cannot trip here: the tuple below is extracted from the already-typed
+    // `record.decision`, so it always matches its variant's ownership (serde dropped
+    // any non-owned field on deserialize). Field ownership is authoritatively
+    // enforced on the write path; this re-check reduces to the empty-rationale case.
     let (blocked_by, after_goal_id, overlap_files, retry_after_secs): (
         &[String],
         &str,
