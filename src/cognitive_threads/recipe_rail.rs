@@ -186,6 +186,37 @@ pub fn run_reflective_thread<I: RecipeInvoker + ?Sized>(
     }
 }
 
+/// Production-only narration for the four recipe-free (pure-Rust) threads —
+/// interoception, maintenance, engineer_log_analysis, creative_ideas. After a
+/// thread's deterministic sensing/gates have already performed EVERY durable
+/// effect, this surfaces a natural-language `reasoning_summary` from a typed
+/// record by invoking the thread's narration recipe through the identical
+/// fail-closed [`run_reflective_thread`] path the reflective threads use. The
+/// `observations` string is fenced before it rides as the `observations` ctx var.
+///
+/// Returns `Some(outcome)` ONLY when narration produced a successful tick (the
+/// caller returns it in place of its deterministic summary); `None` when
+/// narration was skipped-by-failure, so the caller falls back to its own
+/// deterministic outcome. Narration can therefore never DOWNGRADE an
+/// already-successful tick.
+pub fn narrate_pure_thread(
+    repo_root: &Path,
+    state_root: &Path,
+    recipe_name: &str,
+    thread: ThreadName,
+    observations: &str,
+    start: std::time::Instant,
+) -> Option<ThreadOutcome> {
+    let invoker = RecipeRunnerInvoker::new(repo_root.to_path_buf(), state_root.to_path_buf());
+    let ctx_vars: Vec<(&str, String)> = vec![
+        ("state_root", state_root.display().to_string()),
+        ("observations", fence_untrusted(observations)),
+    ];
+    let narrated =
+        run_reflective_thread(&invoker, recipe_name, thread, state_root, ctx_vars, start);
+    narrated.success.then_some(narrated)
+}
+
 /// The memory IPC socket a reflective recipe inherits so a bare `simard memory
 /// remember` inside it reaches the SAME live store the daemon publishes — the
 /// exact seam the episode-distiller uses (issue #2679). Kept identical to

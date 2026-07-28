@@ -360,12 +360,24 @@ fn cognition_cli_dispatches_record_thread_reasoning() {
 fn all_thirteen_threads_route_through_run_reflective_thread() {
     for thread in ALL_RECIPE_BACKED_THREADS {
         let src = read_rel(&format!("src/cognitive_threads/threads/{thread}.rs"));
+        // A thread emits its natural-language reasoning_summary either by calling
+        // `run_reflective_thread` directly (the reflective rails) or via the
+        // shared `narrate_pure_thread` helper (the recipe-free rails), which
+        // itself routes through `run_reflective_thread`.
         assert!(
-            src.contains("run_reflective_thread"),
-            "threads/{thread}.rs must route its tick through `run_reflective_thread` so it emits \
-             a natural-language reasoning_summary from a typed record"
+            src.contains("run_reflective_thread") || src.contains("narrate_pure_thread"),
+            "threads/{thread}.rs must route its tick through `run_reflective_thread` \
+             (directly or via `narrate_pure_thread`) so it emits a natural-language \
+             reasoning_summary from a typed record"
         );
     }
+    // The shared helper the recipe-free rails delegate to must itself route
+    // through `run_reflective_thread`, so the chain is verified end-to-end.
+    let rail = read_rel("src/cognitive_threads/recipe_rail.rs");
+    assert!(
+        rail.contains("fn narrate_pure_thread") && rail.contains("run_reflective_thread"),
+        "recipe_rail.rs `narrate_pure_thread` must route through `run_reflective_thread`"
+    );
 }
 
 #[test]
@@ -374,7 +386,7 @@ fn interoception_is_no_longer_recipe_free() {
     // thread (its deterministic sensing stays in the recipe/tooling).
     let src = read_rel("src/cognitive_threads/threads/interoception.rs");
     assert!(
-        src.contains("run_reflective_thread"),
+        src.contains("run_reflective_thread") || src.contains("narrate_pure_thread"),
         "interoception must be recipe-backed after WS-B (no longer a pure-Rust, recipe-free rail)"
     );
 }

@@ -643,29 +643,18 @@ impl CognitiveThread for CreativeIdeasThread {
                 // extending the #4959 typed records), invoke the recipe to surface
                 // a natural-language reasoning_summary from a typed record. Never
                 // runs under the offline test seams (narrate=false) or in dry-run.
-                if self.narrate && !report.dry_run {
-                    let invoker = super::super::recipe_rail::RecipeRunnerInvoker::new(
-                        ctx.repo_root.to_path_buf(),
-                        ctx.state_root.to_path_buf(),
-                    );
-                    let ctx_vars: Vec<(&str, String)> = vec![
-                        ("state_root", ctx.state_root.display().to_string()),
-                        (
-                            "observations",
-                            super::super::recipe_rail::fence_untrusted(&summary),
-                        ),
-                    ];
-                    let narrated = super::super::recipe_rail::run_reflective_thread(
-                        &invoker,
+                if self.narrate
+                    && !report.dry_run
+                    && let Some(narrated) = super::super::recipe_rail::narrate_pure_thread(
+                        ctx.repo_root,
+                        ctx.state_root,
                         RECIPE,
                         ThreadName::CreativeIdeas,
-                        ctx.state_root,
-                        ctx_vars,
+                        &summary,
                         start,
-                    );
-                    if narrated.success {
-                        return narrated;
-                    }
+                    )
+                {
+                    return narrated;
                 }
 
                 ThreadOutcome::ok(summary, start.elapsed()).with_detail(detail)

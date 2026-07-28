@@ -258,10 +258,6 @@ impl CognitiveThread for InteroceptionThread {
         // natural-language reasoning_summary from a typed record. Never runs
         // under the offline test constructors (narrate=false) or in dry-run.
         if self.narrate && !dry_run {
-            let invoker = super::super::recipe_rail::RecipeRunnerInvoker::new(
-                ctx.repo_root.to_path_buf(),
-                ctx.state_root.to_path_buf(),
-            );
             let observations = format!(
                 "sensed {facts} probe(s); breach={breach}; {breach_detail}",
                 breach_detail = if breach_detail.is_empty() {
@@ -270,22 +266,14 @@ impl CognitiveThread for InteroceptionThread {
                     breach_detail.as_str()
                 }
             );
-            let ctx_vars: Vec<(&str, String)> = vec![
-                ("state_root", ctx.state_root.display().to_string()),
-                (
-                    "observations",
-                    super::super::recipe_rail::fence_untrusted(&observations),
-                ),
-            ];
-            let narrated = super::super::recipe_rail::run_reflective_thread(
-                &invoker,
+            if let Some(narrated) = super::super::recipe_rail::narrate_pure_thread(
+                ctx.repo_root,
+                ctx.state_root,
                 RECIPE,
                 ThreadName::Interoception,
-                ctx.state_root,
-                ctx_vars,
+                &observations,
                 start,
-            );
-            if narrated.success {
+            ) {
                 return narrated;
             }
         }

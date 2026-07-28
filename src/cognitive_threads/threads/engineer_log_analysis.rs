@@ -237,29 +237,19 @@ impl CognitiveThread for EngineerLogAnalysisThread {
         // scan (which owns every durable issue-filing effect above), invoke the
         // recipe to surface a natural-language reasoning_summary from a typed
         // record. Never runs under the offline test constructor (narrate=false).
-        if success && self.narrate && !dry_run {
-            let invoker = super::super::recipe_rail::RecipeRunnerInvoker::new(
-                ctx.repo_root.to_path_buf(),
-                ctx.state_root.to_path_buf(),
-            );
-            let ctx_vars: Vec<(&str, String)> = vec![
-                ("state_root", ctx.state_root.display().to_string()),
-                (
-                    "observations",
-                    super::super::recipe_rail::fence_untrusted(&summary),
-                ),
-            ];
-            let narrated = super::super::recipe_rail::run_reflective_thread(
-                &invoker,
+        if success
+            && self.narrate
+            && !dry_run
+            && let Some(narrated) = super::super::recipe_rail::narrate_pure_thread(
+                ctx.repo_root,
+                ctx.state_root,
                 RECIPE,
                 ThreadName::EngineerLogAnalysis,
-                ctx.state_root,
-                ctx_vars,
+                &summary,
                 start,
-            );
-            if narrated.success {
-                return narrated;
-            }
+            )
+        {
+            return narrated;
         }
 
         if success {

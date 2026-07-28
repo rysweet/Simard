@@ -74,6 +74,25 @@ pub enum ThreadName {
 }
 
 impl ThreadName {
+    /// The closed roster of all thirteen threads, in declaration order. Single
+    /// source of truth for any code that must iterate the full set (e.g.
+    /// [`from_cli_label`](Self::from_cli_label)).
+    pub const ALL: [ThreadName; 13] = [
+        Self::Salience,
+        Self::Metacognition,
+        Self::Reflection,
+        Self::Prospection,
+        Self::OperatorModel,
+        Self::Analogy,
+        Self::Narrative,
+        Self::ValuesDeliberation,
+        Self::Consolidation,
+        Self::CreativeIdeas,
+        Self::EngineerLogAnalysis,
+        Self::Interoception,
+        Self::Maintenance,
+    ];
+
     /// The stable `snake_case` label — identical to the serde wire tag and the
     /// per-thread record filename stem.
     pub fn label(self) -> &'static str {
@@ -98,23 +117,9 @@ impl ThreadName {
     /// roster. `None` (fail closed) for anything not in the thirteen.
     pub fn from_cli_label(raw: &str) -> Option<Self> {
         let key = raw.trim();
-        [
-            Self::Salience,
-            Self::Metacognition,
-            Self::Reflection,
-            Self::Prospection,
-            Self::OperatorModel,
-            Self::Analogy,
-            Self::Narrative,
-            Self::ValuesDeliberation,
-            Self::Consolidation,
-            Self::CreativeIdeas,
-            Self::EngineerLogAnalysis,
-            Self::Interoception,
-            Self::Maintenance,
-        ]
-        .into_iter()
-        .find(|t| key.eq_ignore_ascii_case(t.label()))
+        Self::ALL
+            .into_iter()
+            .find(|t| key.eq_ignore_ascii_case(t.label()))
     }
 
     /// The single [`ThreadDomain`] tag this thread is allowed to carry. A record
