@@ -21,6 +21,7 @@ use crate::error::SimardResult;
 use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
 };
+use crate::goal_curation::no_progress_breaker::fold_goal_identity;
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
     SURFACED_INVESTIGATION_FAILURE_LIMIT, needs_reinvestigation,
@@ -80,6 +81,19 @@ const NO_PROGRESS_SUPPRESSION_MARKER_KIND: &str = "ooda-breaker-marker";
 /// derived from goal text — so goal descriptions can never smuggle content into
 /// the marker (no argv/flag injection, no path traversal).
 const NO_PROGRESS_SUPPRESSION_MARKER_REF_ID: &str = "ooda-breaker";
+
+/// Body-marker prefix the breaker embeds in a filed tracking issue and the
+/// open-issue backstop ([`NoProgressIssueFiler::issue_open_with_marker`])
+/// matches on. The full marker line is `{PREFIX} {folded_id}` (one ASCII space,
+/// where `folded_id = fold_goal_identity(goal.id)`), placed in the issue
+/// **body**, never the title. A constant — never re-typed at a call site.
+///
+/// This is the GitHub-durable identity key that lets suppression survive the two
+/// conditions the board-local [`WipRef`] marker cannot cover: **goal-id churn**
+/// (a new id each cycle defeats the `WipRef`) and a **goal-board reset** (which
+/// erases the `WipRef` entirely). The key is a pure hash of the id, so it leaks
+/// no secrets and is safe to embed and to interpolate into a `gh --search`.
+const OODA_GOAL_KEY_MARKER_PREFIX: &str = "ooda-goal-key:";
 
 /// True when `wip` is a breaker-authored escalation artifact — EITHER the durable
 /// suppression marker ([`NO_PROGRESS_SUPPRESSION_MARKER_KIND`], written
@@ -157,6 +171,26 @@ pub(crate) trait NoProgressIssueFiler {
     /// `None` simply means the goal stays Blocked without a linked artifact
     /// (no worse than before this linkage existed).
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue>;
+
+    /// Existence backstop: is there an OPEN `ooda-stuck` issue whose body carries
+    /// `marker` (an `ooda-goal-key:<folded_id>` line)? Additive with a default of
+    /// `false` so every existing impl and test fake is unchanged and takes the
+    /// "no duplicate found" path.
+    ///
+    /// Called ONLY after the board-local [`WipRef`] fast path misses (see
+    /// [`escalate_with_tracking_issue`]), so a steady-state daemon with an intact
+    /// board makes zero extra API calls (SR7).
+    ///
+    /// **Fail-open (SR5):** a query error MUST return `false` ("no duplicate
+    /// found") and let filing proceed — a rare duplicate is strictly better than
+    /// a lost stuck-goal signal, and the check must never abort the OODA cycle.
+    ///
+    /// **Scope:** OPEN issues only. A closed issue does not suppress — a reopened
+    /// stall should re-file, consistent with the storm-suppression
+    /// `find_existing` semantics.
+    fn issue_open_with_marker(&self, _marker: &str) -> bool {
+        false
+    }
 }
 
 /// Production filer: `gh issue create --label ooda-stuck`, mirroring the
@@ -212,6 +246,86 @@ impl NoProgressIssueFiler for GhIssueFiler {
             }
         }
     }
+
+    /// Open-issue backstop over `gh issue list`, scoped to the breaker's own
+    /// `ooda-stuck` label and the `ooda-goal-key` body marker.
+    ///
+    /// This is a direct, independent existence query — it deliberately does NOT
+    /// call the signature-typed `search_issues` trait method used by
+    /// `supply_chain_steward` (that keys on `stewardship-signature`, not
+    /// `ooda-goal-key`); it only follows the same argv-vector,
+    /// `--search … in:body` invocation pattern.
+    ///
+    /// - **Argv only (SR2):** `Command::new("gh").args([…])`; never `sh -c` or a
+    ///   string-interpolated command line. `marker` is already a pure
+    ///   `[0-9a-f]{16}`-keyed token ([`fold_goal_identity`]), so it cannot inject
+    ///   qualifiers into the `--search` argument (SR1).
+    /// - **Strong match, not index trust:** GitHub's `--search` index is
+    ///   eventually consistent, so the verdict is confirmed against the returned
+    ///   JSON `body` (a strongly-consistent field) rather than the search match
+    ///   alone — a freshly filed issue that has not yet indexed still dedups on
+    ///   the next cycle once returned by the label filter.
+    /// - **Least privilege / fail-open (SR4/SR5):** repo-scoped `gh`; never
+    ///   reads/logs/embeds `GH_TOKEN`; any error fails **open** (`false`) so the
+    ///   check never aborts the cycle.
+    fn issue_open_with_marker(&self, marker: &str) -> bool {
+        match std::process::Command::new("gh")
+            .args([
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--label",
+                "ooda-stuck",
+                "--search",
+                &format!("{marker} in:body"),
+                "--json",
+                "number,body",
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => body_contains_marker(&out.stdout, marker),
+            Ok(out) => {
+                tracing::warn!(
+                    target: "simard::ooda",
+                    stderr = %String::from_utf8_lossy(&out.stderr),
+                    "no-progress breaker: gh open-issue backstop query failed — failing OPEN (may re-file)",
+                );
+                false
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "simard::ooda",
+                    error = %e,
+                    "no-progress breaker: gh spawn failed for open-issue backstop — failing OPEN (may re-file)",
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Confirm the `gh issue list --json number,body` output contains an OPEN issue
+/// whose `body` embeds `marker`. Parsing the strongly-consistent `body` field
+/// (rather than trusting the eventually-consistent `--search` match) is what
+/// makes the backstop robust to a freshly filed, not-yet-indexed issue. Any
+/// parse failure fails **open** (`false`, SR5) — a rare duplicate beats a lost
+/// stuck-goal signal.
+fn body_contains_marker(stdout: &[u8], marker: &str) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return false;
+    };
+    value
+        .as_array()
+        .map(|issues| {
+            issues.iter().any(|issue| {
+                issue
+                    .get("body")
+                    .and_then(|b| b.as_str())
+                    .is_some_and(|body| body.contains(marker))
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Parse the issue number from a `gh issue create` success line, which prints
@@ -251,15 +365,40 @@ fn link_tracking_issue(goal: &mut ActiveGoal, filed: &FiledIssue) {
 /// re-filed, then best-effort file + link a `gh` tracking issue. Storm-safe and
 /// restart-surviving.
 ///
-/// Ordering (the storm fix): the durable suppression marker and the `Blocked`
-/// status are written FIRST, through the existing atomic goal-board save path, so
-/// the goal is idempotently suppressed BEFORE [`NoProgressIssueFiler::file_issue`]
-/// is attempted. A `None` from `file_issue` (a `gh` outage, or a URL that did not
-/// parse to a bare issue number) therefore leaves the goal `Blocked` + suppressed
-/// (no re-file next cycle) instead of `Blocked` + untracked (re-file forever) —
-/// the exact loop that produced the ~15-duplicate `UNCLEAR-CRITERIA` issue storm.
-/// On a `Some`, the bare marker is UPGRADED IN PLACE to the linked tracking ref
-/// via [`upgrade_suppression_marker_to_link`] — never appended as a duplicate.
+/// # The two-guard filing gate
+///
+/// The `Blocked` status is written first (unchanged from the storm fix); only
+/// the *file* step is gated, in strict cost order:
+///
+/// ```text
+/// 1. board-local WipRef marker present (is_breaker_tracking_ref)?
+///        └─ yes → already suppressed; return          (FAST PATH, zero API calls)
+/// 2. filer.issue_open_with_marker("ooda-goal-key:<folded_id>")?
+///        └─ yes → an open duplicate already exists; re-seed the WipRef marker
+///                 and return — do NOT file
+/// 3. otherwise → file_issue(title, body-with-marker); write the WipRef marker;
+///                upgrade to a linked tracking ref on success
+/// ```
+///
+/// Guard 1 is the durable, restart-surviving board marker that ended the
+/// original ~15-duplicate `UNCLEAR-CRITERIA` storm. Guard 2 is the
+/// GitHub-durable open-issue backstop ([`NoProgressIssueFiler::issue_open_with_marker`])
+/// that extends suppression across the two conditions the `WipRef` cannot cover
+/// — **goal-id churn** (a fresh id has no `WipRef`) and a **goal-board reset**
+/// (the `WipRef` was erased) — then re-seeds the board marker so future cycles
+/// answer at guard 1. It runs ONLY on a guard-1 miss (zero steady-state API
+/// cost, SR7) and fails **open** (SR5): a query error re-files rather than
+/// dropping a stuck-goal signal.
+///
+/// A `None` from `file_issue` (a `gh` outage, or a URL that did not parse to a
+/// bare issue number) leaves the goal `Blocked` + suppressed (no re-file next
+/// cycle) instead of `Blocked` + untracked (re-file forever). On a `Some`, the
+/// bare marker is UPGRADED IN PLACE to the linked tracking ref via
+/// [`upgrade_suppression_marker_to_link`] — never appended as a duplicate.
+///
+/// The filed body embeds a trailing `ooda-goal-key: <folded_id>` line
+/// ([`fold_goal_identity`]) — a pure hash carrying no secrets — so guard 2 can
+/// recognise the breaker's own open issue on a later churned/reset cycle.
 ///
 /// Linking the issue is what makes an `UNCLEAR-CRITERIA` goal's done-criteria
 /// measurable: with the link the done-gate can observe the tracking issue as
@@ -279,6 +418,15 @@ fn escalate_with_tracking_issue(
     issue_body: &str,
     filer: &dyn NoProgressIssueFiler,
 ) {
+    // The GitHub-durable identity key for this goal. Computed once, up front, so
+    // both suppression guards and the embedded body marker key on the SAME
+    // folded id. `fold_goal_identity` yields a pure `[0-9a-f]{16}` token, safe to
+    // embed and to interpolate into the backstop's `gh --search` (SR1).
+    let marker = format!(
+        "{OODA_GOAL_KEY_MARKER_PREFIX} {}",
+        fold_goal_identity(goal_id)
+    );
+
     // Idempotence: a goal already carrying any breaker artifact (a bare
     // suppression marker OR a linked tracking ref) is never re-filed — a re-stall
     // must not spam duplicate `ooda-stuck` issues, even across a daemon restart.
@@ -290,22 +438,41 @@ fn escalate_with_tracking_issue(
     else {
         return;
     };
-    let already_tracked = g.wip_refs.iter().any(is_breaker_tracking_ref);
 
-    // 1. Durable, link-independent suppression FIRST. Always block the goal; an
-    //    already-suppressed goal stops here so it is never re-filed (idempotence
-    //    across a `gh` failure and a daemon restart, since the marker lives on the
-    //    goal board, not the in-memory tracker).
+    // 1. Durable, link-independent suppression FIRST. Always block the goal.
     g.status = GoalProgress::Blocked(blocked_reason);
+
+    // Guard 1 — board-local `WipRef` fast path (zero API calls, SR7). An
+    // already-suppressed goal stops here so it is never re-filed (idempotence
+    // across a `gh` failure and a daemon restart, since the marker lives on the
+    // goal board, not the in-memory tracker).
+    let already_tracked = g.wip_refs.iter().any(is_breaker_tracking_ref);
     if already_tracked {
         return;
     }
-    g.wip_refs.push(suppression_marker());
 
-    // 2. Best-effort link SECOND, holding the same borrow (`file_issue` does not
-    //    touch `state`). On success upgrade the bare marker in place to the linked
-    //    ref; on `None` the goal stays Blocked + suppressed and is not re-filed.
-    if let Some(filed) = filer.file_issue(issue_title, issue_body) {
+    // Guard 2 — GitHub-durable open-issue backstop. Consulted ONLY on a guard-1
+    // miss, so a steady-state daemon with an intact board makes no extra API
+    // call. This covers the two conditions the `WipRef` marker cannot: goal-id
+    // churn (a fresh id has no `WipRef`) and a goal-board reset (the `WipRef` was
+    // erased). `filer` does not touch `state`, so the `&mut g` borrow is safe to
+    // hold across the call. A `false` default / query error fails OPEN (SR5).
+    if filer.issue_open_with_marker(&marker) {
+        // An open duplicate already exists — re-seed the board-local marker so
+        // the next cycle answers at the fast path (guard 1) without another API
+        // call, and do NOT re-file (storm-safe).
+        g.wip_refs.push(suppression_marker());
+        return;
+    }
+
+    // Guard 3 — no duplicate anywhere. Suppress FIRST (so a `gh` outage still
+    // leaves the goal Blocked + suppressed rather than Blocked + re-filing
+    // forever — the exact loop that produced the ~15-duplicate storm), then
+    // best-effort file the tracking issue with the goal-key marker embedded in
+    // its body so the backstop can dedup it on a future churned/reset cycle.
+    g.wip_refs.push(suppression_marker());
+    let body_with_marker = format!("{issue_body}\n\n{marker}");
+    if let Some(filed) = filer.file_issue(issue_title, &body_with_marker) {
         upgrade_suppression_marker_to_link(g, &filed);
     }
 }
@@ -2397,5 +2564,234 @@ mod tests_derive_criteria {
         ] {
             let _ = derive_criteria(&goal_with_desc(pathological));
         }
+    }
+}
+
+/// # TDD (Step 7) — goal-key open-issue backstop: the two-guard filing gate
+///
+/// FAILING BY DESIGN until the additive backstop specified in
+/// `docs/reference/no-progress-breaker-goal-key-backstop-api.md` exists:
+///
+///   * the `NoProgressIssueFiler::issue_open_with_marker` default method
+///     (default `false`), and
+///   * the second suppression guard in [`escalate_with_tracking_issue`] that
+///     runs `issue_open_with_marker("ooda-goal-key:<folded_id>")` ONLY on a
+///     board-local `WipRef` fast-path miss, embeds the `ooda-goal-key` marker in
+///     the filed body, and re-seeds the `WipRef` marker when the backstop hits.
+///
+/// These pin the churn/reset-durable dedup that the board-local `WipRef` marker
+/// alone cannot provide (goal-id churn defeats its key; a board reset erases it).
+#[cfg(test)]
+mod tests_goal_key_backstop_gate {
+    use std::cell::{Cell, RefCell};
+
+    use super::{
+        FiledIssue, NoProgressIssueFiler, escalate_with_tracking_issue, is_breaker_tracking_ref,
+    };
+    use crate::goal_curation::no_progress_breaker::fold_goal_identity;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+    use crate::ooda_loop::OodaState;
+
+    /// A spy filer that records both trait methods so the gate's ordering and
+    /// cost contract (SR7: guard 2 only on guard-1 miss) is directly assertable.
+    struct SpyFiler {
+        /// `issue_open_with_marker` return value (the backstop verdict).
+        open_marker_returns: bool,
+        /// `file_issue` result: `Some(number)` succeeds, `None` models a `gh`
+        /// outage / unparsed URL.
+        file_returns: Option<String>,
+        file_calls: Cell<usize>,
+        marker_calls: Cell<usize>,
+        last_body: RefCell<Option<String>>,
+        last_marker: RefCell<Option<String>>,
+    }
+
+    impl SpyFiler {
+        fn new(open_marker_returns: bool, file_returns: Option<&str>) -> Self {
+            Self {
+                open_marker_returns,
+                file_returns: file_returns.map(str::to_string),
+                file_calls: Cell::new(0),
+                marker_calls: Cell::new(0),
+                last_body: RefCell::new(None),
+                last_marker: RefCell::new(None),
+            }
+        }
+    }
+
+    impl NoProgressIssueFiler for SpyFiler {
+        fn file_issue(&self, _title: &str, body: &str) -> Option<FiledIssue> {
+            self.file_calls.set(self.file_calls.get() + 1);
+            *self.last_body.borrow_mut() = Some(body.to_string());
+            self.file_returns.as_ref().map(|number| FiledIssue {
+                number: number.clone(),
+                url: Some(format!("https://github.com/o/r/issues/{number}")),
+            })
+        }
+
+        fn issue_open_with_marker(&self, marker: &str) -> bool {
+            self.marker_calls.set(self.marker_calls.get() + 1);
+            *self.last_marker.borrow_mut() = Some(marker.to_string());
+            self.open_marker_returns
+        }
+    }
+
+    /// A minimal filer that implements ONLY `file_issue`, relying on the trait's
+    /// default `issue_open_with_marker` — the additivity guarantee.
+    struct DefaultOnlyFiler;
+    impl NoProgressIssueFiler for DefaultOnlyFiler {
+        fn file_issue(&self, _t: &str, _b: &str) -> Option<FiledIssue> {
+            None
+        }
+    }
+
+    fn state_with_active(goal: ActiveGoal) -> OodaState {
+        let mut board = GoalBoard::new();
+        board.active.push(goal);
+        OodaState::new(board)
+    }
+
+    fn only_goal(state: &OodaState) -> &ActiveGoal {
+        &state.active_goals.active[0]
+    }
+
+    fn breaker_ref_count(goal: &ActiveGoal) -> usize {
+        goal.wip_refs
+            .iter()
+            .filter(|w| is_breaker_tracking_ref(w))
+            .count()
+    }
+
+    fn escalate(state: &mut OodaState, goal_id: &str, filer: &dyn NoProgressIssueFiler) {
+        escalate_with_tracking_issue(
+            state,
+            goal_id,
+            "[OODA-SAFEGUARD] no-progress breaker: UNCLEAR-CRITERIA".to_string(),
+            "OODA no-progress breaker: goal stuck (UNCLEAR-CRITERIA)",
+            "The OODA daemon produced no shippable action.",
+            filer,
+        );
+    }
+
+    /// Additivity: an impl that does NOT override `issue_open_with_marker` must
+    /// take the default `false` ("no duplicate found") path.
+    #[test]
+    fn default_issue_open_with_marker_is_false() {
+        let filer = DefaultOnlyFiler;
+        assert!(
+            !filer.issue_open_with_marker("ooda-goal-key: whatever"),
+            "the trait default must be false so existing filers/fakes are unchanged"
+        );
+    }
+
+    /// Case 1 — first filing. Guard 1 misses (fresh goal, no `WipRef`) and guard
+    /// 2 misses (no open duplicate) → `file_issue` is called exactly once, and
+    /// the body it receives carries the `ooda-goal-key:<folded_id>` marker keyed
+    /// on THIS goal's folded id.
+    #[test]
+    fn first_filing_files_once_and_embeds_the_goal_key_marker() {
+        let goal_id = "simard-identity-atelier-industrial-furniture-de";
+        let filer = SpyFiler::new(false, Some("4231"));
+        let mut state = state_with_active(ActiveGoal::new(goal_id, "vague goal", 1));
+
+        escalate(&mut state, goal_id, &filer);
+
+        assert_eq!(filer.file_calls.get(), 1, "first firing files exactly once");
+        let body = filer.last_body.borrow().clone().expect("body captured");
+        let expected = format!("ooda-goal-key: {}", fold_goal_identity(goal_id));
+        assert!(
+            body.contains(&expected),
+            "filed body must embed the goal-key marker line {expected:?}; got:\n{body}"
+        );
+        assert_eq!(
+            breaker_ref_count(only_goal(&state)),
+            1,
+            "one linked breaker ref"
+        );
+        assert!(matches!(only_goal(&state).status, GoalProgress::Blocked(_)));
+    }
+
+    /// Case 2 — duplicate suppressed across goal-id churn / board reset. Guard 1
+    /// misses (the `WipRef` was erased by churn/reset) but guard 2 finds an OPEN
+    /// issue carrying the goal-key marker → `file_issue` is NOT called, and the
+    /// board-local `WipRef` marker is RE-SEEDED so the next cycle hits the fast
+    /// path again.
+    #[test]
+    fn backstop_hit_suppresses_filing_and_reseeds_the_wipref() {
+        let goal_id = "g-churned";
+        let filer = SpyFiler::new(true, Some("9999"));
+        let mut state = state_with_active(ActiveGoal::new(goal_id, "vague goal", 1));
+
+        escalate(&mut state, goal_id, &filer);
+
+        assert_eq!(filer.marker_calls.get(), 1, "backstop consulted once");
+        assert_eq!(
+            filer.file_calls.get(),
+            0,
+            "an open duplicate found by the backstop must suppress re-filing"
+        );
+        assert_eq!(
+            breaker_ref_count(only_goal(&state)),
+            1,
+            "the backstop hit must re-seed the board-local WipRef marker so the \
+             fast path suppresses future cycles without another API call"
+        );
+        let marker = filer.last_marker.borrow().clone().expect("marker captured");
+        assert!(
+            marker.contains(&fold_goal_identity(goal_id)),
+            "the backstop must be queried with THIS goal's folded key; got {marker:?}"
+        );
+    }
+
+    /// Case 3 — fast path, zero API calls (SR7). Once a board-local `WipRef`
+    /// marker exists (guard 1 hits), the backstop `issue_open_with_marker` must
+    /// NOT be consulted again.
+    #[test]
+    fn fast_path_hit_never_consults_the_backstop() {
+        let goal_id = "g-stable";
+        // First firing seeds the WipRef marker (file fails, guard 2 miss).
+        let first = SpyFiler::new(false, None);
+        let mut state = state_with_active(ActiveGoal::new(goal_id, "vague goal", 1));
+        escalate(&mut state, goal_id, &first);
+        assert_eq!(
+            first.marker_calls.get(),
+            1,
+            "guard 2 consulted on the guard-1 miss"
+        );
+        assert_eq!(
+            breaker_ref_count(only_goal(&state)),
+            1,
+            "WipRef marker seeded"
+        );
+
+        // Second firing: guard 1 must hit and short-circuit before guard 2.
+        let second = SpyFiler::new(true, Some("1"));
+        escalate(&mut state, goal_id, &second);
+        assert_eq!(
+            second.marker_calls.get(),
+            0,
+            "an intact board WipRef must answer at guard 1 — the backstop API is \
+             never called (zero steady-state API cost, SR7)"
+        );
+        assert_eq!(second.file_calls.get(), 0, "and no re-file");
+    }
+
+    /// Case 6 — fail-open. A backstop that returns `false` (its documented
+    /// behaviour on a `gh` error) must let filing proceed rather than abort:
+    /// losing a stuck-goal signal is worse than a rare duplicate (SR5).
+    #[test]
+    fn backstop_false_fails_open_and_files() {
+        let goal_id = "g-fail-open";
+        let filer = SpyFiler::new(false, Some("7000"));
+        let mut state = state_with_active(ActiveGoal::new(goal_id, "vague goal", 1));
+
+        escalate(&mut state, goal_id, &filer);
+
+        assert_eq!(filer.marker_calls.get(), 1, "backstop consulted");
+        assert_eq!(
+            filer.file_calls.get(),
+            1,
+            "a false (fail-open) backstop verdict must not block filing"
+        );
     }
 }

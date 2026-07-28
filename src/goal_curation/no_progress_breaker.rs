@@ -74,6 +74,31 @@ pub const NO_PROGRESS_BLOCKED_PREFIX: &str =
 /// `{PREFIX}{count}{SUFFIX}`.
 pub const NO_PROGRESS_BLOCKED_SUFFIX: &str = " consecutive no-action cycles; needs human review";
 
+/// Fold a churny [`ActiveGoal.id`](super::types::ActiveGoal) into a stable,
+/// injection-safe identity token: the first 16 lowercase hex characters of
+/// `sha256(goal_id)` (the first 8 digest bytes).
+///
+/// Pure and total. Mirrors the folding shape of
+/// [`crate::stewardship::failure_signature`] so a volatile id collapses to one
+/// deterministic `[0-9a-f]{16}` key that two OODA cycles on the same goal share.
+///
+/// Because the output is a fixed-charset hex literal it is safe to interpolate
+/// into a `gh --search` query argument (SR1): it can never carry whitespace,
+/// quotes, or GitHub search qualifiers (`is:`, `label:`, `in:`) that a raw,
+/// attacker-influenced goal id could smuggle into the open-issue backstop's
+/// dedup check. It is a one-way hash, not an encoding: no fragment of the raw id
+/// survives into the folded key.
+pub(crate) fn fold_goal_identity(goal_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(goal_id.as_bytes());
+    let mut out = String::with_capacity(16);
+    for b in &digest[..8] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// True when `reason` was authored by the no-progress breaker.
 ///
 /// Keys on the globally-unique [`NO_PROGRESS_BLOCKED_PREFIX`] sentinel **alone**

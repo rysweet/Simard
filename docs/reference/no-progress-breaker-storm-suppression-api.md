@@ -18,6 +18,7 @@ owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./no-progress-breaker-goal-key-backstop-api.md
   - ./no-progress-breaker-api.md
   - ./no-progress-root-cause-resolution-api.md
   - ./no-progress-reinvestigation-api.md

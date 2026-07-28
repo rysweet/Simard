@@ -17,10 +17,12 @@ owner: simard
 doc_type: concept
 status: implemented
 related:
+  - ./no-progress-breaker-goal-key-backstop.md
   - ./no-progress-root-cause-resolution.md
   - ./no-progress-terminal-investigation.md
   - ./perpetual-goal-no-progress-exemption.md
   - ./gap-scan-backoff-dedup.md
+  - ../reference/no-progress-breaker-goal-key-backstop-api.md
   - ../reference/no-progress-breaker-storm-suppression-api.md
   - ../reference/no-progress-root-cause-resolution-api.md
   - ../reference/no-progress-breaker-api.md

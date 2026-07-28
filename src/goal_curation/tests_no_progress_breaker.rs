@@ -332,3 +332,92 @@ fn four_stuck_supply_chain_goals_all_leave_the_active_loop_via_the_ladder() {
         }
     }
 }
+
+/// # TDD (Step 7) — goal-key backstop: pure `fold_goal_identity` contract
+///
+/// FAILING BY DESIGN until `fold_goal_identity` (and its `pub(crate)`
+/// visibility) exists in `super::no_progress_breaker`, and the redaction
+/// helpers in `crate::stewardship::dedup` are promoted to `pub(crate)`.
+///
+/// Specifies the pure, injection-safe identity-folding helper documented in
+/// `docs/reference/no-progress-breaker-goal-key-backstop-api.md` — the stable
+/// key that lets the open-issue backstop dedup across goal-id churn / board
+/// reset without ever letting a churny, attacker-influenced goal id leak into a
+/// `gh --search` query (SR1).
+#[cfg(test)]
+mod tests_goal_key_backstop {
+    use super::super::no_progress_breaker::fold_goal_identity;
+
+    /// A goal id carrying every character class that would corrupt a `gh
+    /// --search` query if interpolated raw: whitespace, quotes, and GitHub
+    /// search qualifiers (`is:`, `label:`, `in:body`).
+    const ADVERSARIAL_ID: &str =
+        "simard-identity-\"drop\" is:open label:ooda-stuck in:body a8f57a50 --json";
+
+    fn is_lower_hex_16(s: &str) -> bool {
+        s.len() == 16
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// Case 4 (charset): the folded key is ALWAYS exactly 16 lowercase hex
+    /// chars, even for an adversarial id — so it can be interpolated into a
+    /// `--search` argument without carrying spaces / quotes / qualifiers.
+    #[test]
+    fn folded_key_is_pure_16_lower_hex_even_for_adversarial_id() {
+        assert!(
+            is_lower_hex_16(&fold_goal_identity(ADVERSARIAL_ID)),
+            "an adversarial goal id must fold to a pure [0-9a-f]{{16}} token (SR1)"
+        );
+        assert!(is_lower_hex_16(&fold_goal_identity("g")));
+        assert!(is_lower_hex_16(&fold_goal_identity("")));
+        assert!(is_lower_hex_16(&fold_goal_identity(
+            "simard-identity-atelier-industrial-furniture-de"
+        )));
+    }
+
+    /// Determinism: the same id always folds to the same key (this is what lets
+    /// two OODA cycles on the same goal dedup to one open issue).
+    #[test]
+    fn fold_is_deterministic() {
+        assert_eq!(
+            fold_goal_identity(ADVERSARIAL_ID),
+            fold_goal_identity(ADVERSARIAL_ID),
+        );
+    }
+
+    /// Distinct ids fold to distinct keys (no accidental over-collapse that
+    /// would suppress a genuinely different stuck goal).
+    #[test]
+    fn distinct_ids_fold_to_distinct_keys() {
+        assert_ne!(fold_goal_identity("goal-a"), fold_goal_identity("goal-b"));
+    }
+
+    /// SR1/SR3: the raw id (and any secret-shaped substring inside it) must NOT
+    /// survive into the folded key — it is a one-way hash, not an encoding.
+    #[test]
+    fn raw_id_never_leaks_into_the_folded_key() {
+        let folded = fold_goal_identity(ADVERSARIAL_ID);
+        for needle in ["is:", "label:", "in:body", "\"", " ", "--json", "a8f57a50"] {
+            assert!(
+                !folded.contains(needle),
+                "folded key must not echo id fragment {needle:?}"
+            );
+        }
+    }
+
+    /// Implementation prerequisite #1: the stewardship redaction helpers must be
+    /// promoted from module-private `fn` to `pub(crate) fn` so the breaker (in
+    /// `goal_curation`) can redact goal-derived free-text before embedding it in
+    /// an escalation body (SR3/SR6). This test only COMPILES once that
+    /// visibility widening lands.
+    #[test]
+    fn redaction_helpers_are_reachable_from_goal_curation() {
+        let uuid = "0191b2c3-4d5e-7f80-9abc-def012345678";
+        assert_eq!(crate::stewardship::dedup::redact_token(uuid), "<UUID>");
+        assert_eq!(
+            crate::stewardship::dedup::redact_uuids(&format!("session={uuid}")),
+            "session=<UUID>",
+        );
+    }
+}

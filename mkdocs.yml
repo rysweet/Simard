@@ -147,6 +147,7 @@ nav:
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Terminal No-Progress Stall Never Parks Empty Evidence: concepts/no-progress-terminal-investigation.md
     - No-Progress Breaker Suppresses Its Own Issue Storm: concepts/no-progress-breaker-storm-suppression.md
+    - No-Progress Breaker Survives Goal-ID Churn and Board Resets: concepts/no-progress-breaker-goal-key-backstop.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Stable Goal-Session Identity: concepts/stable-goal-session-identity.md
     - Blocked-Goal Escalation Backoff: concepts/blocked-goal-escalation-backoff.md
@@ -201,6 +202,7 @@ nav:
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Diagnose a No-Progress Breaker Issue Storm: howto/diagnose-a-no-progress-breaker-issue-storm.md
+    - Configure the No-Progress Breaker Open-Issue Backstop: howto/configure-no-progress-breaker-open-issue-backstop.md
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
     - Triage a Blocked-Goal Escalation (Before It Reaches You): howto/triage-a-blocked-goal-escalation.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
@@ -457,6 +459,7 @@ nav:
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
     - No-Progress Re-Investigation API: reference/no-progress-reinvestigation-api.md
     - No-Progress Breaker Issue-Storm Suppression API: reference/no-progress-breaker-storm-suppression-api.md
+    - No-Progress Breaker Goal-Key Backstop API: reference/no-progress-breaker-goal-key-backstop-api.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
