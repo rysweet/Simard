@@ -3796,18 +3796,6 @@ mod issue_2570_cross_consumer_launcher_guard_tests {
 mod zero_fallback_2580_tests {
     use super::*;
 
-    /// The real Copilot CLI launch preamble + an ANSI-coloured tracing line —
-    /// the exact stdout contamination the shared #2484 chokepoint must strip on
-    /// every reasoner capture path before the structured decision is read.
-    fn banner_and_ansi_noise() -> String {
-        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
-         INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-         version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
-         Run 'copilot update' to check for updates.\n\
-         \x1b[2m2026-07-04T16:00:00.000000Z\x1b[0m \x1b[32mINFO\x1b[0m simard: cycle begin\n"
-            .to_string()
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // AC1: no code path emits a deterministic-default decision from a
     // parse-failure — the shared terminal returns an EXPLICIT Err + metric.
@@ -3905,31 +3893,6 @@ mod zero_fallback_2580_tests {
                 "the real decision must pass through unchanged for {outcome:?}"
             );
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // AC2 + AC3: the shared sanitizing chokepoint covers EVERY reasoner
-    // capture path, and the extractor consumes a structured JSON envelope
-    // (well-formed structured output parses; no free-prose keyword reliance).
-    // ─────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn merge_judge_envelope_survives_banner_and_ansi() {
-        // The merge-judge capture path also routes through the shared chokepoint
-        // (`extract_json_payload`); a banner+ANSI-polluted verdict envelope must
-        // still yield the balanced JSON object, not the launcher noise.
-        let raw = format!(
-            "{}{{\"verdict\": \"not_ready\", \"rationale\": \"CI red\", \"blockers\": []}}",
-            banner_and_ansi_noise()
-        );
-        let payload = crate::recipe_output::extract_json_payload(&raw)
-            .expect("the chokepoint must recover the JSON verdict envelope from banner+ANSI noise");
-        assert!(payload.contains("\"verdict\""));
-        assert!(payload.contains("not_ready"));
-        assert!(
-            !payload.contains("launching copilot") && !payload.contains("NODE_OPTIONS"),
-            "the sanitized payload must not carry launcher-preamble noise: {payload}"
-        );
     }
 
     // ─────────────────────────────────────────────────────────────────────

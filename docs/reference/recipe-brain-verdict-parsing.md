@@ -1,7 +1,7 @@
 ---
 title: Recipe-brain verdict/decision parsing
 description: Current recipe-backed brain parsing contract; OODA use becomes legacy only after verified typed-route cutover.
-last_updated: 2026-07-25
+last_updated: 2026-07-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -533,6 +533,19 @@ For the design rationale, see
 ---
 
 ## Reasoner JSON recovery at the parse chokepoint (#2658 lineage)
+
+> **Retired in #4991.** The two named wrapper functions in this section —
+> `recipe_output::extract_json_payload` and `extract_and_parse_json` — were
+> removed as dead code (they had **zero production callers** after the typed
+> record-contract cutover). The composed JSON-hardening they wrapped is
+> **retained** and still public: `recover_json_view` (which composes
+> `strip_json_comments`, `strip_json_trailing_commas`,
+> `escape_json_string_control_chars`, `escape_json_string_invalid_escapes`,
+> `normalize_python_json_literals`, and `normalize_json_number_specials`),
+> together with `strip_recipe_noise` and `last_balanced_object`. The prose and
+> code below are kept as the historical design rationale for that recovery
+> layer; where it references the two retired wrappers, read it as "the retained
+> primitives, composed directly."
 
 The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI /
 log noise but returns the balanced `{…}` object body **verbatim**. Six common
