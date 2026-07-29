@@ -1,39 +1,13 @@
-//! Contract tests for the retired orphaned JSON-scraper surface of
-//! `src/recipe_output/extract.rs` (issue #4991, PR #4992).
+//! Contract tests for the recipe-output sanitizer surface.
 //!
-//! An earlier phase already deleted the two dead entry points
-//! (`extract_json_payload`, `extract_and_parse_json`). The completed retirement
-//! also removed the JSON coercion/verdict layer they were the sole callers of:
-//! 10 `pub fn`s plus the `VerdictMatch` struct. Only `strip_ansi` and
-//! `strip_recipe_noise` (plus their private helpers and the `record_parse_outcome`
-//! observability hook in `mod.rs`) survive as the shared public surface.
+//! The public sanitizer API consists of `strip_ansi` and `strip_recipe_noise`.
+//! These helpers remove ANSI escapes and known recipe-runner, logging, and
+//! launcher noise. Clean input returns `Cow::Borrowed` without allocation;
+//! sanitization returns `Cow::Owned` only when the text changes.
 //!
-//! Removed public symbols (must vanish from the crate's public API):
-//!   extract_verdict, recover_json_view, balanced_objects, last_balanced_object,
-//!   normalize_json_number_specials, normalize_python_json_literals,
-//!   strip_json_comments, strip_json_trailing_commas,
-//!   escape_json_string_control_chars, escape_json_string_invalid_escapes,
-//!   and the `VerdictMatch` struct.
-//!
-//! This file specifies the contract in five groups:
-//!   1. `scrapers_stay_absent`  — regression guard: the two previously-removed
-//!      entry points stay gone.
-//!   2. `dead_symbol_absence`   — the 10 fns + `VerdictMatch` MUST vanish from
-//!      their definition site (`extract.rs`), the `mod.rs` re-export, and the
-//!      rest of the source tree.
-//!   3. `retained_surface`      — the retained public surface includes
-//!      `{strip_ansi, strip_recipe_noise}` (+ the `record_parse_outcome` def in
-//!      mod.rs). Those retained symbols and their re-exports MUST survive.
-//!   4. `retained_behavior`     — selected ANSI and recipe-noise sanitization
-//!      behavior and clean-input borrowing remain intact.
-//!   5. `consumers_unchanged`   — selected production consumers keep using the
-//!      retained `strip_recipe_noise` and reference no removed name.
-//!
-//! Absence assertions use WHOLE-WORD matching so that unrelated identifiers that
-//! merely embed a removed name as a substring are not counted. In particular the
-//! private `extract_balanced_objects` helpers in `stewardship/merge_judge.rs` and
-//! `goal_curation/progress_reviewer.rs` (which embed `balanced_objects`) are
-//! false positives and are explicitly out of scope (design R3 / ambiguity A2).
+//! The tests enforce that API boundary, sanitizer behavior, borrowing contract,
+//! and continued use by production consumers. Whole-word matching keeps symbol
+//! boundary checks from matching names embedded in unrelated identifiers.
 
 use std::borrow::Cow;
 use std::fs;
@@ -41,10 +15,10 @@ use std::path::PathBuf;
 
 use simard::recipe_output::{strip_ansi, strip_recipe_noise};
 
-/// The two entry points removed by the earlier phase — must stay gone.
+/// Entry points excluded from the public sanitizer API.
 const REMOVED_ENTRY_POINTS: &[&str] = &["extract_json_payload", "extract_and_parse_json"];
 
-/// The 10 orphaned public functions removed by this phase.
+/// Functions excluded from the public sanitizer API.
 const REMOVED_FNS: &[&str] = &[
     "extract_verdict",
     "recover_json_view",
@@ -58,10 +32,10 @@ const REMOVED_FNS: &[&str] = &[
     "escape_json_string_invalid_escapes",
 ];
 
-/// The struct removed alongside the verdict extractor.
+/// Type excluded from the public sanitizer API.
 const REMOVED_STRUCT: &str = "VerdictMatch";
 
-/// The only two public helpers that survive this phase.
+/// The two retained public helpers.
 const RETAINED_FNS: &[&str] = &["strip_ansi", "strip_recipe_noise"];
 
 fn manifest_dir() -> PathBuf {
@@ -88,7 +62,7 @@ fn mentions_symbol(haystack: &str, sym: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 1. SCRAPERS STAY ABSENT — regression guard for the earlier phase's deletion.
+// 1. SANITIZER API BOUNDARY — unsupported entry points remain unavailable.
 // ---------------------------------------------------------------------------
 mod scrapers_stay_absent {
     use super::*;
@@ -117,8 +91,8 @@ mod scrapers_stay_absent {
 }
 
 // ---------------------------------------------------------------------------
-// 2. DEAD SYMBOL ABSENCE — the 10 orphaned fns and the `VerdictMatch` struct
-//    remain absent from their definition site, public re-export, and source tree.
+// 2. UNSUPPORTED SYMBOL ABSENCE — excluded symbols remain unavailable from the
+//    implementation, public re-export, and source tree.
 // ---------------------------------------------------------------------------
 mod dead_symbol_absence {
     use super::*;
@@ -146,8 +120,8 @@ mod dead_symbol_absence {
 
     #[test]
     fn extract_rs_has_zero_residual_mentions_of_removed_symbols() {
-        // Definitions, their #[cfg(test)] unit tests, and any doc cross-refs to
-        // the removed symbols must all be gone from the primary deletion file.
+        // Definitions, unit tests, and documentation references must all respect
+        // the sanitizer API boundary.
         let extract = read_src("src/recipe_output/extract.rs");
         for name in REMOVED_FNS {
             assert!(
@@ -179,9 +153,7 @@ mod dead_symbol_absence {
 
     #[test]
     fn recipe_output_module_no_longer_exposes_removed_symbols_tree_wide() {
-        // Whole-word grep-zero across src/, excluding the false-positive owners
-        // of the private `extract_balanced_objects` helper (design R3 / A2) and
-        // this test file's sibling contract tests, if any live under src/.
+        // Exclude private helpers whose compound names contain a checked symbol.
         const EXCLUDE: &[&str] = &[
             "src/stewardship/merge_judge.rs",
             "src/goal_curation/progress_reviewer.rs",
@@ -238,7 +210,7 @@ mod dead_symbol_absence {
 }
 
 // ---------------------------------------------------------------------------
-// 3. RETAINED SURFACE — {strip_ansi, strip_recipe_noise} remain public, and the
+// 3. PUBLIC SURFACE — {strip_ansi, strip_recipe_noise} remain public, and the
 //    `record_parse_outcome` definition in mod.rs remains present.
 // ---------------------------------------------------------------------------
 mod retained_surface {
@@ -278,8 +250,8 @@ mod retained_surface {
 }
 
 // ---------------------------------------------------------------------------
-// 4. RETAINED BEHAVIOR — selected sanitization and clean-path borrowing
-//    contracts remain intact through the retained public API.
+// 4. SANITIZER BEHAVIOR — sanitization and clean-path borrowing remain intact
+//    through the public API.
 // ---------------------------------------------------------------------------
 mod retained_behavior {
     use super::*;
@@ -326,8 +298,8 @@ mod retained_behavior {
 }
 
 // ---------------------------------------------------------------------------
-// 5. CONSUMERS UNCHANGED — selected production consumers keep using the retained
-//    `strip_recipe_noise` and reference no removed name.
+// 5. CONSUMER CONTRACT — selected production consumers use `strip_recipe_noise`
+//    and reference no unsupported name.
 // ---------------------------------------------------------------------------
 mod consumers_unchanged {
     use super::*;
