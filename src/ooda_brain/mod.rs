@@ -22,10 +22,13 @@ mod fallback;
 mod judgment_record;
 mod orient;
 mod orient_decide_record;
+// Issue #4970: typed cognitive-thread reasoning record + fail-closed reader that
+// replaces the boolean `"{recipe}: ok"` collapse with agentic NL reasoning.
 pub mod parse_failure;
 pub mod prompt_store;
 mod recipe_brain;
 mod rustyclawd;
+mod thread_reasoning_record;
 // Crate-visible so other recipe-runner spawn sites (goal decomposition, progress
 // checking) can bound their free-text `-c` context vars with the same helper —
 // closing the E2BIG argv-overflow class and the #2127 newline/YAML class at once.
@@ -89,6 +92,10 @@ pub use recipe_brain::RecipeBrain;
 /// transport / metric as the OODA brains rather than reinventing them.
 pub(crate) use recipe_brain::{
     EscalationConfig, LadderRung, build_phase_escalation_note, extract_recipe_decision_output,
+};
+pub use thread_reasoning_record::{
+    MAX_AGE_SECS, THREAD_REASONING_SCHEMA, ThreadDomain, ThreadName, ThreadReasoningReadError,
+    ThreadReasoningRecord, read_verified_thread_reasoning, sanitize_reasoning_summary,
 };
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;
