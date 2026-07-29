@@ -36,7 +36,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "ERROR: not inside a git repository" >&2
   exit 2
 }
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || {
+  echo "ERROR: cannot cd into repo root: $REPO_ROOT" >&2
+  exit 2
+}
 
 BASE_REF="${BASE_REF:-origin/main}"
 
@@ -226,11 +229,14 @@ if [ -f "$ATLAS" ] && grep -qiE 'design sketch' "$ATLAS" \
 else
   fail "atlas prose does not clearly frame Overseer as an unwired sketch"
 fi
-# The claim is grounded in source: overseer module carries #![allow(dead_code)].
-if grep -qE '#!\[allow\(dead_code\)\]' src/overseer/mod.rs 2>/dev/null; then
+# The claim is grounded in source: overseer module carries the #![allow(dead_code)]
+# attribute. Anchor on the attribute line (optional leading whitespace, then `#!`)
+# so a stale doc-comment mention (a `//!` line that merely names the attribute in
+# prose) can never keep this check green after the real attribute is removed.
+if grep -qE '^[[:space:]]*#!\[allow\(dead_code\)\]' src/overseer/mod.rs 2>/dev/null; then
   pass "source claim verified: src/overseer/mod.rs has #![allow(dead_code)]"
 else
-  fail "src/overseer/mod.rs no longer has #![allow(dead_code)] — re-check the sketch framing"
+  fail "src/overseer/mod.rs no longer has the #![allow(dead_code)] attribute — re-check the sketch framing"
 fi
 
 # =============================================================================

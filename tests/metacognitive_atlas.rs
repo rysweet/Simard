@@ -177,11 +177,16 @@ fn overseer_is_framed_as_unwired_sketch() {
         "atlas prose must frame the Overseer as an unwired design sketch"
     );
 
-    // The framing must stay grounded in source: the module is dead code.
+    // The framing must stay grounded in source: the module is dead code. Match the
+    // attribute *line* (not a mere substring) so a stale doc-comment that only
+    // mentions `#![allow(dead_code)]` in prose cannot keep this guard green after
+    // the real inner attribute is removed — the exact drift this test defends against.
     let overseer_mod = read("src/overseer/mod.rs");
     assert!(
-        overseer_mod.contains("#![allow(dead_code)]"),
-        "src/overseer/mod.rs no longer carries #![allow(dead_code)]; \
+        overseer_mod
+            .lines()
+            .any(|l| l.trim_start().starts_with("#![allow(dead_code)]")),
+        "src/overseer/mod.rs no longer carries the #![allow(dead_code)] attribute; \
          re-verify the atlas 'unwired sketch' framing"
     );
 }
