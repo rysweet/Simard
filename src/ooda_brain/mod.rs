@@ -18,6 +18,9 @@ use std::path::PathBuf;
 pub mod confidence;
 mod context;
 mod decide;
+// Issue #4967 (epic #4719, Group E): typed engineer-lifecycle Act decision record
+// + fail-closed reader that retires the last reasoner-decision stdout scrape.
+mod engineer_lifecycle_record;
 mod fallback;
 mod judgment_record;
 mod orient;
@@ -70,6 +73,10 @@ pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME,
 };
+pub use engineer_lifecycle_record::{
+    ENGINEER_LIFECYCLE_SCHEMA, EngineerLifecycleRecord, LifecycleReadError,
+    read_verified_engineer_lifecycle_decision, sanitize_lifecycle_fields,
+};
 pub use fallback::DeterministicLifecycleBrain;
 pub use judgment_record::{
     BrainJudgmentRecord, BrainPhase, clear as clear_brain_judgments, push as push_brain_judgment,
@@ -85,6 +92,10 @@ pub use orient_decide_record::{
     OrientFields, read_verified_decide, read_verified_orient,
 };
 pub use parse_failure::ParseFailureRecord;
+/// The closed engineer-lifecycle variant token list — re-exported crate-wide so
+/// the `simard ooda record-lifecycle-decision` CLI writer enumerates the exact
+/// same accepted set the reader/mapping enforce (Group E, #4967). Never forked.
+pub(crate) use recipe_brain::LIFECYCLE_VARIANT_LIST;
 pub use recipe_brain::RecipeBrain;
 /// Shared escalation-ladder backbone + verdict-parse instrumentation reused by
 /// the recipe-backed merge-judge (issue #2419 family / #2429). Exposed

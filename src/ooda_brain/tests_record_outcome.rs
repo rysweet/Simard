@@ -13,11 +13,14 @@
 //! failure that keeps the goal open), never a silent `keep_open_and_report`
 //! (#1711). The R1–R7 matrix below is the load-bearing invariant.
 //!
-//! IMPORTANT (D1 of the requirements): Group D removes ONLY its five owned dead
-//! symbols. The shared `extract_and_parse_json` / `extract.rs` MUST survive —
-//! the engineer-lifecycle `DecisionEnvelope` path still uses it and is OUT of
-//! Group D's two-seam scope. The epic is therefore NOT complete. The
-//! source-shape assertions below are scoped to the Group-D-owned symbols only.
+//! IMPORTANT: Group D removed ONLY its five owned dead symbols, and Group E
+//! (#4967) has since retired the engineer-lifecycle stdout-scrape seam (its ACT
+//! effect is now a typed `EngineerLifecycleRecord` read fail-closed). The shared
+//! `extract_and_parse_json` / `extract.rs` MUST still survive — but now for the
+//! remaining out-of-scope consumers (journal `pr_source`, goal-curation
+//! `recipe_progress_checker`), NOT the lifecycle decision path. The source-shape
+//! assertions below are scoped to the Group-D-owned symbols only; the lifecycle
+//! retirement is asserted by the retention guard at the bottom of this file.
 
 use std::path::{Path, PathBuf};
 
@@ -512,26 +515,43 @@ fn operator_cli_dispatches_the_record_outcome_arm() {
 }
 
 // ---------------------------------------------------------------------------
-// D1 RETENTION GUARD — the epic is NOT complete. The shared
-// `extract_and_parse_json` / `extract.rs` MUST survive because the
-// engineer-lifecycle `DecisionEnvelope` path (out of Group D scope) still uses
-// it. Deleting it here would break a live production seam and falsely signal
-// epic #4719 complete.
+// RETENTION GUARD — the shared `extract_and_parse_json` / `extract.rs` MUST
+// survive because out-of-scope consumers (journal `pr_source`, goal-curation
+// `recipe_progress_checker`) still use `strip_recipe_noise` / the shared
+// extractor. Group E (#4967) retired ONLY the engineer-lifecycle stdout-scrape
+// seam: the ACT effect is now a typed `EngineerLifecycleRecord` read
+// fail-closed, so `extract_decision_envelope` / `DecisionEnvelope` MUST be gone
+// from recipe_brain and the typed reader MUST be wired in their place.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shared_extract_survives_group_d_for_the_lifecycle_seam() {
+fn shared_extract_survives_for_out_of_scope_consumers() {
     // The shared extractor module and function still exist in the tree.
     let extract = read_rel("src/recipe_output/extract.rs");
     assert!(
         extract.contains("extract_and_parse_json"),
-        "extract_and_parse_json MUST survive Group D — the engineer-lifecycle seam still uses it"
+        "extract_and_parse_json MUST survive — out-of-scope consumers still use the shared extractor"
     );
-    // And recipe_brain STILL calls it via the lifecycle DecisionEnvelope path.
+}
+
+#[test]
+fn lifecycle_scrape_path_is_retired_for_the_typed_record() {
+    // Group E (#4967): recipe_brain no longer scrapes the lifecycle decision —
+    // the envelope parsers are gone and the typed fail-closed reader is wired.
     let recipe_brain = read_rel(RECIPE_BRAIN);
     assert!(
-        recipe_brain.contains("extract_decision_envelope")
-            && recipe_brain.contains("DecisionEnvelope"),
-        "the engineer-lifecycle DecisionEnvelope path MUST remain live (epic #4719 NOT complete)"
+        !recipe_brain.contains("extract_decision_envelope")
+            && !recipe_brain.contains("DecisionEnvelope"),
+        "the engineer-lifecycle stdout-scrape envelope path MUST be retired (Group E #4967)"
+    );
+    assert!(
+        recipe_brain.contains("read_verified_engineer_lifecycle_decision"),
+        "the lifecycle rail MUST read the typed record fail-closed"
+    );
+    let cli = read_rel(OODA_CLI);
+    assert!(
+        cli.contains("dispatch_record_lifecycle_decision")
+            && cli.contains("\"record-lifecycle-decision\""),
+        "operator_cli MUST dispatch the gated `record-lifecycle-decision` writer verb"
     );
 }

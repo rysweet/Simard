@@ -46,6 +46,15 @@ Commands:
                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
                               Record exactly one typed, validated OODA Decide
                               action-routing (the reasoner's tool; zero privilege).
+  record-lifecycle-decision --decision <continue_skipping|reclaim_and_redispatch|
+                            deprioritize|open_tracking_issue|mark_goal_blocked|
+                            consider_self_update>
+                  [--rationale <TEXT> | --rationale-path <FILE>]
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated engineer-
+                              lifecycle Act decision (the reasoner's tool; zero
+                              privilege). The extra-field variants derive their
+                              body/reason/redispatch text from --rationale.
   record-admission --choice <admit|defer|serialize_after>
                    (--rationale <TEXT> | --rationale-path <FILE>)
                    --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
@@ -128,6 +137,7 @@ pub(super) fn dispatch_ooda_command(
         "record-outcome" => dispatch_record_outcome(args),
         "record-orient" => dispatch_record_orient(args),
         "record-decide" => dispatch_record_decide(args),
+        "record-lifecycle-decision" => dispatch_record_lifecycle_decision(args),
         "record-admission" => dispatch_record_admission(args),
         "record-resource-admission" => dispatch_record_resource_admission(args),
         "record-idea-dedup" => dispatch_record_idea_dedup(args),
@@ -431,6 +441,89 @@ fn dispatch_record_decide(
     };
 
     crate::persistence::persist_json("ooda-decide-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-lifecycle-decision` — the zero-privilege tool the OODA
+/// engineer-lifecycle reasoner calls to record EXACTLY ONE typed, validated Act
+/// decision (Group E, #4967; retires the last reasoner-decision stdout scrape).
+///
+/// It validates the closed `--decision` variant + bounds/sanitizes the optional
+/// `--rationale` through the SINGLE shared
+/// [`sanitize_lifecycle_fields`](crate::ooda_brain::sanitize_lifecycle_fields)
+/// chokepoint (the same one the reader applies, so writer and reader can never
+/// drift), hardens `--record-path` (absolute, no `..`), stamps `written_at_epoch`
+/// = now, then writes exactly one atomic `0o600`
+/// [`EngineerLifecycleRecord`](crate::ooda_brain::EngineerLifecycleRecord). Any
+/// validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). The tool holds no privilege: its only side
+/// effect is that one write. `RecipeBrain` reads the record back with
+/// [`read_verified_engineer_lifecycle_decision`](crate::ooda_brain::read_verified_engineer_lifecycle_decision)
+/// — it never scrapes the agent's stdout.
+///
+/// Unlike the sibling record verbs, `--rationale` is OPTIONAL (an empty
+/// rationale is a valid record); the extra-field variants
+/// (`reclaim_and_redispatch` / `open_tracking_issue` / `mark_goal_blocked`)
+/// derive their body/reason/redispatch text from it, exactly as the retired
+/// scrape path did.
+fn dispatch_record_lifecycle_decision(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "decision",
+        "rationale",
+        "rationale-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let decision = required_named(&parsed, "decision")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    // --rationale is OPTIONAL (empty is valid); the extra-field variants reuse it.
+    let rationale = resolve_field(&parsed, "rationale", "rationale-path")?.unwrap_or_default();
+
+    // Validate the closed variant + bound/sanitize the rationale through the
+    // SINGLE shared chokepoint. An out-of-set decision or an oversize rationale
+    // ⇒ None ⇒ rejected here, before any write. Returns the canonical token +
+    // sanitized rationale, so the persisted record is already normalized.
+    let (canonical, clean_rationale) =
+        crate::ooda_brain::sanitize_lifecycle_fields(decision, &rationale).ok_or_else(|| {
+            format!(
+                "invalid lifecycle decision: unknown --decision {decision:?} or a rationale that \
+                 is too long after sanitize (decision must be one of {})",
+                crate::ooda_brain::LIFECYCLE_VARIANT_LIST
+            )
+        })?;
+
+    let written_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let record = crate::ooda_brain::EngineerLifecycleRecord {
+        schema: crate::ooda_brain::ENGINEER_LIFECYCLE_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision: canonical.to_string(),
+        rationale: clean_rationale,
+        written_at_epoch,
+    };
+
+    crate::persistence::persist_json("ooda-engineer-lifecycle-decision", record_path, &record)?;
     Ok(())
 }
 
