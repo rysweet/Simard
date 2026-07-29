@@ -413,7 +413,12 @@ fn every_existing_recipe_writes_the_reasoning_record() {
     // It fails RED against the pre-#4986 tree (seven recipes still say
     // "finish successfully") and turns GREEN once the escape is removed so every
     // path falls through to `record-thread-reasoning`.
-    for recipe in REFLECTIVE_RECIPES {
+    //
+    // The guard covers ALL 13 reasoning-recording recipes — the 9 reflective
+    // rails (`REFLECTIVE_RECIPES`) plus the 4 new-thread recipes
+    // (`NEW_THREAD_RECIPES`) — so no recipe can regress by reintroducing an
+    // early-exit escape ahead of the REQUIRED record step.
+    for recipe in REFLECTIVE_RECIPES.iter().chain(NEW_THREAD_RECIPES.iter()) {
         let yaml = read_rel(&format!("prompt_assets/simard/recipes/{recipe}.yaml"));
 
         // (1) The ACT step exists on every recipe.
