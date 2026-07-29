@@ -1,9 +1,9 @@
-//! TDD Step 7 — failing contract tests for retiring the orphaned JSON-scraper
-//! surface of `src/recipe_output/extract.rs` (issue #4991, PR #4992).
+//! Contract tests for the retired orphaned JSON-scraper surface of
+//! `src/recipe_output/extract.rs` (issue #4991, PR #4992).
 //!
 //! An earlier phase already deleted the two dead entry points
-//! (`extract_json_payload`, `extract_and_parse_json`). This phase removes the
-//! now-orphaned JSON coercion/verdict layer they were the sole callers of:
+//! (`extract_json_payload`, `extract_and_parse_json`). The completed retirement
+//! also removed the JSON coercion/verdict layer they were the sole callers of:
 //! 10 `pub fn`s plus the `VerdictMatch` struct. Only `strip_ansi` and
 //! `strip_recipe_noise` (plus their private helpers and the `record_parse_outcome`
 //! observability hook in `mod.rs`) survive as the shared public surface.
@@ -15,20 +15,19 @@
 //!   escape_json_string_control_chars, escape_json_string_invalid_escapes,
 //!   and the `VerdictMatch` struct.
 //!
-//! This file specifies the contract four ways:
+//! This file specifies the contract in five groups:
 //!   1. `scrapers_stay_absent`  — regression guard: the two previously-removed
-//!      entry points stay gone. (Passes today and after.)
+//!      entry points stay gone.
 //!   2. `dead_symbol_absence`   — the 10 fns + `VerdictMatch` MUST vanish from
-//!      their definition site (`extract.rs`) and the `mod.rs` re-export. These
-//!      FAIL today (the code still exists) and pass once the deletion lands.
-//!      This is the driving TDD signal.
-//!   3. `retained_surface`      — the public surface shrinks to EXACTLY
+//!      their definition site (`extract.rs`), the `mod.rs` re-export, and the
+//!      rest of the source tree.
+//!   3. `retained_surface`      — the retained public surface includes
 //!      `{strip_ansi, strip_recipe_noise}` (+ the `record_parse_outcome` def in
 //!      mod.rs). Those retained symbols and their re-exports MUST survive.
-//!   4. `retained_behavior`     — `strip_ansi` and `strip_recipe_noise` keep
-//!      their exact behavior (no signature/body change). Passes today and after.
-//!   5. `consumers_unchanged`   — out-of-scope production consumers keep compiling
-//!      against the retained `strip_recipe_noise` and reference no removed name.
+//!   4. `retained_behavior`     — selected ANSI and recipe-noise sanitization
+//!      behavior and clean-input borrowing remain intact.
+//!   5. `consumers_unchanged`   — selected production consumers keep using the
+//!      retained `strip_recipe_noise` and reference no removed name.
 //!
 //! Absence assertions use WHOLE-WORD matching so that unrelated identifiers that
 //! merely embed a removed name as a substring are not counted. In particular the
@@ -118,9 +117,8 @@ mod scrapers_stay_absent {
 }
 
 // ---------------------------------------------------------------------------
-// 2. DEAD SYMBOL ABSENCE — the driving TDD failures. The 10 orphaned fns and
-//    the `VerdictMatch` struct MUST vanish from their definition site and the
-//    public re-export. These FAIL today and pass once the deletion lands.
+// 2. DEAD SYMBOL ABSENCE — the 10 orphaned fns and the `VerdictMatch` struct
+//    remain absent from their definition site, public re-export, and source tree.
 // ---------------------------------------------------------------------------
 mod dead_symbol_absence {
     use super::*;
@@ -199,7 +197,8 @@ mod dead_symbol_absence {
             if EXCLUDE.iter().any(|e| rel == *e) {
                 return;
             }
-            let body = fs::read_to_string(path).unwrap_or_default();
+            let body = fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
             for name in REMOVED_FNS {
                 if mentions_symbol(&body, name) {
                     offenders.push(format!("{rel}: {name}"));
@@ -217,12 +216,19 @@ mod dead_symbol_absence {
     }
 
     fn visit_rs_files(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path)) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("failed to read directory {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| {
+                panic!(
+                    "failed to read an entry in directory {}: {e}",
+                    dir.display()
+                )
+            });
             let path = entry.path();
-            if path.is_dir() {
+            let metadata = fs::metadata(&path)
+                .unwrap_or_else(|e| panic!("failed to read metadata for {}: {e}", path.display()));
+            if metadata.is_dir() {
                 visit_rs_files(&path, f);
             } else if path.extension().is_some_and(|e| e == "rs") {
                 f(&path);
@@ -232,8 +238,8 @@ mod dead_symbol_absence {
 }
 
 // ---------------------------------------------------------------------------
-// 3. RETAINED SURFACE — the public API shrinks to EXACTLY {strip_ansi,
-//    strip_recipe_noise}; the `record_parse_outcome` def in mod.rs is untouched.
+// 3. RETAINED SURFACE — {strip_ansi, strip_recipe_noise} remain public, and the
+//    `record_parse_outcome` definition in mod.rs remains present.
 // ---------------------------------------------------------------------------
 mod retained_surface {
     use super::*;
@@ -272,8 +278,8 @@ mod retained_surface {
 }
 
 // ---------------------------------------------------------------------------
-// 4. RETAINED BEHAVIOR — the two survivors keep their exact behavior. These
-//    compile against the retained public API and pass today and after.
+// 4. RETAINED BEHAVIOR — selected sanitization and clean-path borrowing
+//    contracts remain intact through the retained public API.
 // ---------------------------------------------------------------------------
 mod retained_behavior {
     use super::*;
@@ -293,16 +299,16 @@ mod retained_behavior {
     }
 
     #[test]
-    fn strip_recipe_noise_drops_launcher_preamble_and_keeps_json() {
+    fn strip_recipe_noise_drops_launcher_preamble_and_keeps_agent_output() {
         let raw = concat!(
             "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference).\n",
             "INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot\n",
-            "{\"facts\":[]}"
+            "agent answer"
         );
         let cleaned = strip_recipe_noise(raw);
         assert!(
-            cleaned.contains("{\"facts\":[]}"),
-            "the JSON payload line must survive denoising: {cleaned}"
+            cleaned.contains("agent answer"),
+            "the agent-output line must survive denoising: {cleaned}"
         );
         assert!(
             !cleaned.contains("NODE_OPTIONS") && !cleaned.contains("launching copilot"),
@@ -313,18 +319,15 @@ mod retained_behavior {
     #[test]
     fn strip_recipe_noise_borrows_fully_clean_input() {
         assert!(
-            matches!(
-                strip_recipe_noise("{\"decision\":\"admit\"}"),
-                Cow::Borrowed(_)
-            ),
+            matches!(strip_recipe_noise("plain agent output"), Cow::Borrowed(_)),
             "noise-free input must pass through borrowed (no allocation)"
         );
     }
 }
 
 // ---------------------------------------------------------------------------
-// 5. CONSUMERS UNCHANGED — out-of-scope production consumers keep compiling
-//    against the retained `strip_recipe_noise` and reference no removed name.
+// 5. CONSUMERS UNCHANGED — selected production consumers keep using the retained
+//    `strip_recipe_noise` and reference no removed name.
 // ---------------------------------------------------------------------------
 mod consumers_unchanged {
     use super::*;

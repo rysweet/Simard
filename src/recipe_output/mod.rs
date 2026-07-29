@@ -1,11 +1,9 @@
-//! Shared recipe-runner-rs stdout parsing primitives + per-phase parse
+//! Shared recipe-runner-rs stdout sanitization primitives and per-phase parse
 //! observability counters (issue #2484).
 //!
-//! [`extract`] holds the hardened ANSI/log/banner stripping and JSON/verdict
-//! extraction reused by every recipe-backed phase (distill, merge-judge,
-//! engineer-lifecycle brain, decide, orient, progress-checker). This is the
-//! one shared, well-tested path that replaces the formerly bespoke, fragile
-//! per-phase extractors.
+//! [`extract`] provides the retained [`strip_ansi`] and [`strip_recipe_noise`]
+//! APIs. They remove ANSI escapes and known recipe-runner, logging, and launcher
+//! noise while preserving clean output through a zero-allocation borrowed path.
 
 pub mod extract;
 
