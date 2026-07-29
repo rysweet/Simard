@@ -1,39 +1,69 @@
-//! TDD Step 7 — failing contract tests for retiring the two dead JSON-scrape
-//! functions (`extract_json_payload`, `extract_and_parse_json`).
+//! TDD Step 7 — failing contract tests for retiring the orphaned JSON-scraper
+//! surface of `src/recipe_output/extract.rs` (issue #4991, PR #4992).
 //!
-//! Issue #4991 removes ONLY those two `pub fn`s from
-//! `src/recipe_output/extract.rs` and their re-export in
-//! `src/recipe_output/mod.rs`, deletes their exclusive test battery, and
-//! deletes their sole non-production caller
-//! (`merge_judge_envelope_survives_banner_and_ansi` in `recipe_brain.rs`).
+//! An earlier phase already deleted the two dead entry points
+//! (`extract_json_payload`, `extract_and_parse_json`). This phase removes the
+//! now-orphaned JSON coercion/verdict layer they were the sole callers of:
+//! 10 `pub fn`s plus the `VerdictMatch` struct. Only `strip_ansi` and
+//! `strip_recipe_noise` (plus their private helpers and the `record_parse_outcome`
+//! observability hook in `mod.rs`) survive as the shared public surface.
 //!
-//! This file specifies that contract three ways:
-//!   1. `absence_guards`   — the two names MUST vanish from the primary sites
-//!      (these FAIL today because the code still exists; they pass once the
-//!      deletion lands). This is the driving TDD signal.
-//!   2. `retention_guards` — every retained `pub` helper and its re-export MUST
-//!      survive; the public API only shrinks by exactly the two names.
-//!   3. `retained_behavior` — the JSON-hardening the deleted `extract_and_parse_json`
-//!      used to compose is preserved by rewriting the two boundary cases onto the
-//!      retained primitives (`strip_recipe_noise` + `last_balanced_object`,
-//!      `recover_json_view`). These pass today and MUST keep passing.
-//!   4. `consumers_unchanged` — the out-of-scope production consumers keep
-//!      compiling against the retained `strip_recipe_noise` and never referenced
-//!      the deleted names.
+//! Removed public symbols (must vanish from the crate's public API):
+//!   extract_verdict, recover_json_view, balanced_objects, last_balanced_object,
+//!   normalize_json_number_specials, normalize_python_json_literals,
+//!   strip_json_comments, strip_json_trailing_commas,
+//!   escape_json_string_control_chars, escape_json_string_invalid_escapes,
+//!   and the `VerdictMatch` struct.
 //!
-//! Absence assertions target the DEFINITION / RE-EXPORT forms and the primary
-//! deletion sites only. They are deliberately scoped to `extract.rs`,
-//! `mod.rs`, and `recipe_brain.rs` so that string-literal references inside the
-//! inverted absence-guards elsewhere in the tree are NOT counted as callers.
+//! This file specifies the contract four ways:
+//!   1. `scrapers_stay_absent`  — regression guard: the two previously-removed
+//!      entry points stay gone. (Passes today and after.)
+//!   2. `dead_symbol_absence`   — the 10 fns + `VerdictMatch` MUST vanish from
+//!      their definition site (`extract.rs`) and the `mod.rs` re-export. These
+//!      FAIL today (the code still exists) and pass once the deletion lands.
+//!      This is the driving TDD signal.
+//!   3. `retained_surface`      — the public surface shrinks to EXACTLY
+//!      `{strip_ansi, strip_recipe_noise}` (+ the `record_parse_outcome` def in
+//!      mod.rs). Those retained symbols and their re-exports MUST survive.
+//!   4. `retained_behavior`     — `strip_ansi` and `strip_recipe_noise` keep
+//!      their exact behavior (no signature/body change). Passes today and after.
+//!   5. `consumers_unchanged`   — out-of-scope production consumers keep compiling
+//!      against the retained `strip_recipe_noise` and reference no removed name.
+//!
+//! Absence assertions use WHOLE-WORD matching so that unrelated identifiers that
+//! merely embed a removed name as a substring are not counted. In particular the
+//! private `extract_balanced_objects` helpers in `stewardship/merge_judge.rs` and
+//! `goal_curation/progress_reviewer.rs` (which embed `balanced_objects`) are
+//! false positives and are explicitly out of scope (design R3 / ambiguity A2).
 
 use std::borrow::Cow;
 use std::fs;
 use std::path::PathBuf;
 
-use simard::recipe_output::{last_balanced_object, recover_json_view, strip_recipe_noise};
+use simard::recipe_output::{strip_ansi, strip_recipe_noise};
 
-const FN_PAYLOAD: &str = "extract_json_payload";
-const FN_PARSE: &str = "extract_and_parse_json";
+/// The two entry points removed by the earlier phase — must stay gone.
+const REMOVED_ENTRY_POINTS: &[&str] = &["extract_json_payload", "extract_and_parse_json"];
+
+/// The 10 orphaned public functions removed by this phase.
+const REMOVED_FNS: &[&str] = &[
+    "extract_verdict",
+    "recover_json_view",
+    "balanced_objects",
+    "last_balanced_object",
+    "normalize_json_number_specials",
+    "normalize_python_json_literals",
+    "strip_json_comments",
+    "strip_json_trailing_commas",
+    "escape_json_string_control_chars",
+    "escape_json_string_invalid_escapes",
+];
+
+/// The struct removed alongside the verdict extractor.
+const REMOVED_STRUCT: &str = "VerdictMatch";
+
+/// The only two public helpers that survive this phase.
+const RETAINED_FNS: &[&str] = &["strip_ansi", "strip_recipe_noise"];
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -44,202 +74,257 @@ fn read_src(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+/// True iff `sym` appears in `haystack` as a whole identifier token — i.e. the
+/// characters immediately before and after are not Rust identifier characters.
+/// This avoids counting `balanced_objects` inside `extract_balanced_objects`.
+fn mentions_symbol(haystack: &str, sym: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let is_ident = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    haystack.match_indices(sym).any(|(start, m)| {
+        let end = start + m.len();
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_ident(bytes[end]);
+        before_ok && after_ok
+    })
+}
+
 // ---------------------------------------------------------------------------
-// 1. ABSENCE GUARDS — the driving TDD failures. The two dead functions, their
-//    re-export, and their sole non-production caller MUST be gone.
+// 1. SCRAPERS STAY ABSENT — regression guard for the earlier phase's deletion.
 // ---------------------------------------------------------------------------
-mod absence_guards {
+mod scrapers_stay_absent {
     use super::*;
 
     #[test]
-    fn extract_json_payload_definition_is_deleted() {
+    fn removed_entry_points_have_no_definitions() {
         let extract = read_src("src/recipe_output/extract.rs");
-        assert!(
-            !extract.contains("pub fn extract_json_payload"),
-            "`pub fn {FN_PAYLOAD}` must be deleted from src/recipe_output/extract.rs"
-        );
+        for name in REMOVED_ENTRY_POINTS {
+            assert!(
+                !mentions_symbol(&extract, name),
+                "previously-removed entry point `{name}` must stay gone from extract.rs"
+            );
+        }
     }
 
     #[test]
-    fn extract_and_parse_json_definition_is_deleted() {
-        let extract = read_src("src/recipe_output/extract.rs");
-        assert!(
-            !extract.contains("pub fn extract_and_parse_json"),
-            "`pub fn {FN_PARSE}` must be deleted from src/recipe_output/extract.rs"
-        );
-    }
-
-    #[test]
-    fn extract_rs_has_zero_residual_mentions() {
-        // Section-header comments, doc cross-references, and the whole exclusive
-        // test battery for the two functions must all be gone — a grep-zero gate
-        // scoped to the primary deletion file (design R2).
-        let extract = read_src("src/recipe_output/extract.rs");
-        assert!(
-            !extract.contains(FN_PAYLOAD),
-            "no residual `{FN_PAYLOAD}` mention (defs, section comments, docs, or exclusive tests) \
-             may remain in extract.rs"
-        );
-        assert!(
-            !extract.contains(FN_PARSE),
-            "no residual `{FN_PARSE}` mention (defs, section comments, docs, or exclusive tests) \
-             may remain in extract.rs"
-        );
-    }
-
-    #[test]
-    fn mod_rs_no_longer_reexports_the_two_names() {
+    fn removed_entry_points_not_reexported() {
         let module = read_src("src/recipe_output/mod.rs");
-        assert!(
-            !module.contains(FN_PAYLOAD),
-            "`{FN_PAYLOAD}` must be removed from the `pub use` re-export list in mod.rs"
-        );
-        assert!(
-            !module.contains(FN_PARSE),
-            "`{FN_PARSE}` must be removed from the `pub use` re-export list in mod.rs"
-        );
-    }
-
-    #[test]
-    fn recipe_brain_drops_the_sole_non_production_caller() {
-        let brain = read_src("src/ooda_brain/recipe_brain.rs");
-        assert!(
-            !brain.contains("merge_judge_envelope_survives_banner_and_ansi"),
-            "the sole non-production caller test must be deleted from recipe_brain.rs"
-        );
-        assert!(
-            !brain.contains(FN_PAYLOAD),
-            "recipe_brain.rs must have zero references to the deleted `{FN_PAYLOAD}`"
-        );
+        for name in REMOVED_ENTRY_POINTS {
+            assert!(
+                !mentions_symbol(&module, name),
+                "previously-removed entry point `{name}` must not reappear in mod.rs"
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 2. RETENTION GUARDS — the public API shrinks by EXACTLY the two names.
-//    Every other retained helper and its re-export survives untouched.
+// 2. DEAD SYMBOL ABSENCE — the driving TDD failures. The 10 orphaned fns and
+//    the `VerdictMatch` struct MUST vanish from their definition site and the
+//    public re-export. These FAIL today and pass once the deletion lands.
 // ---------------------------------------------------------------------------
-mod retention_guards {
+mod dead_symbol_absence {
     use super::*;
 
-    const RETAINED_PUB_FNS: &[&str] = &[
-        "pub fn strip_ansi",
-        "pub fn strip_recipe_noise",
-        "pub fn last_balanced_object",
-        "pub fn balanced_objects",
-        "pub fn recover_json_view",
-        "pub fn strip_json_comments",
-        "pub fn strip_json_trailing_commas",
-        "pub fn escape_json_string_control_chars",
-        "pub fn escape_json_string_invalid_escapes",
-        "pub fn normalize_json_number_specials",
-        "pub fn normalize_python_json_literals",
-        "pub fn extract_verdict",
-    ];
-
-    const RETAINED_REEXPORTS: &[&str] = &[
-        "VerdictMatch",
-        "balanced_objects",
-        "escape_json_string_control_chars",
-        "escape_json_string_invalid_escapes",
-        "extract_verdict",
-        "last_balanced_object",
-        "normalize_json_number_specials",
-        "normalize_python_json_literals",
-        "recover_json_view",
-        "strip_ansi",
-        "strip_json_comments",
-        "strip_json_trailing_commas",
-        "strip_recipe_noise",
-    ];
+    #[test]
+    fn orphaned_fn_definitions_are_deleted() {
+        let extract = read_src("src/recipe_output/extract.rs");
+        for name in REMOVED_FNS {
+            let def = format!("pub fn {name}");
+            assert!(
+                !extract.contains(&def),
+                "orphaned `{def}` must be deleted from src/recipe_output/extract.rs"
+            );
+        }
+    }
 
     #[test]
-    fn all_retained_public_helpers_survive_in_extract_rs() {
+    fn verdict_match_struct_is_deleted() {
         let extract = read_src("src/recipe_output/extract.rs");
-        for def in RETAINED_PUB_FNS {
+        assert!(
+            !extract.contains("pub struct VerdictMatch"),
+            "orphaned `pub struct VerdictMatch` must be deleted from extract.rs"
+        );
+    }
+
+    #[test]
+    fn extract_rs_has_zero_residual_mentions_of_removed_symbols() {
+        // Definitions, their #[cfg(test)] unit tests, and any doc cross-refs to
+        // the removed symbols must all be gone from the primary deletion file.
+        let extract = read_src("src/recipe_output/extract.rs");
+        for name in REMOVED_FNS {
             assert!(
-                extract.contains(def),
+                !mentions_symbol(&extract, name),
+                "no residual whole-word `{name}` mention (def, unit test, or doc) \
+                 may remain in extract.rs"
+            );
+        }
+        assert!(
+            !mentions_symbol(&extract, REMOVED_STRUCT),
+            "no residual whole-word `{REMOVED_STRUCT}` mention may remain in extract.rs"
+        );
+    }
+
+    #[test]
+    fn mod_rs_no_longer_reexports_removed_symbols() {
+        let module = read_src("src/recipe_output/mod.rs");
+        for name in REMOVED_FNS {
+            assert!(
+                !mentions_symbol(&module, name),
+                "`{name}` must be removed from the `pub use extract::{{…}}` list in mod.rs"
+            );
+        }
+        assert!(
+            !mentions_symbol(&module, REMOVED_STRUCT),
+            "`{REMOVED_STRUCT}` must be removed from the `pub use extract::{{…}}` list in mod.rs"
+        );
+    }
+
+    #[test]
+    fn recipe_output_module_no_longer_exposes_removed_symbols_tree_wide() {
+        // Whole-word grep-zero across src/, excluding the false-positive owners
+        // of the private `extract_balanced_objects` helper (design R3 / A2) and
+        // this test file's sibling contract tests, if any live under src/.
+        const EXCLUDE: &[&str] = &[
+            "src/stewardship/merge_judge.rs",
+            "src/goal_curation/progress_reviewer.rs",
+        ];
+        let root = manifest_dir().join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        visit_rs_files(&root, &mut |path| {
+            let rel = path
+                .strip_prefix(manifest_dir())
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if EXCLUDE.iter().any(|e| rel == *e) {
+                return;
+            }
+            let body = fs::read_to_string(path).unwrap_or_default();
+            for name in REMOVED_FNS {
+                if mentions_symbol(&body, name) {
+                    offenders.push(format!("{rel}: {name}"));
+                }
+            }
+            if mentions_symbol(&body, REMOVED_STRUCT) {
+                offenders.push(format!("{rel}: {REMOVED_STRUCT}"));
+            }
+        });
+        assert!(
+            offenders.is_empty(),
+            "removed symbols must not be defined, re-exported, or called anywhere in src/ \
+             (excluding private-helper owners); offenders: {offenders:?}"
+        );
+    }
+
+    fn visit_rs_files(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path)) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit_rs_files(&path, f);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                f(&path);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3. RETAINED SURFACE — the public API shrinks to EXACTLY {strip_ansi,
+//    strip_recipe_noise}; the `record_parse_outcome` def in mod.rs is untouched.
+// ---------------------------------------------------------------------------
+mod retained_surface {
+    use super::*;
+
+    #[test]
+    fn retained_public_helpers_survive_in_extract_rs() {
+        let extract = read_src("src/recipe_output/extract.rs");
+        for name in RETAINED_FNS {
+            let def = format!("pub fn {name}");
+            assert!(
+                extract.contains(&def),
                 "retained helper `{def}` must NOT be deleted from extract.rs"
             );
         }
-        assert!(
-            extract.contains("pub struct VerdictMatch"),
-            "retained `pub struct VerdictMatch` must survive in extract.rs"
-        );
     }
 
     #[test]
-    fn all_retained_reexports_survive_in_mod_rs() {
+    fn retained_reexports_survive_in_mod_rs() {
         let module = read_src("src/recipe_output/mod.rs");
-        for ident in RETAINED_REEXPORTS {
+        for name in RETAINED_FNS {
             assert!(
-                module.contains(ident),
-                "retained re-export `{ident}` must remain in the mod.rs `pub use` list"
+                mentions_symbol(&module, name),
+                "retained re-export `{name}` must remain in the mod.rs `pub use` list"
             );
         }
+    }
+
+    #[test]
+    fn record_parse_outcome_definition_is_untouched() {
+        let module = read_src("src/recipe_output/mod.rs");
+        assert!(
+            module.contains("pub fn record_parse_outcome"),
+            "`record_parse_outcome` must stay defined in mod.rs (out of scope for removal)"
+        );
     }
 }
 
 // ---------------------------------------------------------------------------
-// 3. RETAINED BEHAVIOR — the JSON hardening the deleted `extract_and_parse_json`
-//    composed is preserved by the retained primitives. These are the two
-//    boundary tests rewritten onto retained public helpers (design step 4).
+// 4. RETAINED BEHAVIOR — the two survivors keep their exact behavior. These
+//    compile against the retained public API and pass today and after.
 // ---------------------------------------------------------------------------
 mod retained_behavior {
     use super::*;
 
     #[test]
-    fn recovers_json_payload_behind_launcher_preamble() {
-        // Formerly `extract_json_payload(&raw)`; rewritten onto the retained
-        // `strip_recipe_noise` + `last_balanced_object` pipeline it used to call.
-        let raw = format!(
-            "{marker}\n{launching}\n{{\"facts\":[]}}",
-            marker = "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference).",
-            launching = "INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot",
-        );
-        let cleaned = strip_recipe_noise(&raw);
-        let payload = last_balanced_object(cleaned.as_ref())
-            .expect("balanced object must be recovered from behind launcher preamble");
-        assert_eq!(payload, "{\"facts\":[]}");
+    fn strip_ansi_removes_csi_sequences_and_preserves_text() {
+        let colored = "\u{1b}[31mADMIT\u{1b}[0m";
+        assert_eq!(strip_ansi(colored), "ADMIT");
+    }
+
+    #[test]
+    fn strip_ansi_borrows_clean_input() {
         assert!(
-            !payload.contains("launching copilot") && !payload.contains("NODE_OPTIONS"),
-            "recovered payload must not carry launcher-preamble noise: {payload}"
+            matches!(strip_ansi("plain text with no escapes"), Cow::Borrowed(_)),
+            "ANSI-free input must pass through borrowed (no allocation)"
         );
     }
 
     #[test]
-    fn recover_json_view_does_not_forge_literal_across_block_comment() {
-        // Whole-token guarantee: a block comment must not splice `T` + `rue` into
-        // a `True` the literal view then "recovers". The recovered view is owned
-        // (the comment was stripped) but still malformed, so a strict parse fails
-        // — the split token is never masked. Rewritten to exercise the retained
-        // `recover_json_view` directly, without the deleted `extract_and_parse_json`.
-        let fixed = recover_json_view(r#"{"ready": T/*x*/rue}"#);
+    fn strip_recipe_noise_drops_launcher_preamble_and_keeps_json() {
+        let raw = concat!(
+            "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference).\n",
+            "INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot\n",
+            "{\"facts\":[]}"
+        );
+        let cleaned = strip_recipe_noise(raw);
         assert!(
-            matches!(fixed, Cow::Owned(_)),
-            "stripping the block comment must yield an owned, rewritten view"
+            cleaned.contains("{\"facts\":[]}"),
+            "the JSON payload line must survive denoising: {cleaned}"
         );
         assert!(
-            serde_json::from_str::<serde_json::Value>(fixed.as_ref()).is_err(),
-            "the split `T/*x*/rue` token must remain malformed — never forged into `True`"
+            !cleaned.contains("NODE_OPTIONS") && !cleaned.contains("launching copilot"),
+            "launcher-preamble noise must be dropped: {cleaned}"
         );
     }
 
     #[test]
-    fn recover_json_view_is_a_noop_on_valid_json() {
-        // The retained recovery view must borrow valid JSON byte-for-byte — the
-        // provable no-op property the deleted parser relied on for fail-closed
-        // behavior on non-recoverable input.
-        let view = recover_json_view(r#"{"decision":"admit","score":0.9}"#);
+    fn strip_recipe_noise_borrows_fully_clean_input() {
         assert!(
-            matches!(view, Cow::Borrowed(_)),
-            "valid JSON must pass through recover_json_view unchanged (borrowed)"
+            matches!(
+                strip_recipe_noise("{\"decision\":\"admit\"}"),
+                Cow::Borrowed(_)
+            ),
+            "noise-free input must pass through borrowed (no allocation)"
         );
     }
 }
 
 // ---------------------------------------------------------------------------
-// 4. CONSUMERS UNCHANGED — out-of-scope production consumers keep compiling
-//    against the retained `strip_recipe_noise` and never used the deleted names.
+// 5. CONSUMERS UNCHANGED — out-of-scope production consumers keep compiling
+//    against the retained `strip_recipe_noise` and reference no removed name.
 // ---------------------------------------------------------------------------
 mod consumers_unchanged {
     use super::*;
@@ -261,12 +346,18 @@ mod consumers_unchanged {
     }
 
     #[test]
-    fn consumers_never_reference_the_deleted_names() {
+    fn consumers_never_reference_removed_names() {
         for rel in CONSUMERS {
             let src = read_src(rel);
+            for name in REMOVED_FNS.iter().chain(REMOVED_ENTRY_POINTS.iter()) {
+                assert!(
+                    !mentions_symbol(&src, name),
+                    "{rel} must not reference the removed `{name}`"
+                );
+            }
             assert!(
-                !src.contains(FN_PAYLOAD) && !src.contains(FN_PARSE),
-                "{rel} must not reference the deleted `{FN_PAYLOAD}` / `{FN_PARSE}`"
+                !mentions_symbol(&src, REMOVED_STRUCT),
+                "{rel} must not reference the removed `{REMOVED_STRUCT}`"
             );
         }
     }
