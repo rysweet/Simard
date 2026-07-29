@@ -225,16 +225,41 @@ fn all_dot_sources_are_wellformed_digraphs() {
 #[test]
 fn atlas_renders_five_mermaid_diagrams() {
     let atlas = read(ATLAS);
-    let mermaid = atlas.matches("```mermaid").count();
-    assert_eq!(
-        mermaid, 5,
-        "atlas must render exactly 5 inline Mermaid diagrams; found {mermaid}"
+
+    // Walk fenced code blocks in document order, tracking open/close state so
+    // that every ```mermaid block is verified to be individually closed by a
+    // bare ``` fence before the next block opens. This is stricter than a
+    // global even-count of fences, which could pass even if a mermaid block
+    // were closed by another info-string fence (e.g. ```mermaid ... ```bash).
+    let mut inside_fence = false;
+    let mut mermaid_blocks = 0usize;
+    for line in atlas.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("```") {
+            continue;
+        }
+        let info = trimmed.trim_start_matches('`').trim();
+        if inside_fence {
+            assert_eq!(
+                info, "",
+                "code fence must be closed by a bare ``` line, found: {line:?}"
+            );
+            inside_fence = false;
+        } else {
+            if info == "mermaid" {
+                mermaid_blocks += 1;
+            }
+            inside_fence = true;
+        }
+    }
+
+    assert!(
+        !inside_fence,
+        "atlas has an unclosed code fence; Mermaid/code blocks will not render"
     );
-    let fences = atlas.lines().filter(|l| l.starts_with("```")).count();
     assert_eq!(
-        fences % 2,
-        0,
-        "atlas has unbalanced code fences ({fences}); Mermaid/code blocks will not render"
+        mermaid_blocks, 5,
+        "atlas must render exactly 5 inline Mermaid diagrams; found {mermaid_blocks}"
     );
 }
 

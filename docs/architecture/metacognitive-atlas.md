@@ -46,7 +46,7 @@ The metacognitive model is a **mind of many processes** sharing one scheduler:
   (`src/cognitive_threads/telemetry.rs`).
 - **Cognitive-threads layer** — the closed roster of **thirteen** threads,
   `ThreadName::ALL` in `src/ooda_brain/thread_reasoning_record.rs`
-  (`pub const ALL: [ThreadName; 13]`, ~line 80). Each thread
+  (`pub const ALL: [ThreadName; 13]`). Each thread
   is a thin rail over an agentic recipe and hands its reasoning back through a
   typed `ThreadReasoningRecord`.
 - **OODA layer** — the authoritative loop (`src/ooda_loop/`) reasoning through
@@ -141,8 +141,8 @@ thread's real reasoning summary.
 Graphviz source: [`diagrams/thread-drilldown.dot`](./diagrams/thread-drilldown.dot).
 
 The roster is bound to `ThreadName::ALL`
-(`src/ooda_brain/thread_reasoning_record.rs`, `pub const ALL: [ThreadName; 13]`
-at ~line 80). Each recipe lives at
+(`src/ooda_brain/thread_reasoning_record.rs`, `pub const ALL: [ThreadName; 13]`).
+Each recipe lives at
 `prompt_assets/simard/recipes/<recipe>.yaml`:
 
 | # | Thread (`ThreadName`) | `RECIPE` const | Backing recipe file |
@@ -381,8 +381,8 @@ This atlas is a **living document**, not a point-in-time report. When the code
 changes, update both the inline Mermaid and the matching `.dot` source together:
 
 - The thirteen-thread roster is bound to `ThreadName::ALL`
-  (`src/ooda_brain/thread_reasoning_record.rs`, `pub const ALL: [ThreadName; 13]`
-  at ~line 80) — if a thread is added or
+  (`src/ooda_brain/thread_reasoning_record.rs`, `pub const ALL: [ThreadName; 13]`)
+  — if a thread is added or
   removed there, update [Diagram 2](#2-cognitive-threads-drill-down) and the
   roster table.
 - Each thread's recipe is its `RECIPE` const — if a `RECIPE` string changes,
