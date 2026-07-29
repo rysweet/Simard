@@ -249,7 +249,19 @@ fn issue_list_args(repo: &str, query: &IssueListQuery) -> Vec<String> {
     match query {
         IssueListQuery::Signature(signature) => {
             args.push("--search".to_string());
-            args.push(format!("stewardship-signature:{signature} in:body"));
+            // Full-text search for the bare 16-hex signature in the issue body.
+            //
+            // The signature MUST NOT be prefixed with the `stewardship-signature:`
+            // marker here: GitHub issue search parses a leading `<word>:` token as
+            // a *search qualifier*, so `stewardship-signature:<sig>` is treated as
+            // an unknown qualifier and silently matches NOTHING — the fast search
+            // then always returns empty, defeating dedup and letting a re-observed
+            // failure re-file a fresh `[stewardship] …` issue every tick (the
+            // observed issue-churn storm, #4962/#4956/#4951/#4945/#4942/#4957).
+            // A bare 16-hex signature is specific enough to full-text match only
+            // the intended tracking issue, and mirrors the working query in
+            // `supply_chain_steward::gh` (`"{signature} in:body"`).
+            args.push(format!("{signature} in:body"));
         }
         IssueListQuery::RecentOpen(limit) => {
             args.push("--limit".to_string());
@@ -433,12 +445,35 @@ mod tests {
         assert!(args.windows(2).any(|w| w
             == [
                 "--search".to_string(),
-                "stewardship-signature:cafef00dcafef00d in:body".to_string()
+                "cafef00dcafef00d in:body".to_string()
             ]));
         assert!(!args.iter().any(|a| a == "--limit"));
         assert_eq!(
             args[0..6],
             ["issue", "list", "-R", "o/r", "--state", "open"]
+        );
+    }
+
+    /// Regression (#4962): the signature search MUST be a bare full-text term,
+    /// never a `stewardship-signature:` qualifier. GitHub parses a leading
+    /// `<word>:` as a search qualifier, so the marker-prefixed form matched
+    /// NOTHING and every re-observed failure re-filed a duplicate issue.
+    #[test]
+    fn signature_search_is_bare_fulltext_not_a_qualifier() {
+        let args = issue_list_args("o/r", &IssueListQuery::Signature("cafef00dcafef00d".into()));
+        let search = args
+            .windows(2)
+            .find(|w| w[0] == "--search")
+            .map(|w| w[1].clone())
+            .expect("Signature query must pass a --search term");
+        assert!(
+            !search.contains("stewardship-signature:"),
+            "the search term must NOT embed the `stewardship-signature:` qualifier \
+             (GitHub would parse it as a qualifier and match nothing): {search:?}"
+        );
+        assert!(
+            search.starts_with("cafef00dcafef00d"),
+            "the search term must lead with the bare signature: {search:?}"
         );
     }
 
