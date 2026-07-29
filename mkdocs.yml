@@ -492,6 +492,7 @@ nav:
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Cognition Record-Brain-Introspection/Self-Quality-Audit Tools: reference/record-brain-introspection-self-audit-cli.md
     - Disk-Health API: reference/disk-health-api.md
     - Disk Reclaim API: reference/disk-reclaim-api.md
     - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md

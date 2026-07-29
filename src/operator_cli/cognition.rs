@@ -44,6 +44,20 @@ salience-signal  Write the numeric OODA-Decide salience ranking to
 
 There is no JSON to print: the file write IS the effect. With no [state-root]
 the tool resolves $SIMARD_STATE_ROOT, then $HOME/.simard.
+
+record-brain-introspection  Write a typed, owner-only (0o600), freshness-checked
+                 brain-introspection record to --record-path (absolute, no '..').
+                 Flags: --written-at-epoch <u64>, repeatable --brain-health
+                 (>=1 REQUIRED), --pattern, --regression, --prune-candidate;
+                 scalar --prune-requested <usize>, --issue-url <url>. The rail
+                 reads it back fail-closed (R1-R7). Validate-all-then-write-once.
+
+record-self-quality-audit  Write a typed, owner-only (0o600), freshness-checked
+                 self-quality-audit record to --record-path (absolute, no '..').
+                 Flags: --written-at-epoch <u64>, --waves-completed <0..=5>,
+                 --summary-line <non-empty, REQUIRED>, repeatable --pr-opened,
+                 --pr-merged, --crusty-approved, --crusty-unresolved. The rail
+                 reads it back fail-closed (R1-R7). Validate-all-then-write-once.
 ";
 
 /// One input ranking entry as supplied by the recipe (pre-validation). The
@@ -147,6 +161,8 @@ pub(crate) fn dispatch_cognition_command(
         }
         "salience-signal" => run_salience_signal(args),
         "record-thread-reasoning" => dispatch_record_thread_reasoning(args),
+        "record-brain-introspection" => dispatch_record_brain_introspection(args),
+        "record-self-quality-audit" => dispatch_record_self_quality_audit(args),
         other => Err(format!("unknown cognition subcommand: {other}").into()),
     }
 }
@@ -214,9 +230,15 @@ fn run_salience_signal(
 // every cognitive-thread recipe calls exactly once (issue #4970, WS-A.2).
 // ===========================================================================
 
+use crate::brain_introspection_record::{
+    BRAIN_INTROSPECTION_SCHEMA, BrainIntrospectionRecord, check_bounds as check_brain_bounds,
+};
 use crate::ooda_brain::{
     THREAD_REASONING_SCHEMA, ThreadDomain, ThreadName, ThreadReasoningRecord,
     sanitize_reasoning_summary,
+};
+use crate::self_quality_audit_record::{
+    SELF_QUALITY_AUDIT_SCHEMA, SelfQualityAuditRecord, check_bounds as check_audit_bounds,
 };
 
 /// Every flag the writer accepts. An unknown flag is rejected (nothing is ever
@@ -268,9 +290,13 @@ impl ParsedArgs {
     }
 }
 
-/// Parse the writer's `--flag value` argv, rejecting unknown flags and duplicate
-/// scalars. Repeatable flags accumulate in order.
-fn parse_record_args(
+/// Parse a writer's `--flag value` argv against the supplied `known`/`repeatable`
+/// flag sets, rejecting unknown flags and duplicate scalars. Repeatable flags
+/// accumulate in order. Shared by every gated record verb so they can never
+/// drift on argv discipline.
+fn parse_record_args_with(
+    known: &[&str],
+    repeatable: &[&str],
     args: impl Iterator<Item = String>,
 ) -> Result<ParsedArgs, Box<dyn std::error::Error>> {
     let values: Vec<String> = args.collect();
@@ -282,14 +308,14 @@ fn parse_record_args(
         let flag = values[index]
             .strip_prefix("--")
             .ok_or_else(|| format!("expected named option, got {:?}", values[index]))?;
-        if !KNOWN_FLAGS.contains(&flag) {
+        if !known.contains(&flag) {
             return Err(format!("unknown option --{flag}").into());
         }
         let value = values
             .get(index + 1)
             .ok_or_else(|| format!("--{flag} requires a value"))?
             .clone();
-        if REPEATABLE_FLAGS.contains(&flag) {
+        if repeatable.contains(&flag) {
             lists.entry(flag.to_string()).or_default().push(value);
         } else if scalars.insert(flag.to_string(), value).is_some() {
             return Err(format!("duplicate option --{flag}").into());
@@ -297,6 +323,13 @@ fn parse_record_args(
         index += 2;
     }
     Ok(ParsedArgs { scalars, lists })
+}
+
+/// Parse the thread-reasoning writer's argv (its fixed flag sets).
+fn parse_record_args(
+    args: impl Iterator<Item = String>,
+) -> Result<ParsedArgs, Box<dyn std::error::Error>> {
+    parse_record_args_with(KNOWN_FLAGS, REPEATABLE_FLAGS, args)
 }
 
 /// Harden a `--record-path`: absolute and free of any `..` component. Mirrors
@@ -495,5 +528,155 @@ pub(crate) fn dispatch_record_thread_reasoning(
         domain,
     };
     crate::persistence::persist_json("cognition-thread-reasoning", record_path, &record)?;
+    Ok(())
+}
+
+// ===========================================================================
+// `simard cognition record-brain-introspection` and
+// `simard cognition record-self-quality-audit` — the two gated ACT-step writer
+// verbs that retire the last brittle text-marker scrapes (issue #4968). Each
+// recipe's final ACT step calls its verb EXACTLY ONCE to write a typed,
+// owner-only (0o600), freshness-checked record the Rust rail reads fail-closed.
+// ===========================================================================
+
+/// Shared prelude for the #4968 record verbs: resolve + harden `--record-path`
+/// (absolute, no `..`) and parse the required `--written-at-epoch` (u64 unix
+/// seconds). Returns the owned path + epoch, or a hard error (nothing is
+/// written until every field validates).
+fn record_path_and_epoch(
+    parsed: &ParsedArgs,
+) -> Result<(PathBuf, u64), Box<dyn std::error::Error>> {
+    let record_path_raw = parsed
+        .scalar("record-path")
+        .ok_or("missing required option --record-path")?;
+    let record_path = Path::new(record_path_raw);
+    harden_record_path(record_path, "record-path")?;
+
+    let written_at_epoch: u64 = parsed
+        .scalar("written-at-epoch")
+        .ok_or("missing required option --written-at-epoch")?
+        .trim()
+        .parse()
+        .map_err(|_| "invalid --written-at-epoch (expected unix seconds, u64)")?;
+
+    Ok((record_path.to_path_buf(), written_at_epoch))
+}
+
+/// Every flag the brain-introspection writer accepts.
+const BRAIN_KNOWN_FLAGS: &[&str] = &[
+    "record-path",
+    "written-at-epoch",
+    "brain-health",
+    "pattern",
+    "regression",
+    "prune-candidate",
+    "prune-requested",
+    "issue-url",
+];
+/// The brain-introspection list fields (may repeat).
+const BRAIN_REPEATABLE_FLAGS: &[&str] =
+    &["brain-health", "pattern", "regression", "prune-candidate"];
+
+/// `simard cognition record-brain-introspection` — the zero-privilege ACT-step
+/// tool the brain-introspection recipe calls EXACTLY ONCE. It validates the
+/// bounded lists + the REQUIRED non-empty `--brain-health`, hardens
+/// `--record-path`, then writes EXACTLY ONE atomic `0o600`
+/// [`BrainIntrospectionRecord`](crate::brain_introspection_record::BrainIntrospectionRecord).
+/// Any validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). The record is read back fail-closed by
+/// [`read_verified_brain_introspection`](crate::brain_introspection_record::read_verified_brain_introspection).
+pub(crate) fn dispatch_record_brain_introspection(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse_record_args_with(BRAIN_KNOWN_FLAGS, BRAIN_REPEATABLE_FLAGS, args)?;
+    let (record_path, written_at_epoch) = record_path_and_epoch(&parsed)?;
+
+    let prune_requested: usize = match parsed.scalar("prune-requested") {
+        None => 0,
+        Some(v) => v
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid --prune-requested (expected a usize): {e}"))?,
+    };
+
+    let record = BrainIntrospectionRecord {
+        schema: BRAIN_INTROSPECTION_SCHEMA.to_string(),
+        written_at_epoch,
+        brain_health: parsed.list("brain-health"),
+        patterns: parsed.list("pattern"),
+        regressions: parsed.list("regression"),
+        prune_candidates: parsed.list("prune-candidate"),
+        prune_requested,
+        issue_url: parsed.scalar("issue-url").map(str::to_string),
+    };
+
+    // Re-validate the SAME closed bounds + required-field chokepoint the reader
+    // applies, so the writer never produces a record the reader would reject.
+    check_brain_bounds(&record).map_err(|(code, detail)| format!("R{code} {detail}"))?;
+
+    crate::persistence::persist_json("cognition-brain-introspection", &record_path, &record)?;
+    Ok(())
+}
+
+/// Every flag the self-quality-audit writer accepts.
+const AUDIT_KNOWN_FLAGS: &[&str] = &[
+    "record-path",
+    "written-at-epoch",
+    "waves-completed",
+    "summary-line",
+    "pr-opened",
+    "pr-merged",
+    "crusty-approved",
+    "crusty-unresolved",
+];
+/// The self-quality-audit list fields (may repeat).
+const AUDIT_REPEATABLE_FLAGS: &[&str] = &[
+    "pr-opened",
+    "pr-merged",
+    "crusty-approved",
+    "crusty-unresolved",
+];
+
+/// `simard cognition record-self-quality-audit` — the zero-privilege ACT-step
+/// tool the monthly self-quality-audit recipe calls EXACTLY ONCE. It validates
+/// the `--waves-completed` ceiling, the bounded PR-URL lists, and the REQUIRED
+/// non-empty `--summary-line`, hardens `--record-path`, then writes EXACTLY ONE
+/// atomic `0o600`
+/// [`SelfQualityAuditRecord`](crate::self_quality_audit_record::SelfQualityAuditRecord).
+/// Any validation failure ⇒ a non-zero exit AND **no file on disk**.
+pub(crate) fn dispatch_record_self_quality_audit(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = parse_record_args_with(AUDIT_KNOWN_FLAGS, AUDIT_REPEATABLE_FLAGS, args)?;
+    let (record_path, written_at_epoch) = record_path_and_epoch(&parsed)?;
+
+    let waves_completed: u32 = match parsed.scalar("waves-completed") {
+        None => 0,
+        Some(v) => v
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid --waves-completed (expected a u32): {e}"))?,
+    };
+
+    let record = SelfQualityAuditRecord {
+        schema: SELF_QUALITY_AUDIT_SCHEMA.to_string(),
+        written_at_epoch,
+        waves_completed,
+        prs_opened: parsed.list("pr-opened"),
+        prs_merged: parsed.list("pr-merged"),
+        crusty_approved: parsed.list("crusty-approved"),
+        crusty_unresolved: parsed.list("crusty-unresolved"),
+        summary_line: parsed
+            .scalar("summary-line")
+            .unwrap_or_default()
+            .to_string(),
+    };
+
+    // Re-validate the SAME closed bounds + required-field chokepoint the reader
+    // applies (waves <= 5, non-empty summary), so the writer never produces a
+    // record the reader would reject.
+    check_audit_bounds(&record).map_err(|(code, detail)| format!("R{code} {detail}"))?;
+
+    crate::persistence::persist_json("cognition-self-quality-audit", &record_path, &record)?;
     Ok(())
 }

@@ -414,3 +414,150 @@ fn the_four_new_thread_recipes_exist_and_record_reasoning() {
         );
     }
 }
+
+// ===========================================================================
+// Issue #4968 — retire the LAST two brittle-parse survivors. The
+// brain-introspection and monthly-self-quality-audit adapters must stop scraping
+// concatenated recipe step-output text for terminal markers and instead hand
+// their result back through a typed, owner-only, freshness-checked record the
+// rail reads FAIL-CLOSED (R1–R7) — the same typed-record contract Groups A–C use.
+//
+// These source-/recipe-shape checks are authored tests-first: they fail RED
+// against the pre-#4968 tree (the adapters still define `parse_*_text` and scrape
+// `step_results[].output`; the record modules + writer verbs do not exist) and
+// turn GREEN only once the typed-record handoff lands. Behavioural coverage lives
+// in `brain_introspection_tests` / `self_quality_audit_tests`.
+// ===========================================================================
+
+/// The two production adapters whose text-marker scrape is being deleted.
+const BRITTLE_ADAPTER_SOURCES: &[&str] =
+    &["src/brain_introspection.rs", "src/self_quality_audit.rs"];
+
+#[test]
+fn brittle_adapters_no_longer_scrape_step_output_text() {
+    // The exact greps from the #4968 brief's acceptance list: no dead marker
+    // grammar, and no `step_results[].output` envelope scraping in either adapter.
+    for rel in BRITTLE_ADAPTER_SOURCES {
+        let src = read_rel(rel);
+        for forbidden in [
+            "parse_brain_introspection_text",
+            "parse_self_quality_audit_text",
+            "step_results",
+            ".output",
+            "struct RecipeOutput",
+            "struct StepResult",
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "{rel} must not contain `{forbidden}` after #4968 — the adapter reads a \
+                 typed record fail-closed, never scrapes concatenated step output"
+            );
+        }
+    }
+}
+
+#[test]
+fn brittle_adapters_read_the_typed_record_fail_closed() {
+    let brain = read_rel("src/brain_introspection.rs");
+    assert!(
+        brain.contains("read_verified_brain_introspection"),
+        "brain_introspection.rs must read its result via `read_verified_brain_introspection` \
+         (fail-closed R1–R7), not a text scrape"
+    );
+    assert!(
+        brain.contains("record_path"),
+        "brain_introspection.rs must pass `-c record_path=<abs>` so the recipe's ACT step \
+         writes the typed record there (rail-supplied trust anchor)"
+    );
+
+    let audit = read_rel("src/self_quality_audit.rs");
+    assert!(
+        audit.contains("read_verified_self_quality_audit"),
+        "self_quality_audit.rs must read its result via `read_verified_self_quality_audit` \
+         (fail-closed R1–R7), not a text scrape"
+    );
+    assert!(
+        audit.contains("record_path"),
+        "self_quality_audit.rs must pass `-c record_path=<abs>` so the recipe's ACT step \
+         writes the typed record there (rail-supplied trust anchor)"
+    );
+}
+
+#[test]
+fn brain_introspection_record_module_pins_the_contract() {
+    let src = read_rel("src/brain_introspection_record.rs");
+    for needle in [
+        "BRAIN_INTROSPECTION_SCHEMA",
+        "\"brain-introspection/v1\"",
+        "MAX_AGE_SECS",
+        "300",
+        "deny_unknown_fields",
+        "fn read_verified_brain_introspection",
+    ] {
+        assert!(
+            src.contains(needle),
+            "brain_introspection_record.rs must pin `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn self_quality_audit_record_module_pins_the_contract() {
+    let src = read_rel("src/self_quality_audit_record.rs");
+    for needle in [
+        "SELF_QUALITY_AUDIT_SCHEMA",
+        "\"self-quality-audit/v1\"",
+        "MAX_AGE_SECS",
+        "300",
+        "deny_unknown_fields",
+        "fn read_verified_self_quality_audit",
+    ] {
+        assert!(
+            src.contains(needle),
+            "self_quality_audit_record.rs must pin `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn lib_declares_the_two_new_record_modules() {
+    let src = read_rel("src/lib.rs");
+    for module in ["brain_introspection_record", "self_quality_audit_record"] {
+        assert!(
+            src.contains(module),
+            "lib.rs must declare `pub mod {module};` (sibling of its adapter, not under ooda_brain)"
+        );
+    }
+}
+
+#[test]
+fn cognition_cli_dispatches_the_two_new_record_verbs() {
+    let src = read_rel("src/operator_cli/cognition.rs");
+    for needle in [
+        "record-brain-introspection",
+        "record-self-quality-audit",
+        "dispatch_record_brain_introspection",
+        "dispatch_record_self_quality_audit",
+    ] {
+        assert!(
+            src.contains(needle),
+            "cognition.rs must route/define the gated writer verb `{needle}`"
+        );
+    }
+}
+
+#[test]
+fn both_recipes_write_their_typed_record_via_the_gated_verb() {
+    let brain = read_rel("prompt_assets/simard/recipes/brain-introspection.yaml");
+    assert!(
+        brain.contains("record-brain-introspection"),
+        "brain-introspection.yaml must call `simard cognition record-brain-introspection` as its \
+         final ACT step (no more terminal marker emission)"
+    );
+    let audit = read_rel("prompt_assets/simard/recipes/monthly-self-quality-audit.yaml");
+    assert!(
+        audit.contains("record-self-quality-audit"),
+        "monthly-self-quality-audit.yaml must call `simard cognition record-self-quality-audit` as \
+         its final ACT step (no more AUDIT_COMPLETE marker emission)"
+    );
+}
