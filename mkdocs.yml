@@ -78,6 +78,7 @@ nav:
     - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
     - Reflective Cognitive Threads Act via Tools: architecture/reflective-cognitive-threads.md
     - The Metacognitive Model (OODA + overseer + threads): architecture/metacognitive-model.md
+    - The Metacognitive Atlas (code-derived diagrams): architecture/metacognitive-atlas.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
