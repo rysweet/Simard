@@ -93,6 +93,15 @@ impl From<CapabilityError> for RecipeProcessError {
 pub struct EffectExecutionError {
     message: String,
     permanent: bool,
+    /// When set, the effect could not run because the goal record was
+    /// legitimately completed/removed (or otherwise concurrently mutated out
+    /// from under the prepared effect) between prepare and dispatch. This is a
+    /// benign race, not a failure: the dispatcher closes the outbox row as a
+    /// counted, structured no-op instead of mapping it to
+    /// `CycleErrorCode::DownstreamFailed`. A benign no-op is also `permanent`
+    /// so it can never be mistaken for a retryable failure if this flag is ever
+    /// dropped on the floor.
+    no_op: bool,
 }
 
 impl EffectExecutionError {
@@ -100,6 +109,7 @@ impl EffectExecutionError {
         Self {
             message: message.into(),
             permanent: true,
+            no_op: false,
         }
     }
 
@@ -107,6 +117,20 @@ impl EffectExecutionError {
         Self {
             message: message.into(),
             permanent: false,
+            no_op: false,
+        }
+    }
+
+    /// A benign goal-lifecycle race: the goal was legitimately
+    /// completed/removed between preparing this effect and dispatching it, so
+    /// there is nothing left to do. Structurally `permanent` (never retried)
+    /// and flagged `no_op` so the dispatcher records a counted no-op outcome
+    /// rather than a `DownstreamFailed` cycle error.
+    pub fn benign_no_op(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            permanent: true,
+            no_op: true,
         }
     }
 }
@@ -591,6 +615,9 @@ impl<'a> OutboxWorker<'a> {
         let result = match self.effects.execute(&job) {
             Ok(result) => result,
             Err(error) => {
+                if error.no_op {
+                    return self.finish_effect_as_benign_no_op(&job, &error);
+                }
                 if !error.permanent {
                     self.handler
                         .release_effect_for_retry(
@@ -643,6 +670,47 @@ impl<'a> OutboxWorker<'a> {
             }
         }
     }
+
+    /// Close the outbox row for a benign goal-lifecycle race (issue #4468): the
+    /// goal was legitimately completed/removed between preparing this effect and
+    /// dispatching it. Do NOT map this to `DownstreamFailed`. The row is closed
+    /// as a succeeded no-op (empty evidence) so it is never redispatched, a
+    /// structured tracing event is emitted, and a counter is incremented so the
+    /// race stays observable rather than silently swallowed.
+    fn finish_effect_as_benign_no_op(
+        &self,
+        job: &EffectJob,
+        error: &EffectExecutionError,
+    ) -> Result<(), CycleError> {
+        tracing::warn!(
+            target: "typed_ooda.effect_dispatch",
+            effect_id = %job.effect_id,
+            outcome_id = %job.outcome_id,
+            goal_id = %job.goal_id,
+            reason = %error,
+            "typed goal-session effect skipped as benign no-op: goal completed or removed between prepare and dispatch",
+        );
+        let _ = crate::self_metrics::record_metric(
+            "typed_ooda_effect_benign_no_op",
+            1.0,
+            &format!(
+                "goal={};effect={};outcome={};reason={}",
+                job.goal_id, job.effect_id, job.outcome_id, error
+            ),
+        );
+        let result = EffectResult::Succeeded { evidence: vec![] };
+        self.handler
+            .finish_effect(
+                job,
+                &effect_mutation_request_id(job, "noop"),
+                SystemTime::now(),
+                &result,
+            )
+            .map_err(|failure| {
+                CycleError::new(CycleErrorCode::PersistenceFailed, failure.to_string())
+            })?;
+        Ok(())
+    }
 }
 
 fn effect_mutation_request_id(job: &EffectJob, operation: &str) -> String {
@@ -672,6 +740,11 @@ mod tests {
         Succeed,
         Permanent,
         Retryable,
+        // Models the systemic race this fix targets: between preparing a
+        // goal-session effect and dispatching it, the goal record was
+        // legitimately completed/removed, so the executor reports a benign,
+        // structured no-op instead of a terminal failure.
+        BenignNoOp,
     }
 
     struct FakeEffects {
@@ -701,6 +774,9 @@ mod tests {
                 }),
                 FakeMode::Permanent => Err(EffectExecutionError::permanent("permanent boom")),
                 FakeMode::Retryable => Err(EffectExecutionError::retryable("transient boom")),
+                FakeMode::BenignNoOp => Err(EffectExecutionError::benign_no_op(
+                    "goal disappeared before effect dispatch",
+                )),
             }
         }
     }
@@ -1058,6 +1134,109 @@ mod tests {
             .effect_for_outcome(&outcome.outcome_id)
             .expect("query effect")
             .expect("effect");
+        assert_eq!(job.state.as_str(), "failed");
+    }
+
+    // ---------------------------------------------------------------------
+    // Regression: benign goal-removed race at effect dispatch.
+    //
+    // The systemic defect (issue #4468): a prepared goal-session effect is
+    // dispatched after the goal record was legitimately completed/removed
+    // between prepare and dispatch. Today the executor surfaces this as
+    // EffectExecutionError::permanent("goal disappeared before effect
+    // dispatch"), which maps to CycleErrorCode::DownstreamFailed and fails
+    // the OODA cycle. It must instead be a benign, structured, counted no-op:
+    // the outbox row is closed as succeeded (never redispatched) and the
+    // cycle completes with Ok(()).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn benign_no_op_constructor_is_permanent_and_flagged() {
+        // Defense-in-depth: a benign no-op is still `permanent` (so it can
+        // never be mistaken for a retryable failure) AND carries the explicit
+        // `no_op` discriminator that routes it to the counted-no-op arm.
+        let error = EffectExecutionError::benign_no_op("goal disappeared before effect dispatch");
+        assert!(
+            error.permanent,
+            "a benign no-op must remain permanent as a safety net"
+        );
+        assert!(
+            error.no_op,
+            "a benign no-op must set the no_op discriminator"
+        );
+        assert_eq!(error.to_string(), "goal disappeared before effect dispatch");
+
+        // The existing constructors must NOT set the no_op flag, or a real
+        // failure could be silently swallowed as a success.
+        assert!(!EffectExecutionError::permanent("boom").no_op);
+        assert!(!EffectExecutionError::retryable("later").no_op);
+    }
+
+    #[test]
+    fn dispatch_after_goal_removed_is_benign_no_op() {
+        let handler = handler();
+        let outcome = record_pending_action(&handler, file_issue_action());
+        let effects = FakeEffects::new(FakeMode::BenignNoOp);
+        let worker = OutboxWorker::new(&handler, &effects, "test-worker", Duration::from_secs(60));
+
+        // The goal was legitimately removed between prepare and dispatch. This
+        // MUST complete the cycle successfully, not raise DownstreamFailed.
+        worker
+            .dispatch_outcome(&outcome)
+            .expect("a benign goal-removed race must complete as a no-op, not DownstreamFailed");
+        assert_eq!(
+            effects.calls(),
+            1,
+            "the effect is attempted exactly once before the benign no-op"
+        );
+
+        // The outbox row is closed as succeeded so the effect is never
+        // redispatched by a later cycle or startup recovery.
+        let job = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query effect")
+            .expect("effect");
+        assert_eq!(
+            job.state.as_str(),
+            "succeeded",
+            "a benign no-op must close the outbox row, not leave it pending/failed"
+        );
+
+        // Idempotent redispatch must observe the closed row and must not
+        // re-run the effect executor.
+        worker
+            .dispatch_outcome(&outcome)
+            .expect("idempotent redispatch of a closed benign no-op");
+        assert_eq!(
+            effects.calls(),
+            1,
+            "a benign no-op effect must never be re-run"
+        );
+    }
+
+    #[test]
+    fn permanent_effect_failure_is_not_treated_as_benign_no_op() {
+        // Negative guard for the no_op reordering risk: a genuine permanent
+        // failure (no no_op flag) must still fail the cycle with
+        // DownstreamFailed and record the effect as `failed` — never swallowed
+        // into a success by the benign-no-op arm.
+        let handler = handler();
+        let outcome = record_pending_action(&handler, file_issue_action());
+        let effects = FakeEffects::new(FakeMode::Permanent);
+        let worker = OutboxWorker::new(&handler, &effects, "test-worker", Duration::from_secs(60));
+        let error = worker
+            .dispatch_outcome(&outcome)
+            .expect_err("a real permanent failure must surface as DownstreamFailed");
+        assert_eq!(error.code(), CycleErrorCode::DownstreamFailed);
+        let job = handler
+            .effect_for_outcome(&outcome.outcome_id)
+            .expect("query effect")
+            .expect("effect");
+        assert_ne!(
+            job.state.as_str(),
+            "succeeded",
+            "a permanent failure must never be closed as succeeded"
+        );
         assert_eq!(job.state.as_str(), "failed");
     }
 

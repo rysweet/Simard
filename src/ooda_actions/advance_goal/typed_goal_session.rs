@@ -148,7 +148,11 @@ pub(crate) fn run(
         std::time::Duration::from_secs(300),
     );
     if let Err(error) = startup_worker.drain_pending(32) {
-        eprintln!("[simard] typed OODA outbox startup recovery incomplete: {error}");
+        tracing::warn!(
+            target: "typed_ooda.outbox_recovery",
+            error = %error,
+            "typed OODA outbox startup recovery incomplete",
+        );
     }
     let execution = match route.execute(
         repo_root,
@@ -334,7 +338,13 @@ impl LiveGoalSessionEffects<'_, '_> {
                 .active
                 .iter()
                 .find(|goal| goal.id == goal_id)
-                .ok_or_else(|| EffectExecutionError::permanent("goal disappeared before spawn"))?;
+                .ok_or_else(|| {
+                    // Benign goal-lifecycle race (issue #4468): the goal was
+                    // legitimately completed/removed between preparing this
+                    // effect and dispatching it, BEFORE any side effect ran.
+                    // Report a counted no-op, not a DownstreamFailed cycle.
+                    EffectExecutionError::benign_no_op("goal disappeared before spawn")
+                })?;
             (goal.repo.clone(), goal.assigned_to.is_some())
         };
         if already_assigned {
@@ -457,7 +467,13 @@ impl LiveGoalSessionEffects<'_, '_> {
                 .iter()
                 .find(|goal| goal.id == goal_id)
                 .ok_or_else(|| {
-                    EffectExecutionError::permanent("goal disappeared before effect dispatch")
+                    // Benign goal-lifecycle race (issue #4468): the goal was
+                    // legitimately completed/removed between preparing this
+                    // effect and dispatching it. This is the named defect
+                    // signature ("goal disappeared before effect dispatch").
+                    // It occurs before any side effect, so it is a benign,
+                    // counted no-op rather than a DownstreamFailed failure.
+                    EffectExecutionError::benign_no_op("goal disappeared before effect dispatch")
                 })?;
             goal_repository(goal).map_err(EffectExecutionError::permanent)?
         };
