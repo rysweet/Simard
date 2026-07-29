@@ -498,9 +498,10 @@ fn dispatch_record_lifecycle_decision(
 
     // Validate the closed variant + bound/sanitize the rationale through the
     // SINGLE shared chokepoint. An out-of-set decision or an oversize rationale
-    // ⇒ None ⇒ rejected here, before any write. Returns the canonical token +
-    // sanitized rationale, so the persisted record is already normalized.
-    let (canonical, clean_rationale) =
+    // ⇒ None ⇒ rejected here, before any write. Returns the decoded decision +
+    // sanitized rationale; the canonical token is projected from the decision so
+    // the persisted record is already normalized.
+    let (mapped, clean_rationale) =
         crate::ooda_brain::sanitize_lifecycle_fields(decision, &rationale).ok_or_else(|| {
             format!(
                 "invalid lifecycle decision: unknown --decision {decision:?} or a rationale that \
@@ -508,6 +509,7 @@ fn dispatch_record_lifecycle_decision(
                 crate::ooda_brain::LIFECYCLE_VARIANT_LIST
             )
         })?;
+    let canonical = crate::ooda_brain::lifecycle_decision_choice(&mapped);
 
     let written_at_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

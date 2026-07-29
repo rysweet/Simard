@@ -30,7 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cognitive_threads::recipe_rail::secret_scrub;
 
 use super::EngineerLifecycleDecision;
-use super::recipe_brain::{lifecycle_decision_choice, lifecycle_decision_from_variant};
+use super::recipe_brain::lifecycle_decision_from_variant;
 use super::sanitize::sanitize_context_var;
 
 /// The pinned on-disk schema string for an [`EngineerLifecycleRecord`]. The
@@ -89,13 +89,18 @@ pub struct EngineerLifecycleRecord {
 ///   REJECTED (never truncated) if it still exceeds [`MAX_RATIONALE_CHARS`]. An
 ///   empty rationale is valid.
 ///
-/// Returns the canonical variant token (identical to the
-/// `EngineerLifecycleDecision` serde tag) plus the sanitized rationale, so the
-/// writer stores a normalized record and the reader/writer can never drift.
+/// Returns the fully decoded [`EngineerLifecycleDecision`] (carrying the
+/// sanitized rationale in its extra-field variants) plus the sanitized
+/// rationale string, so the writer stores a normalized record and the reader
+/// obtains the validated decision from ONE call — writer and reader can never
+/// drift. Callers that need the canonical snake_case token (e.g. the record's
+/// `decision` field) project it with [`lifecycle_decision_choice`].
+///
+/// [`lifecycle_decision_choice`]: super::recipe_brain::lifecycle_decision_choice
 pub fn sanitize_lifecycle_fields(
     decision: &str,
     rationale: &str,
-) -> Option<(&'static str, String)> {
+) -> Option<(EngineerLifecycleDecision, String)> {
     // Sanitize with a large intermediate bound so control/whitespace is folded
     // WITHOUT truncating — we reject oversize below rather than silently
     // shortening a real rationale.
@@ -106,9 +111,9 @@ pub fn sanitize_lifecycle_fields(
         return None;
     }
     // The mapping is the SINGLE authority on the closed variant set; a match
-    // yields the rich enum from which we take the canonical token.
+    // yields the rich enum carrying the sanitized rationale.
     let mapped = lifecycle_decision_from_variant(decision.trim(), clean.clone())?;
-    Some((lifecycle_decision_choice(&mapped), clean))
+    Some((mapped, clean))
 }
 
 /// A fail-closed read error, carrying the R-code of the check that tripped so
@@ -221,20 +226,19 @@ pub fn read_verified_engineer_lifecycle_decision(
     }
 
     // R5 + defense-in-depth — re-validate the closed variant AND re-sanitize the
-    // free text through the SAME chokepoint the writer used. An out-of-set
-    // decision or an oversized/hostile rationale fails closed here, never
-    // honored verbatim. Success yields the canonical enum (with the extra-field
-    // variants' derived body/reason/redispatch text preserved exactly).
-    let (_token, clean_rationale) = sanitize_lifecycle_fields(&record.decision, &record.rationale)
-        .ok_or_else(|| {
+    // free text through the SAME chokepoint the writer used, obtaining the
+    // decoded decision in ONE call. An out-of-set decision or an
+    // oversized/hostile rationale fails closed here, never honored verbatim.
+    // Success yields the canonical enum (with the extra-field variants' derived
+    // body/reason/redispatch text preserved exactly).
+    let (decision, _clean_rationale) =
+        sanitize_lifecycle_fields(&record.decision, &record.rationale).ok_or_else(|| {
             LifecycleReadError::new(
                 5,
                 "decision not in the closed variant set OR rationale invalid after sanitize"
                     .to_string(),
             )
         })?;
-    let decision = lifecycle_decision_from_variant(record.decision.trim(), clean_rationale)
-        .ok_or_else(|| LifecycleReadError::new(5, "decision not in the closed variant set"))?;
 
     // R7 — cycle identity (no replay of a prior cycle's verdict).
     if record.cycle_number != expected_cycle {
@@ -294,6 +298,7 @@ pub fn read_verified_engineer_lifecycle_decision(
 
 #[cfg(test)]
 mod tests {
+    use super::super::recipe_brain::lifecycle_decision_choice;
     use super::*;
     use std::io::Write;
 
@@ -482,9 +487,9 @@ mod tests {
 
     #[test]
     fn shared_chokepoint_folds_case_and_bounds() {
-        // Case-insensitive variant, canonical token returned.
-        let (tok, r) = sanitize_lifecycle_fields("Continue_Skipping", "  healthy  ").unwrap();
-        assert_eq!(tok, "continue_skipping");
+        // Case-insensitive variant, decoded to the canonical decision.
+        let (dec, r) = sanitize_lifecycle_fields("Continue_Skipping", "  healthy  ").unwrap();
+        assert_eq!(lifecycle_decision_choice(&dec), "continue_skipping");
         assert_eq!(r, "healthy");
         // Out-of-set decision.
         assert!(sanitize_lifecycle_fields("frobnicate", "x").is_none());

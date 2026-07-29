@@ -103,6 +103,7 @@ pub use recipe_brain::RecipeBrain;
 /// transport / metric as the OODA brains rather than reinventing them.
 pub(crate) use recipe_brain::{
     EscalationConfig, LadderRung, build_phase_escalation_note, extract_recipe_decision_output,
+    lifecycle_decision_choice,
 };
 pub use thread_reasoning_record::{
     MAX_AGE_SECS, THREAD_REASONING_SCHEMA, ThreadDomain, ThreadName, ThreadReasoningReadError,
