@@ -14,6 +14,7 @@ owner: simard
 doc_type: architecture
 status: implemented
 related:
+  - ./metacognitive-atlas.md
   - ./reflective-cognitive-threads.md
   - ./typed-ooda-loop.md
   - ../reference/simard-cognition-record-thread-reasoning-cli.md
@@ -39,6 +40,13 @@ autonomous engineering, an overseer that runs a slower *meta*-OODA over the daem
 itself, and a roster of background **cognitive threads** each on its own cadence.
 This page is the single readable map of how those processes think and how their
 reasoning becomes visible.
+
+!!! tip "See also — the code-derived atlas"
+    For the **graphical** companion to this prose map, see
+    [The metacognitive atlas](./metacognitive-atlas.md): a code-first system map
+    plus per-layer drill-downs (threads, OODA, Overseer) and the representative
+    recipe → record → rail data flow, rendered inline as Mermaid with committed
+    Graphviz `.dot` sources.
 
 The organising principle is [agentic-recipes-first](../concepts/agentic-recipes-first-principle.md):
 **judgment lives in recipes and prompts; Rust is a thin rail** that schedules,
