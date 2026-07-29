@@ -285,10 +285,11 @@ fn orient_recipe_has_no_decimal_or_first_token_scrape() {
 // turn GREEN once the rework lands.
 //
 // CRITICAL scope guard (A7): the rework deletes ONLY the SIX admission-EXCLUSIVE
-// scrape symbols. The SHARED `extract.rs` machinery
-// (`extract_and_parse_json` / `extract_json_payload`) is still used by the
-// per-goal / creative-ideas seams and the out-of-scope text consumers, and MUST
-// survive — asserted below. (Group E #4967 later retired the lifecycle use.)
+// scrape symbols. The SHARED `extract.rs` module survives for the per-goal /
+// creative-ideas seams and the out-of-scope text consumers via its retained
+// helpers — asserted below. Its dead JSON scrapers `extract_and_parse_json` /
+// `extract_json_payload` were later retired as unused (#4991). (Group E #4967
+// retired the lifecycle use.)
 // ===========================================================================
 
 #[test]
@@ -352,7 +353,7 @@ fn recipe_brain_admission_seams_read_the_typed_record() {
 #[test]
 fn admission_seams_no_longer_scrape_json_from_stdout() {
     // The two admission seams must not route through the shared JSON scraper any
-    // more. `extract_and_parse_json` survives in the tree for OTHER seams, but it
+    // more. The shared extractor survives in the tree for OTHER seams, but it
     // must appear NOWHERE in the admission-specific writer/reader code — which,
     // post-rework, no longer exists in recipe_brain as a scrape path. We assert
     // the admission adapter tags no longer co-occur with a stdout-scrape call by
@@ -372,22 +373,25 @@ fn admission_seams_no_longer_scrape_json_from_stdout() {
 }
 
 #[test]
-fn shared_recipe_output_extract_survives_group_b() {
-    // A7 retention guard: `extract.rs` + `extract_and_parse_json` /
-    // `extract_json_payload` still back the per-goal / creative-ideas seams and
-    // the out-of-scope text consumers. Group B deletes only the SIX
-    // admission-exclusive symbols. (Group E #4967 later retired the lifecycle use.)
+fn shared_recipe_output_extract_survives_but_scrapers_removed() {
+    // A7 removal guard: `extract.rs` survives for the per-goal / creative-ideas
+    // seams and the out-of-scope text consumers via retained helpers. Group B
+    // deletes only the SIX admission-exclusive symbols; the two dead scrapers
+    // `extract_and_parse_json` / `extract_json_payload` were later retired as
+    // unused (#4991). (Group E #4967 retired the lifecycle use.)
     let path = repo_root().join("src/recipe_output/extract.rs");
     assert!(
         path.is_file(),
         "src/recipe_output/extract.rs MUST survive Group B — still used by non-admission seams"
     );
     let extract = read_rel("src/recipe_output/extract.rs");
-    for retained in ["extract_json_payload", "extract_and_parse_json"] {
+    for removed in [
+        "pub fn extract_json_payload",
+        "pub fn extract_and_parse_json",
+    ] {
         assert!(
-            extract.contains(retained),
-            "extract.rs MUST retain shared helper `{retained}` — Group B deletes only the six \
-             admission-exclusive scrape symbols"
+            !extract.contains(removed),
+            "extract.rs MUST NOT contain dead scraper `{removed}` — retired as dead code (#4991)"
         );
     }
 }

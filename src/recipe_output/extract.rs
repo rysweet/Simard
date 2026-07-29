@@ -1224,89 +1224,6 @@ pub fn recover_json_view(s: &str) -> Cow<'_, str> {
     }
 }
 
-/// Extract a JSON object from noisy recipe stdout as an owned `String`.
-///
-/// Tries two cleaned views and returns the last balanced `{…}` from the first
-/// that yields one:
-///
-/// 1. [`strip_recipe_noise`] — drops whole log/banner lines, which recovers a
-///    payload whose pretty-printed body has an interleaved tracing line.
-/// 2. [`strip_ansi`] — line-preserving, which recovers a payload that sits on
-///    the *same physical line* as a leading timestamp/log prefix (that line
-///    would otherwise be dropped wholesale by view 1).
-///
-/// Returns `None` when neither view contains a balanced object.
-pub fn extract_json_payload(raw: &str) -> Option<String> {
-    for cleaned in [strip_recipe_noise(raw), strip_ansi(raw)] {
-        if let Some(obj) = last_balanced_object(cleaned.as_ref()) {
-            return Some(obj.to_string());
-        }
-    }
-    None
-}
-
-/// Extract a balanced JSON object from noisy recipe stdout (via
-/// [`extract_json_payload`]) and deserialize it into `T`, applying the shared
-/// **recovery views** on a strict-parse failure (issues #2484 / #2658).
-///
-/// This is the shared reasoner-side extract-and-parse chokepoint. Every
-/// recipe-backed reasoning phase (engineer/resource admission, idea dedup /
-/// consolidation, outcome, decide, orient) reads its structured decision by
-/// extracting the balanced `{…}` object and `serde_json`-deserializing it.
-/// [`extract_json_payload`] strips the banner / ANSI / log noise but returns
-/// the object body **verbatim**, so six common real-world LLM JSON defects
-/// survive into the payload and fail a strict `serde_json::from_str`:
-///
-///  1. a `,` immediately before a closing `}`/`]` (the trailing comma,
-///     issue #2658),
-///  2. an UNescaped ASCII control character (a raw newline/tab/CR) inside a
-///     string value — the shape a model emits for a multi-line
-///     `content`/`rationale` field,
-///  3. an INVALID backslash escape inside a string value — a lone `\` not
-///     followed by a JSON escape initiator, the shape a model emits for a
-///     Windows path (`C:\Users`), a regex (`\d+`), or a LaTeX fragment
-///     (`\alpha`),
-///  4. a JavaScript-style COMMENT outside a string value — a `// …` line or
-///     `/* … */` block comment, the "JSONC" shape a model emits to annotate a
-///     field (`"confidence": 0.8 // high`),
-///  5. a Python/JS bare literal (`True`/`False`/`None`) outside a string value —
-///     the shape a model that reasons in Python emits for a boolean/null field
-///     (`"ready": True`, `"error": None`), and
-///  6. a non-finite NUMBER literal (`NaN`/`Infinity`/`-Infinity`) outside a
-///     string value — the shape Python's `json.dumps` emits by default for an
-///     IEEE float special (`"score": NaN`, `"bound": -Infinity`), normalised to
-///     the canonical JSON `null`.
-///
-/// Before this helper each phase parsed strictly and silently dropped its whole
-/// structured decision on any one stray byte, falling back to a permissive
-/// default and discarding the reasoner's actual judgment.
-///
-/// Recovery retries the strict parse on the composed [`recover_json_view`]
-/// (comment stripping + invalid-escape doubling + control-character escaping +
-/// trailing-comma stripping + Python-literal normalisation + non-finite-number
-/// normalisation). Each sub-view is a
-/// *provable no-op on valid JSON* —
-/// it returns [`Cow::Borrowed`] byte-for-byte unchanged unless its specific
-/// defect is present — so recovery is attempted **only** when a view actually
-/// rewrote the payload (the [`Cow::Owned`] arm). Any other malformed shape
-/// (unquoted key, elided element, missing value) yields [`Cow::Borrowed`] and
-/// returns `None` unchanged: leniency never widens beyond the six named defects
-/// and a genuine parse error is never masked.
-pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
-    let payload = extract_json_payload(raw)?;
-    match serde_json::from_str::<T>(&payload) {
-        Ok(value) => Some(value),
-        Err(_) => match recover_json_view(&payload) {
-            // A recovery view actually rewrote the payload — retry the strict
-            // parse on the recovered view.
-            Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
-            // Nothing was recovered: the payload is malformed for some other
-            // reason. Do not re-parse identical bytes; preserve the strict miss.
-            Cow::Borrowed(_) => None,
-        },
-    }
-}
-
 /// A verdict-keyword match against cleaned recipe output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictMatch<'k> {
@@ -1525,129 +1442,6 @@ mod tests {
     #[test]
     fn last_balanced_object_none_when_no_object() {
         assert_eq!(last_balanced_object("no braces"), None);
-    }
-
-    // ---- extract_json_payload --------------------------------------------
-
-    #[test]
-    fn extract_json_payload_recovers_from_ansi_log_noise() {
-        // Raw fails (contains ESC); cleaned succeeds — the #2479-style
-        // raw-vs-stripped recovery proof, generalised.
-        let raw = "\x1b[2m2026-06-28T08:08:58.151133Z\x1b[0m  INFO simard: run\n\
-                   {\"facts\":[{\"concept\":\"lesson-learned\"}]}";
-        assert!(
-            serde_json::from_str::<serde_json::Value>(raw).is_err(),
-            "raw span with ESC byte must not parse as JSON"
-        );
-        let payload = extract_json_payload(raw).expect("payload recovered");
-        assert!(serde_json::from_str::<serde_json::Value>(&payload).is_ok());
-        assert_eq!(payload, "{\"facts\":[{\"concept\":\"lesson-learned\"}]}");
-    }
-
-    #[test]
-    fn extract_json_payload_none_for_pure_noise() {
-        let raw = "2026-06-28T08:08:58.151133Z  INFO no payload at all";
-        assert_eq!(extract_json_payload(raw), None);
-    }
-
-    #[test]
-    fn extract_json_payload_recovers_same_line_log_prefix() {
-        // Payload appended to a log line on the SAME physical line: the
-        // line-dropped view would discard it, so the ANSI-only fallback view
-        // must recover it.
-        let raw = "\x1b[2m2026-06-28T08:08:58.151133Z\x1b[0m  INFO done {\"facts\":[]}";
-        assert_eq!(
-            extract_json_payload(raw),
-            Some("{\"facts\":[]}".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_json_payload_recovers_interleaved_log_line() {
-        // A tracing line interleaved inside a pretty-printed body: the
-        // line-dropped view removes it so the braces balance again.
-        let raw = "{\n  \"facts\": [\n\
-                   2026-06-28T08:08:58.151133Z  INFO progress\n\
-                   ]\n}";
-        assert_eq!(
-            extract_json_payload(raw),
-            Some("{\n  \"facts\": [\n]\n}".to_string())
-        );
-    }
-
-    // ---- extract_and_parse_json ------------------------------------------
-
-    #[derive(Debug, serde::Deserialize, PartialEq)]
-    struct Env {
-        decision: String,
-        #[serde(default)]
-        items: Vec<String>,
-    }
-
-    #[test]
-    fn extract_and_parse_json_parses_clean_object() {
-        let raw = r#"{"decision": "admit", "items": ["a", "b"]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("clean object parses");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_trailing_comma_before_brace() {
-        // The strict `serde_json::from_str` on the extracted payload rejects
-        // this; the trailing-comma recovery view rescues it.
-        let raw = r#"{"decision": "admit", "items": ["a"],}"#;
-        let env: Env = extract_and_parse_json(raw).expect("trailing comma recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_trailing_comma_before_bracket() {
-        let raw = r#"{"decision": "defer", "items": ["a", "b",]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("trailing comma in array recovered");
-        assert_eq!(env.items, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_trailing_comma_through_banner_noise() {
-        // Banner + interleaved log line AND a trailing comma: the extractor
-        // strips the noise, then recovery strips the comma — the two hardening
-        // passes compose.
-        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
-                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
-                   {\"decision\": \"admit\", \"items\": [\"a\",],}";
-        let env: Env = extract_and_parse_json(raw).expect("noise + trailing comma recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_none_for_non_comma_malformed() {
-        // Leniency never widens past the trailing-comma defect: an unquoted key
-        // or missing value is still a miss (returns None, not a wrong default).
-        assert_eq!(
-            extract_and_parse_json::<Env>(r#"{decision: "admit"}"#),
-            None
-        );
-        assert_eq!(extract_and_parse_json::<Env>(r#"{"decision":}"#), None);
-    }
-
-    #[test]
-    fn extract_and_parse_json_none_when_no_object_present() {
-        assert_eq!(
-            extract_and_parse_json::<Env>("2026-07-20 INFO no json here"),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_and_parse_json_preserves_comma_inside_string_content() {
-        // A comma inside a string value is a legitimate content byte and must
-        // survive both the strict parse and the recovery view unchanged.
-        let raw = r#"{"decision": "admit", "items": ["a, b, c"]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("string-content comma preserved");
-        assert_eq!(env.items, vec!["a, b, c".to_string()]);
     }
 
     // ---- escape_json_string_control_chars --------------------------------
@@ -2115,124 +1909,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn extract_and_parse_json_recovers_control_char_in_string() {
-        // End-to-end: a multi-line string value with a raw newline (the shape a
-        // model emits for a `rationale`) is recovered through the shared
-        // chokepoint instead of dropping the whole decision.
-        let raw = "{\"decision\": \"admit\", \"items\": [\"first line\nsecond line\"]}";
-        let env: Env = extract_and_parse_json(raw).expect("control char recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["first line\nsecond line".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_control_char_through_banner_noise() {
-        // Banner + interleaved ANSI log line AND a raw newline inside a string:
-        // extractor strips the noise, then recovery escapes the control char.
-        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
-                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
-                   {\"decision\": \"defer\", \"items\": [\"a\tb\"]}";
-        let env: Env = extract_and_parse_json(raw).expect("noise + control char recovered");
-        assert_eq!(env.decision, "defer");
-        assert_eq!(env.items, vec!["a\tb".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_control_char_and_trailing_comma_together() {
-        let raw = "{\"decision\": \"admit\", \"items\": [\"x\ny\",],}";
-        let env: Env = extract_and_parse_json(raw).expect("both defects recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["x\ny".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_invalid_escape_in_string() {
-        // End-to-end: a `rationale`/`items` value carrying a regex `\d+` (a lone
-        // backslash) is recovered through the shared chokepoint instead of
-        // dropping the whole decision on the invalid escape.
-        let raw = r#"{"decision": "admit", "items": ["match \d+ digits"]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("invalid escape recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec![r"match \d+ digits".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_invalid_escape_through_banner_noise() {
-        // Banner + interleaved ANSI log line AND a Windows path (lone backslashes)
-        // inside a string: the extractor strips the noise, then recovery doubles
-        // the invalid escapes.
-        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
-                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
-                   {\"decision\": \"defer\", \"items\": [\"C:\\Users\\log\"]}";
-        let env: Env = extract_and_parse_json(raw).expect("noise + invalid escape recovered");
-        assert_eq!(env.decision, "defer");
-        assert_eq!(env.items, vec![r"C:\Users\log".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_all_three_defects_together() {
-        // A single payload with all three recoverable defects: an invalid escape
-        // (`\d`), a raw control char (newline), and a trailing comma.
-        let raw = "{\"decision\": \"admit\", \"items\": [\"re \\d\nline\",],}";
-        let env: Env = extract_and_parse_json(raw).expect("all three defects recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_line_comment_in_envelope() {
-        // End-to-end: a model annotating a field with a `// …` line comment (the
-        // JSONC shape) is recovered through the shared chokepoint instead of
-        // dropping the whole decision.
-        let raw = "{\"decision\": \"admit\", // high confidence\n\"items\": [\"a\"]}";
-        let env: Env = extract_and_parse_json(raw).expect("line comment recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_block_comment_through_banner_noise() {
-        // Banner + interleaved ANSI log line AND a `/* … */` block comment
-        // between fields: the extractor strips the noise, then recovery strips
-        // the comment.
-        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
-                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
-                   {\"decision\": \"defer\", /* rationale */ \"items\": [\"a\"]}";
-        let env: Env = extract_and_parse_json(raw).expect("noise + block comment recovered");
-        assert_eq!(env.decision, "defer");
-        assert_eq!(env.items, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_all_four_defects_together() {
-        // A single payload with every recoverable defect: a comment, an invalid
-        // escape (`\d`), a raw control char (newline), and a trailing comma.
-        let raw = "{\"decision\": \"admit\", /* note */ \"items\": [\"re \\d\nline\",],}";
-        let env: Env = extract_and_parse_json(raw).expect("all four defects recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_preserves_url_slashes_in_string() {
-        // A `//` inside a string value (a URL) is content, never a comment: the
-        // clean payload parses strictly and the recovery view never mangles it.
-        let raw = r#"{"decision": "admit", "items": ["see https://x.example//y"]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("url slashes preserved");
-        assert_eq!(env.items, vec!["see https://x.example//y".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_none_for_non_escape_malformed() {
-        // Leniency never widens past the three named defects: an unquoted key is
-        // still a miss even though the new invalid-escape view exists.
-        assert_eq!(
-            extract_and_parse_json::<Env>(r#"{decision: "admit"}"#),
-            None
-        );
-    }
-
     // ---- extract_verdict -------------------------------------------------
 
     const MERGE_KEYWORDS: &[&str] = &["not_ready", "not ready", "unclear", "ready"];
@@ -2499,14 +2175,14 @@ mod tests {
         // Defence-in-depth for the whole-token guarantee: a block comment cannot
         // splice `T` + `rue` into a `True` the literal view then "recovers". The
         // recovered view is owned (the comment was stripped) but still malformed,
-        // so the shared chokepoint returns None — the split token is never masked.
+        // so a strict re-parse of the recovered view still fails — the split token
+        // is never masked.
         let fixed = recover_json_view(r#"{"ready": T/*x*/rue}"#);
         assert!(matches!(fixed, Cow::Owned(_)));
         assert!(serde_json::from_str::<serde_json::Value>(fixed.as_ref()).is_err());
-        assert_eq!(
-            extract_and_parse_json::<Env>(r#"{"decision": D/*x*/one}"#),
-            None
-        );
+        let split = recover_json_view(r#"{"decision": D/*x*/one}"#);
+        assert!(matches!(split, Cow::Owned(_)));
+        assert!(serde_json::from_str::<serde_json::Value>(split.as_ref()).is_err());
     }
 
     #[test]
@@ -2538,64 +2214,6 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(fixed.as_ref()).unwrap();
         assert_eq!(v["ready"], serde_json::json!(null));
         assert_eq!(v["items"], serde_json::json!(["re \\d\nline"]));
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_python_literal_in_envelope() {
-        // End-to-end: a model reasoning in Python emits `True`/`None` for
-        // boolean/null fields; the shared chokepoint recovers the whole decision
-        // instead of dropping it on the capitalisation.
-        #[derive(Debug, serde::Deserialize, PartialEq)]
-        struct Flags {
-            ready: bool,
-            #[serde(default)]
-            error: Option<String>,
-        }
-        let raw = r#"{"ready": True, "error": None}"#;
-        let f: Flags = extract_and_parse_json(raw).expect("python literals recovered");
-        assert_eq!(
-            f,
-            Flags {
-                ready: true,
-                error: None
-            }
-        );
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_python_literal_through_banner_noise() {
-        // Banner + interleaved ANSI log line AND a `False` bare literal: the
-        // extractor strips the noise, then recovery normalises the literal.
-        #[derive(Debug, serde::Deserialize, PartialEq)]
-        struct Flags {
-            blocked: bool,
-        }
-        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
-                   \x1b[2m2026-07-20T00:00:00.000000Z\x1b[0m INFO decide\n\
-                   {\"blocked\": False}";
-        let f: Flags = extract_and_parse_json(raw).expect("noise + python literal recovered");
-        assert_eq!(f, Flags { blocked: false });
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_all_five_defects_together() {
-        // Every recoverable defect at once through the shared chokepoint: a
-        // comment, an invalid escape (`\d`), a raw control char (newline), a
-        // trailing comma, and a Python literal (`None`) on an extra field the
-        // envelope ignores.
-        let raw = "{\"decision\": \"admit\", \"ready\": None, /* note */ \"items\": [\"re \\d\nline\",],}";
-        let env: Env = extract_and_parse_json(raw).expect("all five defects recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_preserves_literal_word_inside_string() {
-        // A `True`/`None` word inside a string value is content: the clean payload
-        // parses strictly and the recovery view never mangles it.
-        let raw = r#"{"decision": "admit", "items": ["set True, keep None"]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("literal-in-string preserved");
-        assert_eq!(env.items, vec!["set True, keep None".to_string()]);
     }
 
     // ---- normalize_json_number_specials ----------------------------------
@@ -2775,77 +2393,6 @@ mod tests {
         assert_eq!(v["score"], serde_json::json!(null));
         assert_eq!(v["items"], serde_json::json!(["re \\d\nline"]));
     }
-
-    #[test]
-    fn extract_and_parse_json_recovers_number_special_in_optional_field() {
-        // End-to-end: a model pretty-printing a Python computation emits a bare
-        // NaN/Infinity for a numeric field; the shared chokepoint recovers the
-        // whole decision (the non-finite value reads as null) instead of dropping
-        // it on the one stray token.
-        #[derive(Debug, serde::Deserialize, PartialEq)]
-        struct Scored {
-            decision: String,
-            #[serde(default)]
-            score: Option<f64>,
-            #[serde(default)]
-            bound: Option<f64>,
-        }
-        let raw = r#"{"decision": "admit", "score": NaN, "bound": -Infinity}"#;
-        let s: Scored = extract_and_parse_json(raw).expect("non-finite numbers recovered");
-        assert_eq!(
-            s,
-            Scored {
-                decision: "admit".to_string(),
-                score: None,
-                bound: None,
-            }
-        );
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_number_special_through_banner_noise() {
-        // Banner + interleaved ANSI log line AND a bare `Infinity`: the extractor
-        // strips the noise, then recovery normalises the non-finite number on an
-        // extra field the envelope ignores.
-        let raw = "Recipe: ooda SUCCESS (3.0s)\n\
-                   \x1b[2m2026-07-25T00:00:00.000000Z\x1b[0m INFO decide\n\
-                   {\"decision\": \"admit\", \"score\": Infinity}";
-        let env: Env = extract_and_parse_json(raw).expect("noise + non-finite number recovered");
-        assert_eq!(env.decision, "admit");
-    }
-
-    #[test]
-    fn extract_and_parse_json_recovers_all_six_defects_together() {
-        // Every recoverable defect at once through the shared chokepoint: a
-        // comment, an invalid escape (`\d`), a raw control char (newline), a
-        // trailing comma, a Python literal (`None`), and a non-finite number
-        // (`NaN`), the latter two on extra fields the envelope ignores.
-        let raw = "{\"decision\": \"admit\", \"ready\": None, \"score\": NaN, /* note */ \"items\": [\"re \\d\nline\",],}";
-        let env: Env = extract_and_parse_json(raw).expect("all six defects recovered");
-        assert_eq!(env.decision, "admit");
-        assert_eq!(env.items, vec!["re \\d\nline".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_preserves_number_special_word_inside_string() {
-        // A NaN/Infinity word inside a string value is content: the clean payload
-        // parses strictly and the recovery view never mangles it.
-        let raw = r#"{"decision": "admit", "items": ["score was NaN then Infinity"]}"#;
-        let env: Env = extract_and_parse_json(raw).expect("special-in-string preserved");
-        assert_eq!(env.items, vec!["score was NaN then Infinity".to_string()]);
-    }
-
-    #[test]
-    fn extract_and_parse_json_number_special_with_unquoted_key_still_none() {
-        // Leniency never widens: a non-finite number ALONGSIDE a genuinely
-        // unrecoverable defect (an unquoted key) still yields None — the
-        // non-finite view rewrites its token but the strict re-parse of the
-        // still-malformed body fails, so no broken decision is masked.
-        assert_eq!(
-            extract_and_parse_json::<Env>(r#"{decision: "admit", "score": NaN}"#),
-            None
-        );
-    }
 }
 
 /// Issue #2496: the Copilot CLI launch-log preamble must be dropped at this
@@ -2926,9 +2473,10 @@ mod issue_2496_launcher_tests {
     #[test]
     fn recovers_json_payload_behind_launcher_preamble() {
         let raw = format!("{INFO_MARKER}\n{LAUNCHING}\n{{\"facts\":[]}}");
+        let cleaned = strip_recipe_noise(&raw);
         assert_eq!(
-            extract_json_payload(&raw),
-            Some("{\"facts\":[]}".to_string())
+            last_balanced_object(cleaned.as_ref()),
+            Some("{\"facts\":[]}")
         );
     }
 

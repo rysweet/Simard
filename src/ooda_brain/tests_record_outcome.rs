@@ -16,11 +16,13 @@
 //! IMPORTANT: Group D removed ONLY its five owned dead symbols, and Group E
 //! (#4967) has since retired the engineer-lifecycle stdout-scrape seam (its ACT
 //! effect is now a typed `EngineerLifecycleRecord` read fail-closed). The shared
-//! `extract_and_parse_json` / `extract.rs` MUST still survive — but now for the
-//! remaining out-of-scope consumers (journal `pr_source`, goal-curation
-//! `recipe_progress_checker`), NOT the lifecycle decision path. The source-shape
-//! assertions below are scoped to the Group-D-owned symbols only; the lifecycle
-//! retirement is asserted by the retention guard at the bottom of this file.
+//! `extract.rs` module MUST still survive — but now for the remaining
+//! out-of-scope consumers (journal `pr_source`, goal-curation
+//! `recipe_progress_checker`) via retained helpers like `strip_recipe_noise`.
+//! Its dead JSON scrapers `extract_and_parse_json` / `extract_json_payload` were
+//! retired as unused (#4991). The source-shape assertions below are scoped to the
+//! Group-D-owned symbols only; the removal is asserted by the guard at the
+//! bottom of this file.
 
 use std::path::{Path, PathBuf};
 
@@ -424,8 +426,9 @@ fn mod_exposes_the_outcome_record_surface() {
 #[test]
 fn group_d_owned_dead_symbols_are_deleted() {
     // The five Group-D-owned scrape symbols must be GONE from the tree. This is
-    // scoped to Group-D's own symbols — NOT the shared `extract_and_parse_json`,
-    // which the engineer-lifecycle path still uses (see the survival test below).
+    // scoped to Group-D's own symbols — NOT the shared `extract.rs` module, which
+    // survives for out-of-scope consumers via its retained helpers (see the
+    // survival test below).
     let recipe_brain = read_rel(RECIPE_BRAIN);
     for gone in [
         "OutcomeEnvelope",
@@ -515,22 +518,30 @@ fn operator_cli_dispatches_the_record_outcome_arm() {
 }
 
 // ---------------------------------------------------------------------------
-// RETENTION GUARD — the shared `extract_and_parse_json` / `extract.rs` MUST
-// survive because out-of-scope consumers (journal `pr_source`, goal-curation
-// `recipe_progress_checker`) still use `strip_recipe_noise` / the shared
-// extractor. Group E (#4967) retired ONLY the engineer-lifecycle stdout-scrape
-// seam: the ACT effect is now a typed `EngineerLifecycleRecord` read
-// fail-closed, so `extract_decision_envelope` / `DecisionEnvelope` MUST be gone
-// from recipe_brain and the typed reader MUST be wired in their place.
+// REMOVED-AS-DEAD-CODE GUARD — the shared `extract.rs` module MUST survive
+// because out-of-scope consumers (journal `pr_source`, goal-curation
+// `recipe_progress_checker`) still use `strip_recipe_noise` / other retained
+// helpers. Its dead JSON scrapers `extract_and_parse_json` /
+// `extract_json_payload` were retired as unused (#4991) and MUST be gone. Group E
+// (#4967) retired the engineer-lifecycle stdout-scrape seam: the ACT effect is
+// now a typed `EngineerLifecycleRecord` read fail-closed, so
+// `extract_decision_envelope` / `DecisionEnvelope` MUST be gone from recipe_brain
+// and the typed reader MUST be wired in their place.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shared_extract_survives_for_out_of_scope_consumers() {
-    // The shared extractor module and function still exist in the tree.
+fn shared_extract_module_survives_but_scrapers_removed() {
+    // The shared extractor module still exists (out-of-scope consumers use its
+    // retained helpers), but the two dead JSON scrapers were deleted (#4991).
     let extract = read_rel("src/recipe_output/extract.rs");
     assert!(
-        extract.contains("extract_and_parse_json"),
-        "extract_and_parse_json MUST survive — out-of-scope consumers still use the shared extractor"
+        extract.contains("pub fn strip_recipe_noise"),
+        "extract.rs MUST survive — out-of-scope consumers still use retained helpers"
+    );
+    assert!(
+        !extract.contains("pub fn extract_and_parse_json")
+            && !extract.contains("pub fn extract_json_payload"),
+        "the dead JSON scrapers MUST be gone — retired as dead code (#4991)"
     );
 }
 

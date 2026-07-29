@@ -11,10 +11,9 @@ pub mod extract;
 
 pub use extract::{
     VerdictMatch, balanced_objects, escape_json_string_control_chars,
-    escape_json_string_invalid_escapes, extract_and_parse_json, extract_json_payload,
-    extract_verdict, last_balanced_object, normalize_json_number_specials,
-    normalize_python_json_literals, recover_json_view, strip_ansi, strip_json_comments,
-    strip_json_trailing_commas, strip_recipe_noise,
+    escape_json_string_invalid_escapes, extract_verdict, last_balanced_object,
+    normalize_json_number_specials, normalize_python_json_literals, recover_json_view, strip_ansi,
+    strip_json_comments, strip_json_trailing_commas, strip_recipe_noise,
 };
 
 /// Record the outcome of a recipe-output parse for one phase.
