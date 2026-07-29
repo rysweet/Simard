@@ -215,17 +215,20 @@ fn is_noise_line(line: &str) -> bool {
 ///
 /// The prefix is logging metadata, not payload. Removing it lets downstream
 /// extractors see a real verdict when the agent answered, and lets launcher-only
-/// lines collapse to ordinary launcher noise. Non-matching lines are returned
-/// unchanged on the borrowed path.
-fn strip_recipe_agent_prefix(line: &str) -> Cow<'_, str> {
+/// lines collapse to ordinary launcher noise.
+///
+/// Returns [`Some`] with the payload substring (a **borrowed** slice of `line`,
+/// never a fresh allocation) when the prefix is present, or [`None`] when `line`
+/// carries no such prefix. Callers treat `None` as "use the line unchanged".
+fn strip_recipe_agent_prefix(line: &str) -> Option<&str> {
     let leading = line.len() - line.trim_start().len();
     let t = &line[leading..];
     let b = t.as_bytes();
     if b.len() < "[00:00:00] [amplihack:x:0] ".len() {
-        return Cow::Borrowed(line);
+        return None;
     }
     if b.first() != Some(&b'[') {
-        return Cow::Borrowed(line);
+        return None;
     }
     let time_ok = b.get(1..9).is_some_and(|time| {
         time[0].is_ascii_digit()
@@ -238,16 +241,12 @@ fn strip_recipe_agent_prefix(line: &str) -> Cow<'_, str> {
             && time[7].is_ascii_digit()
     });
     if !time_ok || b.get(9) != Some(&b']') || b.get(10) != Some(&b' ') {
-        return Cow::Borrowed(line);
+        return None;
     }
     let rest = &t[11..];
-    let Some(after_agent) = rest.strip_prefix("[amplihack:") else {
-        return Cow::Borrowed(line);
-    };
-    let Some(end) = after_agent.find("] ") else {
-        return Cow::Borrowed(line);
-    };
-    Cow::Owned(after_agent[end + 2..].to_string())
+    let after_agent = rest.strip_prefix("[amplihack:")?;
+    let end = after_agent.find("] ")?;
+    Some(&after_agent[end + 2..])
 }
 
 /// Strip ANSI escapes **and** drop whole tracing/env_logger log lines,
@@ -258,23 +257,31 @@ fn strip_recipe_agent_prefix(line: &str) -> Cow<'_, str> {
 /// no droppable line), preserving today's behaviour and allocations.
 pub fn strip_recipe_noise(raw: &str) -> Cow<'_, str> {
     let de_ansi = strip_ansi(raw);
-    if !de_ansi
+    // Clean-path detection is allocation-free: `strip_recipe_agent_prefix` now
+    // borrows (returning `Some` payload / `None`) and `is_noise_line` only
+    // scans, so a fully-clean input never allocates and returns the ANSI-strip
+    // result as-is (`Borrowed` stays `Borrowed`). A line is droppable if it
+    // carries an agent prefix we'd rewrite (`Some`) or is noise on its own.
+    let has_droppable = de_ansi
         .lines()
-        .any(|line| is_noise_line(line) || matches!(strip_recipe_agent_prefix(line), Cow::Owned(_)))
-    {
-        // No droppable lines: pass through the ANSI-strip result as-is
-        // (`Borrowed` stays `Borrowed` on the fully-clean path).
+        .any(|line| match strip_recipe_agent_prefix(line) {
+            Some(_) => true,
+            None => is_noise_line(line),
+        });
+    if !has_droppable {
         return de_ansi;
     }
-    let kept: Vec<String> = de_ansi
+    // Rebuild once. Each kept line is a borrowed slice (prefix-stripped payload
+    // or the original line), so the only allocation on the dirty path is the
+    // final joined `String` — no per-line `String` churn.
+    let kept: Vec<&str> = de_ansi
         .lines()
         .filter_map(|line| {
-            let stripped = strip_recipe_agent_prefix(line);
-            let payload = stripped.as_ref();
+            let payload = strip_recipe_agent_prefix(line).unwrap_or(line);
             if is_noise_line(payload) {
                 None
             } else {
-                Some(payload.to_string())
+                Some(payload)
             }
         })
         .collect();
