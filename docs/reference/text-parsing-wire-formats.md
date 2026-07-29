@@ -88,7 +88,7 @@ Used by: **every** recipe-backed parser below, before it runs.
 | `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines, runner-banner lines, **and Copilot launch-log preamble lines** (via `is_noise_line`). `Cow::Borrowed` on the clean path. |
 | `is_noise_line(&str) -> bool` *(private)* | Per-line predicate: `true` for an ISO-timestamp tracing line, a runner summary-banner line, **or** a Copilot launcher line (`is_copilot_launcher_line`). A JSON payload line beginning (after `trim_start`) with a structural token (`{`, `"`, `[`), an action keyword, a bare decimal, or a verdict keyword never matches, so dropping such a line never discards the answer. |
 | `is_copilot_launcher_line(&str) -> bool` *(private)* | The launcher-only arm (#2496). Anchored `starts_with`/`contains` matches on the four launcher shapes below; matches **no** payload line. ANSI is stripped before it runs. |
-| `balanced_objects` / `last_balanced_object` / `extract_json_payload` | String-literal-aware balanced `{…}` scan. JSON extraction is **dual-pass** (line-dropped **and** ANSI-only) so the payload survives both an interleaved log line inside a pretty body and a same-line log prefix. |
+| `balanced_objects` / `last_balanced_object` | String-literal-aware balanced `{…}` scan over cleaned text. Compose `strip_recipe_noise` + `last_balanced_object` for extraction. (The former `extract_json_payload` dual-pass wrapper — line-dropped **and** ANSI-only — was retired as dead code in #4991.) |
 | `extract_verdict(raw, keywords)` | Precedence keyword scan over cleaned text. |
 | `record_parse_outcome(phase, success)` | Emits `recipe_parse_{success,failure}_total{phase}` to `metrics.jsonl`. |
 
