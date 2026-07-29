@@ -1,6 +1,7 @@
 /target
 /target-shared
 /.claude/runtime/
+.claude/**/runtime/
 .cargo/config.toml
 __pycache__/
 *.pyc

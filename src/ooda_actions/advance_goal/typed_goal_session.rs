@@ -148,7 +148,12 @@ pub(crate) fn run(
         std::time::Duration::from_secs(300),
     );
     if let Err(error) = startup_worker.drain_pending(32) {
-        eprintln!("[simard] typed OODA outbox startup recovery incomplete: {error}");
+        tracing::error!(
+            target: "simard::typed_ooda",
+            goal_id = %goal.id,
+            error = %error,
+            "typed OODA outbox startup recovery incomplete"
+        );
     }
     let execution = match route.execute(
         repo_root,

@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -11,6 +11,142 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::types::*;
+
+/// Maximum attempts (initial try + retries) for acquiring an immediate write
+/// transaction when SQLite reports the database busy/locked. Belt-and-suspenders
+/// on top of process-level write serialization (one shared connection per DB
+/// path) and the 5s per-connection `busy_timeout`, covering cross-process /
+/// OS-level contention. On exhaustion the underlying error is surfaced unchanged
+/// as a `PersistenceFailed`; it is never swallowed.
+const BUSY_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+/// One shared SQLite connection per typed-outcome DB path.
+type SharedConnection = Arc<Mutex<Connection>>;
+
+/// Acquire an `Immediate` write transaction with a bounded, fail-visible retry
+/// on `SQLITE_BUSY` / "database is locked". Evaluates to the live `Transaction`
+/// on success; on a non-busy error or retry exhaustion it `return`s the
+/// `persistence` error from the enclosing method (identical outward behavior to
+/// the prior `.map_err(persistence)?`).
+macro_rules! begin_immediate {
+    ($connection:expr) => {{
+        let mut __attempt: u32 = 0;
+        loop {
+            match $connection.transaction_with_behavior(TransactionBehavior::Immediate) {
+                Ok(__transaction) => break __transaction,
+                Err(__error) => {
+                    __attempt += 1;
+                    if __attempt >= BUSY_RETRY_MAX_ATTEMPTS || !is_sqlite_busy(&__error) {
+                        return Err(persistence(__error));
+                    }
+                    std::thread::sleep(busy_backoff(__attempt));
+                }
+            }
+        }
+    }};
+}
+
+/// Process-wide registry mapping a canonical typed-outcome DB path to its single
+/// shared connection. Routing every handle through this registry means all OODA
+/// cycles and the outbox startup-recovery path serialize on one WAL +
+/// `busy_timeout` connection instead of opening independent connections that
+/// contend on the file-level write lock (issue #4483).
+fn connection_registry() -> &'static Mutex<HashMap<PathBuf, SharedConnection>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, SharedConnection>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Canonical registry key for a DB path. The DB file may not exist yet, so the
+/// parent directory is canonicalized and the file name rejoined; this keeps
+/// distinct temp DBs (per-test isolation) on distinct shared connections while
+/// still collapsing different spellings of the same file to one entry.
+fn canonical_key(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    // A parent-less path (bare relative file name) is anchored to the current
+    // working directory so it still canonicalizes to an absolute key, keeping
+    // the invariant that one file maps to exactly one shared connection.
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match directory.canonicalize() {
+        Ok(canonical) => canonical.join(file_name),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// Return the shared connection for `path`, creating and initializing it (WAL +
+/// `busy_timeout` pragmas, then schema migration) exactly once per canonical
+/// path. Every subsequent handle for the same path clones the same `Arc`.
+fn shared_connection(path: &Path) -> CapabilityResult<SharedConnection> {
+    let key = canonical_key(path);
+    let mut registry = connection_registry()
+        .lock()
+        .map_err(|_| persistence_message("typed outcome connection registry is poisoned"))?;
+    if let Some(existing) = registry.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    let mut connection = Connection::open(path).map_err(persistence)?;
+    apply_connection_pragmas(&connection)?;
+    super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
+    let shared: SharedConnection = Arc::new(Mutex::new(connection));
+    registry.insert(key, Arc::clone(&shared));
+    Ok(shared)
+}
+
+/// Apply the durability + concurrency pragmas every typed-outcome connection
+/// must run: foreign keys on, 5s busy timeout, and WAL journaling. Applied
+/// unconditionally at connect (defense-in-depth; WAL also persists on disk).
+fn apply_connection_pragmas(connection: &Connection) -> CapabilityResult<()> {
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(persistence)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(persistence)?;
+    // SQLite reports the *resulting* journal mode without erroring when it
+    // cannot honor the request (e.g. an unsupported filesystem). Verify WAL was
+    // actually engaged instead of silently proceeding, since the whole
+    // shared-connection concurrency fix depends on WAL being active.
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .map_err(persistence)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(persistence_message(format!(
+            "typed outcome connection could not enter WAL journal mode (got {journal_mode:?}); \
+             the shared-connection concurrency fix requires WAL"
+        )));
+    }
+    Ok(())
+}
+
+/// True iff `error` is a SQLite busy/locked condition eligible for retry.
+fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, message) => {
+            matches!(
+                failure.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) || message
+                .as_deref()
+                .is_some_and(|message| message.contains("database is locked"))
+        }
+        _ => false,
+    }
+}
+
+/// Exponential backoff of `5 * 2^attempt` milliseconds, capped at 100ms.
+///
+/// `begin_immediate!` calls this only for `attempt` 1..=4 (it returns at
+/// `BUSY_RETRY_MAX_ATTEMPTS = 5` before sleeping), so the effective sleep
+/// sequence is 10ms, 20ms, 40ms, 80ms. The 100ms cap guards against overflow
+/// and is unreachable at the current `BUSY_RETRY_MAX_ATTEMPTS`.
+fn busy_backoff(attempt: u32) -> Duration {
+    let millis = 5u64.saturating_mul(1u64 << attempt.min(5)).min(100);
+    Duration::from_millis(millis)
+}
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct EffectKind(String);
@@ -144,7 +280,7 @@ pub trait EngineerLiveness: Send + Sync {
 }
 
 pub struct CapabilityHandler {
-    connection: Mutex<Connection>,
+    connection: SharedConnection,
     policy: CapabilityPolicy,
     engineer_liveness: Option<Box<dyn EngineerLiveness>>,
 }
@@ -253,13 +389,9 @@ impl std::fmt::Debug for CapabilityHandler {
 
 impl CapabilityHandler {
     pub fn open(path: impl AsRef<Path>, policy: CapabilityPolicy) -> CapabilityResult<Self> {
-        let mut connection = Connection::open(path.as_ref()).map_err(persistence)?;
-        connection
-            .busy_timeout(Duration::from_secs(5))
-            .map_err(persistence)?;
-        super::schema::initialize(&mut connection, now_millis()).map_err(persistence)?;
+        let connection = shared_connection(path.as_ref())?;
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection,
             policy,
             engineer_liveness: None,
         })
@@ -287,9 +419,7 @@ impl CapabilityHandler {
     /// `docs/reference/engineer-claim-release-api.md`.
     pub fn release_engineer_claim(&self, claim_key: &str) -> CapabilityResult<()> {
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         transaction
             .execute(
                 "DELETE FROM engineer_claims WHERE claim_key = ?1",
@@ -369,9 +499,7 @@ impl CapabilityHandler {
         )?;
         let binding = ActorBinding::new(actor, cycle_id, goal_id, repository)?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) =
             replay_request(&transaction, request_id, "actor_session", &fingerprint)?
         {
@@ -492,9 +620,7 @@ impl CapabilityHandler {
             &("privileged_approval_v1", effect_id),
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) = replay_request(
             &transaction,
             request_id,
@@ -617,9 +743,7 @@ impl CapabilityHandler {
         let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
 
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) = replay_request(
             &transaction,
             &request.identity.request_id,
@@ -781,9 +905,7 @@ impl CapabilityHandler {
         }
         let fingerprint = fingerprint(actor, &self.policy.revision, &request)?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) = replay_request(
             &transaction,
             &request.identity.request_id,
@@ -869,9 +991,7 @@ impl CapabilityHandler {
         self.validate_process_execution(actor, request)?;
         let fingerprint = fingerprint(actor, &self.policy.revision, &("process_exec_v1", request))?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) = replay_request(
             &transaction,
             &request.identity.request_id,
@@ -952,9 +1072,7 @@ impl CapabilityHandler {
     ) -> CapabilityResult<()> {
         let result_json = serde_json::to_vec(record).map_err(serialization)?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         let changed = transaction
             .execute(
                 "UPDATE process_executions SET status=?2, result_json=?3
@@ -1138,9 +1256,7 @@ impl CapabilityHandler {
             &("claim_next_effect_v1", worker, lease_millis),
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) =
             replay_request(&transaction, request_id, "effect_claim", &fingerprint)?
         {
@@ -1207,9 +1323,7 @@ impl CapabilityHandler {
             ),
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) =
             replay_request(&transaction, request_id, "effect_claim", &fingerprint)?
         {
@@ -1251,9 +1365,7 @@ impl CapabilityHandler {
         let actor = AuthenticatedToolContext::new("effect-recovery", "system", std::iter::empty());
         let fingerprint = fingerprint(&actor, &self.policy.revision, &("recover_effects_v1", now))?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) =
             replay_request(&transaction, request_id, "effect_recovery", &fingerprint)?
         {
@@ -1313,9 +1425,7 @@ impl CapabilityHandler {
             ),
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if replay_request::<serde_json::Value>(
             &transaction,
             request_id,
@@ -1372,9 +1482,7 @@ impl CapabilityHandler {
             ),
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if replay_request::<serde_json::Value>(
             &transaction,
             request_id,
@@ -1467,9 +1575,7 @@ impl CapabilityHandler {
             ),
         )?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if replay_request::<serde_json::Value>(
             &transaction,
             request_id,
@@ -1529,9 +1635,7 @@ impl CapabilityHandler {
         };
         let result_json = serde_json::to_vec(result).map_err(serialization)?;
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if replay_request::<EffectResult>(&transaction, request_id, "effect_finish", &fingerprint)?
             .is_some()
         {
@@ -1577,9 +1681,7 @@ impl CapabilityHandler {
         fingerprint: String,
     ) -> CapabilityResult<TerminalOutcome> {
         let mut connection = self.lock()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(persistence)?;
+        let transaction = begin_immediate!(connection);
         if let Some(existing) =
             replay_request(&transaction, &identity.request_id, "terminal", &fingerprint)?
         {
