@@ -136,6 +136,7 @@ nav:
     - Enrichment Observability (is recall reaching decisions?): concepts/enrichment-observability.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Self-Diagnose on Step Error (ask WHY): concepts/self-diagnose-on-step-error.md
+    - Unconditional Thread-Reasoning Record (no early-exit): concepts/unconditional-thread-reasoning-record.md
     - Journal E2BIG Recipe-Spawn (file the context): concepts/journal-recipe-spawn-e2big.md
     - Comprehensive E2BIG Elimination (one facade): concepts/e2big-elimination.md
     - Signal-Meeting E2BIG (meeting agent proxy spawn site): concepts/signal-meeting-agent-e2big.md
@@ -520,6 +521,7 @@ nav:
     - The RecipeInvoker Seam: reference/recipe-invoker-seam.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
     - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
+    - Unconditional Thread-Reasoning Record Contract: reference/unconditional-thread-reasoning-record-contract.md
     - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md
     - Creative Ideas Trigger-Scoped Read: reference/creative-ideas-trigger-scoped-read.md
     - Creative-Ideas Semantic Dedup-Gate API: reference/creative-ideas-dedup-gate-api.md

@@ -393,13 +393,64 @@ fn interoception_is_no_longer_recipe_free() {
 
 #[test]
 fn every_existing_recipe_writes_the_reasoning_record() {
-    // The nine already-agentic recipes gain a final ACT step calling the tool.
+    // ISSUE #4986 — the record step must be UNCONDITIONAL, not merely present.
+    //
+    // The OODA reflection step failed with
+    //   `cognitive-thread: reflection: FAILED — R1 no record at expected path:
+    //    No such file or directory (os error 2)`
+    // because seven reflective recipes offered an early `finish successfully`
+    // escape on their "nothing durable to keep" path — they exited 0 WITHOUT
+    // writing the typed record, so the fail-CLOSED R1 reader
+    // (`read_verified_thread_reasoning`) tripped on a spurious absent record.
+    //
+    // This gate is strengthened from "the string `record-thread-reasoning` is
+    // present" to "the record step is the single terminal ACT with no early-exit
+    // escape preceding it," while tolerating the two legitimate substrings that
+    // would otherwise be false positives on the already-compliant recipes:
+    //   * the REQUIRED guardrail line "... do not print JSON, and do not skip it.",
+    //   * `salience-appraise`'s legitimate branch end "... signal) and finish.".
+    //
+    // It fails RED against the pre-#4986 tree (seven recipes still say
+    // "finish successfully") and turns GREEN once the escape is removed so every
+    // path falls through to `record-thread-reasoning`.
     for recipe in REFLECTIVE_RECIPES {
         let yaml = read_rel(&format!("prompt_assets/simard/recipes/{recipe}.yaml"));
+
+        // (1) The ACT step exists on every recipe.
         assert!(
             yaml.contains("record-thread-reasoning"),
-            "{recipe}.yaml must call `simard cognition record-thread-reasoning` as its ACT step \
-             so its reasoning surfaces via a typed record"
+            "{recipe}.yaml must call `simard cognition record-thread-reasoning` \
+             as its terminal ACT step so its reasoning surfaces via a typed record"
+        );
+
+        // (2) It is UNCONDITIONAL — no early-exit escape may precede it.
+        //
+        // Strip the guarded negation first: every reflective recipe carries the
+        // REQUIRED guardrail line "... do not print JSON, and do not skip it.",
+        // so "do not skip it" must never count as an escape. We then anchor on the
+        // TRUE escape phrase `finish successfully` (what the seven pre-#4986
+        // recipes used to exit 0 without recording) and never on the bare
+        // `and finish` substring — `salience-appraise` legitimately says
+        // "... signal) and finish." and is fully compliant.
+        let scan = yaml.replace("do not skip it", "");
+
+        for escape in ["finish successfully", "write nothing", "return early"] {
+            assert!(
+                !scan.contains(escape),
+                "{recipe}.yaml must not permit exiting before the REQUIRED \
+                 record-thread-reasoning step (found early-exit phrase: {escape:?}). \
+                 On the \"nothing durable to keep\" path it must skip only the \
+                 optional `simard memory remember` write and STILL fall through to \
+                 the record step (issue #4986)."
+            );
+        }
+
+        // "skip it" is an escape ONLY when it is not the guarded "do not skip it"
+        // (already stripped from `scan` above).
+        assert!(
+            !scan.contains("skip it"),
+            "{recipe}.yaml uses an unguarded \"skip it\" that could bypass the \
+             REQUIRED record-thread-reasoning step (issue #4986)"
         );
     }
 }

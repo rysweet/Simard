@@ -50,6 +50,14 @@ pub enum FailureCause {
     /// scheduler (issue #4786). Recorded durably so a caught thread error flows
     /// to the Overseer as a corrective signal instead of being swallowed.
     CognitiveThread,
+    /// A fail-CLOSED thread-reasoning rail reader (e.g.
+    /// `read_verified_thread_reasoning`) found no record at its expected path —
+    /// the "R1" absent-record branch, surfaced as `ENOENT`
+    /// ("No such file or directory (os error 2)"). Issue #4986: a reflective
+    /// recipe that exited 0 without writing its typed reasoning record trips
+    /// this. Classified distinctly (not the catch-all [`Unknown`]) so a
+    /// recurrence self-diagnoses to a clear, actionable cause.
+    MissingReasoningRecord,
 }
 
 impl FailureCause {
@@ -65,6 +73,7 @@ impl FailureCause {
             FailureCause::NetworkOrAuth => "network-or-auth",
             FailureCause::Unknown => "unknown",
             FailureCause::CognitiveThread => "cognitive-thread",
+            FailureCause::MissingReasoningRecord => "missing-reasoning-record",
         }
     }
 }
@@ -194,6 +203,16 @@ fn classify_cause(exit_code: Option<i32>, transcript: &str) -> FailureCause {
         || has("could not read username")
     {
         return FailureCause::NetworkOrAuth;
+    }
+    // Absent thread-reasoning record (issue #4986). A fail-CLOSED rail reader
+    // (e.g. `read_verified_thread_reasoning`) emits its own transcript marker
+    // when the typed record is missing at the expected path. Keyed on the
+    // reader's specific strings — the human "no record at expected path" and the
+    // Rust `ENOENT` rendering "(os error 2)" — both specific enough not to
+    // collide with a shell's bare "No such file or directory". Transcript-marker
+    // first (module doctrine), so it wins over a bare exit-code hint.
+    if has("no record at expected path") || has("no such file or directory (os error 2)") {
+        return FailureCause::MissingReasoningRecord;
     }
     // Command not found (marker or the canonical exit 127).
     if has("command not found") || exit_code == Some(127) {

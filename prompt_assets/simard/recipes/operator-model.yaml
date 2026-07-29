@@ -81,8 +81,9 @@ steps:
       ```
 
       Your `simard …` invocations ARE the effect. Infer only what the evidence
-      supports; if you learned nothing new about the operator, run no commands
-      and finish successfully.
+      supports; if you learned nothing new about the operator, run no `simard
+      memory remember` commands, but you MUST STILL complete the REQUIRED
+      record-thread-reasoning step below.
 
       ## Record your reasoning (REQUIRED final ACT step)
 

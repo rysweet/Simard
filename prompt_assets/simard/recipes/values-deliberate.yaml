@@ -88,7 +88,9 @@ steps:
       ```
 
       Your `simard …` invocations ARE the effect. If there is no genuine hard
-      tradeoff to weigh, run no commands and finish successfully.
+      tradeoff to weigh, run no `simard memory remember` / `simard goal add`
+      commands, but you MUST STILL complete the REQUIRED record-thread-reasoning
+      step below.
 
       ## Record your reasoning (REQUIRED final ACT step)
 

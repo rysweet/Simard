@@ -80,7 +80,8 @@ steps:
       ```
 
       Your `simard …` invocations ARE the effect. Map only structurally sound
-      analogies; if none is apt, run no commands and finish successfully.
+      analogies; if none is apt, run no `simard memory remember` commands, but you
+      MUST STILL complete the REQUIRED record-thread-reasoning step below.
 
       ## Record your reasoning (REQUIRED final ACT step)
 

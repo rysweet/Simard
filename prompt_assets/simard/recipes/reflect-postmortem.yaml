@@ -57,7 +57,9 @@ steps:
 
       1. Decide whether the outcome is worth a durable post-mortem. If it is
          pure noise (a trivial success with nothing to learn, or an exact repeat
-         of a prior post-mortem above), write nothing and finish successfully.
+         of a prior post-mortem above), skip the `simard memory remember` write
+         below — but you MUST STILL complete the REQUIRED record-thread-reasoning
+         step at the end (noting that there was nothing durable to keep).
       2. For a post-mortem worth keeping, WRITE it into memory by running the
          `simard memory remember` tool with these scalar flags:
 

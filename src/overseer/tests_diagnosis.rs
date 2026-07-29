@@ -471,3 +471,121 @@ fn spawn_diagnosis_serialises_exit_code_as_null() {
     assert_eq!(v["cause"], serde_json::json!("arg-list-too-long"));
     assert!(v["exit_code"].is_null(), "spawn failure has no exit code");
 }
+
+// ---------------------------------------------------------------------------
+// #4986 — the absent thread-reasoning record (R1) self-diagnoses to a clean,
+// additive `MissingReasoningRecord` cause instead of the catch-all `Unknown`.
+//
+// The live OODA failure is
+//   `cognitive-thread: reflection: FAILED — R1 no record at expected path:
+//    No such file or directory (os error 2)`
+// surfaced by the fail-CLOSED reader `read_verified_thread_reasoning`. The
+// additive signature keys off the reader's own transcript markers
+//   "no record at expected path" / "No such file or directory (os error 2)"
+// so a recurrence of this exact defect self-diagnoses cleanly rather than
+// falling through to `Unknown`.
+//
+// This is PURELY ADDITIVE: `classify_terminal_failure`'s signature/shape and
+// every existing arm are unchanged, so all classifications above are untouched.
+// These tests fail RED against the pre-#4986 tree (the `MissingReasoningRecord`
+// variant does not yet exist → compile error) and turn GREEN once the additive
+// variant + `as_str` arm + `classify_cause` marker land.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_reasoning_record_has_its_own_stable_label() {
+    assert_eq!(
+        FailureCause::MissingReasoningRecord.as_str(),
+        "missing-reasoning-record"
+    );
+}
+
+#[test]
+fn missing_reasoning_record_display_matches_its_label() {
+    assert_eq!(
+        format!("{}", FailureCause::MissingReasoningRecord),
+        "missing-reasoning-record"
+    );
+}
+
+#[test]
+fn missing_reasoning_record_serialises_as_its_kebab_label() {
+    assert_eq!(
+        serde_json::to_string(&FailureCause::MissingReasoningRecord).unwrap(),
+        "\"missing-reasoning-record\""
+    );
+}
+
+#[test]
+fn missing_reasoning_record_label_is_distinct_from_unknown() {
+    // The whole point of the additive variant: it must NOT collapse into the
+    // catch-all `Unknown` label.
+    assert_ne!(
+        FailureCause::MissingReasoningRecord.as_str(),
+        FailureCause::Unknown.as_str()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn r1_no_record_at_expected_path_marker_classifies_as_missing_reasoning_record() {
+    // The exact evidence from the #4986 OODA reflection-step failure.
+    assert_eq!(
+        cause_of(
+            1,
+            "cognitive-thread: reflection: FAILED — R1 no record at expected path: \
+             No such file or directory (os error 2)"
+        ),
+        FailureCause::MissingReasoningRecord
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn enoent_os_error_2_marker_in_transcript_classifies_as_missing_reasoning_record() {
+    // The bare ENOENT string the reader emits is enough on its own.
+    assert_eq!(
+        cause_of(1, "read record: No such file or directory (os error 2)"),
+        FailureCause::MissingReasoningRecord
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_record_marker_matching_is_case_insensitive() {
+    assert_eq!(
+        cause_of(1, "NO RECORD AT EXPECTED PATH"),
+        FailureCause::MissingReasoningRecord
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_record_signature_is_additive_and_disturbs_no_other_classification() {
+    // Additive only: every pre-#4986 cause still classifies exactly as before.
+    assert_eq!(
+        cause_of(126, "Argument list too long"),
+        FailureCause::ArgListTooLong
+    );
+    assert_eq!(cause_of(127, ""), FailureCause::CommandNotFound);
+    assert_eq!(cause_of(126, ""), FailureCause::PermissionDenied);
+    assert_eq!(
+        cause_of(1, "no space left on device"),
+        FailureCause::DiskFull
+    );
+    // A generic, unrelated failure is still the structured catch-all `Unknown`.
+    assert_eq!(
+        cause_of(1, "some unremarkable failure"),
+        FailureCause::Unknown
+    );
+}
+
+#[test]
+fn spawn_enoent_stays_unknown_the_missing_record_signature_is_transcript_only() {
+    // The additive signature lives in the TRANSCRIPT classifier only. A raw
+    // pre-exec spawn ENOENT (errno 2) carries no reader marker and must remain a
+    // structured `Unknown` — the spawn path is deliberately left unchanged.
+    let d = classify_spawn_failure(&io::Error::from_raw_os_error(2));
+    assert_eq!(d.cause, FailureCause::Unknown);
+    assert_eq!(d.exit_code, None);
+}

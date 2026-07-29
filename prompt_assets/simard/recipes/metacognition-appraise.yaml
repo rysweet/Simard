@@ -90,7 +90,8 @@ steps:
       ```
 
       Your `simard …` invocations ARE the effect. If nothing is worth keeping,
-      run no commands and finish successfully.
+      run no `simard memory remember` / `simard goal add` commands — but you MUST
+      STILL complete the REQUIRED record-thread-reasoning step below.
 
       ## Record your reasoning (REQUIRED final ACT step)
 
