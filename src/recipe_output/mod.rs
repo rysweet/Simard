@@ -1,9 +1,9 @@
 //! Shared recipe-runner stdout sanitization primitives.
 //!
-//! [`extract`] provides the retained [`strip_ansi`] and [`strip_recipe_noise`]
-//! APIs. They remove ANSI escapes and known recipe-runner, logging, and launcher
-//! noise. Clean input returns [`std::borrow::Cow::Borrowed`] without allocation;
-//! sanitization returns [`std::borrow::Cow::Owned`] only when the text changes.
+//! The retained public surface consists of [`strip_ansi`] and
+//! [`strip_recipe_noise`] from [`extract`]. Both return [`std::borrow::Cow`]:
+//! ANSI- and noise-free input remains borrowed, while input that requires
+//! sanitization becomes owned.
 
 pub mod extract;
 

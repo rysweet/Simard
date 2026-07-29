@@ -1,13 +1,13 @@
 //! Contract tests for the recipe-output sanitizer surface.
 //!
-//! The public sanitizer API consists of `strip_ansi` and `strip_recipe_noise`.
-//! These helpers remove ANSI escapes and known recipe-runner, logging, and
-//! launcher noise. Clean input returns `Cow::Borrowed` without allocation;
-//! sanitization returns `Cow::Owned` only when the text changes.
+//! The retained public sanitizer API consists of `strip_ansi` and
+//! `strip_recipe_noise`. These helpers remove ANSI escapes and known
+//! recipe-runner, logging, and launcher noise while preserving
+//! `Cow::Borrowed` for input that needs no sanitization.
 //!
-//! The tests enforce that API boundary, sanitizer behavior, borrowing contract,
-//! and continued use by production consumers. Whole-word matching keeps symbol
-//! boundary checks from matching names embedded in unrelated identifiers.
+//! These tests enforce the finished API boundary, sanitizer behavior, borrowing
+//! contract, and continued use by production consumers. Whole-word matching
+//! keeps absence guards from matching names embedded in unrelated identifiers.
 
 use std::borrow::Cow;
 use std::fs;
@@ -15,10 +15,10 @@ use std::path::PathBuf;
 
 use simard::recipe_output::{strip_ansi, strip_recipe_noise};
 
-/// Entry points excluded from the public sanitizer API.
+/// Unsupported entry-point names checked by the API absence guards.
 const REMOVED_ENTRY_POINTS: &[&str] = &["extract_json_payload", "extract_and_parse_json"];
 
-/// Functions excluded from the public sanitizer API.
+/// Unsupported function names checked by the API absence guards.
 const REMOVED_FNS: &[&str] = &[
     "extract_verdict",
     "recover_json_view",
@@ -32,7 +32,7 @@ const REMOVED_FNS: &[&str] = &[
     "escape_json_string_invalid_escapes",
 ];
 
-/// Type excluded from the public sanitizer API.
+/// Unsupported type name checked by the API absence guards.
 const REMOVED_STRUCT: &str = "VerdictMatch";
 
 /// The two retained public helpers.
