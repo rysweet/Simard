@@ -8,12 +8,13 @@ description: >
   re-leasing a stable session_id with a new cycle_id is legitimate, the
   unchanged actor_sessions upsert, and the regression test list. Fixes the
   false AuthorizationScopeViolation crash-loop on PERPETUAL/STANDING goals.
-last_updated: 2026-07-19
+last_updated: 2026-07-30
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./actor-session-startup-purge.md
   - ./stable-goal-session-identity-api.md
   - ./ooda-capability-api.md
   - ../concepts/stable-goal-session-identity.md
@@ -52,8 +53,11 @@ changes on every tick.
 Actor-session leases in the typed-OODA ledger last 30 days
 ([`route.rs`](https://github.com/rysweet/Simard/blob/main/src/typed_ooda/route.rs),
 `ACTOR_SESSION_LEASE = Duration::from_secs(30 * 24 * 60 * 60)`).
-`register_actor_session` only `DELETE`s **expired** rows, so a live lease never
-clears between the ~7-minute cycle retries of a running goal.
+Within a running daemon, `register_actor_session` only `DELETE`s **expired**
+rows, so a live lease never clears between the ~7-minute cycle retries of a
+running goal. The daemon clears all inherited actor-session leases once at
+startup; see the
+[actor-session startup purge](./actor-session-startup-purge.md).
 
 The `AuthorizationScopeViolation` guard previously compared the **entire**
 `ActorBinding`, including the per-cycle `cycle_id`. On re-lease:
@@ -263,6 +267,10 @@ so token rotation is preserved.
   `validate_identifier` trust boundary are untouched.
 - **Request-replay idempotency** (`replay_request(request_id, "actor_session", fingerprint)`)
   is untouched; a retried `request_id` still returns the prior lease.
+- **The daemon startup lifecycle** clears prior-process actor sessions before
+  goal-cycle work. It does not change this in-process scope guard or run from
+  `CapabilityHandler::open`; see the
+  [actor-session startup purge](./actor-session-startup-purge.md).
 
 ## Security invariants
 

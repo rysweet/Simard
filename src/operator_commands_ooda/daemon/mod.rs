@@ -102,6 +102,22 @@ fn clear_stale_draining_flag_at_boot_in(state_dir: &std::path::Path, log_root: &
     }
 }
 
+fn purge_actor_sessions_on_startup(
+    state_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    let ledger_parent = ledger_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("typed-OODA ledger path has no parent directory"))?;
+    std::fs::create_dir_all(ledger_parent)?;
+    let handler = crate::typed_ooda::CapabilityHandler::open(
+        &ledger_path,
+        crate::typed_ooda::CapabilityPolicy::new("daemon-startup"),
+    )?;
+    handler.purge_actor_sessions()?;
+    Ok(())
+}
+
 /// Resolve the identity-scoped cognition (#3125) for the daemon from the
 /// environment, **fail-closed**.
 ///
@@ -281,6 +297,7 @@ pub fn run_ooda_daemon(
     let state_root = state_root_override.unwrap_or_else(memory_ipc::default_state_root);
 
     std::fs::create_dir_all(&state_root)?;
+    purge_actor_sessions_on_startup(&state_root)?;
     clear_stale_draining_flag_at_boot(&state_root);
 
     // Freshness gate at daemon startup (issue #439): belt-and-suspenders run of
@@ -2386,6 +2403,74 @@ mod tests {
         clear_stale_draining_flag_at_boot_in(state.path(), log_root.path());
 
         assert!(crate::safe_update::draining_flag_path(state.path()).exists());
+    }
+
+    #[test]
+    fn startup_purge_removes_stale_actor_session_but_preserves_live_scope_guard() {
+        use crate::typed_ooda::{
+            ActionKind, AuthenticatedToolContext, CapabilityErrorCode, CapabilityGrant,
+            CapabilityHandler, CapabilityPolicy, RepositoryRef,
+        };
+
+        let state = tempfile::tempdir().expect("state root");
+        let ledger_path = crate::typed_ooda::ledger_path(state.path());
+        std::fs::create_dir_all(ledger_path.parent().expect("ledger parent"))
+            .expect("create ledger directory");
+        let actor = |cycle_id: &str, observe_only: bool| {
+            AuthenticatedToolContext::new(
+                "goal-session-actor",
+                "ooda-stable-goal-session",
+                [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+            )
+            .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+            .bound_to_cycle_goal(cycle_id, "goal-perpetual")
+            .with_engineer_permissions(["repo_read"])
+            .with_observe_only(observe_only)
+        };
+        let lease = Duration::from_secs(30 * 24 * 60 * 60);
+
+        let prior_process =
+            CapabilityHandler::open(&ledger_path, CapabilityPolicy::new("policy-v1"))
+                .expect("open prior-process ledger");
+        prior_process
+            .register_actor_session(
+                &actor("cycle-before-restart", false),
+                "request-before-restart",
+                "cycle-before-restart",
+                "goal-perpetual",
+                lease,
+            )
+            .expect("persist future-dated prior-process lease");
+        drop(prior_process);
+
+        purge_actor_sessions_on_startup(state.path()).expect("startup purge must succeed");
+
+        let current_process =
+            CapabilityHandler::open(&ledger_path, CapabilityPolicy::new("policy-v1"))
+                .expect("reopen ledger after startup purge");
+        current_process
+            .register_actor_session(
+                &actor("cycle-after-restart", true),
+                "request-after-restart",
+                "cycle-after-restart",
+                "goal-perpetual",
+                lease,
+            )
+            .expect("startup purge must allow the stable session under its new scope");
+
+        let error = current_process
+            .register_actor_session(
+                &actor("cycle-live-scope-change", false),
+                "request-live-scope-change",
+                "cycle-live-scope-change",
+                "goal-perpetual",
+                lease,
+            )
+            .expect_err("a live scope change must still be rejected");
+        assert_eq!(
+            error.code(),
+            CapabilityErrorCode::AuthorizationScopeViolation
+        );
     }
 
     // ── shutdown_daemon ─────────────────────────────────────────────
