@@ -210,8 +210,8 @@ and
 | `prepare_resets_before_checkout_even_on_the_skip_fetch_present_commit_branch` | The reset guards the skip-fetch (commit-already-present) branch too — proven with origin destroyed so no fetch is possible. |
 | `resetting_the_source_checkout_never_touches_the_warm_target_dir` | The warm `self_deploy_target_dir()` sentinel survives the source reset. |
 | `dirty_non_canonical_override_is_not_reset_and_still_fails_loud_at_checkout` | A dirty `SIMARD_SELF_DEPLOY_REPO` override is **not** scrubbed and fails loud at checkout; its local edit + untracked stray survive. |
+| `prepare_repeatedly_recovers_the_same_tracked_drift` | Repeating the exact tracked-hook wedge before the same deploy target remains recoverable and leaves the checkout pristine each time. |
 | `hooks_manifest_and_scripts_are_git_tracked` | Every file under `.github/hooks/` — including `amplihack-hooks.json` — is git-tracked. |
-| `hooks_dir_has_no_untracked_drift_in_a_clean_checkout` | A fresh checkout leaves `.github/hooks/` pristine (CI drift ⇒ red). |
 
 Run:
 

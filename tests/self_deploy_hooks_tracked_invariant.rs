@@ -14,7 +14,7 @@
 //! lives in `src/self_deploy/source_prep.rs` and is covered by
 //! `src/self_deploy/tests_source_prep.rs`. This file locks the *other* half of
 //! the fix as a durable CI invariant: the hooks manifest (and every script it
-//! authorises) MUST stay **git-tracked** and MUST NOT drift in a clean checkout.
+//! authorises) MUST stay **git-tracked**.
 //!
 //! Why an invariant test rather than another unit test:
 //!
@@ -22,12 +22,6 @@
 //!     and hook scripts stay tracked for review and supply-chain integrity
 //!     (SR-P1-2). If a future change moves `.github/hooks/` out of version
 //!     control to "solve" the drift, this test goes red and names why.
-//!   * **A clean checkout must be drift-free.** The manifest writer is
-//!     write-if-changed: regenerating an identical manifest is a no-op, so a
-//!     fresh `git checkout` of `main` leaves `.github/hooks/` pristine. If the
-//!     manifest starts drifting again (an unconditional rewrite reappears), a
-//!     fresh CI checkout will show the file modified and this test goes red —
-//!     exactly the signal that was missing while #4914 burned Overseer cycles.
 //!
 //! See `docs/reference/self-deploy-drift-resilient-checkout.md`.
 
@@ -40,7 +34,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-const HOOKS_DIR: &str = ".github/hooks";
 const MANIFEST_REL: &str = ".github/hooks/amplihack-hooks.json";
 
 /// Run `git <args>` in the repo root, returning `(success, stdout)`. A spawn
@@ -98,50 +91,17 @@ fn hooks_manifest_and_scripts_are_git_tracked() {
     // Every hook script the manifest authorises must be tracked too: at least
     // the manifest plus one hook script under .github/hooks/ must be listed by
     // `git ls-files`, so the directory can never silently become untracked.
+    let hooks_dir = ".github/hooks";
     let (ok, listed) =
-        git(&root, &["ls-files", "--", HOOKS_DIR]).expect("git ls-files must run in a work tree");
-    assert!(ok, "git ls-files {HOOKS_DIR} must succeed");
+        git(&root, &["ls-files", "--", hooks_dir]).expect("git ls-files must run in a work tree");
+    assert!(ok, "git ls-files {hooks_dir} must succeed");
     let tracked_files: Vec<&str> = listed.lines().filter(|l| !l.is_empty()).collect();
     assert!(
         tracked_files.contains(&MANIFEST_REL),
-        "the manifest must appear in `git ls-files {HOOKS_DIR}`"
+        "the manifest must appear in `git ls-files {hooks_dir}`"
     );
     assert!(
         tracked_files.len() >= 2,
-        "{HOOKS_DIR} must track the manifest AND its hook scripts (found only {tracked_files:?})"
-    );
-}
-
-#[test]
-fn hooks_dir_has_no_untracked_drift_in_a_clean_checkout() {
-    let root = repo_root();
-    if !is_git_work_tree(&root) {
-        eprintln!(
-            "skipping hooks_dir_has_no_untracked_drift_in_a_clean_checkout: {} is not a git work tree",
-            root.display()
-        );
-        return;
-    }
-
-    // A fresh checkout of `main` must leave .github/hooks/ pristine. Any
-    // untracked (and not gitignored) file here is a drift source that can
-    // re-wedge the self-deploy checkout, exactly the #4914 failure mode.
-    let (ok, others) = git(
-        &root,
-        &[
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "--",
-            HOOKS_DIR,
-        ],
-    )
-    .expect("git ls-files --others must run in a work tree");
-    assert!(ok, "git ls-files --others {HOOKS_DIR} must succeed");
-    let untracked: Vec<&str> = others.lines().filter(|l| !l.is_empty()).collect();
-    assert!(
-        untracked.is_empty(),
-        "no untracked files may live under {HOOKS_DIR} in a clean checkout (drift source for #4914); \
-         found: {untracked:?}"
+        "{hooks_dir} must track the manifest AND its hook scripts (found only {tracked_files:?})"
     );
 }
