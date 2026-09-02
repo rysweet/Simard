@@ -144,19 +144,18 @@ After the launcher lines are removed, the remaining lines are rejoined. If
 nothing matched, the input is returned as `Cow::Borrowed` (zero-copy) so clean
 titles pay no allocation cost.
 
-### Anchoring, not substring matching
+### Narrow launcher signatures
 
 The cardinal risk is **over-stripping** a legitimate title — e.g. a goal that
 literally reads *"Document the NODE_OPTIONS tuning we use"*, or one that simply
 begins with the word *"INFO"* or *"WARN"*. The sanitizer never matches a bare
-log-level prefix and never matches a bare substring; it matches only the **full
-preamble signature**:
+log-level prefix; it matches only distinctive **launcher signatures**:
 
 | Guard | Effect |
 |-------|--------|
 | Joint-marker anchor (leading `ℹ` info marker **and** `NODE_OPTIONS=` **and** `(saved preference)`) | A title that mentions `NODE_OPTIONS` alone — with no leading `ℹ` and no `(saved preference)` marker — is preserved verbatim. |
 | Narrow predicate excludes bare `INFO `/`WARN `/`Run 'copilot update'` arms | A title beginning with `INFO`, `WARN`, or the `copilot update` phrase is preserved and slugified normally, so distinct such titles never collide on an empty slug. |
-| Whole-line match only | A launcher shape embedded mid-sentence in a real title does not trigger a strip; only a standalone launcher line is dropped. |
+| Line filtering | Matching removes the entire line. The `ℹ NODE_OPTIONS` signature must start the line; the launcher binary/version signatures are distinctive substrings that may occur anywhere on the line. |
 | Strip **before** normalization | Metacharacters (`/`, `..`, `~`, leading `-`) in a launcher line are removed *before* kebab-casing runs, so they can never survive into a branch name. |
 
 ---
