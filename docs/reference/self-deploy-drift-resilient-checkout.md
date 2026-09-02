@@ -6,8 +6,8 @@ description: >
   from wedging every self-deploy with `git checkout` "your local changes would
   be overwritten". Covers the fail-closed, canonical-only `reset_source_tree`
   scrub that runs before every `checkout --detach`, the `remove_stale_checkout`
-  clone-clean recovery, and the git-tracked / drift-free CI invariant.
-last_updated: 2026-07-28
+  clone-clean recovery, and the git-tracked hooks CI invariant.
+last_updated: 2026-09-02
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -29,7 +29,7 @@ related:
 > `is_canonical_src_repo` fail-closed gate, and the `remove_stale_checkout`
 > clone-clean recovery live in
 > [`src/self_deploy/source_prep.rs`](https://github.com/rysweet/Simard/blob/main/src/self_deploy/source_prep.rs).
-> The git-tracked / drift-free invariant is asserted by
+> The git-tracked hooks invariant is asserted by
 > [`tests/self_deploy_hooks_tracked_invariant.rs`](https://github.com/rysweet/Simard/blob/main/tests/self_deploy_hooks_tracked_invariant.rs),
 > and the reset behaviour by
 > [`src/self_deploy/tests_source_prep.rs`](https://github.com/rysweet/Simard/blob/main/src/self_deploy/tests_source_prep.rs).
@@ -68,10 +68,9 @@ The repair has two independent halves:
 1. **Recover at deploy time.** Reset + clean the disposable canonical checkout
    *before* `checkout --detach`, strictly gated so only the throwaway clone can
    ever be scrubbed (never a caller-supplied override or the operator cwd).
-2. **Keep the drift source honest.** Assert in CI that `.github/hooks/` stays
-   git-tracked and that a clean checkout carries **no** untracked drift, so a
-   reappearing unconditional manifest rewrite reds `cargo test` instead of
-   silently re-wedging self-deploy.
+2. **Keep the hook source reviewable.** Assert in CI that `.github/hooks/`
+   stays git-tracked rather than treating untracking or gitignoring the
+   manifest as a drift workaround.
 
 > **Escalation linkage.** This is the root-cause repair for the symptom that
 > escalation PR #4914 tagged. Closing #4914 itself is an operational Overseer
@@ -84,7 +83,7 @@ The repair has two independent halves:
 - [1. Reset-before-checkout on both prepare paths](#1-reset-before-checkout-on-both-prepare-paths)
 - [2. Fail-closed canonical-only gate](#2-fail-closed-canonical-only-gate)
 - [3. Clone-clean recovery for an absent/invalid checkout](#3-clone-clean-recovery-for-an-absentinvalid-checkout)
-- [4. Git-tracked / drift-free CI invariant](#4-git-tracked--drift-free-ci-invariant)
+- [4. Git-tracked hooks CI invariant](#4-git-tracked-hooks-ci-invariant)
 - [Observability](#observability)
 - [Error surface](#error-surface)
 - [Security model](#security-model)
@@ -152,7 +151,7 @@ than by resetting an unverified path:
   never asked to reset an unverified path. The warm `self_deploy_target_dir()`
   is untouched, so builds stay incremental.
 
-## 4. Git-tracked / drift-free CI invariant
+## 4. Git-tracked hooks CI invariant
 
 Recovering at deploy time is necessary but not sufficient — the drift *source*
 must stay honest. [`tests/self_deploy_hooks_tracked_invariant.rs`](https://github.com/rysweet/Simard/blob/main/tests/self_deploy_hooks_tracked_invariant.rs)
@@ -162,9 +161,6 @@ asserts, in a git work tree (it skips cleanly in vendored/packaged builds):
   git-tracked.** Untracking / gitignoring the manifest is explicitly **not** the
   fix (supply-chain integrity; the manifest and its hook scripts stay
   reviewable).
-- **A fresh checkout leaves `.github/hooks/` pristine** (no untracked drift), so
-  a reappearing unconditional manifest rewrite turns CI red instead of silently
-  re-wedging self-deploy.
 
 ## Observability
 
@@ -192,7 +188,7 @@ No new `SafeUpdateError` variants. Failures reuse the existing surface from the
 | Control | Enforcement |
 | --- | --- |
 | **Reset only the disposable managed clone** | Double-canonicalized equality with `self_deploy_src_dir()` at the call site (`is_canonical_src_repo`) and again inside `reset_source_tree`; any error/mismatch refuses the reset (fail-closed). A `SIMARD_SELF_DEPLOY_REPO` override resolves to a different canonical path, so its tree is **never** reset — a dirty override still fails loud on checkout. |
-| **Keep `.github/hooks/` tracked** | The git-tracked / no-drift invariant test makes untracking or a reappearing unconditional rewrite red. |
+| **Keep `.github/hooks/` tracked** | The invariant test makes untracking or gitignoring the manifest and its authorised scripts red. |
 | **`clean -fd`, never `-x`** | Ignored secrets/caches and the warm target dir survive the scrub. |
 | **No shell, no injection** | Both git invocations use the env-scrubbed argv-array `git_capture`; the validated full SHA is pinned to `checkout --detach` so a skipped fetch can never check out a different tree (SEC-I2). |
 | **Forward-only swap intact** | The recovery paths do not bypass the ancestry oracle or the `self_deploy_canary` forward-only swap gates. |
