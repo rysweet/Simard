@@ -35,6 +35,11 @@ pub struct AssembleOptions {
     pub service_unit: String,
     /// Optional allowlist of section names to assemble; `None` = all.
     pub sections: Option<Vec<String>>,
+    /// Override for the `daemon_health.json` heartbeat path used when the
+    /// systemd unit is not loaded. `None` resolves the real process-global
+    /// path (`data_local_dir()/simard/daemon_health.json`). Tests inject a
+    /// hermetic path so they never read the host's live daemon heartbeat.
+    pub daemon_health_path: Option<PathBuf>,
 }
 
 impl Default for AssembleOptions {
@@ -43,6 +48,7 @@ impl Default for AssembleOptions {
             state_root: crate::state_root::simard_state_root(),
             service_unit: "simard.service".to_string(),
             sections: None,
+            daemon_health_path: None,
         }
     }
 }
@@ -119,7 +125,7 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
     // process-agnostic in non-systemd deployments (dev / worktree / container).
     match assemble_daemon_from_systemctl(opts) {
         Some(env) => env,
-        None => assemble_daemon_from_heartbeat(),
+        None => assemble_daemon_from_heartbeat(opts),
     }
 }
 
@@ -199,8 +205,15 @@ fn daemon_health_path() -> PathBuf {
 /// Fail-visible: a missing / unreadable / unparseable heartbeat degrades this
 /// one section to `absent` with the honest `systemctl: unit not loaded` note
 /// (never panics, never fabricates a running daemon).
-fn assemble_daemon_from_heartbeat() -> SectionEnvelope<Daemon> {
-    read_daemon_heartbeat(&daemon_health_path(), chrono::Utc::now())
+///
+/// The heartbeat path comes from `opts.daemon_health_path` when set (hermetic
+/// tests inject a path), otherwise the real process-global [`daemon_health_path`].
+fn assemble_daemon_from_heartbeat(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
+    let path = opts
+        .daemon_health_path
+        .clone()
+        .unwrap_or_else(daemon_health_path);
+    read_daemon_heartbeat(&path, chrono::Utc::now())
 }
 
 /// Read + map the heartbeat at `path` as of `now`. Split from
@@ -228,8 +241,11 @@ fn read_daemon_heartbeat(
 /// - stale  → `state = "stale (<phase>)"`,   `freshness = stale`
 /// - no/invalid timestamp → `state = "unknown"`, `freshness = stale`
 ///
-/// `as_of` is the heartbeat `timestamp`. `main_pid` / `n_restarts` are not
-/// recorded in the heartbeat, so they stay `None` (honest) rather than guessed.
+/// `as_of` is the heartbeat `timestamp`. `main_pid` is read defensively from
+/// the heartbeat when present (issue #4929) so `assemble_resources` can sample
+/// `/proc/<pid>` RSS + CPU; a missing or malformed value degrades to `None`
+/// (honest empty metric, never a guessed PID). `n_restarts` is not recorded in
+/// the heartbeat, so it stays `None`.
 fn daemon_from_heartbeat(
     health: &serde_json::Value,
     now: chrono::DateTime<chrono::Utc>,
@@ -240,6 +256,13 @@ fn daemon_from_heartbeat(
         .and_then(|p| p.as_str())
         .unwrap_or("")
         .trim();
+
+    // Defensive parse: `as_u64` yields `None` for strings, negatives, and
+    // non-numbers, so a malformed `main_pid` never panics or fabricates a PID.
+    let main_pid = health
+        .get("main_pid")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u32::try_from(p).ok());
 
     let fresh = timestamp
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -260,7 +283,7 @@ fn daemon_from_heartbeat(
     let daemon = Daemon {
         state,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        main_pid: None,
+        main_pid,
         deployed_commit: None,
         instance_uptime: None,
         running_since: None,
@@ -1446,6 +1469,92 @@ mod pure_helper_tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(env.availability, Availability::Unavailable);
         assert_eq!(env.note.as_deref(), Some("systemctl: unit not loaded"));
+    }
+
+    // ── F5 (#4929): heartbeat `main_pid` unblocks `simard status` RSS/CPU ──
+    // The daemon now stamps its own PID into `daemon_health.json`; the provider
+    // must read it so `assemble_resources` can sample `/proc/<pid>` RSS + CPU.
+    // Before the fix, `daemon_from_heartbeat` hardcoded `main_pid: None`, so
+    // status rendered daemon CPU/RSS as "absent" even with a fresh heartbeat.
+
+    /// A heartbeat carrying `main_pid` must surface it on the daemon section
+    /// (defensive `as_u64`), so status can sample the live process.
+    #[test]
+    fn daemon_from_heartbeat_reads_main_pid_when_present() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "status": "running",
+            "cycle_phase": "orient",
+            "main_pid": 81234,
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        let d = env.data.as_ref().expect("fresh heartbeat carries data");
+        assert_eq!(
+            d.main_pid,
+            Some(81234),
+            "a heartbeat main_pid must flow to the daemon section for RSS/CPU sampling"
+        );
+    }
+
+    /// A heartbeat with no `main_pid` stays honestly `None` (observability-only,
+    /// never fabricated). This must keep holding after the fix.
+    #[test]
+    fn daemon_from_heartbeat_missing_main_pid_stays_none() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "cycle_phase": "sleep",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert!(
+            env.data.as_ref().unwrap().main_pid.is_none(),
+            "absent main_pid degrades to None (empty metric), never a guess"
+        );
+    }
+
+    /// Defensive parse: a non-numeric / malformed `main_pid` degrades to `None`
+    /// (a total function — no panic, no silent bad-PID action).
+    #[test]
+    fn daemon_from_heartbeat_ignores_non_numeric_main_pid() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "cycle_phase": "act",
+            "main_pid": "not-a-pid",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert!(
+            env.data.as_ref().unwrap().main_pid.is_none(),
+            "a malformed main_pid must be ignored, not panic or fabricate a PID"
+        );
+    }
+
+    /// Wiring guard for the F5 end goal: given a real, live PID,
+    /// `assemble_resources` samples a non-empty RSS from `/proc/<pid>/status`.
+    /// This is the value the heartbeat `main_pid` feeds once it is read — the
+    /// reason plumbing the PID through makes `simard status` show RSS instead
+    /// of "absent".
+    #[test]
+    fn assemble_resources_reports_rss_for_a_live_pid() {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-rss-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The test's own PID is guaranteed live and readable under /proc.
+        let resources = assemble_resources(Some(std::process::id()), &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let data = resources
+            .data
+            .expect("resources section is live on a host with /proc");
+        assert!(
+            data.rss_bytes.is_some(),
+            "a live daemon PID must yield a VmRSS reading (not 'absent')"
+        );
     }
 }
 

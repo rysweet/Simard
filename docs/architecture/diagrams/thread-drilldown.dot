@@ -1,0 +1,89 @@
+// Simard metacognitive atlas — Diagram 2: cognitive-threads drill-down.
+//
+// Code-first: the thirteen threads are bound to `ThreadName::ALL` in its exact
+// declaration order (src/ooda_brain/thread_reasoning_record.rs). Each thread's
+// backing recipe is the `RECIPE` const on the thread module
+// (src/cognitive_threads/threads/<thread>.rs). Cadence is the thread's
+// `policy()` — `SchedulePolicy::Interval(..)` for the reflective/background
+// threads. Every thread hands its reasoning back through a typed
+// `ThreadReasoningRecord` (schema `thread-reasoning/v1`) which the thin rail
+// (`recipe_rail::run_reflective_thread`) reads fail-closed and surfaces into
+// `ThreadOutcome.summary`.
+//
+// Note: interoception is recipe-FREE deterministic sensing; its `RECIPE` const
+// (`interoception-sense`) is used only for optional production narration.
+//
+// Render (optional, CI-safe): dot -Tsvg thread-drilldown.dot -o thread-drilldown.svg
+digraph simard_thread_drilldown {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", shape=box, style=rounded];
+    edge [fontname="Helvetica"];
+    labelloc="t";
+    label="Cognitive-threads drill-down — ThreadName::ALL (declaration order) → recipe → record → rail";
+
+    // Core modules shared by every thread rail.
+    subgraph cluster_core {
+        label="Core modules (src/cognitive_threads)";
+        style=rounded;
+        color="#4C566A";
+        mind           [label="mind.rs\nMind (scheduler)"];
+        schedule       [label="schedule.rs\nSchedulePolicy::Interval"];
+        thread         [label="thread.rs\nCognitiveThread / ThreadOutcome"];
+        recipe_rail    [label="recipe_rail.rs\nRecipeRunnerInvoker\nrun_reflective_thread()"];
+        salience_sig   [label="salience_signal.rs"];
+        telemetry      [label="telemetry.rs"];
+    }
+
+    // The typed handoff — single source of truth for the roster.
+    record [label="ThreadReasoningRecord\nschema thread-reasoning/v1\nooda_brain/thread_reasoning_record.rs",
+            shape=note, color="#EBCB8B", style="filled,rounded", fillcolor="#FFF6D6"];
+    outcome [label="ThreadOutcome.summary\n(daemon log = real reasoning)",
+             shape=box, color="#A3BE8C", style="filled,rounded", fillcolor="#E8F0DE"];
+
+    // The 13 threads, in ThreadName::ALL declaration order, each tagged with its
+    // RECIPE const (prompt_assets/simard/recipes/<recipe>.yaml).
+    salience    [label="salience\nsalience-appraise"];
+    metacog     [label="metacognition\nmetacognition-appraise", color="#5E81AC", penwidth=2];
+    reflection  [label="reflection\nreflect-postmortem"];
+    prospection [label="prospection\nprospect-foresight"];
+    operatormdl [label="operator_model\noperator-model"];
+    analogy     [label="analogy\nanalogy-map"];
+    narrative   [label="narrative\nnarrative-identity"];
+    values      [label="values_deliberation\nvalues-deliberate"];
+    consolid    [label="consolidation\nconsolidate-sleep"];
+    creative    [label="creative_ideas\ncreative-ideate"];
+    engineerlog [label="engineer_log_analysis\nengineer-log-triage"];
+    interocept  [label="interoception\ninteroception-sense (recipe-free)", style="rounded,dashed"];
+    maintenance [label="maintenance\nmaintenance-housekeep"];
+
+    // Scheduling: Mind ticks each thread by its Interval policy.
+    mind -> schedule;
+    { rank=same; salience; metacog; reflection; prospection; operatormdl; analogy;
+      narrative; values; consolid; creative; engineerlog; interocept; maintenance; }
+
+    schedule -> salience    [label="Interval"];
+    schedule -> metacog;
+    schedule -> reflection;
+    schedule -> prospection;
+    schedule -> operatormdl;
+    schedule -> analogy;
+    schedule -> narrative;
+    schedule -> values;
+    schedule -> consolid;
+    schedule -> creative;
+    schedule -> engineerlog;
+    schedule -> interocept;
+    schedule -> maintenance;
+
+    // Each thread ACTS via its recipe, which writes the typed record.
+    metacog -> recipe_rail [label="run_reflective_thread(RECIPE)"];
+    salience -> recipe_rail [style=dotted];
+    reflection -> recipe_rail [style=dotted];
+    recipe_rail -> record   [label="recipe writes"];
+    record -> outcome       [label="rail reads fail-closed → summary"];
+
+    // Signals & telemetry.
+    salience -> salience_sig [style=dashed, label="salience signal"];
+    outcome -> telemetry     [style=dashed, label="observed"];
+}

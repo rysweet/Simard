@@ -5,7 +5,7 @@
 //! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
 //! and record ran/health from its EXIT STATUS alone. The thread parses NOTHING
 //! back and performs NO durable write itself — the recipe's `simard …` tool
-//! calls ARE the effect. OFF by default behind the double env gate.
+//! calls ARE the effect. ENABLED by default (opt-out) behind the default-ON double env gate.
 //!
 //! **Status (issue #5):** implemented; [`SalienceThread::tick`] is covered by
 //! the hermetic offline unit tests in `tests_catalog` (fake recipe invoker)
@@ -20,6 +20,7 @@ use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
+use crate::ooda_brain::ThreadName;
 
 /// Stable telemetry id.
 pub const ID: &str = "salience";
@@ -168,9 +169,16 @@ impl CognitiveThread for SalienceThread {
         ];
 
         // TRIGGER — record ran/health from the recipe's EXIT STATUS only.
-        let result = self.invoker.invoke(RECIPE, &ctx_vars);
-        self.note_run(ctx.now_epoch, result.is_success());
-        result.into_outcome(RECIPE, start.elapsed())
+        let outcome = recipe_rail::run_reflective_thread(
+            self.invoker.as_ref(),
+            RECIPE,
+            ThreadName::Salience,
+            ctx.state_root,
+            ctx_vars,
+            start,
+        );
+        self.note_run(ctx.now_epoch, outcome.success);
+        outcome
     }
 
     fn health(&self) -> ThreadHealth {

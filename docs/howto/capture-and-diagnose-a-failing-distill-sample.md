@@ -128,9 +128,13 @@ Add the harvested bytes verbatim as a fixture and assert the *current* behavior
 you want:
 
 - **Extractor gap** → add a test in the `#[cfg(test)]` module of
-  `src/recipe_output/extract.rs` asserting `extract_json_payload(SAMPLE)` returns
-  the embedded facts object. This mirrors the existing
-  `extract_json_payload_recovers_*` tests.
+  `src/recipe_output/extract.rs` asserting that the retained extraction
+  primitives recover the embedded facts object from `SAMPLE` — e.g.
+  `last_balanced_object(&strip_recipe_noise(SAMPLE))`, with `recover_json_view`
+  for JSON-defect hardening. This mirrors the existing `strip_recipe_noise` /
+  `last_balanced_object` / `recover_json_view` tests. (The former
+  `extract_json_payload` / `extract_and_parse_json` wrappers were retired as
+  dead code in #4991; compose the retained primitives directly.)
 - **Prompt/retry gap** → add a test in `src/memory_consolidation/distillation.rs`
   driving the runner with the captured output and asserting the pass recovers
   (or classifies correctly) rather than silently deferring.

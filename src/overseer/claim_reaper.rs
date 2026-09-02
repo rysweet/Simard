@@ -100,6 +100,34 @@ pub enum ClaimLiveness {
 /// real filesystem, process, or `gh` is touched.
 pub trait ClaimLivenessProbe: Send + Sync {
     fn assess(&self, claim_key: &str) -> ClaimLiveness;
+
+    /// The set of goal ids the authoritative goal board CONFIRMS are
+    /// standing/perpetual
+    /// ([`ActiveGoal::is_perpetual`](crate::goal_curation::types::ActiveGoal::is_perpetual)).
+    ///
+    /// Read ONCE per cleanup run (outside the per-claim loop) so a single board
+    /// read serves every claim in the sweep. The reaper matches each claim's
+    /// goal id (via the shared claim-key parser) against this set: standing
+    /// claims receive more time for heartbeat inactivity but still undergo
+    /// investigation and removal when old enough. A `HeartbeatStale` claim whose
+    /// goal is in this set gets a larger but BOUNDED idle threshold
+    /// (`stale_secs * 8`) — never a permanent exemption. A `NoWorktree` claim
+    /// (the worktree is physically gone) is provably dead and reclaimed
+    /// regardless of membership, and a `Completed` claim keeps its ordinary
+    /// `stale_secs` threshold.
+    ///
+    /// Fail-closed for the extra time (not for reaping): if the board is
+    /// missing, empty, or unreadable this returns an EMPTY set, so no claim is
+    /// granted extra time — there is no silent success value that hands out more
+    /// time without proof. Only a goal the board CONFIRMS is perpetual earns the
+    /// larger threshold.
+    ///
+    /// Default empty so every existing probe impl keeps ordinary behavior
+    /// (every claim on the plain `stale_secs` threshold) unchanged until it opts
+    /// in.
+    fn perpetual_goal_ids(&self) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
 }
 
 /// Ledger seam the reaper sweeps and reclaims through. Backed in production by
@@ -276,14 +304,24 @@ pub struct ReapSummary {
 ///     no investigation launched).
 ///   * [`ClaimLiveness::Dead`] `{ NoWorktree, .. }` ⇒ reclaim IMMEDIATELY — there
 ///     is no worktree evidence to preserve, so the investigator is NOT consulted.
-///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age > stale_secs`
-///     ⇒ INVESTIGATE first (evidence archived by the seam), then reclaim IFF the
-///     returned [`InvestigationVerdict::should_reap`] (a genuinely-dead verdict).
-///     Any other verdict (still-alive false positive / blocked / recoverable /
+///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age` exceeds the
+///     claim's idle threshold ⇒ INVESTIGATE first (evidence archived by the
+///     seam), then reclaim IFF the returned
+///     [`InvestigationVerdict::should_reap`] (a genuinely-dead verdict). Any
+///     other verdict (still-alive false positive / blocked / recoverable /
 ///     in-flight `Pending`) KEEPS the claim (fail-closed). Interventions are
-///     surfaced on `pending_interventions` REGARDLESS of the verdict.
-///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age <= stale_secs`
-///     ⇒ skip (fresh / quiet-but-alive; fail-closed; not investigated).
+///     surfaced on `pending_interventions` REGARDLESS of the verdict. The idle
+///     threshold is the ordinary `stale_secs` for an ordinary claim, and the
+///     larger but BOUNDED `stale_secs * 8` for a claim the goal board confirms
+///     is standing/perpetual: standing claims receive more time for heartbeat
+///     inactivity but still undergo investigation and removal when old enough
+///     (never a permanent exemption).
+///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age` is at/under
+///     the claim's idle threshold ⇒ skip (fresh / quiet-but-alive; fail-closed;
+///     not investigated).
+///   * [`ClaimLiveness::Dead`] `{ Completed, age }` keeps its ordinary
+///     `stale_secs` threshold (standing goals get no extra time here) and, once
+///     past it, is reclaimed directly WITHOUT investigation.
 ///   * [`ClaimLiveness::Live`] ⇒ skip.
 ///
 /// Reclaim = [`ClaimLedger::release_engineer_claim`] + [`OrphanWorktreeCleanup`],
@@ -307,6 +345,16 @@ pub fn reap_stale_claims(
         return summary;
     }
 
+    // Read the goal board ONCE per cleanup run (outside the per-claim loop): the
+    // set of goal ids the board CONFIRMS are standing/perpetual. A confirmed
+    // standing goal earns a larger but BOUNDED idle threshold on the
+    // `HeartbeatStale` path (below); every other claim keeps the ordinary
+    // `stale_secs`. Fail-closed for the extra time: a missing / empty /
+    // unreadable board yields an EMPTY set here, so NO claim is granted extra
+    // time — there is no silent success value that hands out more time without
+    // proof.
+    let perpetual_goal_ids = probe.perpetual_goal_ids();
+
     for claim_key in ledger.list_engineer_claims() {
         // Classify the claim's engineer. Fail-closed: anything short of a
         // CONFIDENT dead verdict (Live, or a `HeartbeatStale` age at/under the
@@ -323,15 +371,31 @@ pub fn reap_stale_claims(
             ClaimLiveness::Dead {
                 reason: DeadReason::HeartbeatStale,
                 age_secs,
-            } => match age_secs {
-                // Strictly OLDER than the threshold ⇒ provably stale. Boundary
-                // (age == threshold) is protected (no wall-clock kill).
-                Some(age) if age > stale_secs => (DeadReason::HeartbeatStale, Some(age)),
-                _ => {
-                    summary.skipped += 1;
-                    continue;
+            } => {
+                // Standing claims receive more time for heartbeat inactivity but
+                // still undergo investigation and removal when old enough. Match
+                // the goal id with the existing claim-key parser; a malformed or
+                // unmatched key is simply absent from the set and gets ordinary
+                // behavior. Confirmed standing goals get a larger but BOUNDED
+                // threshold (`stale_secs * 8`, saturating), never a permanent
+                // exemption; ordinary claims keep the plain `stale_secs`.
+                let idle_threshold =
+                    if perpetual_goal_ids.contains(goal_id_from_claim_key(&claim_key)) {
+                        stale_secs.saturating_mul(8)
+                    } else {
+                        stale_secs
+                    };
+                match age_secs {
+                    // Strictly OLDER than the threshold ⇒ provably stale.
+                    // Boundary (age == threshold) is protected (no wall-clock
+                    // kill).
+                    Some(age) if age > idle_threshold => (DeadReason::HeartbeatStale, Some(age)),
+                    _ => {
+                        summary.skipped += 1;
+                        continue;
+                    }
                 }
-            },
+            }
             ClaimLiveness::Dead {
                 reason: DeadReason::Completed,
                 age_secs,
@@ -341,6 +405,8 @@ pub fn reap_stale_claims(
                 // flight (age <= threshold) is protected. Older than the
                 // threshold ⇒ a residual completed worktree whose claim leaked;
                 // reclaim it directly (below) instead of re-investigating it.
+                // A completed worktree gets NO standing extra time — completion
+                // is a positive terminal signal regardless of goal kind.
                 Some(age) if age > stale_secs => (DeadReason::Completed, Some(age)),
                 _ => {
                     summary.skipped += 1;
@@ -379,6 +445,15 @@ pub fn reap_stale_claims(
                 None
             }
             DeadReason::HeartbeatStale => {
+                // Standing claims receive more time for heartbeat inactivity but
+                // still undergo investigation and removal when old enough. Any
+                // extra time was already granted by the larger BOUNDED idle
+                // threshold above (`stale_secs * 8` for a board-confirmed
+                // standing goal); a claim that reaches this point has crossed its
+                // threshold and MUST be investigated before any reap — standing
+                // or not. There is no permanent exemption: an idle-age
+                // (`HeartbeatStale`) engineer has a worktree whose evidence MUST
+                // be preserved and whose death MUST be understood before reclaim.
                 let idle_age = age_secs.unwrap_or(0);
                 let outcome = investigator.investigate(&claim_key, idle_age);
                 // Findings ALWAYS feed the gated Act path — even a kept claim's
@@ -644,6 +719,28 @@ impl ClaimLivenessProbe for WorktreeClaimLivenessProbe {
             }
             None => ClaimLiveness::Live,
         }
+    }
+
+    /// Collect the set of goal ids the authoritative goal board CONFIRMS are
+    /// standing/perpetual, by reading the board rooted at the SAME `state_root`
+    /// the reaper and engineers share and reusing the durable `is_perpetual()`
+    /// marker predicate (issue #4437). Read ONCE per cleanup run; the reaper
+    /// correlates each claim by goal id (recovered from the `claim_key` the same
+    /// repo-agnostic way [`assess`](Self::assess) matches worktrees).
+    ///
+    /// Fail-closed for the extra time (not for reaping): a missing, empty, or
+    /// corrupt board yields an EMPTY set (`goal_board_store::load` returns an
+    /// empty default on both), so no claim is granted the larger idle threshold
+    /// without proof. Only goals the board CONFIRMS are perpetual are included;
+    /// they still undergo investigation and removal once old enough.
+    fn perpetual_goal_ids(&self) -> std::collections::HashSet<String> {
+        crate::goal_board_store::load(&self.state_root)
+            .board
+            .active
+            .iter()
+            .filter(|goal| goal.is_perpetual())
+            .map(|goal| goal.id.clone())
+            .collect()
     }
 }
 
@@ -1514,6 +1611,12 @@ mod tests {
     /// Deterministic probe: fixed verdict per claim key.
     struct MapProbe {
         verdicts: BTreeMap<String, ClaimLiveness>,
+        /// Goal ids the board CONFIRMS are standing/perpetual (issue #4437).
+        /// Empty by default so existing tests see ordinary behavior unchanged.
+        perpetual: std::collections::BTreeSet<String>,
+        /// Count of `perpetual_goal_ids` calls, so a test can pin that the goal
+        /// board is looked up EXACTLY ONCE per cleanup run (outside the loop).
+        perpetual_lookups: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MapProbe {
@@ -1523,7 +1626,26 @@ mod tests {
                     .iter()
                     .map(|(k, v)| ((*k).to_string(), v.clone()))
                     .collect(),
+                perpetual: std::collections::BTreeSet::new(),
+                perpetual_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        /// Mark the given claim keys' goals as standing/perpetual so the probe's
+        /// `perpetual_goal_ids` reports their goal ids (issue #4437). Accepts
+        /// full claim keys (as the tests already hold) and stores the parsed goal
+        /// id via the SAME shared claim-key parser the reaper matches with.
+        fn with_perpetual(mut self, keys: &[&str]) -> Self {
+            self.perpetual = keys
+                .iter()
+                .map(|k| goal_id_from_claim_key(k).to_string())
+                .collect();
+            self
+        }
+
+        /// Shared handle to the `perpetual_goal_ids` call counter.
+        fn perpetual_lookup_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.perpetual_lookups)
         }
     }
 
@@ -1534,6 +1656,12 @@ mod tests {
                 .get(claim_key)
                 .cloned()
                 .unwrap_or(ClaimLiveness::Live)
+        }
+
+        fn perpetual_goal_ids(&self) -> std::collections::HashSet<String> {
+            self.perpetual_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.perpetual.iter().cloned().collect()
         }
     }
 
@@ -2409,8 +2537,364 @@ mod tests {
         assert_eq!(summary.skipped, 1);
     }
 
-    /// `Blocked` and `Recoverable` engineers may still resume, so neither is
-    /// reaped — but their remediation interventions ARE surfaced for dispatch.
+    // ----- Standing/perpetual claims get MORE TIME, never forever (#4437) -----
+    //
+    // Standing claims receive more time for heartbeat inactivity but still
+    // undergo investigation and removal when old enough. The confirmed-standing
+    // idle threshold is `STALE_SECS * 8` (1800s → 14400s / 4h); every other path
+    // (ordinary claims, `Completed`, `NoWorktree`) is unchanged.
+
+    const STANDING_STALE_SECS: u64 = STALE_SECS * 8; // 14_400s == 4h
+
+    /// A standing/perpetual claim idle BETWEEN the ordinary 30-minute threshold
+    /// and the 4-hour bounded threshold is KEPT without investigation — it has
+    /// merely been granted more time for its benign between-cycle idle. No
+    /// reclaim, no release, no worktree cleanup, and crucially NO investigation
+    /// (the extra time is granted by the larger threshold, before the
+    /// investigate-before-reap step). A `Dead` investigator proves the claim is
+    /// never investigated in this window.
+    #[test]
+    fn standing_claim_between_30min_and_4h_is_kept_without_investigation() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // 1 hour idle: PAST the ordinary 1800s threshold, WELL UNDER the 14400s
+        // standing threshold.
+        let age = 3600;
+        assert!(age > STALE_SECS && age <= STANDING_STALE_SECS);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "a standing claim inside its bounded window must not be reaped"
+        );
+        assert!(ledger.released.borrow().is_empty());
+        assert_eq!(
+            ledger.list_engineer_claims(),
+            vec![key.to_string()],
+            "the standing claim is preserved inside the bounded window"
+        );
+        assert!(cleanup.cleaned().is_empty());
+        assert!(
+            investigator.investigated().is_empty(),
+            "inside the bounded window the standing claim gets more time via the \
+             larger threshold — it is not investigated at all"
+        );
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.pending_interventions.is_empty());
+    }
+
+    /// A standing/perpetual claim idle PAST the 4-hour bounded threshold is NOT
+    /// kept forever: it flows through the ordinary investigate-before-reap path
+    /// and, when the investigation concludes DEAD, is reclaimed. This is the core
+    /// guarantee that standing claims are never permanently exempt.
+    #[test]
+    fn standing_claim_older_than_4h_is_investigated_and_reaped_when_dead() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // 5 hours idle: PAST the 14400s standing threshold.
+        let age = STANDING_STALE_SECS + 3600;
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a standing claim older than its bounded threshold that investigates \
+             DEAD must be reclaimed — never kept forever"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "past the bounded threshold the standing claim IS investigated before \
+             any reap"
+        );
+    }
+
+    /// A standing/perpetual claim older than the 4-hour threshold is KEPT when
+    /// the investigation concludes STILL-ALIVE — fail-closed exactly like an
+    /// ordinary claim. The extra time is bounded, but a genuinely-live standing
+    /// engineer is still protected by the investigation verdict.
+    #[test]
+    fn old_standing_claim_is_kept_when_investigation_says_alive() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        let age = STANDING_STALE_SECS + 9000; // well past 4h
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        // Investigation says the engineer is actually still working.
+        let investigator = FakeInvestigator::dead_unknown()
+            .with_outcome(key, outcome(InvestigationVerdict::StillAlive, Vec::new()));
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "an old standing claim that investigates STILL-ALIVE must be kept"
+        );
+        assert!(ledger.released.borrow().is_empty());
+        assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
+        assert!(cleanup.cleaned().is_empty());
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "the old standing claim IS investigated; the still-alive verdict is \
+             what keeps it (fail-closed), not a permanent exemption"
+        );
+        assert_eq!(summary.skipped, 1);
+    }
+
+    /// An ORDINARY (non-standing) claim still uses the ordinary 30-minute
+    /// threshold: at an idle age that a standing claim would sail through, the
+    /// ordinary claim is investigated and reaped. This pins that the extra time
+    /// is granted ONLY to board-confirmed standing goals.
+    #[test]
+    fn ordinary_claim_still_uses_30min_threshold() {
+        let key = "rysweet/Simard:ship-the-widget";
+        let ledger = FakeLedger::new(&[key]);
+        // 2363s: past the ordinary 1800s threshold, but FAR under the 14400s
+        // standing threshold — a standing claim at this age would be kept.
+        let age = 2363;
+        assert!(age > STALE_SECS && age < STANDING_STALE_SECS);
+        // NOT marked perpetual.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "an ordinary claim past 30 minutes is investigated and reaped"
+        );
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "an ordinary claim uses the ordinary threshold — no extra time"
+        );
+    }
+
+    /// A standing/perpetual `Completed` claim gets NO extra time: completion is a
+    /// positive terminal signal, so it keeps the ordinary 30-minute threshold and
+    /// — once past it — is reclaimed DIRECTLY, without investigation, standing or
+    /// not.
+    #[test]
+    fn standing_completed_claim_uses_30min_and_is_reaped_without_investigation() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // Past the ordinary 1800s threshold but under 14400s: proves completion
+        // does NOT inherit the standing extra time.
+        let age = 2363;
+        assert!(age > STALE_SECS && age < STANDING_STALE_SECS);
+        let probe =
+            MapProbe::new(&[(key, dead(DeadReason::Completed, Some(age)))]).with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a standing Completed claim past 30 minutes is reclaimed directly"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert!(
+            investigator.investigated().is_empty(),
+            "a Completed claim carries a positive terminal signal — reclaimed \
+             without investigation, standing or not"
+        );
+    }
+
+    /// The goal board is read EXACTLY ONCE per cleanup run, outside the per-claim
+    /// loop — even across several claims. Pins the once-per-run contract that
+    /// keeps the sweep from re-reading the board for every claim.
+    #[test]
+    fn goal_board_lookup_happens_once_for_several_claims() {
+        let a = "rysweet/Simard:goal-a";
+        let b = "rysweet/Simard:goal-b";
+        let c = "rysweet/Simard:goal-c";
+        let ledger = FakeLedger::new(&[a, b, c]);
+        let probe = MapProbe::new(&[
+            (a, dead(DeadReason::HeartbeatStale, Some(3600))),
+            (b, dead(DeadReason::HeartbeatStale, Some(100))),
+            (c, dead(DeadReason::NoWorktree, None)),
+        ])
+        .with_perpetual(&[a]);
+        let lookups = probe.perpetual_lookup_counter();
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let _ = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the goal board must be read exactly once per cleanup run, not \
+             per-claim"
+        );
+    }
+
+    /// Fail-closed for the extra time: when the goal board reports NO confirmed
+    /// standing goals (missing / empty / corrupt board ⇒ empty set), a claim that
+    /// would be standing gets NO extra time — it uses the ordinary 30-minute
+    /// threshold and is investigated/reaped. There is no silent success value
+    /// that hands out more time without proof.
+    #[test]
+    fn missing_or_corrupt_board_gives_no_extra_time() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // 1 hour idle: inside the standing window BUT past the ordinary
+        // threshold. With an EMPTY perpetual set (the missing/corrupt-board
+        // outcome) it must be treated as ordinary and reaped.
+        let age = 3600;
+        assert!(age > STALE_SECS && age <= STANDING_STALE_SECS);
+        // No `.with_perpetual(...)` ⇒ `perpetual_goal_ids` is empty, exactly what
+        // a missing/empty/corrupt board yields.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "with no confirmed standing goal, no extra time is granted — the \
+             claim uses the ordinary threshold and is reaped"
+        );
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "no board proof ⇒ ordinary threshold ⇒ investigated before reap"
+        );
+    }
+
+    /// Standing extra time is scoped to the idle-age (`HeartbeatStale`) path
+    /// ONLY: a standing/perpetual goal whose worktree is PHYSICALLY GONE
+    /// (`NoWorktree`) is provably dead and IS reclaimed immediately, because a
+    /// standing goal must not leak a claim whose worktree no longer exists.
+    #[test]
+    fn perpetual_goal_with_no_worktree_is_still_reclaimed() {
+        let key = "rysweet/Simard:standing-but-worktree-gone";
+        let ledger = FakeLedger::new(&[key]);
+        let probe =
+            MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]).with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a perpetual goal with a physically-absent worktree is provably \
+             dead and must still be reclaimed"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert!(
+            investigator.investigated().is_empty(),
+            "a NoWorktree claim has no evidence to preserve, so it is reclaimed \
+             directly without investigation — perpetual or not"
+        );
+    }
+
+    // ----- Production probe: perpetual_goal_ids reads the real board ----------
+
+    /// Build a standing/perpetual [`ActiveGoal`] (its description carries the
+    /// `[standing]` sentinel, so [`ActiveGoal::is_perpetual`] is `true`).
+    fn standing_active_goal(id: &str) -> crate::goal_curation::ActiveGoal {
+        crate::goal_curation::ActiveGoal {
+            id: id.to_string(),
+            description: format!("[standing] keep {id} healthy — perpetual goal"),
+            priority: 1,
+            status: crate::goal_curation::GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            last_progress_update_at: None,
+            parent_goal_id: None,
+            priority_explicit: false,
+            labels: Vec::new(),
+        }
+    }
+
+    /// The production probe collects EXACTLY the goal ids the board confirms are
+    /// standing/perpetual — an ordinary goal on the same board is excluded.
+    #[test]
+    fn production_probe_collects_confirmed_standing_goal_ids() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        crate::goal_board_store::mutate(state_root.path(), |state| {
+            state
+                .board
+                .active
+                .push(standing_active_goal("keep-ci-green"));
+            let mut ordinary = standing_active_goal("ship-one-widget");
+            ordinary.description = "ship one widget then done".to_string();
+            state.board.active.push(ordinary);
+        })
+        .expect("seed board");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let ids = probe.perpetual_goal_ids();
+
+        assert!(
+            ids.contains("keep-ci-green"),
+            "a board-confirmed standing goal id must be collected: {ids:?}"
+        );
+        assert!(
+            !ids.contains("ship-one-widget"),
+            "an ordinary goal must not be treated as standing: {ids:?}"
+        );
+        assert_eq!(ids.len(), 1);
+    }
+
+    /// A MISSING goal board yields an EMPTY set — no claim gets extra time
+    /// without proof (fail-closed for the extra time).
+    #[test]
+    fn production_probe_perpetual_ids_empty_when_board_missing() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        // No goal_board.json is ever written under this root.
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+
+        assert!(
+            probe.perpetual_goal_ids().is_empty(),
+            "a missing board must grant no standing extra time"
+        );
+    }
+
+    /// A CORRUPT goal board yields an EMPTY set — a garbage file must never be
+    /// read as a silent success that hands out extra time.
+    #[test]
+    fn production_probe_perpetual_ids_empty_when_board_corrupt() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let path = crate::goal_board_store::store_path(state_root.path());
+        std::fs::create_dir_all(path.parent().expect("store parent")).expect("create state dir");
+        std::fs::write(&path, b"{ this is not valid json ]").expect("write corrupt board");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+
+        assert!(
+            probe.perpetual_goal_ids().is_empty(),
+            "a corrupt board must grant no standing extra time"
+        );
+    }
+
     #[test]
     fn blocked_and_recoverable_are_not_reaped_but_surface_interventions() {
         let blocked = "rysweet/Simard:waiting-on-dep";

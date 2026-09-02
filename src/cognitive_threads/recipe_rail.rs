@@ -29,6 +29,8 @@ use std::process::Command;
 
 use crate::recipe_context_file::ContextFile;
 
+use crate::ooda_brain::{ThreadName, read_verified_thread_reasoning};
+
 use super::thread::ThreadOutcome;
 
 /// The master env gate that must be truthy for *any* cognitive thread to run.
@@ -79,14 +81,140 @@ impl InvokeResult {
     /// Map the verdict to a [`ThreadOutcome`]: `Ran` => a successful tick,
     /// `Failed` => a failed tick surfaced LOUDLY with its detail. No third state
     /// can quietly turn a failure into a wrote-nothing success.
+    ///
+    /// NOTE: reflective threads no longer route through this method — they use
+    /// [`run_reflective_thread`], which surfaces the recipe's natural-language
+    /// `reasoning_summary` from a typed record instead of a boolean success
+    /// string. This mapping is retained for the failure-verdict unit tests only.
     pub fn into_outcome(self, recipe_name: &str, duration: std::time::Duration) -> ThreadOutcome {
         match self {
-            InvokeResult::Ran => ThreadOutcome::ok(format!("{recipe_name}: ok"), duration),
+            InvokeResult::Ran => ThreadOutcome::ok(format!("{recipe_name}: ran"), duration),
             InvokeResult::Failed { detail } => {
                 ThreadOutcome::failed(format!("{recipe_name}: {detail}"), duration)
             }
         }
     }
+}
+
+/// The per-thread reasoning-record path: one file per thread under the state
+/// root, pre-truncated each invocation. Pinned by the reference doc
+/// (`docs/reference/simard-cognition-record-thread-reasoning-cli.md`).
+pub fn reasoning_record_path(state_root: &Path, thread: ThreadName) -> PathBuf {
+    state_root
+        .join("cognitive_threads")
+        .join("reasoning")
+        .join(format!("{}.json", thread.label()))
+}
+
+/// The one shared brick every reflective thread's `tick` calls: derive the
+/// per-thread record path, PRE-TRUNCATE any stale artifact (anti-replay),
+/// capture `invoke_start`, pass `-c record_path=<abs>` so the recipe's ACT step
+/// writes there, invoke the recipe, then READ the typed record FAIL-CLOSED and
+/// surface its natural-language `reasoning_summary` into `ThreadOutcome.summary`.
+///
+/// This is what killed the boolean success-string collapse: a recipe that ran
+/// but wrote no valid record is a FAILURE (never a silent success), and the
+/// summary is sourced from the typed record — NEVER scraped from stdout.
+///
+/// `extra_ctx_vars` are the thread's own inputs (`state_root`, fenced memory
+/// payloads, counts); the rail adds `record_path` itself.
+pub fn run_reflective_thread<I: RecipeInvoker + ?Sized>(
+    invoker: &I,
+    recipe_name: &str,
+    thread: ThreadName,
+    state_root: &Path,
+    extra_ctx_vars: Vec<(&str, String)>,
+    start: std::time::Instant,
+) -> ThreadOutcome {
+    // Anti-replay part 1: derive the per-thread path and delete any leftover
+    // record BEFORE spawning, so a prior run's reasoning can never be read as
+    // current. A missing file is fine.
+    let record_path = reasoning_record_path(state_root, thread);
+    let _ = std::fs::remove_file(&record_path);
+
+    // Capture invoke_start AFTER pre-truncate and BEFORE spawn: a record written
+    // this invocation must have `mtime >= invoke_start` (R7).
+    let invoke_start = std::time::SystemTime::now();
+
+    // Pass the ABSOLUTE record path so the recipe's ACT step
+    // (`simard cognition record-thread-reasoning --record-path {{record_path}}`)
+    // writes exactly there.
+    let mut ctx_vars: Vec<(&str, String)> = Vec::with_capacity(extra_ctx_vars.len() + 1);
+    ctx_vars.push(("record_path", record_path.display().to_string()));
+    ctx_vars.extend(extra_ctx_vars);
+
+    let result = invoker.invoke(recipe_name, &ctx_vars);
+    let duration = start.elapsed();
+
+    match result {
+        // The recipe exited 0 — now the ONLY source of truth is the typed record
+        // it wrote via its gated tool call. Read it fail-closed.
+        InvokeResult::Ran => {
+            match read_verified_thread_reasoning(&record_path, thread, invoke_start) {
+                Ok(rec) => ThreadOutcome::ok(rec.reasoning_summary, duration),
+                Err(e) => {
+                    // No `unwrap_or`, no stdout fallback: a recipe that "ran" but
+                    // wrote no valid record is a FAILURE, logged in the canonical
+                    // `FAILED — R{n} <reason>` format so an operator can tell which
+                    // fail-closed check tripped.
+                    let line = format!(
+                        "cognitive-thread: {}: FAILED — R{} {}",
+                        thread.label(),
+                        e.code,
+                        e.detail
+                    );
+                    tracing::warn!(
+                        target: "simard::cognitive_threads",
+                        thread = thread.label(),
+                        recipe = recipe_name,
+                        r_code = e.code,
+                        "{line}"
+                    );
+                    ThreadOutcome::failed(line, duration)
+                }
+            }
+        }
+        // A non-zero recipe run is a LOUD failure, unchanged.
+        InvokeResult::Failed { detail } => ThreadOutcome::failed(
+            format!(
+                "cognitive-thread: {}: FAILED — recipe run failed: {}",
+                thread.label(),
+                bound_diag(&detail)
+            ),
+            duration,
+        ),
+    }
+}
+
+/// Production-only narration for the four recipe-free (pure-Rust) threads —
+/// interoception, maintenance, engineer_log_analysis, creative_ideas. After a
+/// thread's deterministic sensing/gates have already performed EVERY durable
+/// effect, this surfaces a natural-language `reasoning_summary` from a typed
+/// record by invoking the thread's narration recipe through the identical
+/// fail-closed [`run_reflective_thread`] path the reflective threads use. The
+/// `observations` string is fenced before it rides as the `observations` ctx var.
+///
+/// Returns `Some(outcome)` ONLY when narration produced a successful tick (the
+/// caller returns it in place of its deterministic summary); `None` when
+/// narration was skipped-by-failure, so the caller falls back to its own
+/// deterministic outcome. Narration can therefore never DOWNGRADE an
+/// already-successful tick.
+pub fn narrate_pure_thread(
+    repo_root: &Path,
+    state_root: &Path,
+    recipe_name: &str,
+    thread: ThreadName,
+    observations: &str,
+    start: std::time::Instant,
+) -> Option<ThreadOutcome> {
+    let invoker = RecipeRunnerInvoker::new(repo_root.to_path_buf(), state_root.to_path_buf());
+    let ctx_vars: Vec<(&str, String)> = vec![
+        ("state_root", state_root.display().to_string()),
+        ("observations", fence_untrusted(observations)),
+    ];
+    let narrated =
+        run_reflective_thread(&invoker, recipe_name, thread, state_root, ctx_vars, start);
+    narrated.success.then_some(narrated)
 }
 
 /// The memory IPC socket a reflective recipe inherits so a bare `simard memory
@@ -290,8 +418,13 @@ fn looks_high_entropy(run: &str) -> bool {
             '0'..='9' => has_digit = true,
             _ => {}
         }
+        // Both classes seen — the verdict can no longer change, so stop
+        // scanning the rest of a potentially long blob.
+        if has_alpha && has_digit {
+            return true;
+        }
     }
-    has_alpha && has_digit
+    false
 }
 
 /// Validate + normalize an LLM-derived concept key (SR-7). Returns `Some(key)`
@@ -313,19 +446,29 @@ pub fn validate_concept_key(_raw: &str) -> Option<String> {
     Some(key.to_string())
 }
 
-/// The double env gate as a **pure** predicate (SR-12 / S8): a thread is enabled
-/// iff BOTH the master gate and its per-thread gate are truthy. Env gates are
+/// The double env gate as a **pure** predicate (SR-12 / S8): default-ON opt-out.
+/// A thread is enabled UNLESS its master gate or its per-thread gate is set to an
+/// explicit falsy token — mirroring the existing `SIMARD_CREATIVE_IDEAS_ENABLED`
+/// default-ON pattern (issue #4845, requirement A4 — THE CRUX). Env gates are
 /// rollout controls, not an authorization boundary — see
 /// `docs/concepts/salience-and-decide.md`.
 ///
-/// Truthy values are `1`, `true`, `TRUE`, `yes`, `on` (leading/trailing
-/// whitespace ignored). Any other value — including `None` — is false.
-pub fn env_gate_open(_master: Option<&str>, _thread: Option<&str>) -> bool {
-    fn truthy(v: Option<&str>) -> bool {
-        v.map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false)
+/// Falsy tokens (case-insensitive, leading/trailing whitespace ignored) are
+/// `0`, `false`, `no`, `off`. `None` (unset), empty, and any other value are NOT
+/// an opt-out and leave the gate OPEN. The predicate fails **closed** on an
+/// explicit falsy value on either gate (security T-S1): an operator opt-out is
+/// always honoured.
+pub fn env_gate_open(master: Option<&str>, thread: Option<&str>) -> bool {
+    fn falsy(v: Option<&str>) -> bool {
+        v.map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(false)
     }
-    truthy(_master) && truthy(_thread)
+    !falsy(master) && !falsy(thread)
 }
 
 /// Read the double env gate for a thread from the process environment using
@@ -653,5 +796,126 @@ mod context_transport_tests {
             !std::path::Path::new(abs).exists(),
             "the per-invocation payload file is removed when the guard drops"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4845 — TDD contract (Step 7) for the DEFAULT-ON opt-out env gate flip
+// (design component C1 / requirement A4 — THE CRUX, security SR-12 / T-S1).
+//
+// Authored BEFORE the flip, so this module is RED until `env_gate_open` changes
+// from the double-AND default-OFF predicate (`truthy(master) && truthy(thread)`)
+// to a default-ON opt-out predicate: a thread is enabled UNLESS its master or
+// per-thread gate is set to an explicit falsy token. This mirrors the existing
+// `SIMARD_CREATIVE_IDEAS_ENABLED` default-ON pattern
+// (`creative_ideas::is_falsey` — {0,false,no,off}). The predicate is PURE, so
+// these tests pass `Option` args directly and never touch the process env.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod env_gate_default_on_tests {
+    use super::env_gate_open;
+
+    // --- The default: NOTHING set ⇒ ENABLED (the whole point of issue #4845). ---
+    #[test]
+    fn unset_master_and_thread_is_enabled_by_default() {
+        assert!(
+            env_gate_open(None, None),
+            "default-ON opt-out: with neither gate set, a thread must be ENABLED \
+             (this is the flip #4845 requires; RED under the old default-OFF gate)"
+        );
+    }
+
+    // --- Explicit falsy on EITHER gate opts out (fail-closed, security T-S1). ---
+    #[test]
+    fn explicit_falsy_master_opts_out_the_whole_roster() {
+        for falsy in ["0", "false", "FALSE", "no", "off", " 0 ", "Off", "No"] {
+            assert!(
+                !env_gate_open(Some(falsy), None),
+                "master gate set to an explicit falsy value ({falsy:?}) must DISABLE \
+                 (operator opt-out honoured; fail-closed)"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_falsy_thread_opts_out_just_that_thread() {
+        for falsy in ["0", "false", "FALSE", "no", "off", " off ", "NO"] {
+            assert!(
+                !env_gate_open(None, Some(falsy)),
+                "per-thread gate set to an explicit falsy value ({falsy:?}) must DISABLE \
+                 that thread even with the master gate at its default-ON state"
+            );
+        }
+    }
+
+    // --- Truthy values remain enabled (back-compat with the old opt-in). ---
+    #[test]
+    fn truthy_values_stay_enabled() {
+        for truthy in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(
+                env_gate_open(Some(truthy), Some(truthy)),
+                "an explicitly truthy master+thread ({truthy:?}) stays ENABLED"
+            );
+        }
+    }
+
+    // --- Unknown / empty / garbage is NOT an opt-out ⇒ stays enabled. ---
+    #[test]
+    fn unknown_or_empty_value_defaults_to_enabled() {
+        for garbage in ["", "  ", "maybe", "2", "enabled", "disabled", "0x0", "null"] {
+            assert!(
+                env_gate_open(Some(garbage), None),
+                "a non-falsy master value ({garbage:?}) must NOT opt out — default-ON \
+                 only honours the explicit falsy token set, everything else is enabled"
+            );
+            assert!(
+                env_gate_open(None, Some(garbage)),
+                "a non-falsy thread value ({garbage:?}) must NOT opt out"
+            );
+        }
+    }
+
+    // --- Master falsy dominates a truthy per-thread (master kills the roster). ---
+    #[test]
+    fn master_falsy_overrides_truthy_thread() {
+        assert!(
+            !env_gate_open(Some("0"), Some("1")),
+            "an explicit master opt-out disables the thread even if its own gate is truthy"
+        );
+    }
+
+    // --- Truthy master + falsy thread ⇒ that one thread stays off. ---
+    #[test]
+    fn thread_falsy_overrides_truthy_master() {
+        assert!(
+            !env_gate_open(Some("1"), Some("0")),
+            "a per-thread opt-out disables that thread even under an explicitly enabled master"
+        );
+    }
+
+    // --- Full truth table, exhaustively pinned (master × thread). ---
+    #[test]
+    fn full_truth_table() {
+        // (master, thread, expected_enabled)
+        let cases: &[(Option<&str>, Option<&str>, bool)] = &[
+            (None, None, true),                // default-ON
+            (Some(""), None, true),            // empty ≠ falsy
+            (Some("garbage"), None, true),     // garbage ≠ falsy
+            (Some("1"), Some("1"), true),      // both truthy
+            (Some("true"), None, true),        // truthy master, unset thread
+            (None, Some("on"), true),          // unset master, truthy thread
+            (Some("0"), None, false),          // master opt-out
+            (None, Some("0"), false),          // thread opt-out
+            (Some("off"), Some("1"), false),   // master opt-out wins
+            (Some("1"), Some("false"), false), // thread opt-out wins
+            (Some("no"), Some("no"), false),   // both opted out
+        ];
+        for &(m, t, want) in cases {
+            assert_eq!(
+                env_gate_open(m, t),
+                want,
+                "env_gate_open(master={m:?}, thread={t:?}) should be {want}"
+            );
+        }
     }
 }

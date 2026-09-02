@@ -54,11 +54,13 @@ pub mod conflict;
 pub mod deploy;
 pub mod deploy_trigger;
 pub mod diagnosis;
+pub mod doc_pr_reconcile;
 pub mod ecosystem_observe;
 pub mod failure_sink;
 pub mod guardrails;
 pub mod health_review;
 pub mod intervention;
+pub mod issue_cooldown;
 pub mod launch;
 pub mod meeting_ops;
 pub mod merge_ops;
@@ -66,14 +68,18 @@ pub mod merge_queue_observe;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
+pub mod rework_loop;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
+pub mod signal_liaison;
 pub mod thread_oversight;
 pub mod tuning;
 pub mod whisper_ops;
 pub mod wiring;
 
+#[cfg(test)]
+mod tests_config_liaison_rework;
 #[cfg(test)]
 mod tests_deploy_drift;
 #[cfg(test)]
@@ -85,6 +91,8 @@ mod tests_gap_scan;
 #[cfg(test)]
 mod tests_goal_health;
 #[cfg(test)]
+mod tests_intervention_rework;
+#[cfg(test)]
 mod tests_m1;
 #[cfg(test)]
 mod tests_m2;
@@ -93,7 +101,19 @@ mod tests_memory_recall;
 #[cfg(test)]
 mod tests_merge_queue_reasoning;
 #[cfg(test)]
+mod tests_rework_loop;
+#[cfg(test)]
 mod tests_root_cause;
+// process_health (TDD): reblock-issue signature stabilization — two re-block
+// observations of the same cause that differ only by a volatile goal id must
+// dedup to ONE stewardship signature (`fold_volatile_goal_ids`).
+#[cfg(test)]
+mod tests_reblock_signature;
+// goal_hygiene (TDD): the auto-generated documentation-PR reconciliation pass —
+// composite fail-closed identity gate, single-open canonical selection, and the
+// by-number close executor.
+#[cfg(test)]
+mod tests_doc_pr_reconcile;
 #[cfg(test)]
 mod tests_self_healing;
 #[cfg(test)]
@@ -102,7 +122,13 @@ mod tests_selfmerge_fix;
 mod tests_whisper;
 // Issue #4786: TDD contract for the deterministic thread-oversight rail.
 #[cfg(test)]
+mod tests_signal_liaison;
+#[cfg(test)]
 mod tests_thread_oversight;
+// Issue #4930: contract tests for the durable issue-cooldown ledger that stops
+// the OODA-core auto-issue storm.
+#[cfg(test)]
+mod tests_issue_cooldown;
 
 pub use capabilities::{
     Auditor, BlockedGoal, Deployer, GoalCurator, HealthReviewStatus, IssueFiler, IssuePriority,
@@ -138,9 +164,9 @@ pub use whisper_ops::{
 };
 pub use wiring::{
     BoardGoalCurator, MemoryRecallOps, OverseerCadence, OverseerTickReport, RefuseDeployer,
-    assemble_capabilities, build_overseer, overseer_identity, overseer_tick,
-    overseer_tick_detailed, overseer_tick_interval_secs, run_overseer_tick_isolated,
-    run_overseer_tick_isolated_detailed,
+    TickWatchdog, assemble_capabilities, build_overseer, guard_generation_matches,
+    overseer_identity, overseer_tick, overseer_tick_detailed, overseer_tick_interval_secs,
+    run_overseer_tick_isolated, run_overseer_tick_isolated_detailed,
 };
 
 pub use activity::ProblemEntry;
@@ -331,6 +357,18 @@ pub struct Overseer {
     /// status field + a single dual-channel NotifyOperator), never re-sent every
     /// tick while it stays disabled.
     merge_reasoning_disabled_notified: bool,
+    /// The `gh` client for the additive **auto-doc PR reconciliation** pass
+    /// (goal_hygiene): each due tick it lists open PRs across the governed
+    /// [`merge_queue_roster`](Self::merge_queue_roster) and closes stale /
+    /// superseded auto-generated `"Update documentation with …"` drafts so at
+    /// most one stays open ([`doc_pr_reconcile::run_doc_pr_reconcile`]). `None`
+    /// by default (bare constructor / tests) so the pass is skipped and the
+    /// Overseer performs NO `gh` I/O — existing `run_cycle` tests are unaffected;
+    /// `build_overseer` wires the production [`crate::stewardship::RealPrGhClient`].
+    doc_pr_reconcile_gh: Option<Box<dyn crate::stewardship::merge_authority::PrGhClient>>,
+    /// Monotonic tick counter driving the auto-doc PR reconciliation every-N
+    /// cadence (reuses the shared gap-scan cadence knob).
+    doc_pr_reconcile_tick: u64,
     /// The agentic **health-review** rail ([standing]): the thin
     /// [`health_review::HealthReviewer`] seam that invokes the
     /// `overseer-health-review` recipe on the Overseer cadence — an AGENT reads
@@ -372,6 +410,34 @@ pub struct Overseer {
     /// constructor / tests, so thread oversight is skipped. Drives R5 oversight
     /// without a hand-maintained duplicate thread list.
     thread_registry: Vec<ThreadHealth>,
+    /// The operator-liaison external-I/O seam (issue #4911, D1). `None` (inert)
+    /// until `build_overseer` wires the production port; when present AND
+    /// `SIMARD_OVERSEER_SIGNAL_LIAISON` is enabled, `run_cycle` drains new
+    /// operator-group messages, runs the liaison recipe, reads the typed decision
+    /// fail-closed, posts any reply, and gates any directed intervention. All
+    /// deterministic logic lives in the tested `signal_liaison` pure functions.
+    liaison_port: Option<Box<dyn signal_liaison::LiaisonPort>>,
+    /// The PR-rework external-I/O seam (issue #4911, D2). `None` (inert) until
+    /// `build_overseer` wires the production port; when present AND
+    /// `SIMARD_OVERSEER_REWORK` is enabled, `run_cycle` evaluates each held
+    /// candidate PR via the tested `rework_loop::poll_rework` fail-closed rail and
+    /// gates the resulting rework/escalation.
+    rework_port: Option<Box<dyn rework_loop::ReworkPort>>,
+    /// Optional cooperative-cancellation predicate (issue #4981). `None` (the
+    /// default) means "never cancelled" — the Overseer behaves exactly as
+    /// before. When wired, `overseer_tick_detailed` consults it AFTER `run_cycle`,
+    /// BEFORE every planned `act`, and once more AFTER the action loop before the
+    /// observation write-back: the first time it returns `true` the tick stops
+    /// taking further actions, writes back no observation, and marks its report
+    /// `superseded`. The daemon
+    /// injects a predicate that returns `true` once the shared tick-generation
+    /// token has moved past the generation THIS tick captured — i.e. the liveness
+    /// watchdog reclaimed the slot and a newer catch-up tick has superseded this
+    /// one. This is COOPERATIVE only: it gates the decision to START the next
+    /// action; a syscall or `act` already in flight is allowed to complete (it
+    /// cannot be killed). Bounding an individual external call is separate
+    /// hardening (per-call timeouts), not this predicate's job.
+    cancel_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -528,6 +594,8 @@ impl Overseer {
             merge_queue_every_n: 1,
             merge_queue_tick: 0,
             merge_reasoning_disabled_notified: false,
+            doc_pr_reconcile_gh: None,
+            doc_pr_reconcile_tick: 0,
             health_reviewer: None,
             health_review_enabled: false,
             health_review_every_n: 1,
@@ -535,6 +603,9 @@ impl Overseer {
             deploy_drift_observer: None,
             state_root: None,
             thread_registry: Vec::new(),
+            liaison_port: None,
+            rework_port: None,
+            cancel_check: None,
         }
     }
 
@@ -604,6 +675,51 @@ impl Overseer {
         self
     }
 
+    /// Wire the operator-liaison external-I/O seam (issue #4911, D1). Absent by
+    /// default (the pass is inert); `build_overseer` wires the production Signal
+    /// receive/send + recipe-runner port. Gated at run time by
+    /// `SIMARD_OVERSEER_SIGNAL_LIAISON` (default off).
+    pub fn with_liaison_port(mut self, port: Box<dyn signal_liaison::LiaisonPort>) -> Self {
+        self.liaison_port = Some(port);
+        self
+    }
+
+    /// Wire the PR-rework external-I/O seam (issue #4911, D2). Absent by default
+    /// (the pass is inert); `build_overseer` wires the production candidate-lister
+    /// port. Gated at run time by `SIMARD_OVERSEER_REWORK` (default off).
+    pub fn with_rework_port(mut self, port: Box<dyn rework_loop::ReworkPort>) -> Self {
+        self.rework_port = Some(port);
+        self
+    }
+
+    /// Wire the cooperative-cancellation predicate (issue #4981). `None` (the
+    /// default) preserves the prior behavior exactly (no cancellation — every
+    /// planned, admitted action runs). When wired, `overseer_tick_detailed`
+    /// checks it after `run_cycle`, before each planned `act`, and once more
+    /// after the action loop before the observation write-back; the first
+    /// `true` stops all further actions, skips the write-back, and marks the
+    /// tick `superseded`. The
+    /// daemon injects `move || generation.load() != my_generation`, reusing the
+    /// SAME `Arc<AtomicU64>` tick-generation token and captured worker generation
+    /// the watchdog/`ClearOnDrop` fencing already uses — so a watchdog reclaim
+    /// (which bumps the generation) both frees the overlap slot AND cooperatively
+    /// tells the hung tick to stop acting. Cooperative only: an `act`/syscall
+    /// already in flight completes; it is never killed.
+    pub fn with_cancel_check(mut self, check: Box<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.cancel_check = Some(check);
+        self
+    }
+
+    /// Whether this tick has been cooperatively superseded (issue #4981):
+    /// `true` only when a cancellation predicate is wired AND currently reports
+    /// cancellation. `false` (never superseded) when no predicate is wired —
+    /// the default, preserving prior behavior. Consulted by
+    /// `overseer_tick_detailed` after `run_cycle`, before every planned act, and
+    /// again after the action loop before the observation write-back.
+    pub fn is_superseded(&self) -> bool {
+        self.cancel_check.as_ref().is_some_and(|check| check())
+    }
+
     /// Wire the live agentic observe/orient merge-queue reasoner rail (#4097):
     /// the governed `roster` the reasoning agent surveys, the
     /// [`merge_queue_observe::MergeQueueReasoner`] seam that invokes the
@@ -623,6 +739,68 @@ impl Overseer {
         self.merge_queue_reasoner = Some(reasoner);
         self.merge_queue_every_n = every_n;
         self
+    }
+
+    /// Wire the `gh` client for the additive auto-doc PR reconciliation pass
+    /// (goal_hygiene). Absent by default (the pass is skipped and NO `gh` I/O is
+    /// performed); `build_overseer` wires the production
+    /// [`crate::stewardship::RealPrGhClient`]. The reconciliation scope is the
+    /// governed [`merge_queue_roster`](Self::merge_queue_roster). Gated at run
+    /// time by [`Self::with_gap_scan_enabled`] (the shared scan opt-out) and an
+    /// every-N cadence.
+    pub fn with_doc_pr_reconcile_client(
+        mut self,
+        gh: Box<dyn crate::stewardship::merge_authority::PrGhClient>,
+    ) -> Self {
+        self.doc_pr_reconcile_gh = Some(gh);
+        self
+    }
+
+    /// Reconcile stale/superseded auto-generated documentation PRs across the
+    /// governed roster so at most one stays open (goal_hygiene). Additive and
+    /// fully **fail-closed**: skipped entirely unless a `gh` client is wired
+    /// AND the shared gap-scan opt-out is enabled AND the every-N cadence is due;
+    /// a per-repo listing/close error is logged and contained — it never aborts
+    /// the cycle or changes any merge/verify decision. Mirrors the gating of the
+    /// merge-queue observe pass.
+    fn reconcile_auto_doc_prs(&mut self) {
+        let tick = self.doc_pr_reconcile_tick;
+        self.doc_pr_reconcile_tick = self.doc_pr_reconcile_tick.wrapping_add(1);
+
+        let Some(gh) = self.doc_pr_reconcile_gh.as_ref() else {
+            return;
+        };
+        if !self.gap_scan_enabled || self.merge_queue_roster.is_empty() {
+            return;
+        }
+        if !ecosystem_observe::should_observe(true, self.merge_queue_every_n, tick) {
+            return;
+        }
+
+        for repo in &self.merge_queue_roster {
+            match doc_pr_reconcile::run_doc_pr_reconcile(repo, gh.as_ref()) {
+                Ok(report) => {
+                    tracing::info!(
+                        target: "simard::overseer",
+                        repo = %repo,
+                        canonical = report.canonical.map(|n| n as i64).unwrap_or(-1),
+                        closed = report.closed.len(),
+                        skipped = report.skipped,
+                        errors = report.errors.len(),
+                        "auto-doc PR reconciliation pass complete for repo",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "simard::overseer",
+                        repo = %repo,
+                        error = %e,
+                        "auto-doc PR reconciliation skipped for repo (list failed) — \
+                         fail-closed, no PRs closed this cycle",
+                    );
+                }
+            }
+        }
     }
 
     /// Enable/disable the whisperer (config opt-out). Off by default; the daemon
@@ -883,6 +1061,15 @@ impl Overseer {
         // empty scope / degraded recipe leaves the observation unchanged.
         self.observe_merge_queue(&mut observed, &in_flight);
 
+        // Additive auto-doc PR reconciliation (goal_hygiene): enforce the
+        // single-open invariant for auto-generated `"Update documentation with …"`
+        // PRs by closing stale / superseded drafts. Fully fail-closed and inert
+        // unless a `gh` client is wired (production only) — see
+        // [`reconcile_auto_doc_prs`]. Placed alongside the merge-queue observe
+        // pass (the PR/merge reconciliation surface); it changes no merge/verify
+        // decision.
+        self.reconcile_auto_doc_prs();
+
         // Drain diagnosed step failures (#2640, PART 2) from the process-global
         // failure sink into this Observe pass, so a caught decision-cycle /
         // engineer / terminal-shell failure surfaces as a corrective
@@ -1018,6 +1205,18 @@ impl Overseer {
         // self-improvement (issue/escalation/fix) instead of a silent reclaim.
         self.dispatch_reaper_interventions(&observed, &mut launches, &mut plan);
 
+        // Operator-liaison receive pass (issue #4911, D1): drain new operator
+        // -group messages, run the liaison recipe, read its typed decision fail
+        // -closed, post any reply, and gate any directed intervention. Inert
+        // until the port is wired AND the flag is enabled (both default off).
+        self.observe_operator_liaison(&observed, &mut launches, &mut plan);
+
+        // PR-rework pass (issue #4911, D2): evaluate each held candidate PR via
+        // the fail-closed `poll_rework` rail and gate any rework/escalation.
+        // Inert until the port is wired AND the flag is enabled (both default
+        // off).
+        self.observe_rework_candidates(&observed, &mut launches, &mut plan);
+
         Ok(CycleReport {
             observed,
             signals,
@@ -1102,6 +1301,223 @@ impl Overseer {
         plan.push(planned);
     }
 
+    /// The operator-liaison receive pass (issue #4911, D1). A THIN rail: it makes
+    /// no judgment. For each new operator-group message the wired port surfaces,
+    /// it applies the tested pure acceptance filter (operator ∧ group ∧ not-echo ∧
+    /// above the durable high-water-mark), hands the body to the `operator
+    /// -liaison` recipe via a ContextFile (never argv), reads the recipe's typed
+    /// decision FAIL-CLOSED, posts any plain-English reply back to the group, and
+    /// routes any directed intervention through the SAME gate every other action
+    /// uses. The high-water-mark advances once per handled message (dedup).
+    ///
+    /// Fail-closed and inert-by-default: an unwired port, the flag off (default),
+    /// an unconfigured operator number / group id, or a missing state root all
+    /// leave the plan unchanged. A per-message I/O or recipe error is contained
+    /// (logged, message skipped) so it can never abort the tick.
+    fn observe_operator_liaison(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if !config::signal_liaison_enabled() || self.liaison_port.is_none() {
+            return;
+        }
+        // Both identities must be configured; the port's `authorized` projection
+        // enforces the operator number, but an unconfigured deploy never acts.
+        let Some(group_id) = config::signal_group_id() else {
+            return;
+        };
+        if config::signal_operator_number().is_none() {
+            return;
+        }
+        let Some(state_root) = self.state_root.clone() else {
+            return;
+        };
+
+        // Do ALL external I/O behind the immutable port borrow, collecting the
+        // directed interventions; then release the borrow before gating (which
+        // needs `&mut self`), exactly as `observe_ecosystem` does.
+        let interventions: Vec<Intervention> = {
+            let port = self
+                .liaison_port
+                .as_ref()
+                .expect("liaison_port presence checked above");
+            let mut out = Vec::new();
+            for msg in port.receive() {
+                let above = signal_liaison::is_above_high_water_mark(
+                    &state_root,
+                    &group_id,
+                    msg.message_id,
+                );
+                if !signal_liaison::liaison_should_accept(
+                    msg.authorized,
+                    msg.group_id.as_deref(),
+                    &group_id,
+                    msg.is_echo,
+                    above,
+                ) {
+                    continue;
+                }
+                let message_key = msg.message_id.to_string();
+                // A fresh run token isolates this run's decision from any prior
+                // one; delete any stale record first so a failed recipe run can
+                // never let an old decision be read back.
+                let run_token = format!(
+                    "liaison-{}-{}-{}",
+                    std::process::id(),
+                    msg.message_id,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                );
+                let _ = crate::stewardship::liaison_decision_store::delete_record(
+                    &state_root,
+                    &group_id,
+                    &message_key,
+                );
+                let ctx = match crate::recipe_context_file::ContextFile::write(
+                    "operator-liaison",
+                    "operator_message",
+                    &msg.text,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "overseer::signal_liaison",
+                            error = %e,
+                            "could not stage operator-message context; skipping this message"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) =
+                    port.run_liaison_recipe(&group_id, msg.message_id, &run_token, ctx.path())
+                {
+                    tracing::warn!(
+                        target: "overseer::signal_liaison",
+                        error = %e,
+                        "operator-liaison recipe run failed; leaving message for a later tick"
+                    );
+                    // Do NOT advance the high-water-mark: retry on a later tick.
+                    continue;
+                }
+                match crate::stewardship::liaison_decision_store::read_verified(
+                    &state_root,
+                    &group_id,
+                    &message_key,
+                    &run_token,
+                ) {
+                    crate::stewardship::liaison_decision_store::ReadOutcome::Found(rec) => {
+                        let actions = signal_liaison::liaison_actions_from_decision(&rec);
+                        if let Some(reply) = actions.reply
+                            && let Err(e) = port.send_group_reply(&group_id, &reply)
+                        {
+                            tracing::warn!(
+                                target: "overseer::signal_liaison",
+                                error = %e,
+                                "could not post the operator-liaison reply"
+                            );
+                        }
+                        if let Some(iv) = actions.intervention {
+                            out.push(iv);
+                        }
+                    }
+                    other => {
+                        tracing::warn!(
+                            target: "overseer::signal_liaison",
+                            outcome = ?other,
+                            "no valid liaison decision recorded for this message (fail-closed)"
+                        );
+                    }
+                }
+                // Handled once: advance the durable high-water-mark so this
+                // message is never reprocessed, whatever the decision was.
+                if let Err(e) =
+                    signal_liaison::record_high_water_mark(&state_root, &group_id, msg.message_id)
+                {
+                    tracing::warn!(
+                        target: "overseer::signal_liaison",
+                        error = %e,
+                        "could not advance the liaison high-water-mark"
+                    );
+                }
+            }
+            out
+        };
+
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
+
+    /// The PR-rework pass (issue #4911, D2). A THIN rail: it makes no fixability
+    /// judgment. For each held candidate PR the wired port surfaces, it reads the
+    /// judge's typed verdict FAIL-CLOSED via [`rework_loop::poll_rework`] and,
+    /// only when that rail admits a rework (reworkable hold, cap not hit, not a
+    /// duplicate, not the Overseer's own PR), routes the resulting
+    /// [`Intervention::ReworkPr`] — or, at the cap, the
+    /// [`Intervention::Escalate`] — through the SAME gate every other action
+    /// uses.
+    ///
+    /// Fail-closed and inert-by-default: an unwired port, the flag off (default),
+    /// or a missing state root all leave the plan unchanged. A `Skip` outcome is
+    /// a no-op.
+    fn observe_rework_candidates(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if !config::rework_enabled() || self.rework_port.is_none() {
+            return;
+        }
+        let Some(state_root) = self.state_root.clone() else {
+            return;
+        };
+        let max_attempts = config::rework_max_attempts();
+        let overseer_login = config::overseer_author_login();
+
+        let interventions: Vec<Intervention> = {
+            let port = self
+                .rework_port
+                .as_ref()
+                .expect("rework_port presence checked above");
+            let mut out = Vec::new();
+            for cand in port.candidates() {
+                match rework_loop::poll_rework(
+                    &state_root,
+                    &cand.repo,
+                    cand.pr,
+                    &cand.pr_author,
+                    &cand.run_token,
+                    max_attempts,
+                    Some(overseer_login.as_str()),
+                ) {
+                    rework_loop::ReworkOutcome::Rework(iv)
+                    | rework_loop::ReworkOutcome::Escalate(iv) => out.push(iv),
+                    rework_loop::ReworkOutcome::Skip(reason) => {
+                        tracing::debug!(
+                            target: "overseer::rework_loop",
+                            repo = %cand.repo,
+                            pr = cand.pr,
+                            reason = %reason,
+                            "rework candidate skipped (fail-closed rail)"
+                        );
+                    }
+                }
+            }
+            out
+        };
+
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
+
     /// One live agentic health-review pass ([standing]), appended to the cycle
     /// plan when the rail is wired and due on the cadence.
     ///
@@ -1117,23 +1533,40 @@ impl Overseer {
     /// [`Intervention`] through the SAME gate (budget / launch-cap / sequencer /
     /// in-flight-dedup / recursion guard) every other action uses.
     ///
-    /// Fail-closed: an unwired reviewer, a disabled rail, an off cadence, a
-    /// `HEALTHY` verdict, or a degraded/failed recipe run all leave the plan
-    /// unchanged — never a fabricated launch or escalation.
+    /// Fail-closed: an unwired reviewer, an off-cadence tick, a `HEALTHY`
+    /// verdict, or a degraded/failed recipe run all leave the plan unchanged —
+    /// never a fabricated launch or escalation.
     ///
     /// The pass's verdict is also SURFACED on `observed.health_review_status`
     /// (never discarded): a pass that ran sets `Reviewed { summary, decisions }`
     /// (so a HEALTHY pass is an observable `Reviewed { decisions: 0 }`, not a
-    /// silent no-op), a degraded/faulted pass sets `Degraded`, and an
-    /// unwired/disabled/off-cadence tick leaves the additive `NotRun` default —
-    /// the same "no silent OFF" discipline `merge_reasoning_status` applies.
+    /// silent no-op), a degraded/faulted pass sets `Degraded`, an operator
+    /// OPT-OUT (the dedicated knob or the shared gap-scan throttle) sets
+    /// `Disabled { reason }` naming the knob — never a silent hard-OFF (#4097),
+    /// exactly as `observe_merge_queue` surfaces the SAME opt-out — and only an
+    /// unwired/off-cadence tick leaves the additive `NotRun` default. The same
+    /// "no silent OFF" discipline `merge_reasoning_status` applies.
     fn health_review(
         &mut self,
         observed: &mut ObservedState,
         launches: &mut usize,
         plan: &mut Vec<PlannedIntervention>,
     ) {
-        if self.health_reviewer.is_none() || !self.health_review_enabled {
+        // Unwired: the build could not resolve the recipe/runner. Nothing ran and
+        // there is no operator intent to report — leave the additive `NotRun`.
+        if self.health_reviewer.is_none() {
+            return;
+        }
+        // Dedicated opt-out (SIMARD_OVERSEER_HEALTH_REVIEW): make it VISIBLE, never
+        // a silent OFF (#4097). Checked before the master throttle so an operator
+        // who disabled THIS pass specifically sees that named as the reason.
+        if !self.health_review_enabled {
+            observed.health_review_status = HealthReviewStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables the agentic health-review pass",
+                    config::SIMARD_OVERSEER_HEALTH_REVIEW_ENV
+                ),
+            };
             return;
         }
         // Cadence: reuse the shared gap-scan enable throttle + the dedicated
@@ -1141,11 +1574,24 @@ impl Overseer {
         // the tick FIRST so a disabled/held pass still keeps the counter monotonic.
         let tick = self.health_review_tick;
         self.health_review_tick = self.health_review_tick.wrapping_add(1);
-        if !ecosystem_observe::should_observe(
-            self.gap_scan_enabled,
-            self.health_review_every_n,
-            tick,
-        ) {
+        // Shared resource opt-out (SIMARD_OVERSEER_GAP_SCAN): the throttle for ALL
+        // agentic overseer scans. Honor it, but surface WHY the self-heal reflex
+        // stopped rather than leaving a silent `NotRun` — exactly as
+        // `observe_merge_queue` does for the SAME opt-out (#4097). (No one-time
+        // NotifyOperator: the operator set this opt-out themselves, so the status
+        // breadcrumb is enough.)
+        if !self.gap_scan_enabled {
+            observed.health_review_status = HealthReviewStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                    config::SIMARD_OVERSEER_GAP_SCAN_ENV
+                ),
+            };
+            return;
+        }
+        // Cadence only: a non-due tick is NOT disabled — skip silently and leave
+        // the last due tick's status untouched (enablement is already decided).
+        if !ecosystem_observe::should_observe(true, self.health_review_every_n, tick) {
             return;
         }
         // Borrow the reviewer only for the call; the returned outcome is owned, so
@@ -1450,16 +1896,32 @@ impl Overseer {
         if self.inflight_investigations.is_empty() {
             return;
         }
-        let done: Vec<String> = self
+        // Collect the signatures whose investigation recipe reached a TERMINAL
+        // state this tick, together with that status for observability. A
+        // `Running` poll — or a transient poll `Err` we cannot interpret —
+        // leaves the handle in place (fail-closed: never drop an investigation
+        // we cannot confirm has finished).
+        let done: Vec<(String, WorkstreamStatus)> = self
             .inflight_investigations
             .iter()
             .filter_map(|(key, handle)| match self.caps.recipes.poll(handle) {
                 Ok(WorkstreamStatus::Running) | Err(_) => None,
-                Ok(_) => Some(key.clone()),
+                Ok(status) => Some((key.clone(), status)),
             })
             .collect();
-        for key in done {
+        for (key, status) in done {
             self.inflight_investigations.remove(&key);
+            // Reconciliation releases the stale-investigation dedup slot but
+            // does not persist the recipe verdict consumed by the claim reaper.
+            if key.starts_with(crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX) {
+                tracing::info!(
+                    target: "overseer::investigation",
+                    investigation_key = %key,
+                    terminal_status = ?status,
+                    "[simard] stale-engineer investigation recipe concluded; in-flight \
+                     slot released (verdict write-back tracked separately: #4467)",
+                );
+            }
         }
     }
 
@@ -1768,6 +2230,39 @@ impl Overseer {
                     pr: *pr,
                     duplicate_of: *duplicate_of,
                 })
+            }
+            // Autonomous PR rework (#4911, D2). A THIN dispatch tag that REUSES
+            // the LaunchRecipe path against default-workflow. Anti-recursion
+            // fail-closed: it drives an autonomous fix on a governed PR, so — like
+            // the coverage launch and merge-queue hygiene — it requires a DISTINCT
+            // configured steward identity before firing. The `concern` rides a
+            // ContextFile (`concern_path`), never argv (E2BIG-safe).
+            Intervention::ReworkPr {
+                repo,
+                pr,
+                concern_path,
+            } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!("rework PR {repo}#{pr} (unconfigured steward identity)"),
+                    });
+                }
+                let brief = RecipeBrief {
+                    task_description: format!(
+                        "Rework PR #{pr} in {repo} on its existing branch to address the \
+                         merge-readiness judge's recorded concern. Read the concern verbatim \
+                         from the file at {concern_path} and make the minimal change that \
+                         resolves it (add the missing test/doc, fix the small correctness nit). \
+                         Do NOT widen scope. Push to the SAME PR branch so the judge re-reviews \
+                         it on the next tick.",
+                    ),
+                    target_repo: repo.clone(),
+                    sequence_group: Some(OVERSEER_REWORK_GROUP.to_string()),
+                };
+                let handle = self.caps.recipes.launch(&brief)?;
+                self.inflight_investigations
+                    .insert(recipe_dedup_key(&brief), handle.clone());
+                Ok(ActOutcome::Launched(handle))
             }
         }
     }
@@ -2390,7 +2885,9 @@ fn now_secs() -> i64 {
 fn is_cost_bearing(iv: &Intervention) -> bool {
     matches!(
         iv,
-        Intervention::LaunchRecipe { .. } | Intervention::RunAudit { .. }
+        Intervention::LaunchRecipe { .. }
+            | Intervention::RunAudit { .. }
+            | Intervention::ReworkPr { .. }
     )
 }
 
@@ -2622,6 +3119,11 @@ impl StoredOccurrence {
 /// used to live on the notify-only `FlagWorkstreamGaps` path) and the sequencer
 /// serialises concurrent coverage launches.
 const WORKSTREAM_COVERAGE_GROUP: &str = "workstream-coverage";
+
+/// Sequence group for the autonomous PR rework loop (issue #4911, Deliverable 2).
+/// Serialises rework launches so two ticks never drive concurrent fixes for the
+/// same PR, and tags the reused `LaunchRecipe` dispatch for telemetry.
+const OVERSEER_REWORK_GROUP: &str = "overseer-rework";
 
 /// Per-gap dedup key for a backlog-coverage problem (issue #4128, D3a):
 /// `workstream-gap:<sorted, deduped gap signatures>`. Keying on the specific gap
@@ -3368,6 +3870,7 @@ mod tests {
     use super::capabilities::*;
     use super::*;
     use crate::error::SimardResult;
+    use std::sync::Mutex;
 
     // ── Fakes: each satisfies one capability with canned values. ────────────
     struct FakeStatus(ObservedState);
@@ -4467,17 +4970,25 @@ mod tests {
     }
 
     #[test]
-    fn health_review_skipped_when_gap_scan_disabled() {
+    fn health_review_disabled_when_gap_scan_disabled_surfaces_loud_status() {
+        // The shared SIMARD_OVERSEER_GAP_SCAN throttle disables ALL agentic
+        // overseer scans, health-review included. It must do so LOUD: the
+        // reviewer is never invoked, the plan gains nothing, AND the observed
+        // status is `Disabled { reason }` naming the gap-scan knob — never a
+        // silent `NotRun` that an operator cannot distinguish from "never wired".
+        let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
         let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
             .with_high_risk_autonomy(true)
             .with_gap_scan_enabled(false) // shared throttle disables the rail
             .with_goal_health_enabled(true)
-            .with_health_reviewer(
-                Box::new(FakeHealthReviewer::returning(Ok(vec![launch_iv("fix")]))),
-                1,
-            )
+            .with_health_reviewer(Box::new(reviewer), 1)
             .with_health_review_enabled(true);
         let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a gap-scan-disabled rail never invokes the reviewer"
+        );
         assert!(
             report
                 .plan
@@ -4485,11 +4996,20 @@ mod tests {
                 .all(|p| p.intervention.label() != "launch_recipe"),
             "the gap-scan opt-out also disables the health-review rail"
         );
+        match report.observed.health_review_status {
+            HealthReviewStatus::Disabled { ref reason } => assert!(
+                reason.contains(config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+                "the disable breadcrumb names the gap-scan knob, got {reason:?}"
+            ),
+            other => panic!("expected a LOUD Disabled status, got {other:?}"),
+        }
     }
 
     #[test]
-    fn health_review_skipped_when_dedicated_flag_disabled() {
-        // Reviewer wired, gap-scan on, but the dedicated opt-out is off.
+    fn health_review_disabled_when_dedicated_flag_disabled_surfaces_loud_status() {
+        // Reviewer wired, gap-scan on, but the dedicated opt-out is off. The pass
+        // never invokes the reviewer, contributes nothing, and surfaces a LOUD
+        // `Disabled { reason }` naming the dedicated knob (never silent NotRun).
         let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
         let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
             .with_high_risk_autonomy(true)
@@ -4510,6 +5030,13 @@ mod tests {
                 .all(|p| p.intervention.label() != "launch_recipe"),
             "a disabled rail contributes nothing"
         );
+        match report.observed.health_review_status {
+            HealthReviewStatus::Disabled { ref reason } => assert!(
+                reason.contains(config::SIMARD_OVERSEER_HEALTH_REVIEW_ENV),
+                "the disable breadcrumb names the dedicated knob, got {reason:?}"
+            ),
+            other => panic!("expected a LOUD Disabled status, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4808,6 +5335,197 @@ mod tests {
             log.lock().expect("log").len(),
             0,
             "the reasoner recipe is never spawned under the resource opt-out"
+        );
+    }
+
+    // A recipes seam whose poll reports a TERMINAL status, so an in-flight
+    // investigation slot is reconciled (freed) on the next tick.
+    struct CompletingInvestigation;
+    impl RecipeLauncher for CompletingInvestigation {
+        fn launch(&self, _brief: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+            Ok(WorkstreamHandle {
+                id: "ws-done".to_string(),
+            })
+        }
+        fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+            Ok(WorkstreamStatus::ProducedPr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 1,
+            })
+        }
+    }
+
+    struct FailingInvestigation;
+    impl RecipeLauncher for FailingInvestigation {
+        fn launch(&self, _brief: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+            Ok(WorkstreamHandle {
+                id: "ws-error".to_string(),
+            })
+        }
+
+        fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+            Err(OverseerError::Capability {
+                what: "poll investigation",
+                detail: "transient failure".to_string(),
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("log capture mutex")).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log capture mutex")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_investigation_logs(run: impl FnOnce()) -> String {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        capture.contents()
+    }
+
+    /// A concluded investigation recipe frees its in-flight dedup slot so a
+    /// re-observed signature is no longer held (the observable half of #4467).
+    #[test]
+    fn reconcile_frees_slot_for_completed_investigation() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(CompletingInvestigation);
+        let mut ov = Overseer::new(c);
+        ov.inflight_investigations.insert(
+            "sig-completed".to_string(),
+            WorkstreamHandle {
+                id: "ws-done".to_string(),
+            },
+        );
+
+        ov.reconcile_inflight_investigations();
+
+        assert!(
+            ov.inflight_investigations.is_empty(),
+            "a terminal investigation recipe must free its in-flight slot"
+        );
+    }
+
+    #[test]
+    fn reconcile_logs_completed_stale_engineer_investigation() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(CompletingInvestigation);
+        let mut ov = Overseer::new(c);
+        let key = format!(
+            "{}bounded-claim-key",
+            crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX
+        );
+        ov.inflight_investigations.insert(
+            key.clone(),
+            WorkstreamHandle {
+                id: "ws-done".to_string(),
+            },
+        );
+
+        let logs = capture_investigation_logs(|| ov.reconcile_inflight_investigations());
+
+        assert!(logs.contains("overseer::investigation"), "{logs}");
+        assert!(logs.contains(&key), "{logs}");
+        assert!(logs.contains("ProducedPr"), "{logs}");
+        assert!(
+            logs.contains("stale-engineer investigation recipe concluded"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn reconcile_does_not_mislabel_generic_recipe_completion() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(CompletingInvestigation);
+        let mut ov = Overseer::new(c);
+        ov.inflight_investigations.insert(
+            "generic recipe description that must not be logged".to_string(),
+            WorkstreamHandle {
+                id: "ws-done".to_string(),
+            },
+        );
+
+        let logs = capture_investigation_logs(|| ov.reconcile_inflight_investigations());
+
+        assert!(
+            !logs.contains("stale-engineer investigation recipe concluded"),
+            "{logs}"
+        );
+        assert!(ov.inflight_investigations.is_empty());
+    }
+
+    /// Fail-closed: a still-running investigation (FakeRecipes::poll => Running)
+    /// is KEPT, so the reaper never drops an investigation it cannot confirm has
+    /// finished.
+    #[test]
+    fn reconcile_keeps_still_running_investigation() {
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]));
+        ov.inflight_investigations.insert(
+            "sig-running".to_string(),
+            WorkstreamHandle {
+                id: "ws-1".to_string(),
+            },
+        );
+
+        ov.reconcile_inflight_investigations();
+
+        assert_eq!(
+            ov.inflight_investigations.len(),
+            1,
+            "a still-running investigation must be kept — fail closed"
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_investigation_when_poll_fails_without_logging_completion() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(FailingInvestigation);
+        let mut ov = Overseer::new(c);
+        ov.inflight_investigations.insert(
+            format!(
+                "{}poll-error",
+                crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX
+            ),
+            WorkstreamHandle {
+                id: "ws-error".to_string(),
+            },
+        );
+
+        let logs = capture_investigation_logs(|| ov.reconcile_inflight_investigations());
+
+        assert_eq!(ov.inflight_investigations.len(), 1);
+        assert!(
+            !logs.contains("stale-engineer investigation recipe concluded"),
+            "{logs}"
         );
     }
 }

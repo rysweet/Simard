@@ -84,6 +84,32 @@ pub const RECALL_PRECISION_SITE: &str = "recall_facts_ranked";
 /// (empty / wildcard `*`) or the result set is empty, so callers skip emitting a
 /// meaningless sample rather than dragging the mean toward zero. `k` is clamped
 /// to the number of returned facts.
+///
+/// # Relevance oracle caveat (issue #4378)
+///
+/// This metric's relevance judgment (the substring proxy above) is
+/// **deliberately DIFFERENT** from the relevance definition that gates the recall
+/// path a user is actually served. Three definitions coexist across the cognition
+/// stack, by design:
+///
+///   1. **Served recall gate — word-boundary.**
+///      [`LibraryCognitiveMemory::search_facts`](crate::cognitive_memory::LibraryCognitiveMemory)
+///      gates a clean query token at a WORD BOUNDARY (`fact_shares_query_relevance`
+///      / `needle_matches_word`), so an interior hit (`act` in "re*act*or") is
+///      NOT relevant.
+///   2. **Ranked recall — ungated** ([`recall_facts_ranked`](crate::cognitive_memory::CognitiveMemoryOps::recall_facts_ranked)):
+///      scores every live fact with NO keyword gate, so `precision_at_k < 1.0` is
+///      a meaningful ranking-quality signal (gating it would destroy that infra).
+///   3. **This metric — substring proxy** (upstream, kept unforked per G2).
+///
+/// The `recall_precision_at_k` self-metric therefore scores the ungated ranker
+/// (#2) with the substring oracle (#3), which can count as relevant a fact the
+/// served word-boundary gate (#1) would exclude — so the metric can read higher
+/// than served precision. This is intentional (the divergence is pinned by
+/// `cognitive_memory::tests_relevance_definition_divergence`; convergence is a
+/// relevance-definition change routed to CONSENSUS_WORKFLOW). See
+/// `docs/reference/recall-precision-hybrid-api.md` §"Relationship to the served
+/// word-boundary gate and the ranker" for the full rationale and interpretation.
 pub fn precision_at_k(query: &str, facts: &[CognitiveFact], k: usize) -> Option<f64> {
     // The only Simard-side glue is the CognitiveFact -> (concept, content)
     // mapping; it carries no scoring logic.

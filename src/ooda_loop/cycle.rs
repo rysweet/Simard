@@ -136,9 +136,15 @@ fn run_ooda_cycle_inner(
     // is unchanged. Goals carry the identity's target-repo slug, so they are
     // scoped to its targets, never to rysweet/Simard.
     let identity_seed_goals = &state.identity_cognition.seed_goals;
+    // Resolve the seed set ONCE per cycle (identity override or baked-in
+    // defaults) and reuse the same Vec for cold seeding below and the warm-board
+    // reconcile further down — no second `resolve_seed_goals` call (#4927).
+    let resolved_seed_goals = crate::goal_curation::resolve_seed_goals(identity_seed_goals);
     if !identity_seed_goals.is_empty() {
-        let goals = crate::goal_curation::resolve_seed_goals(identity_seed_goals);
-        let n = crate::goal_curation::seed_board_from_seed_goals(&mut state.active_goals, &goals);
+        let n = crate::goal_curation::seed_board_from_seed_goals(
+            &mut state.active_goals,
+            &resolved_seed_goals,
+        );
         if n > 0 {
             let who = state
                 .identity_cognition
@@ -153,6 +159,28 @@ fn run_ooda_cycle_inner(
         let n = crate::goal_curation::seed_default_board(&mut state.active_goals);
         if n > 0 {
             eprintln!("[simard] OODA start: seeded {n} default goal(s)");
+        }
+    }
+
+    // #4927: reconcile already-persisted goals against the SAME resolved seed
+    // set. Cold seeding (above) marks fresh goals, but a warm board loaded from
+    // cognitive memory carries the live goal with an UNMARKED description, so the
+    // no-progress breaker's `!is_perpetual()` exemption never fired for it — the
+    // goal was re-parked and issue-filed every cycle. A `standing = true` seed
+    // stamps the marker onto its matching persisted goal in place; an explicit
+    // `standing = false` seed conservatively reverses a leading marker it had
+    // previously added (source:seed goals only). Idempotent and a no-op when no
+    // seed matches, so Simard's default board is unaffected.
+    {
+        let recon = crate::goal_curation::reconcile_standing_markers(
+            &mut state.active_goals,
+            &resolved_seed_goals,
+        );
+        if !recon.is_noop() {
+            eprintln!(
+                "[simard] OODA start: reconciled standing markers — {} added, {} removed (#4927)",
+                recon.added, recon.removed
+            );
         }
     }
 

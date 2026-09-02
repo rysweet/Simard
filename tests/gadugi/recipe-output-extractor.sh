@@ -20,7 +20,7 @@ TEST_OUTPUT="$(
 printf '%s\n' "$TEST_OUTPUT"
 
 # Shared-module recovery proofs.
-printf '%s\n' "$TEST_OUTPUT" | grep -F "extract_json_payload_recovers_from_ansi_log_noise ... ok" >/dev/null
+printf '%s\n' "$TEST_OUTPUT" | grep -F "strip_recipe_noise_strips_ansi_and_logs_together ... ok" >/dev/null
 printf '%s\n' "$TEST_OUTPUT" | grep -F "strip_recipe_noise_drops_tracing_log_lines ... ok" >/dev/null
 printf '%s\n' "$TEST_OUTPUT" | grep -F "strip_recipe_noise_drops_runner_banner_lines ... ok" >/dev/null
 printf '%s\n' "$TEST_OUTPUT" | grep -F "extract_verdict_ignores_keyword_substring_inside_dropped_log_line ... ok" >/dev/null

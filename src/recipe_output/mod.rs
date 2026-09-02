@@ -1,21 +1,13 @@
-//! Shared recipe-runner-rs stdout parsing primitives + per-phase parse
-//! observability counters (issue #2484).
+//! Shared recipe-runner stdout sanitization primitives.
 //!
-//! [`extract`] holds the hardened ANSI/log/banner stripping and JSON/verdict
-//! extraction reused by every recipe-backed phase (distill, merge-judge,
-//! engineer-lifecycle brain, decide, orient, progress-checker). This is the
-//! one shared, well-tested path that replaces the formerly bespoke, fragile
-//! per-phase extractors.
+//! The retained public surface consists of [`strip_ansi`] and
+//! [`strip_recipe_noise`] from [`extract`]. Both return [`std::borrow::Cow`]:
+//! ANSI- and noise-free input remains borrowed, while input that requires
+//! sanitization becomes owned.
 
 pub mod extract;
 
-pub use extract::{
-    VerdictMatch, balanced_objects, escape_json_string_control_chars,
-    escape_json_string_invalid_escapes, extract_and_parse_json, extract_json_payload,
-    extract_verdict, last_balanced_object, normalize_json_number_specials,
-    normalize_python_json_literals, recover_json_view, strip_ansi, strip_json_comments,
-    strip_json_trailing_commas, strip_recipe_noise,
-};
+pub use extract::{strip_ansi, strip_recipe_noise};
 
 /// Record the outcome of a recipe-output parse for one phase.
 ///
@@ -23,7 +15,7 @@ pub use extract::{
 /// `recipe_parse_failure_total` (when the phase fell back to its permissive
 /// default) over the existing `metrics.jsonl` sink, tagging the `phase` in the
 /// metric `context`. This gives both the numerator and the denominator so the
-/// shared-extractor fix is measurable per phase.
+/// parse outcome is measurable per phase.
 ///
 /// `phase` ∈ {`distill`, `merge_judge`, `engineer_lifecycle`, `decide`,
 /// `orient`, `progress_checker`}.

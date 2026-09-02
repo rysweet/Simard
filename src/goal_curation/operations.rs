@@ -407,7 +407,27 @@ pub(super) fn read_latest_snapshot(memory: &dyn CognitiveMemoryOps) -> Option<Go
         .filter(|f| f.concept == "goal-board:snapshot")
         .max_by(|a, b| a.node_id.cmp(&b.node_id))?;
     match serde_json::from_str::<GoalBoard>(&latest.content) {
-        Ok(board) => Some(board),
+        // Defensive tombstone filter on the READ path (issue: roster-goal
+        // escalation storm). A tombstoned goal removed from the board can
+        // still linger inside an older `goal-board:snapshot` fact in
+        // cognitive memory. The OODA cycle loads the board via
+        // `load_goal_board` -> `read_latest_snapshot` and, until now, never
+        // consulted the tombstone set on this hot path — so every cycle
+        // re-materialised the dead goal, the no-progress breaker saw it as
+        // blocked-with-no-progress, and it filed a fresh duplicate
+        // escalation issue. `filter_tombstoned` was only applied on the
+        // operator-command daemon path (`simard goal list`), which is why
+        // the goal appeared gone there while the OODA loop kept resurrecting
+        // it. Filtering here (the shared read used by both `load_goal_board`
+        // and the save merge-read) guarantees a tombstoned goal can never be
+        // read back from memory on any path.
+        Ok(board) => {
+            let tombstones = crate::ooda_loop::load_tombstones(&simard_state_root());
+            Some(crate::goal_board_store::filter_tombstoned(
+                board,
+                &tombstones,
+            ))
+        }
         Err(e) => {
             warn!(
                 concept = "goal-board:snapshot",
@@ -838,14 +858,14 @@ pub fn promote_to_active(
             field: "backlog_id".to_string(),
             reason: format!("backlog item '{backlog_id}' not found"),
         })?;
-    let item = board.backlog.remove(position);
-    let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
-    board.active.push(ActiveGoal {
+    let promoted_source =
+        crate::goal_curation::labels::source_for_backlog(&board.backlog[position].source);
+    let goal = ActiveGoal {
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
-        id: item.id,
-        description: item.description,
+        id: board.backlog[position].id.clone(),
+        description: board.backlog[position].description.clone(),
         priority,
         status: GoalProgress::NotStarted,
         assigned_to,
@@ -853,7 +873,18 @@ pub fn promote_to_active(
         wip_refs: vec![],
         last_progress_update_at: None,
         labels: vec![promoted_source.to_string()],
-    });
+    };
+    // Centralized, fail-closed admission validation (issue #4930): every seam
+    // that admits a record — `add_active_goal` (direct active add),
+    // `add_backlog_item` (backlog admission), and this backlog→active promotion
+    // — must run the same required-field/priority gate. Prior to this, promotion
+    // only checked `validate_priority`, silently admitting into `board.active` a
+    // goal with an empty id/description that the direct-add path rejects.
+    // Validated BEFORE removing the item from the backlog so a rejected
+    // promotion leaves the board untouched (no goal silently lost).
+    validate_active_goal(&goal)?;
+    board.backlog.remove(position);
+    board.active.push(goal);
     Ok(())
 }
 
@@ -1382,7 +1413,7 @@ pub fn seed_board_from_seed_goals(
 
     for goal in goals {
         let id = crate::goals::goal_slug(&goal.title);
-        board.active.push(ActiveGoal {
+        let seeded = ActiveGoal {
             parent_goal_id: None,
             priority_explicit: false,
             id,
@@ -1395,10 +1426,123 @@ pub fn seed_board_from_seed_goals(
             wip_refs: vec![],
             last_progress_update_at: None,
             labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
+        };
+        // A `standing = true` seed produces a perpetual goal so the no-progress
+        // breaker's `!is_perpetual()` exemption applies (issue #4927). Applied
+        // via the single standing marker so `is_perpetual()` stays the source
+        // of truth; an ordinary seed is pushed unchanged (no reclassification).
+        board.active.push(if goal.standing {
+            seeded.mark_standing()
+        } else {
+            seeded
         });
     }
 
     goals.len()
+}
+
+/// Outcome of a single [`reconcile_standing_markers`] pass — how many persisted
+/// goals were newly marked standing (`added`) and how many had a leading
+/// standing marker reversed (`removed`). Both are zero on a settled board, so a
+/// caller can log an accurate, bounded before/after without re-deriving counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StandingReconciliation {
+    /// Persisted goals that a `standing = true` seed newly stamped perpetual.
+    pub added: usize,
+    /// Persisted `source:seed` goals whose leading standing marker an explicit
+    /// `standing = false` seed reversed.
+    pub removed: usize,
+}
+
+impl StandingReconciliation {
+    /// True when this pass changed nothing — no add and no reversal.
+    #[must_use]
+    pub fn is_noop(self) -> bool {
+        self.added == 0 && self.removed == 0
+    }
+}
+
+/// Warm-board reconcile of standing seed declarations against the persisted
+/// board (issue #4927).
+///
+/// A `standing = true` seed only reaches a *cold* board via
+/// [`seed_board_from_seed_goals`] (which no-ops on a non-empty board). The live
+/// `articulate-repo-hygiene-backlog` goal, however, already sits on the
+/// cognitive-memory board with an UNMARKED description — the exact defect that
+/// re-parked it every OODA cycle and fed the `UNCLEAR-CRITERIA` issue storm
+/// (#4927/#4930/#4934), because the breaker's `!is_perpetual()` exemption never
+/// fired for it. This heals that in place, and — so the declaration is
+/// conservatively reversible — also honours an *explicit* `standing = false`.
+///
+/// Matching is EXACT (by [`crate::goals::goal_slug`] against a seed's normalized
+/// title), never by fuzzy prose, so a non-matching or genuinely stuck goal is
+/// never silently exempted from (nor re-exposed to) the safety breaker.
+///
+/// Two directions, both keyed on an exact-slug match to a present seed:
+///
+/// - **`standing = true`** stamps [`STANDING_MARKER_PREFIX`] onto a matching
+///   persisted goal that is not already perpetual (as the original self-heal
+///   did). Idempotent — an already-perpetual goal is skipped, so a repeat pass
+///   heals nothing and never double-stamps.
+/// - **explicit `standing = false`** reverses a *previously reconciled*
+///   declaration by stripping ONLY a leading [`STANDING_MARKER_PREFIX`], and
+///   ONLY from a matching goal that carries the exact [`SOURCE_SEED`] label —
+///   i.e. a goal this seeding path itself created. "Explicit" is load-bearing:
+///   only a seed built via [`crate::identity::SeedGoal::non_standing`] (or TOML
+///   `standing = false`) reverses. An **omitted** `standing` — a default seed
+///   from [`crate::identity::SeedGoal::new`] — is inert and never reverses,
+///   exactly like **seed absence** (deleting a seed entirely leaves its goal
+///   untouched). It also never edits a user-created goal (no `source:seed`
+///   label) and never rewrites a standing *phrase* in the prose (so a goal
+///   whose prose independently reads perpetual stays perpetual).
+///
+/// A no-op when no seed matches. Returns the add/remove counts.
+///
+/// [`SOURCE_SEED`]: crate::goal_curation::labels::SOURCE_SEED
+pub fn reconcile_standing_markers(
+    board: &mut GoalBoard,
+    seeds: &[crate::identity::SeedGoal],
+) -> StandingReconciliation {
+    use std::collections::BTreeSet;
+
+    let standing_true: BTreeSet<String> = seeds
+        .iter()
+        .filter(|seed| seed.standing)
+        .map(|seed| crate::goals::goal_slug(&seed.title))
+        .collect();
+    // An explicit `standing = false` reverses only where the same slug is not
+    // *also* declared standing elsewhere (a `true` declaration always wins).
+    // Crucially this keys off `authorizes_standing_reversal()` — an EXPLICIT
+    // false — never merely `!seed.standing`, so an omitted/default seed (which
+    // is also non-standing) stays inert and never reverses a marker (#4927).
+    let standing_false: BTreeSet<String> = seeds
+        .iter()
+        .filter(|seed| seed.authorizes_standing_reversal())
+        .map(|seed| crate::goals::goal_slug(&seed.title))
+        .filter(|slug| !standing_true.contains(slug))
+        .collect();
+    if standing_true.is_empty() && standing_false.is_empty() {
+        return StandingReconciliation::default();
+    }
+
+    let mut out = StandingReconciliation::default();
+    for goal in &mut board.active {
+        if standing_true.contains(&goal.id) {
+            if !goal.is_perpetual() {
+                goal.mark_standing_in_place();
+                out.added += 1;
+            }
+        } else if standing_false.contains(&goal.id)
+            && goal
+                .labels
+                .iter()
+                .any(|l| l == crate::goal_curation::labels::SOURCE_SEED)
+            && goal.unmark_standing_in_place()
+        {
+            out.removed += 1;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

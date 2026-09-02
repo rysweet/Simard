@@ -1,7 +1,7 @@
 ---
 title: How to run self-deploy from any directory
-description: Operator runbook for the autonomous, fast self-deploy — run `simard self-deploy` from any working directory and have it fetch + check out the merged head and build it into a warm, incremental target dir. Covers the warm directories, the SIMARD_SELF_DEPLOY_REPO override, first-run vs warm-run timing, and how to confirm the merged head (not cwd HEAD) was deployed.
-last_updated: 2026-06-28
+description: Operator runbook for the autonomous, fast self-deploy — run `simard self-deploy` from any working directory and have it fetch + check out the merged head and build it into a warm, incremental target dir. Covers the warm directories, the SIMARD_SELF_DEPLOY_REPO override, the managed-clone reset+clean that keeps redeploys unblockable, first-run vs warm-run timing, and how to confirm the merged head (not cwd HEAD) was deployed.
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -41,6 +41,18 @@ into a cold per-run `temp_dir()` (a ~10-minute from-scratch compile). Now it:
 
 then runs the unchanged safety sequence (dual backup → drain → orphan-reap →
 swap → restart → health-check → rollback).
+
+> **Redeploys are now unblockable on a dirty managed clone.** Immediately before
+> the detached checkout, the managed clone (`~/.simard/self-deploy-src/`) is
+> scrubbed with `git reset --hard` + `git clean -fd`, so a prior run interrupted
+> mid-checkout — or a merged commit that touches a tracked file the last deploy
+> left dirty (observed with `.github/hooks/amplihack-hooks.json`) — can no longer
+> abort the checkout with *"Your local changes … would be overwritten by
+> checkout: Aborting"* and strand the daemon behind `main`. This only ever
+> touches the self-deploy-owned clone; a `SIMARD_SELF_DEPLOY_REPO` override you
+> provide is **never** scrubbed. `git clean` is `-fd` only (never `-x`), so
+> ignored files under the clone are preserved. See
+> [managed-clone hygiene](../reference/self-deploy-source-prep.md#managed-clone-hygiene-reset--clean-before-checkout).
 
 ## Prerequisites
 
@@ -177,7 +189,8 @@ For the full post-deploy verification checklist and rollback, see
 | --- | --- | --- |
 | `SourceResolveFailed` | Invalid `SIMARD_SELF_DEPLOY_REPO`, undiscoverable origin URL, or first-time clone failed. | Fix the path/URL; ensure the cwd or override points at a repo with an `origin` remote. The deploy aborted **before** touching the daemon. |
 | `FetchFailed` | `git fetch origin` failed and the target object is not cached locally. | Check network/credentials to origin. No daemon mutation occurred. |
-| `CheckoutFailed` | The merged SHA failed validation or the detached checkout failed (e.g. the object is missing after fetch). | Inspect the warm clone at `~/.simard/self-deploy-src/`; the deploy aborted pre-sequence. |
+| `CheckoutFailed` | The merged SHA failed validation, the managed-clone `reset --hard`/`clean -fd` hygiene step failed, or the detached checkout failed (e.g. the object is missing after fetch, or a *dirty* `SIMARD_SELF_DEPLOY_REPO` override — which is deliberately never scrubbed). | Inspect the warm clone at `~/.simard/self-deploy-src/`; the deploy aborted pre-sequence. A dirty managed clone is scrubbed automatically, so a persistent `CheckoutFailed` here usually points at a dirty **override** or a genuinely missing object. |
+| Redeploy kept failing on `… would be overwritten by checkout: Aborting` | A prior deploy left the managed clone with local changes to a tracked file. | Fixed automatically: the clone is `reset --hard` + `clean -fd`-scrubbed before checkout. If you still see this, confirm the path is the managed clone and not a dirty `SIMARD_SELF_DEPLOY_REPO` override. |
 | Build is slow every time | The warm target dir was deleted or relocated between runs. | Stop deleting `~/.simard/self-deploy-target/`; keep `SIMARD_STATE_ROOT` stable. |
 
 All three `*Failed` aborts happen during build-step 1, **before** any backup,

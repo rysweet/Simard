@@ -38,7 +38,7 @@ use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::completion_gate::{DependencyState, EvidenceSource};
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BREAKER_THRESHOLD,
-    SURFACED_INVESTIGATION_FAILURE_LIMIT, is_no_progress_marker,
+    SURFACED_INVESTIGATION_FAILURE_LIMIT, is_no_progress_marker, is_quarantined,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -1042,7 +1042,7 @@ fn genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_non
     }
 }
 
-// === (h) evidence-less re-investigation is BOUNDED, then escalated to a human =
+// === (h) evidence-less re-investigation is BOUNDED, then TERMINALLY QUARANTINED =
 //
 // Issue #16 (#4096) fixed the live defect of parking a goal with a bare
 // `evidence=[(none)]` block by making the evidence-less terminal rung
@@ -1050,11 +1050,17 @@ fn genuinely_stuck_with_no_evidence_surfaces_investigation_error_never_parks_non
 // But an *unbounded* re-investigation is its OWN livelock: a goal whose
 // done-criteria are permanently unclear (the six `simard-identity-*` codename
 // goals) surfaces → resets → forever, making no shippable progress and NEVER
-// reaching a human. This asserts the bound: after
-// `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive surfaced failures the
-// breaker stops spinning and escalates the goal to a human WITH the
-// re-investigation count as concrete evidence (never `(none)`) and a measurable
-// "make the done-criteria machine-checkable" ask.
+// reaching a human — and, worse, re-blocking + re-filing a near-identical
+// `ooda-stuck` issue each cycle (the process_health churn).
+//
+// The fix (process_health, HIGH) bounds it with a TERMINAL QUARANTINE: once a
+// goal accrues `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive surfaced
+// failures it is quarantined — Blocked WITH the re-investigation count as
+// concrete evidence (never `(none)`), one deduplicated triage issue filed, and a
+// durable quarantine marker written so the re-investigation pass never
+// re-schedules or re-files it again. The routing consults the PRE-bump surfaced
+// count, so quarantine trips one episode AFTER the counter first reaches the
+// bound (each below-bound episode still surfaces + bumps the counter).
 
 /// Drive one full stall episode (`threshold` no-action cycles) and return the
 /// last cycle's report — one episode yields exactly one terminal-rung decision.
@@ -1079,7 +1085,7 @@ fn drive_episode(
 }
 
 #[test]
-fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
+fn evidenceless_reinvestigation_is_bounded_then_terminally_quarantined() {
     let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
     let limit = SURFACED_INVESTIGATION_FAILURE_LIMIT;
     let id = "simard-identity-concierge-hospitality-design";
@@ -1099,9 +1105,11 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
     let dispatcher = RecordingDispatcher::ok();
     let filer = RecordingFiler::default();
 
-    // Episodes below the bound SURFACE the failure (fail-visible, retriable) and
-    // NEVER escalate — but each bumps the persisted surfaced-failure counter.
-    for episode in 1..limit {
+    // Episodes up to AND INCLUDING the one that lifts the counter to the bound
+    // SURFACE the failure (fail-visible, retriable) and NEVER quarantine — but
+    // each bumps the persisted surfaced-failure counter. Because routing reads
+    // the PRE-bump count, the counter reaches `limit` without tripping quarantine.
+    for episode in 1..=limit {
         let report = drive_episode(
             &mut state,
             id,
@@ -1114,11 +1122,11 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
         );
         assert!(
             report.investigation_errors.contains(&id.to_string()),
-            "episode {episode} (below the bound) must SURFACE the failure: {report:?}"
+            "episode {episode} (below/at the counter bound) must SURFACE the failure: {report:?}"
         );
         assert!(
-            !report.escalated.contains(&id.to_string()),
-            "episode {episode} (below the bound) must NOT escalate yet: {report:?}"
+            report.quarantined.is_empty(),
+            "episode {episode} must NOT quarantine yet (pre-bump count still below the bound): {report:?}"
         );
         assert_eq!(
             state.no_progress_tracker.surfaced_failures(id),
@@ -1127,16 +1135,28 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
         );
         assert!(
             filer.calls.borrow().is_empty(),
-            "no human issue may be filed below the bound: {:?}",
+            "no human issue may be filed before quarantine: {:?}",
             filer.calls.borrow()
         );
         assert!(
             matches!(status_of(&state, id), GoalProgress::NotStarted),
-            "a surfaced-but-not-escalated goal stays retriable (NotStarted)"
+            "a surfaced-but-not-quarantined goal stays retriable (NotStarted)"
+        );
+        assert!(
+            !is_quarantined(
+                state
+                    .active_goals
+                    .active
+                    .iter()
+                    .find(|g| g.id == id)
+                    .expect("goal on board")
+            ),
+            "episode {episode} must not have written the quarantine marker yet"
         );
     }
 
-    // The episode that REACHES the bound escalates to a human.
+    // The NEXT episode observes a PRE-bump surfaced count == limit and TERMINALLY
+    // QUARANTINES the goal (the unbounded re-investigation + re-file churn stops).
     let report = drive_episode(
         &mut state,
         id,
@@ -1148,13 +1168,30 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
         threshold,
     );
     assert!(
-        report.escalated.contains(&id.to_string()),
-        "reaching SURFACED_INVESTIGATION_FAILURE_LIMIT ({limit}) must ESCALATE the \
-         goal — the unbounded re-investigation livelock is broken: {report:?}"
+        report.quarantined.contains(&id.to_string()),
+        "once the surfaced count reaches SURFACED_INVESTIGATION_FAILURE_LIMIT ({limit}) the \
+         next episode must TERMINALLY QUARANTINE the goal — ending the churn: {report:?}"
     );
     assert!(
         !report.investigation_errors.contains(&id.to_string()),
-        "the bounded-out episode escalates (terminal), it does not merely surface: {report:?}"
+        "the quarantining episode is terminal, it does not merely surface: {report:?}"
+    );
+    assert!(
+        report.fired(),
+        "a terminal quarantine is a breaker firing: {report:?}"
+    );
+
+    // The goal now carries the durable quarantine marker.
+    assert!(
+        is_quarantined(
+            state
+                .active_goals
+                .active
+                .iter()
+                .find(|g| g.id == id)
+                .expect("goal on board")
+        ),
+        "the quarantined goal must carry the durable quarantine marker"
     );
 
     // The block reason carries the re-investigation COUNT as concrete evidence —
@@ -1163,22 +1200,22 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
         GoalProgress::Blocked(reason) => {
             assert!(
                 !reason.contains("(none)"),
-                "the escalation must NEVER read as an evidence=[(none)] block: {reason}"
+                "the quarantine must NEVER read as an evidence=[(none)] block: {reason}"
             );
             assert!(
                 is_no_progress_marker(reason) && reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX),
-                "the escalation must keep the [OODA-SAFEGUARD] marker: {reason}"
+                "the quarantine must keep the [OODA-SAFEGUARD] marker: {reason}"
             );
             assert!(
                 reason.contains(NoProgressClass::UnclearCriteria.token()),
-                "the escalation must name the accurate root cause class: {reason}"
+                "the quarantine must name the accurate root cause class: {reason}"
             );
             assert!(
                 reason.contains(&format!("{limit} consecutive evidence-less investigations")),
-                "the escalation evidence must be the re-investigation count: {reason}"
+                "the quarantine evidence must be the re-investigation count: {reason}"
             );
         }
-        other => panic!("expected a WHY-bearing Blocked escalation, got {other:?}"),
+        other => panic!("expected a WHY-bearing Blocked quarantine, got {other:?}"),
     }
 
     // Exactly one human triage issue is filed, and it asks for MEASURABLE
@@ -1204,8 +1241,8 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
     );
 
     // No engineer was ever spawned in this test (the retry was pre-spent), and the
-    // surfaced-failure counter is cleared on escalation so a future re-entry gets a
-    // fresh window rather than escalating immediately.
+    // surfaced-failure counter is cleared on quarantine so the terminal state is
+    // clean (the goal is henceforth skipped by the re-investigation pass anyway).
     assert!(
         dispatcher.calls.borrow().is_empty(),
         "no guided engineer is spawned once the retry is spent"
@@ -1213,7 +1250,7 @@ fn evidenceless_reinvestigation_is_bounded_then_escalated_to_a_human() {
     assert_eq!(
         state.no_progress_tracker.surfaced_failures(id),
         0,
-        "the surfaced-failure counter is cleared once the goal is escalated"
+        "the surfaced-failure counter is cleared once the goal is quarantined"
     );
 }
 

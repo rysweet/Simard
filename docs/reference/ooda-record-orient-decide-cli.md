@@ -1,7 +1,7 @@
 ---
 title: "Reference: simard ooda record-orient / record-decide (typed OODA orient+decide tools)"
 description: The two zero-privilege CLI tools the OODA orient and decide reasoners call to record exactly one typed, validated judgment each, and the file-backed OrientDecisionRecord / DecideDecisionRecord seams RecipeBrain reads instead of scraping prose. Covers usage, the closed-enum + bounded-float contracts, the fail-CLOSED read matrix, configuration, security, and examples.
-last_updated: 2026-07-26
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -103,7 +103,7 @@ file** and exits non-zero with a diagnostic on stderr.
 | `--reason` | yes\* | Short concrete rationale. Must be non-empty after sanitizing. |
 | `--record-path` | yes | **Absolute** path supplied via the recipe's `-c record_path`. Must not contain `..`. |
 | `--goal-id` | yes | The goal this judgment is for. Embedded in the record and re-verified by the reader. |
-| `--cycle-number` | yes | The cycle this judgment is for (`u32`). Embedded in the record and re-verified by the reader. |
+| `--cycle-number` | yes | The cycle this judgment is for (`u32`). Embedded in the record and re-verified by the reader. **For orient/decide the reasoners always pass the `REASONER_RECORD_CYCLE = 0` sentinel** (the live cycle only names the temp dir) — see the note under [How the reasoners call the tools](#how-the-reasoners-call-the-tools). |
 | `--reason-path` | no | Read `reason` from a file instead of argv (for large text). Path must be **absolute** and free of `..`; the file is read under a 64 KiB cap. Mutually exclusive with `--reason`. |
 
 \* Exactly one of `--reason` / `--reason-path` must be supplied and resolve to
@@ -151,10 +151,24 @@ The chokepoint is therefore a superset of `validate`:
 ### `OrientDecisionRecord`
 
 ```rust
+/// The validated orient judgment fields, constructed ONLY through the shared
+/// `OrientFields::from_fields` chokepoint and flattened into the record.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OrientFields {
+    /// Validated final urgency, in [0.0, 1.0], <= base_urgency.
+    pub adjusted_urgency: f64,
+    /// Validated confidence, in [0.0, 1.0].
+    pub confidence: f64,
+    /// Validated demotion magnitude, >= 0.0.
+    pub demotion_applied: f64,
+    /// Sanitized, bounded (<=500 chars) reason.
+    pub reason: String,
+}
+
 /// One typed, on-disk orient-phase demotion judgment, written by the
 /// `simard ooda record-orient` tool and read by RecipeBrain via
 /// `read_verified_orient`. Never scraped from agent prose.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OrientDecisionRecord {
     /// Schema pin. Must equal ORIENT_SCHEMA ("simard.ooda.orient.v1").
     pub schema: String,
@@ -165,18 +179,19 @@ pub struct OrientDecisionRecord {
     /// Pre-penalty urgency, persisted so the reader can re-run the
     /// no-escalation check (adjusted <= base) self-consistently.
     pub base_urgency: f64,
-    /// Validated final urgency, in [0.0, 1.0], <= base_urgency.
-    pub adjusted_urgency: f64,
-    /// Validated confidence, in [0.0, 1.0].
-    pub confidence: f64,
-    /// Validated demotion magnitude, >= 0.0.
-    pub demotion_applied: f64,
-    /// Sanitized, bounded (<=500 chars) rationale.
-    pub reason: String,
+    /// The validated judgment fields (flattened: `adjusted_urgency`,
+    /// `confidence`, `demotion_applied`, `reason`).
+    #[serde(flatten)]
+    pub fields: OrientFields,
 }
 
 pub const ORIENT_SCHEMA: &str = "simard.ooda.orient.v1";
 ```
+
+`adjusted_urgency`, `confidence`, `demotion_applied`, and `reason` live on the
+flattened `OrientFields`, so the on-disk shape is a single flat object (below)
+even though the Rust type nests the validated fields behind the shared
+chokepoint.
 
 #### On-disk shape
 
@@ -184,7 +199,7 @@ pub const ORIENT_SCHEMA: &str = "simard.ooda.orient.v1";
 {
   "schema": "simard.ooda.orient.v1",
   "goal_id": "cognition-research",
-  "cycle_number": 4287,
+  "cycle_number": 0,
   "base_urgency": 0.80,
   "adjusted_urgency": 0.60,
   "confidence": 0.9,
@@ -207,16 +222,20 @@ pub const ORIENT_SCHEMA: &str = "simard.ooda.orient.v1";
 ```rust
 /// Read and fully verify an orient decision record.
 ///
-/// Returns `Ok(OrientJudgment)` ONLY when the record exists, deserializes,
+/// Returns `Ok(OrientFields)` ONLY when the record exists, deserializes,
 /// pins the expected schema, its embedded goal_id/cycle_number match the live
 /// ctx, and its fields re-validate through `OrientFields::from_fields`.
 /// EVERY other outcome is an `Err` — the caller keeps the base urgency (safe
 /// no-op), never a floor default (#1711).
+///
+/// `RecipeBrain::judge_orientation` maps the returned `OrientFields` into the
+/// in-memory `OrientJudgment` (whose free-text field is named `rationale`)
+/// after the read succeeds.
 pub fn read_verified_orient(
     path: &Path,
     goal_id: &str,
     cycle_number: u32,
-) -> SimardResult<OrientJudgment>;
+) -> SimardResult<OrientFields>;
 ```
 
 ---
@@ -245,10 +264,10 @@ On any validation failure it writes **no file** and exits non-zero.
 | Flag | Required | Description |
 |---|---|---|
 | `--choice` | yes | One of the **ten** closed `DecideJudgment` variants (below). Matched **case-insensitively** against the `snake_case` tag; anything else is rejected. |
-| `--reason` | yes\* | Short concrete rationale (becomes the variant's `rationale`). Must be non-empty after sanitizing. |
+| `--reason` | yes\* | Short concrete rationale (stored as the record's `reason`; becomes the runtime judgment's `rationale` after `to_judgment`). Must be non-empty after sanitizing. |
 | `--record-path` | yes | **Absolute** path supplied via the recipe's `-c record_path`. Must not contain `..`. |
 | `--goal-id` | yes | The goal this judgment is for. Embedded in the record and re-verified by the reader. |
-| `--cycle-number` | yes | The cycle this judgment is for (`u32`). Embedded in the record and re-verified by the reader. |
+| `--cycle-number` | yes | The cycle this judgment is for (`u32`). Embedded in the record and re-verified by the reader. **For orient/decide the reasoners always pass the `REASONER_RECORD_CYCLE = 0` sentinel** (the live cycle only names the temp dir) — see the note under [How the reasoners call the tools](#how-the-reasoners-call-the-tools). |
 | `--reason-path` | no | Read `reason` from a file instead of argv. Same absolute / no-`..` / 64 KiB-cap rules as `record-orient`. Mutually exclusive with `--reason`. |
 
 \* Exactly one of `--reason` / `--reason-path` must be supplied and resolve to
@@ -259,25 +278,30 @@ Unknown or duplicate flags are rejected against a `KNOWN_FLAGS` allowlist.
 ### The closed choice enum
 
 `--choice` is validated by the shared `DecideChoice::from_choice_fields`
-chokepoint, which constructs the existing
+chokepoint, which constructs the dedicated closed
+[`DecideChoice`](../reference/ooda-brain-api.md) enum in
+`src/ooda_brain/orient_decide_record.rs`. `DecideChoice` is the CLI/record enum;
+it maps **1:1** onto the runtime
 [`DecideJudgment`](./ooda-decide-prompt.md#action-keywords) enum in
-`src/ooda_brain/decide.rs` — the **single source of truth**. There is no
-parallel enum to drift against, and the reader calls the same chokepoint. The
-CLI keyword is the enum's `#[serde(tag = "choice", rename_all = "snake_case")]`
+`src/ooda_brain/decide.rs` via `DecideChoice::to_judgment`, so the two enums are
+kept in lock-step (a variant that exists on one must exist on the other — see
+[Versioning & Compatibility](#versioning-compatibility)). The reader calls the
+same `from_choice_fields` chokepoint, so writer and reader cannot drift. The CLI
+keyword is `DecideChoice`'s `#[serde(tag = "choice", rename_all = "snake_case")]`
 tag; the ten accepted values are exactly:
 
-| Choice | Enum variant | When to use |
+| Choice | `DecideChoice` variant | When to use |
 |---|---|---|
-| `advance_goal` | `DecideJudgment::AdvanceGoal` | Default for any non-reserved `goal_id` — drive the goal forward. |
-| `run_improvement` | `DecideJudgment::RunImprovement` | Reserved `__improvement__` synthetic ID. |
-| `consolidate_memory` | `DecideJudgment::ConsolidateMemory` | Reserved `__memory__` synthetic ID. |
-| `research_query` | `DecideJudgment::ResearchQuery` | Route to a research query. |
-| `run_gym_eval` | `DecideJudgment::RunGymEval` | Route to a gym evaluation. |
-| `build_skill` | `DecideJudgment::BuildSkill` | Route to skill construction. |
-| `launch_session` | `DecideJudgment::LaunchSession` | Route to a launched session. |
-| `poll_developer_activity` | `DecideJudgment::PollDeveloperActivity` | Reserved `__poll_activity__` synthetic ID. |
-| `extract_ideas` | `DecideJudgment::ExtractIdeas` | Reserved `__extract_ideas__` synthetic ID. |
-| `safe_update` | `DecideJudgment::SafeUpdate` | Reserved `__safe_update__` synthetic ID. |
+| `advance_goal` | `DecideChoice::AdvanceGoal` | Default for any non-reserved `goal_id` — drive the goal forward. |
+| `run_improvement` | `DecideChoice::RunImprovement` | Reserved `__improvement__` synthetic ID. |
+| `consolidate_memory` | `DecideChoice::ConsolidateMemory` | Reserved `__memory__` synthetic ID. |
+| `research_query` | `DecideChoice::ResearchQuery` | Route to a research query. |
+| `run_gym_eval` | `DecideChoice::RunGymEval` | Route to a gym evaluation. |
+| `build_skill` | `DecideChoice::BuildSkill` | Route to skill construction. |
+| `launch_session` | `DecideChoice::LaunchSession` | Route to a launched session. |
+| `poll_developer_activity` | `DecideChoice::PollDeveloperActivity` | Reserved `__poll_activity__` synthetic ID. |
+| `extract_ideas` | `DecideChoice::ExtractIdeas` | Reserved `__extract_ideas__` synthetic ID. |
+| `safe_update` | `DecideChoice::SafeUpdate` | Reserved `__safe_update__` synthetic ID. |
 
 Adding a variant is a coordinated change — see
 [Versioning & Compatibility](#versioning-compatibility).
@@ -301,7 +325,7 @@ Adding a variant is a coordinated change — see
 /// One typed, on-disk decide-phase routing judgment, written by the
 /// `simard ooda record-decide` tool and read by RecipeBrain via
 /// `read_verified_decide`. Never scraped from agent prose.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DecideDecisionRecord {
     /// Schema pin. Must equal DECIDE_SCHEMA ("simard.ooda.decide.v1").
     pub schema: String,
@@ -309,9 +333,9 @@ pub struct DecideDecisionRecord {
     pub goal_id: String,
     /// The cycle this judgment is for. Re-verified against the live ctx.
     pub cycle_number: u32,
-    /// The validated, closed-enum judgment (flattened `choice` + `rationale`).
+    /// The validated, closed-enum choice (flattened `choice` + `reason`).
     #[serde(flatten)]
-    pub judgment: DecideJudgment,
+    pub choice: DecideChoice,
 }
 
 pub const DECIDE_SCHEMA: &str = "simard.ooda.decide.v1";
@@ -323,33 +347,39 @@ pub const DECIDE_SCHEMA: &str = "simard.ooda.decide.v1";
 {
   "schema": "simard.ooda.decide.v1",
   "goal_id": "__memory__",
-  "cycle_number": 4287,
+  "cycle_number": 0,
   "choice": "consolidate_memory",
-  "rationale": "memory has not been consolidated in 12 hours"
+  "reason": "memory has not been consolidated in 12 hours"
 }
 ```
 
-The `choice` discriminator and `rationale` field come from `DecideJudgment`'s
-existing `#[serde(tag = "choice", rename_all = "snake_case")]` representation,
-flattened into the record — so the tool and the enum can never disagree on the
-wire shape.
+The `choice` discriminator and `reason` field come from `DecideChoice`'s
+`#[serde(tag = "choice", rename_all = "snake_case")]` representation, flattened
+into the record — so the tool and the enum can never disagree on the wire shape.
+(The runtime `DecideJudgment` that `DecideChoice::to_judgment` produces names the
+same free text `rationale`; the persisted record always serializes it as
+`reason`.)
 
 ### `read_verified_decide` — the fail-CLOSED reader
 
 ```rust
 /// Read and fully verify a decide decision record.
 ///
-/// Returns `Ok(DecideJudgment)` ONLY when the record exists, deserializes,
+/// Returns `Ok(DecideChoice)` ONLY when the record exists, deserializes,
 /// pins the expected schema, its embedded goal_id/cycle_number match the live
-/// ctx, and its `choice` + `rationale` re-validate through
+/// ctx, and its `choice` + `reason` re-validate through
 /// `DecideChoice::from_choice_fields`. EVERY other outcome is an `Err` — the
 /// caller skips this priority (safe no-op), never an `advance_goal` default
 /// (#1711).
+///
+/// `RecipeBrain::judge_decision` converts the returned `DecideChoice` into the
+/// runtime `DecideJudgment` via `DecideChoice::to_judgment` after the read
+/// succeeds.
 pub fn read_verified_decide(
     path: &Path,
     goal_id: &str,
     cycle_number: u32,
-) -> SimardResult<DecideJudgment>;
+) -> SimardResult<DecideChoice>;
 ```
 
 ---
@@ -366,10 +396,10 @@ returns `Err`:
 | R2 | File present but not valid JSON / truncated | **`Err` → no-op** |
 | R3 | `schema` ≠ the record's expected schema (`simard.ooda.orient.v1` / `simard.ooda.decide.v1`) | **`Err` → no-op** |
 | R4 | **decide:** `choice` not one of the ten closed variants — **orient:** any field non-finite, out of `[0,1]`, or `adjusted_urgency > base_urgency + 1e-9` | **`Err` → no-op** |
-| R5 | `reason` / `rationale` missing or empty after sanitizing | **`Err` → no-op** |
+| R5 | `reason` missing or empty after sanitizing | **`Err` → no-op** |
 | R6 | `goal_id` ≠ live ctx `goal_id` (stale / other-goal record) | **`Err` → no-op** |
 | R7 | `cycle_number` ≠ live ctx `cycle_number` (prior-cycle record) | **`Err` → no-op** |
-| R8 | All checks pass | `Ok(OrientJudgment)` / `Ok(DecideJudgment)` |
+| R8 | All checks pass | `Ok(OrientFields)` / `Ok(DecideChoice)` |
 
 R6/R7 prevent the subtle **fail-open** risk of reading a previous cycle's
 judgment as if it were this cycle's. In addition, each reader receives a
@@ -389,12 +419,23 @@ recipe up so the agent can call its tool and the reader can find the result
 2. Pass context vars to the recipe via `-c` (argv-only, never `sh -c`):
    - `-c record_path=<tempdir>/orient.json` (or `decide.json`)
    - `-c simard_bin=<current_exe absolute path>`
-   - `-c goal_id=<goal_id>`, `-c cycle_number=<n>`
+   - `-c goal_id=<live ctx.goal_id>`, `-c cycle_number=0`
    - orient also: `-c base_urgency=<f>`
 3. Run the `ooda-orient` / `ooda-decide` recipe. The agent's stdout is
    **ignored**; a stray JSON print has zero effect.
 4. Read the judgment with `read_verified_orient(record_path, ctx.goal_id,
-   ctx.cycle_number)` / `read_verified_decide(...)`.
+   REASONER_RECORD_CYCLE)` / `read_verified_decide(...)`.
+
+!!! note "Orient/decide bind `cycle_number` to a fixed sentinel (`0`)"
+    Unlike the per-goal-cycle seam, the orient and decide records live in a
+    **fresh, unique per-call temp dir** that is created and torn down inside a
+    single reasoner call, so cross-cycle replay is structurally impossible. The
+    writer and reader therefore bind `cycle_number` to the constant
+    `REASONER_RECORD_CYCLE = 0` (`src/ooda_brain/recipe_brain.rs`) rather than the
+    live cycle counter. The **`goal_id` binding is live** (`ctx.goal_id`): a
+    record written for one goal can never be read for another (R6). The R7
+    `cycle_number` check still runs — it pins the record to the same sentinel the
+    writer used, closing the wire against a record carrying any other cycle value.
 
 If the tool cannot be resolved or exits non-zero, no record is written and the
 reader fails CLOSED at R1.
@@ -493,7 +534,7 @@ implementation in [`record-decision`](./ooda-record-decision-cli.md).
 |---|---|---|
 | SR-AUTHZ-1 | Reasoner over-reach | Each tool holds **zero privilege**: its only side effect is one `persist_json` write. No routing, no urgency mutation, no Bridge/Python/kuzu, no tokens. |
 | SR-AUTHZ-2 | Bypassing the rail | Authority stays with the deterministic rails, which apply the judgment **after** the read. No `--admin` / `--no-verify` / bypass flag exists. |
-| SR-VAL-1 | Injected / drifted choice | decide `--choice` validated by `DecideChoice::from_choice_fields` (constructs `DecideJudgment`, case-insensitive); no parallel enum. |
+| SR-VAL-1 | Injected / drifted choice | decide `--choice` validated by `DecideChoice::from_choice_fields` (closed 10-variant enum, case-insensitive). `DecideChoice` maps 1:1 onto the runtime `DecideJudgment` via `to_judgment`; both writer and reader use the same chokepoint. |
 | SR-VAL-2 | Priority escalation via orient | orient fields validated by `OrientFields::from_fields`: finite + `[0,1]` + `adjusted_urgency ≤ base_urgency + 1e-9`. A misbehaving LLM cannot inflate a goal's priority. |
 | SR-VAL-3 | Terminal-escape / log injection via free text | `reason` / `rationale` run through `sanitize_context_var(_, 500)` — strips ANSI/CSI + C0/DEL, folds newlines, bounds to 500 chars. Empty-after-sanitize fails CLOSED (R5). |
 | SR-VAL-7 | Replay / stale-record fail-open | Reader independently checks `schema` pin, `goal_id == ctx`, `cycle_number == ctx`, and (orient) `adjusted ≤ base` → mismatch fails CLOSED (R3/R4/R6/R7). |
@@ -511,6 +552,14 @@ written; a single failure means **no** record on disk.
 
 ## Examples
 
+!!! note "`cycle-4287-*` in paths vs. `cycle_number: 0` in records"
+    The temp-dir path is named by the **live** cycle (e.g. `cycle-4287-…`) for
+    operator legibility, but the record's identity field is bound to the fixed
+    `REASONER_RECORD_CYCLE = 0` sentinel (see
+    [How the reasoners call the tools](#how-the-reasoners-call-the-tools)). That
+    is why every example below passes `--cycle-number 0` yet writes into a
+    `cycle-4287` directory.
+
 ### orient — standard floor demotion (1 failure)
 
 ```bash
@@ -522,7 +571,7 @@ simard ooda record-orient \
   --reason "1 failure: standard floor demotion" \
   --record-path /run/simard/ooda/cycle-4287-cognition/orient.json \
   --goal-id cognition-research \
-  --cycle-number 4287
+  --cycle-number 0
 ```
 
 Record written:
@@ -531,7 +580,7 @@ Record written:
 {
   "schema": "simard.ooda.orient.v1",
   "goal_id": "cognition-research",
-  "cycle_number": 4287,
+  "cycle_number": 0,
   "base_urgency": 0.80,
   "adjusted_urgency": 0.60,
   "confidence": 0.9,
@@ -548,7 +597,7 @@ simard ooda record-decide \
   --reason "memory has not been consolidated in 12 hours" \
   --record-path /run/simard/ooda/cycle-4287-memory/decide.json \
   --goal-id __memory__ \
-  --cycle-number 4287
+  --cycle-number 0
 ```
 
 ### decide — ordinary goal (drive forward)
@@ -559,7 +608,7 @@ simard ooda record-decide \
   --reason "standing research goal with open PR — drive to completion" \
   --record-path /run/simard/ooda/cycle-4287-cognition/decide.json \
   --goal-id cognition-research \
-  --cycle-number 4287
+  --cycle-number 0
 ```
 
 ### Large reason via file (not argv)
@@ -571,7 +620,7 @@ simard ooda record-decide \
   --reason-path /run/simard/ooda/cycle-4287-cognition/reason.txt \
   --record-path /run/simard/ooda/cycle-4287-cognition/decide.json \
   --goal-id cognition-research \
-  --cycle-number 4287
+  --cycle-number 0
 ```
 
 ### Rejections (no file written, non-zero exit)
@@ -602,15 +651,20 @@ simard ooda record-orient --record-path /run/simard/../etc/x ...  # error: --rec
 
 ### Adding a decide variant
 
-1. Add the variant to `DecideJudgment` in `src/ooda_brain/decide.rs` and its
-   `action_kind()` / `rationale()` arms.
-2. `DecideChoice::from_choice_fields` picks it up automatically (it constructs
-   the enum) — no parallel list to update.
+1. Add the variant to **both** the `DecideChoice` enum in
+   `src/ooda_brain/orient_decide_record.rs` (its `from_choice_fields`,
+   `variant_label`, and `to_judgment` arms) **and** the runtime `DecideJudgment`
+   enum in `src/ooda_brain/decide.rs` (its `action_kind()` / `rationale()` arms).
+   The two enums are kept 1:1 — `to_judgment` maps every `DecideChoice` variant
+   onto its `DecideJudgment` counterpart, so a new variant must exist on both.
+2. `DecideChoice::from_choice_fields` accepts the new keyword once its match arm
+   is added; the CLI writer and `read_verified_decide` pick it up through the
+   shared chokepoint.
 3. Extend the `ooda-decide` recipe/prompt `OPTIONS` guidance so the agent knows
    to pass it to `--choice`.
 4. Add an example here and in the recipe reference.
 5. Add serde round-trip + `read_verified_decide` fail-closed tests covering the
-   new variant.
+   new variant, and a `to_judgment` mapping test.
 
 ### Changing orient fields
 
@@ -628,10 +682,11 @@ reader must ship together.
 
 This change removes the orient/decide callers of `extract_and_parse_json` /
 `extract_json_payload`. The shared scraper family in
-`src/recipe_output/extract.rs` is **retained** because other, not-yet-converted
-seams still call it (Groups B/C/D: admission + resource-admission; idea-dedup +
-idea-consolidation; outcome-verify + RustyClawd `from_recipe_envelope`, plus the
-engineer-lifecycle envelope). `extract.rs` is deleted only once
+`src/recipe_output/extract.rs` is **retained** because one not-yet-converted
+seam still calls it: the engineer-**lifecycle** `DecisionEnvelope` path. (Groups
+B/C are converted — admission + resource-admission and idea-dedup +
+idea-consolidation; Group D (#4967) converted outcome-verify + RustyClawd.)
+`extract.rs` is deleted only once
 `grep -rn extract_json_payload src/` returns no remaining callers.
 
 Likewise, the shared engineer-lifecycle machinery — `run_brain_ladder`,
@@ -671,8 +726,11 @@ are deleted, after grep-confirming zero callers.
 | rail integration | a brain `Err` → decide skips priority, orient keeps base urgency; no urgency inflation, no default routing |
 
 Tests live in `src/ooda_brain/orient_decide_record.rs` (inline `#[cfg(test)]`
-round-trip + chokepoint), `tests/tests_record_orient_decide.rs` (R1–R8 matrix),
-and `tests/tests_rework_contract.rs` (grep contract).
+round-trip + chokepoint), `src/ooda_brain/tests_record_orient_decide.rs`
+(R1–R8 reader matrix), `src/ooda_brain/tests_rework_contract.rs` (grep contract
+asserting the seams no longer reference `extract_and_parse_json` /
+`extract_json_payload`), and `src/operator_cli/tests_record_orient_decide.rs`
+(CLI writer validation + `0o600` mode + path-guard rejections).
 
 ---
 

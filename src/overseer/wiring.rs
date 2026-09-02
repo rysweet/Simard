@@ -39,9 +39,9 @@ use crate::goal_curation::{
 
 use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
-    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
-    MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
-    RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
+    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, HealthReviewStatus, InFlightItem,
+    IssueOutcome, MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode,
+    RecalledFact, RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
 };
 use crate::overseer::config::{
     claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
@@ -103,6 +103,73 @@ impl OverseerCadence {
             false
         }
     }
+}
+
+// ─────────────────────────── tick watchdog ─────────────────────────────────
+
+/// Liveness watchdog for the periodic Overseer tick (Observed Problem #3).
+///
+/// The daemon spawns each Overseer tick on a background thread guarded by a
+/// single-slot overlap flag so ticks never stack. That flag is cleared by the
+/// tick thread's `Drop` guard — but only if the thread ACTUALLY finishes. A tick
+/// that HANGS on a long `gh`/network call therefore never clears the flag, and
+/// with no watchdog every subsequent scheduled tick is silently dropped: the
+/// Overseer goes stale and the tick history shows large gaps (the 86-minute gap
+/// this fixes).
+///
+/// This is a deliberately clock-free, side-effect-free decision component (it
+/// mirrors [`OverseerCadence`]): the caller feeds a monotonic `now_secs` and the
+/// second the in-flight tick was armed, and the watchdog decides whether that
+/// tick has exceeded its bounded wall-clock budget and must be reclaimed so a
+/// fresh catch-up tick can run. All the actual reclaiming (clearing the flag,
+/// bumping the generation token, emitting the staleness signal) is the daemon's
+/// job — this type only makes the pure, unit-testable decision.
+#[derive(Clone, Copy, Debug)]
+pub struct TickWatchdog {
+    max_inflight_secs: u64,
+}
+
+impl TickWatchdog {
+    /// A watchdog that reclaims an in-flight tick once it has been running for
+    /// `max_inflight_secs`. Floored at 1s so a pathological `0` can never
+    /// reclaim a tick the same second it was armed (which would busy-respawn).
+    pub fn new(max_inflight_secs: u64) -> Self {
+        Self {
+            max_inflight_secs: max_inflight_secs.max(1),
+        }
+    }
+
+    /// The wall-clock budget (seconds) a single tick may run before it is
+    /// considered hung.
+    pub fn max_inflight_secs(&self) -> u64 {
+        self.max_inflight_secs
+    }
+
+    /// Seconds the currently in-flight tick (armed at `armed_at_secs`) has been
+    /// running as of `now_secs`. Monotonic-safe: a backwards clock yields 0.
+    pub fn inflight_secs(&self, armed_at_secs: u64, now_secs: u64) -> u64 {
+        now_secs.saturating_sub(armed_at_secs)
+    }
+
+    /// Whether the in-flight tick should be reclaimed as hung.
+    ///
+    /// Returns `true` only when a tick IS in flight (`armed`) AND it has been
+    /// running for at least [`Self::max_inflight_secs`]. When no tick is in
+    /// flight there is nothing to reclaim, so this is always `false`.
+    pub fn should_reclaim(&self, armed: bool, armed_at_secs: u64, now_secs: u64) -> bool {
+        armed && self.inflight_secs(armed_at_secs, now_secs) >= self.max_inflight_secs
+    }
+}
+
+/// Whether a tick thread's overlap-guard `Drop` may still clear the shared
+/// running flag: only when the generation token it captured at spawn still
+/// matches the current generation. A watchdog reclaim bumps the generation, so a
+/// LATER-finishing hung tick sees a mismatch and must NOT clear the flag —
+/// otherwise it would clear the guard out from under the fresh catch-up tick
+/// that replaced it (the stale-clear race). Pure so the race-freedom is pinned
+/// by a unit test.
+pub fn guard_generation_matches(spawn_generation: u64, current_generation: u64) -> bool {
+    spawn_generation == current_generation
 }
 
 // ─────────────────────────── per-tick report ───────────────────────────────
@@ -218,6 +285,23 @@ pub struct OverseerTickReport {
     /// so legacy feed records deserialize safely and `SCHEMA_VERSION` is
     /// unchanged.
     pub transient_cycle_failure: bool,
+    /// Additive (#4981). `true` when this tick was cooperatively SUPERSEDED —
+    /// its injected cancellation predicate reported that a newer tick has taken
+    /// over (the liveness-watchdog reclaim bumped the shared generation token
+    /// out from under it). A superseded tick performs NO FURTHER actions OR
+    /// WRITES after the point cancellation was observed: if it was already stale
+    /// before the Act loop it takes zero actions, if it was superseded mid-loop
+    /// it lets the one in-flight `act` finish (a running syscall cannot be
+    /// killed) but starts no more, and in every case it skips its observation
+    /// write-back (the post-loop re-check also covers an empty plan or a
+    /// last-action supersession). It is purely observational — it does not
+    /// itself
+    /// suppress publication (the daemon gates that on generation equality). It
+    /// is deliberately **separate** from `cycle_failed`/`panicked`: a superseded
+    /// tick did not fail, it was simply replaced. Covered by the struct-level
+    /// `#[serde(default)]`, so legacy feed records deserialize with
+    /// `superseded = false` and the feed `SCHEMA_VERSION` does not change.
+    pub superseded: bool,
     /// Wall-clock duration of the tick in milliseconds.
     pub duration_ms: u64,
     /// Human-readable lines describing WHAT was observed this tick — the ranked
@@ -331,6 +415,21 @@ pub fn overseer_tick_detailed(
             report.observed_details = cap_details(observed_details_from(&cycle));
             let mut actions: Vec<String> = Vec::new();
             for (i, planned) in cycle.plan.iter().enumerate() {
+                // Cooperative cancellation (#4981): re-check BEFORE every planned
+                // item — both before the first action and between iterations. The
+                // first time supersession is observed we stop: a stale tick
+                // performs no further actions. `act` is synchronous, so any action
+                // already dispatched has fully returned by the time we reach this
+                // check again — that one in-flight action was allowed to finish;
+                // we simply start no more. (A blocked syscall inside that act
+                // cannot be killed here — bounding it is separate per-call-timeout
+                // hardening.) A matching post-loop re-check below also guards the
+                // observation write-back, covering the empty-plan and
+                // last-action-timing cases this loop-top check cannot reach.
+                if overseer.is_superseded() {
+                    report.superseded = true;
+                    break;
+                }
                 if !planned.admitted {
                     report.held += 1;
                     actions.push(describe_hold(planned));
@@ -382,21 +481,36 @@ pub fn overseer_tick_detailed(
             }
             report.action_details = cap_details(actions);
 
-            // Deliberate, de-duplicated write-back of the Overseer's own
-            // observation (#2628). A store increments `memory_writes`; a
-            // de-duplicated / disabled / clean-tick write records nothing; a
-            // backing-store error is SURFACED and counted (never swallowed) and
-            // the tick still completes.
-            match overseer.write_back_observation(&cycle.problems) {
-                Ok(Some(RecordOutcome::Stored { .. })) => report.memory_writes += 1,
-                Ok(_) => {}
-                Err(e) => {
-                    report.memory_errors += 1;
-                    tracing::warn!(
-                        target: "overseer::memory",
-                        error = %e,
-                        "overseer memory write-back failed — surfaced, continuing"
-                    );
+            // Cooperative cancellation (#4981): re-check AFTER the action loop
+            // and BEFORE the observation write-back. The loop-top check only
+            // fires when there is a NEXT planned item to guard, so on its own it
+            // can never set `superseded` for an empty plan, or when replacement
+            // is noticed only after the final action — cases where the worker
+            // would otherwise still write an outdated observation here, racing
+            // ahead of the daemon's generation-fenced log/activity publication.
+            // Once replacement is noticed we take no further writes: mark the
+            // report `superseded` and skip write-back entirely (counters left
+            // untouched). Cooperative only — an `act`/syscall already in flight
+            // has fully returned by this point and was never killed.
+            if overseer.is_superseded() {
+                report.superseded = true;
+            } else {
+                // Deliberate, de-duplicated write-back of the Overseer's own
+                // observation (#2628). A store increments `memory_writes`; a
+                // de-duplicated / disabled / clean-tick write records nothing; a
+                // backing-store error is SURFACED and counted (never swallowed)
+                // and the tick still completes.
+                match overseer.write_back_observation(&cycle.problems) {
+                    Ok(Some(RecordOutcome::Stored { .. })) => report.memory_writes += 1,
+                    Ok(_) => {}
+                    Err(e) => {
+                        report.memory_errors += 1;
+                        tracing::warn!(
+                            target: "overseer::memory",
+                            error = %e,
+                            "overseer memory write-back failed — surfaced, continuing"
+                        );
+                    }
                 }
             }
 
@@ -447,6 +561,7 @@ pub fn overseer_tick_detailed(
         panicked = report.panicked,
         cycle_failed = report.cycle_failed,
         transient_cycle_failure = report.transient_cycle_failure,
+        superseded = report.superseded,
         duration_ms = report.duration_ms,
         "overseer tick complete"
     );
@@ -572,6 +687,34 @@ fn observed_details_from(cycle: &CycleReport) -> Vec<String> {
             out.push(sig.describe());
         }
     }
+    // Surface the agentic health-review verdict ([standing]) so a pass that RAN
+    // is never a silent no-op at the OPERATOR surface — not just on the
+    // `ObservedState` field. A HEALTHY pass (zero decisions) still leaves a
+    // `health-review: <verdict>` breadcrumb in the `simard status` / TUI /
+    // dashboard feed (via `humanize_tick_details`), a DEGRADED pass is surfaced
+    // LOUD rather than vanishing, and an operator OPT-OUT (`Disabled`) is
+    // surfaced LOUD too — naming the knob — so the self-heal reflex being off is
+    // never silent (#4097), exactly as its status field. Only `NotRun` (rail
+    // unwired / off cadence) stays quiet — the same "explain what ran, stay quiet
+    // on what genuinely didn't" discipline the rest of this feed follows. The
+    // recipe-authored `summary` may echo journal-derived text, so it is sanitised
+    // like every other observed line.
+    match &cycle.observed.health_review_status {
+        HealthReviewStatus::Reviewed { summary, .. } => {
+            out.push(sanitize_detail(&format!("health-review: {summary}")));
+        }
+        HealthReviewStatus::Degraded => {
+            out.push(
+                "health-review: degraded — no verdict this pass, took no remediation".to_string(),
+            );
+        }
+        HealthReviewStatus::Disabled { reason } => {
+            out.push(sanitize_detail(&format!(
+                "health-review: disabled — {reason}"
+            )));
+        }
+        HealthReviewStatus::NotRun => {}
+    }
     out
 }
 
@@ -615,6 +758,7 @@ fn intervention_target(iv: &Intervention) -> String {
             pr,
             duplicate_of,
         } => format!("close duplicate PR {repo}#{pr} (dup of #{duplicate_of})"),
+        Intervention::ReworkPr { repo, pr, .. } => format!("rework PR {repo}#{pr}"),
     }
 }
 
@@ -1292,6 +1436,16 @@ pub fn build_overseer(
         None => overseer,
     };
 
+    // Auto-doc PR reconciliation client (goal_hygiene): wire the production
+    // `gh` client so the additive reconciliation pass can enforce the
+    // single-open invariant for auto-generated `"Update documentation with …"`
+    // PRs across the governed roster (closing stale / superseded drafts). Always
+    // wired here; the pass itself is gated at run time behind the governed roster
+    // being non-empty, the shared gap-scan opt-out, and the every-N cadence, and
+    // is fully fail-closed per repo.
+    let overseer =
+        overseer.with_doc_pr_reconcile_client(Box::new(crate::stewardship::RealPrGhClient));
+
     // Live agentic health-review rail ([standing]): on the Overseer cadence the
     // thin rail invokes the `overseer-health-review` recipe — an AGENT reads the
     // OODA journal + `simard status` + `simard goal list`, detects crash-loops /
@@ -1552,6 +1706,145 @@ mod tests {
         assert!(cadence.due(160), "forward past the interval — fires");
     }
 
+    // ── tick watchdog (Observed Problem #3) ───────────────────────────────
+
+    #[test]
+    fn watchdog_does_not_reclaim_a_tick_within_its_budget() {
+        let wd = TickWatchdog::new(900);
+        // No tick in flight → nothing to reclaim regardless of the clock.
+        assert!(!wd.should_reclaim(false, 0, 10_000));
+        // In flight but still well within budget.
+        assert!(!wd.should_reclaim(true, 1_000, 1_000), "0s in — not hung");
+        assert!(
+            !wd.should_reclaim(true, 1_000, 1_899),
+            "899s in — just under the 900s budget"
+        );
+    }
+
+    #[test]
+    fn watchdog_reclaims_a_tick_that_exceeds_its_budget() {
+        let wd = TickWatchdog::new(900);
+        assert!(
+            wd.should_reclaim(true, 1_000, 1_900),
+            "exactly at the budget — reclaim the hung tick"
+        );
+        assert!(
+            wd.should_reclaim(true, 1_000, 6_160),
+            "86 minutes in (the observed gap) — definitely reclaim"
+        );
+    }
+
+    #[test]
+    fn watchdog_budget_is_floored_to_avoid_same_second_respawn() {
+        // A pathological 0 budget must not reclaim a tick the instant it arms.
+        let wd = TickWatchdog::new(0);
+        assert_eq!(wd.max_inflight_secs(), 1);
+        assert!(
+            !wd.should_reclaim(true, 100, 100),
+            "same second — not yet hung"
+        );
+        assert!(
+            wd.should_reclaim(true, 100, 101),
+            "1s past the floor — hung"
+        );
+    }
+
+    #[test]
+    fn watchdog_inflight_is_monotonic_safe() {
+        let wd = TickWatchdog::new(900);
+        // Clock going backwards yields 0 elapsed, never a reclaim.
+        assert_eq!(wd.inflight_secs(1_000, 500), 0);
+        assert!(!wd.should_reclaim(true, 1_000, 500));
+    }
+
+    #[test]
+    fn generation_guard_prevents_the_stale_clear_race() {
+        // The fresh catch-up tick spawned after a reclaim owns generation 1.
+        // The earlier hung tick (spawned at generation 0) must NOT clear the
+        // guard when it finally finishes — its generation no longer matches.
+        assert!(
+            guard_generation_matches(1, 1),
+            "the current tick still owns the guard — its Drop may clear it"
+        );
+        assert!(
+            !guard_generation_matches(0, 1),
+            "a reclaimed (stale) tick must not clear the fresh tick's guard"
+        );
+    }
+
+    /// End-to-end liveness property (Observed Problem #3): a hung tick must not
+    /// permanently block later scheduled ticks. Models the daemon's overlap
+    /// guard + generation token + watchdog reclaim over a virtual clock and
+    /// asserts the schedule recovers instead of going stale forever.
+    #[test]
+    fn a_hung_tick_does_not_block_subsequent_ticks() {
+        let interval = 900u64;
+        let mut cadence = OverseerCadence::new(interval, 0);
+        // Reclaim a tick after 3 missed intervals of hang.
+        let wd = TickWatchdog::new(interval * 3);
+
+        // Guard state the daemon owns across iterations.
+        let mut running = false;
+        let mut armed_at = 0u64;
+        let mut generation = 0u64;
+        // The generation captured by the (still-hung) in-flight tick.
+        let mut inflight_gen = 0u64;
+
+        let mut ticks_started = 0usize;
+        let mut reclaims = 0usize;
+        // Generation captured by the FIRST tick (the one that hangs). After a
+        // reclaim it must become stale so its eventual Drop is a no-op.
+        let mut first_tick_gen: Option<u64> = None;
+
+        // t=900: first tick becomes due and starts (arms the guard), then HANGS
+        // — it never finishes, so its Drop never clears `running`.
+        for now in (1..=6000).step_by(1) {
+            // Watchdog runs first each iteration.
+            if wd.should_reclaim(running, armed_at, now as u64) {
+                // Reclaim: bump generation (invalidating the hung tick's Drop)
+                // and free the slot so a catch-up tick can run.
+                generation += 1;
+                running = false;
+                reclaims += 1;
+            }
+            let due = cadence.due(now as u64);
+            if due && !running {
+                // Arm a fresh tick.
+                running = true;
+                armed_at = now as u64;
+                inflight_gen = generation;
+                if first_tick_gen.is_none() {
+                    first_tick_gen = Some(generation);
+                }
+                ticks_started += 1;
+                // This modelled tick hangs forever — we never clear `running`
+                // here, exactly like a tick blocked on a network call.
+            }
+        }
+
+        // Without the watchdog the guard would latch after the first hang and
+        // `ticks_started` would be exactly 1 forever. With it, the hung tick is
+        // reclaimed and later ticks run.
+        assert!(
+            reclaims >= 1,
+            "the hung tick must be reclaimed at least once"
+        );
+        assert!(
+            ticks_started >= 2,
+            "later scheduled ticks must still run after a hang (got {ticks_started})"
+        );
+        // The FIRST (hung) tick's generation is now stale, so its eventual Drop
+        // is a no-op and can never clear the catch-up tick's guard.
+        let first_gen = first_tick_gen.expect("at least one tick started");
+        assert!(
+            !guard_generation_matches(first_gen, generation),
+            "the hung tick's generation must be invalidated by the reclaim"
+        );
+        // The current in-flight tick, by contrast, legitimately still owns the
+        // guard (its generation matches) — that is correct, not a leak.
+        assert!(guard_generation_matches(inflight_gen, generation));
+    }
+
     // ── fakes for the tick driver ─────────────────────────────────────────
 
     struct FakeStatus(ObservedState);
@@ -1799,6 +2092,243 @@ mod tests {
         assert!(!report.panicked, "an error is not a panic");
         assert_eq!(report.errors, 1);
         assert_eq!(report.problems, 0);
+    }
+
+    // ── cooperative cancellation (#4981) ──────────────────────────────────
+    //
+    // The liveness watchdog reclaims a hung tick's overlap slot by bumping the
+    // shared `Arc<AtomicU64>` generation token. These tests pin the SECOND half
+    // of that story: a tick whose captured generation no longer matches must
+    // stop ACTING (cooperative cancellation) so a superseded/hung tick that
+    // eventually unblocks does not take stale actions on top of the catch-up
+    // tick. The predicate is the SAME generation-fencing token the watchdog and
+    // the daemon's publication gate use — never a second mechanism.
+
+    /// Seed a merge-ready PR the tick would normally merge.
+    fn ready_pr(pr: u32) -> crate::overseer::capabilities::PrRef {
+        crate::overseer::capabilities::PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr,
+        }
+    }
+
+    #[test]
+    fn cancellation_true_before_the_loop_takes_zero_actions_and_reports_superseded() {
+        // A green ready PR with verify-merge autonomy ON would normally be
+        // merged (proven by `tick_verifies_and_merges_a_green_ready_pr…`). But a
+        // cancellation predicate that is ALREADY true — the tick was superseded
+        // before it reached the Act loop — must stop it acting entirely: zero
+        // merges, and the report is flagged superseded. This exercises the real
+        // `overseer_tick_detailed` control flow (run_cycle still ran and planned
+        // the merge; only the ACT is suppressed).
+        let (prs, merges) = RecordingPrs::new(true);
+        let prs = prs.with_ready_prs(vec![ready_pr(42)]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true)
+        // Superseded from the very first check.
+        .with_cancel_check(Box::new(|| true));
+
+        let report = overseer_tick(&mut overseer);
+        assert!(
+            report.superseded,
+            "an already-superseded tick must report superseded"
+        );
+        assert_eq!(
+            report.prs_merged, 0,
+            "a tick superseded before the loop performs NO actions"
+        );
+        assert!(
+            merges.lock().unwrap().is_empty(),
+            "nothing may be merged once superseded before acting"
+        );
+    }
+
+    #[test]
+    fn cancellation_between_iterations_stops_further_actions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // TWO green ready PRs → the plan admits TWO independent merge actions
+        // (each PR is a distinct DeliveryReady problem). The predicate is FALSE
+        // on its first consultation (before action #1) and TRUE thereafter —
+        // modelling the watchdog reclaiming the slot AFTER the first act was
+        // dispatched. The first merge (already in flight) is allowed to finish;
+        // the second must NOT start. This proves the between-iterations gate on
+        // real multi-action control flow, not a restated bool.
+        let (prs, merges) = RecordingPrs::new(true);
+        let prs = prs.with_ready_prs(vec![ready_pr(1), ready_pr(2)]);
+
+        let checks = Arc::new(AtomicUsize::new(0));
+        let checks_in_predicate = Arc::clone(&checks);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true)
+        .with_cancel_check(Box::new(move || {
+            // 0th check → false (act #1 proceeds); every later check → true.
+            checks_in_predicate.fetch_add(1, Ordering::SeqCst) >= 1
+        }));
+
+        let report = overseer_tick(&mut overseer);
+        assert!(
+            report.superseded,
+            "supersession observed between iterations must flag the report"
+        );
+        assert_eq!(
+            report.prs_merged, 1,
+            "exactly ONE action ran before supersession stopped the loop"
+        );
+        assert_eq!(
+            merges.lock().unwrap().len(),
+            1,
+            "the second planned action must not run once superseded"
+        );
+    }
+
+    #[test]
+    fn no_cancellation_predicate_preserves_prior_behavior() {
+        // With NO predicate wired (the default), a tick behaves exactly as
+        // before: both ready PRs are merged and the report is never superseded.
+        // This pins the "additive / opt-in" contract.
+        let (prs, merges) = RecordingPrs::new(true);
+        let prs = prs.with_ready_prs(vec![ready_pr(1), ready_pr(2)]);
+        let mut overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_verify_merge_autonomy(true);
+
+        let report = overseer_tick(&mut overseer);
+        assert!(
+            !report.superseded,
+            "no predicate → never superseded (unchanged behavior)"
+        );
+        assert_eq!(
+            report.prs_merged, 2,
+            "both actions run when there is no cancellation"
+        );
+        assert_eq!(merges.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_generation_fenced_predicate_supersedes_only_after_a_reclaim() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Reconstruct the EXACT predicate the daemon injects — a closure over the
+        // shared generation token comparing it against the generation THIS worker
+        // captured at arm time — and drive it through `Overseer::is_superseded()`.
+        // Before a watchdog reclaim the generations match (not superseded); a
+        // reclaim (bump) makes the predicate report supersession. Same token, no
+        // second mechanism.
+        let generation = Arc::new(AtomicU64::new(7));
+        let my_generation = generation.load(Ordering::SeqCst);
+        let gen_for_predicate = Arc::clone(&generation);
+
+        let (prs, _merges) = RecordingPrs::new(true);
+        let overseer = Overseer::new(caps_with(
+            Box::new(FakeStatus(ObservedState::default())),
+            Box::new(prs),
+        ))
+        .with_cancel_check(Box::new(move || {
+            gen_for_predicate.load(Ordering::SeqCst) != my_generation
+        }));
+
+        assert!(
+            !overseer.is_superseded(),
+            "generations match before any reclaim — the tick is live"
+        );
+        // The liveness watchdog reclaims the slot: it bumps the generation.
+        generation.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            overseer.is_superseded(),
+            "a reclaim bump supersedes this tick via the same generation token"
+        );
+    }
+
+    #[test]
+    fn generation_mismatch_disallows_stale_publication() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // The daemon gates BOTH stale publications (the daemon-log tick summary
+        // and the activity-feed `record_tick`) on `generation == my_generation`.
+        // Model that exact gate over a real shared token: it PUBLISHES while the
+        // worker still owns the generation, and REFUSES once a watchdog reclaim
+        // has bumped it. This is the same fencing token the cancel predicate and
+        // ClearOnDrop use.
+        let generation = Arc::new(AtomicU64::new(3));
+        let my_generation = generation.load(Ordering::SeqCst);
+        let may_publish = |current: &AtomicU64| current.load(Ordering::SeqCst) == my_generation;
+
+        assert!(
+            may_publish(&generation),
+            "a current (non-superseded) worker may publish its tick"
+        );
+        // Watchdog reclaim bumps the shared generation out from under this worker.
+        generation.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !may_publish(&generation),
+            "a stale (superseded) worker must publish NEITHER signal"
+        );
+    }
+
+    #[test]
+    fn a_stale_clear_on_drop_cannot_clear_a_replacement_guard() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        // Faithfully model the daemon's generation-fenced `ClearOnDrop`: its Drop
+        // clears the shared `running` flag ONLY when its captured generation still
+        // matches the current one (`guard_generation_matches`). Prove that a hung
+        // tick reclaimed by the watchdog (generation bumped, a REPLACEMENT tick
+        // now owns the guard) cannot clear the replacement's guard when it finally
+        // finishes and drops. Exercises real Drop control flow, not a bool helper.
+        struct ClearOnDrop {
+            running: Arc<AtomicBool>,
+            generation: Arc<AtomicU64>,
+            my_generation: u64,
+        }
+        impl Drop for ClearOnDrop {
+            fn drop(&mut self) {
+                if guard_generation_matches(
+                    self.my_generation,
+                    self.generation.load(Ordering::SeqCst),
+                ) {
+                    self.running.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        let generation = Arc::new(AtomicU64::new(0));
+
+        // The hung tick captured generation 0 and holds the slot.
+        let hung = ClearOnDrop {
+            running: Arc::clone(&running),
+            generation: Arc::clone(&generation),
+            my_generation: generation.load(Ordering::SeqCst),
+        };
+
+        // Watchdog reclaim: bump the generation and re-arm a REPLACEMENT tick,
+        // which legitimately owns the (still-set) running guard at generation 1.
+        generation.fetch_add(1, Ordering::SeqCst);
+        let replacement = ClearOnDrop {
+            running: Arc::clone(&running),
+            generation: Arc::clone(&generation),
+            my_generation: generation.load(Ordering::SeqCst),
+        };
+
+        // The hung tick finally finishes and drops: its generation is stale, so
+        // its Drop must be a NO-OP — the replacement's guard stays set.
+        drop(hung);
+        assert!(
+            running.load(Ordering::SeqCst),
+            "a stale-generation Drop must NOT clear the replacement tick's guard"
+        );
+
+        // The replacement, which still owns the generation, clears it on drop.
+        drop(replacement);
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "the current tick's Drop legitimately clears its own guard"
+        );
     }
 
     // ── #4080: isolated `act` errors must not pin the meta-thread "erroring" ─
@@ -2474,7 +3004,98 @@ mod tests {
         );
     }
 
-    // ── #4420: a red canary must NEVER be misclassified as transient ────────
+    // ── health-review verdict surfacing ([standing]) ────────────────────────
+    //
+    // The pass sets `ObservedState.health_review_status`, but the "never a
+    // silent no-op" guarantee must reach the OPERATOR feed, not just the struct
+    // field. `observed_details_from` renders the verdict so a HEALTHY /
+    // DEGRADED pass leaves a visible `health-review:` breadcrumb, while an
+    // off/unwired `NotRun` tick stays quiet.
+
+    /// Build a bare `CycleReport` carrying only a health-review verdict — no
+    /// problems, signals, or plan — to isolate the verdict rendering.
+    fn cycle_with_health_review(status: HealthReviewStatus) -> CycleReport {
+        CycleReport {
+            observed: ObservedState {
+                health_review_status: status,
+                ..ObservedState::default()
+            },
+            signals: Vec::new(),
+            problems: Vec::new(),
+            plan: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn health_review_verdict_surfaces_in_the_operator_feed() {
+        // A HEALTHY pass (zero decisions) must still leave an operator-visible
+        // breadcrumb — the whole point of the "never a silent no-op" guarantee.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Reviewed {
+            summary: "healthy — no crash-loop, no blocked goal".to_string(),
+            decisions: 0,
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:"),
+            "a reviewed pass must surface a `health-review:` line: {joined:?}"
+        );
+        assert!(
+            joined.contains("healthy — no crash-loop, no blocked goal"),
+            "the operator line must carry the recipe's verdict summary: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_degraded_surfaces_loud_in_the_operator_feed() {
+        // A degraded pass took no remediation; it must be LOUD in the feed, not
+        // a silent gap that reads identical to "healthy".
+        let cycle = cycle_with_health_review(HealthReviewStatus::Degraded);
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("degraded"),
+            "a degraded pass must surface a loud `health-review: degraded` line: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_disabled_surfaces_loud_in_the_operator_feed() {
+        // An operator OPT-OUT (dedicated knob or the shared gap-scan throttle)
+        // must be LOUD in the feed too — naming WHY the self-heal reflex is off —
+        // never a silent gap that reads identical to a healthy-but-quiet tick.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Disabled {
+            reason: format!(
+                "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV
+            ),
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("disabled"),
+            "a disabled pass must surface a loud `health-review: disabled` line: {joined:?}"
+        );
+        assert!(
+            joined.contains(crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+            "the disabled line must name the knob that turned the reflex off: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_not_run_stays_quiet_in_the_operator_feed() {
+        // An unwired / off-cadence tick must NOT spam the feed with a
+        // health-review line — only a pass that RAN (or an explicit opt-out,
+        // rendered as `Disabled`) earns a line; a bare `NotRun` stays quiet.
+        let cycle = cycle_with_health_review(HealthReviewStatus::NotRun);
+        let details = observed_details_from(&cycle);
+        assert!(
+            !details.iter().any(|d| d.contains("health-review")),
+            "a NotRun health-review must add no line: {details:?}"
+        );
+    }
+
     //
     // The reddening-gate detail STEP 1 now threads into `OverseerError::Capability`
     // can contain transient-looking words (a gate whose failure text mentions a

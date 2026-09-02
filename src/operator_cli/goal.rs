@@ -36,7 +36,9 @@
 
 use std::error::Error;
 
-use crate::goal_curation::{GoalDecomposer, GoalProgress, labels, simard_state_root};
+use crate::goal_curation::{
+    GoalDecomposer, GoalProgress, is_quarantine_ref, labels, simard_state_root,
+};
 use crate::memory_ipc::launch_writer_client;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
@@ -495,7 +497,7 @@ fn handle_label_list(goal_id: &str) -> Result<(), Box<dyn Error>> {
 }
 
 fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
-    let prior = with_board(|board| {
+    let (prior, quarantine_cleared) = with_board(|board| {
         let goal = board
             .active
             .iter_mut()
@@ -506,9 +508,29 @@ fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
             })?;
         let prior = goal.status.clone();
         goal.status = GoalProgress::NotStarted;
-        Ok(prior)
+        // Clear the durable OODA breaker terminal-quarantine marker so the goal
+        // is fully revived: a quarantined goal is otherwise skipped forever by
+        // `reinvestigate_bare_blocked_goals`, so leaving the marker in place
+        // would restore the goal to `NotStarted` while still barring it from the
+        // re-investigation pass. `goal unblock` is the documented, explicit
+        // per-goal escape hatch (unlike `unblock-all`, which is deliberately
+        // scoped away from quarantines), so clearing the marker here is the
+        // intended recovery — it hands the goal a fresh bounded guided-retry
+        // window. The surfaced-failure counter was already reset when quarantine
+        // fired, so no further counter reset is needed.
+        let before = goal.wip_refs.len();
+        goal.wip_refs.retain(|w| !is_quarantine_ref(w));
+        let quarantine_cleared = goal.wip_refs.len() != before;
+        Ok((prior, quarantine_cleared))
     })?;
-    eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
+    if quarantine_cleared {
+        eprintln!(
+            "[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior}); \
+             cleared OODA breaker quarantine marker"
+        );
+    } else {
+        eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
+    }
     Ok(())
 }
 

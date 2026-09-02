@@ -141,8 +141,9 @@ unparseable envelope is an **error**, never a silent default (see
 > a typed `PerGoalDecisionRecord`; `RecipeBrain` reads it with `read_verified`.
 > The wire shape below is identical (it is `PerGoalAction`'s serde form,
 > flattened into the record), but it now travels through a validated file, not
-> prose. `RustyClawdBrain` (a different, out-of-scope seam) still parses its
-> agent response via `from_recipe_envelope`.
+> prose. As of Group D (#4967) `RustyClawdBrain` uses the **same** typed-record
+> path: it asks its agent to call `simard ooda record-decision` and then reads
+> the result with `read_verified`.
 
 ## `PerGoalDecisionRecord` and `read_verified`
 
@@ -153,18 +154,15 @@ empty-reason / goal-mismatch / cycle-mismatch ⇒ `Err`). The full type,
 on-disk shape, reader semantics, and security properties are documented in
 [Reference: `simard ooda record-decision`](ooda-record-decision-cli.md).
 
-On the **RecipeBrain** path the verdict no longer flows through
-`PerGoalAction::from_recipe_envelope` at all — the tool validates the closed enum
-at write time and `read_verified` re-validates it at read time. The
-`from_recipe_envelope` parser remains the canonical path for the **other**
-reasoner backends that still return an in-process envelope (notably
-`RustyClawdBrain`, out of scope for #4720): `choice` is matched
-case-insensitively, `reason`/`task_hint` are trimmed and bounded, and an
-empty/whitespace `reason` or an unknown `choice` yields `None` (surfaced by the
-caller as a no-fallback `Err`). Both paths therefore enforce the **same**
-closed-enum + non-empty-`reason` contract — one via a validated file, the other
-via the envelope parser — so a valid `PerGoalAction` means the same thing
-regardless of backend.
+On the **RecipeBrain** path the verdict no longer flows through an in-process
+envelope parser at all — the tool validates the closed enum at write time and
+`read_verified` re-validates it at read time. As of Group D (#4967) the
+`RustyClawdBrain` seam works the same way: both backends now converge on the
+typed `record-decision` + `read_verified` path, re-validating through
+`PerGoalAction::from_choice_fields` (the single closed-enum chokepoint). A valid
+`PerGoalAction` therefore means the same thing regardless of backend: a
+closed-enum `choice` with a non-empty, bounded `reason`, surfaced as a
+no-fallback `Err` on any violation.
 
 ## `apply_per_goal_action_to_state`
 
@@ -232,7 +230,7 @@ pub trait OodaBrain: Send + Sync {
 | Impl | File | Behavior |
 |---|---|---|
 | `RecipeBrain` | `recipe_brain.rs` | Allocates a fresh per-cycle temp dir, passes `-c record_path` + `-c simard_bin=current_exe()`, runs the `ooda-per-goal-cycle` recipe (no timeout), then reads the typed `PerGoalDecisionRecord` via `read_verified` — **not** `extract_json_payload`. Any absent/malformed/mismatched record **surfaces `Err`** — no silent fallback. |
-| `RustyClawdBrain` | `rustyclawd.rs` | Renders a compact prompt, submits it through the `LlmSubmitter`, then parses the response via the canonical `PerGoalAction::from_recipe_envelope`. **Surfaces `Err`** on an unparseable envelope — no silent fallback. Out of scope for #4720 (does not run the `ooda-per-goal-cycle` recipe). |
+| `RustyClawdBrain` | `rustyclawd.rs` | Allocates a fresh per-cycle temp dir + `record_path`, renders a prompt instructing the agent to call `simard ooda record-decision` (via `submit_for_record`), then reads the typed `PerGoalDecisionRecord` via `read_verified`. Any absent/malformed/mismatched record **surfaces `Err`** — no silent fallback. Converted to the typed-record path in Group D (#4967). |
 | `DeterministicLifecycleBrain` | `fallback.rs` | Returns `Continue` unconditionally. This preserves the no-LLM behavior of the fallback: it **never** rolls the cycle and **never** reaps, so the fallback path cannot re-introduce the idle→reset loop. |
 | Test doubles (5 across 3 files) | `tests.rs`, `spawn.rs`, `recipe_brain.rs` | Return scripted `PerGoalAction`s for regression tests. |
 

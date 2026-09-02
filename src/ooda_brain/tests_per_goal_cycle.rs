@@ -218,17 +218,20 @@ fn per_goal_action_exposes_label_and_reason_accessors() {
 }
 
 // ---------------------------------------------------------------------------
-// PerGoalAction::from_recipe_envelope — the SINGLE canonical envelope parser
-// shared by every brain backend (RecipeBrain, RustyClawdBrain). These lock the
-// consolidated contract so the backends can never drift apart again.
+// PerGoalAction::from_choice_fields — the SINGLE canonical closed-enum
+// validation chokepoint shared by every typed-record path (the
+// `simard ooda record-decision` CLI tool, which gets the fields as argv, and
+// `read_verified`, which re-validates the typed record on read). These lock
+// the consolidated contract so the backends can never drift apart again.
+// (Group D, #4967: the old stdout-scraping `from_recipe_envelope` was removed.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn from_recipe_envelope_parses_a_banner_polluted_fenced_body() {
-    // The canonical parser routes through the shared sanitizing JSON chokepoint,
-    // so a fenced block wrapped in log banners still yields the action.
-    let raw = "recipe-runner banner\n```json\n{\"choice\":\"spawn\",\"reason\":\"dispatch next source\",\"task_hint\":\"read arxiv\"}\n```\ntrailing noise";
-    let parsed = PerGoalAction::from_recipe_envelope(raw).expect("must parse polluted envelope");
+fn from_choice_fields_builds_spawn_with_task_hint() {
+    // The tool passes choice/reason/task_hint straight through as argv; the
+    // chokepoint validates and builds the closed enum variant.
+    let parsed = PerGoalAction::from_choice_fields("spawn", "dispatch next source", "read arxiv")
+        .expect("must build spawn");
     assert_eq!(
         parsed,
         PerGoalAction::Spawn {
@@ -239,32 +242,32 @@ fn from_recipe_envelope_parses_a_banner_polluted_fenced_body() {
 }
 
 #[test]
-fn from_recipe_envelope_rejects_empty_or_whitespace_reason() {
-    // Mandatory-reason invariant enforced for EVERY backend (previously the
-    // rustyclawd path accepted an empty reason via direct enum deserialize).
+fn from_choice_fields_rejects_empty_or_whitespace_reason() {
+    // Mandatory-reason invariant enforced at the single gate for EVERY backend.
     assert!(
-        PerGoalAction::from_recipe_envelope(r#"{"choice":"continue","reason":""}"#).is_none(),
-        "an empty reason must not parse"
+        PerGoalAction::from_choice_fields("continue", "", "").is_none(),
+        "an empty reason must not build"
     );
     assert!(
-        PerGoalAction::from_recipe_envelope(r#"{"choice":"continue","reason":"   "}"#).is_none(),
-        "a whitespace-only reason must not parse"
-    );
-}
-
-#[test]
-fn from_recipe_envelope_rejects_unknown_choice() {
-    // A compromised prompt cannot smuggle a novel destructive action.
-    assert!(
-        PerGoalAction::from_recipe_envelope(r#"{"choice":"reap_now","reason":"x"}"#).is_none(),
-        "an unknown choice must not parse"
+        PerGoalAction::from_choice_fields("continue", "   ", "").is_none(),
+        "a whitespace-only reason must not build"
     );
 }
 
 #[test]
-fn from_recipe_envelope_matches_choice_case_insensitively_and_trims() {
-    let parsed = PerGoalAction::from_recipe_envelope(r#"{"choice":" Continue ","reason":" ok "}"#)
-        .expect("case-insensitive trimmed choice must parse");
+fn from_choice_fields_rejects_unknown_choice() {
+    // A compromised prompt / hostile CLI invocation cannot smuggle a novel
+    // destructive action past the closed-enum gate.
+    assert!(
+        PerGoalAction::from_choice_fields("reap_now", "x", "").is_none(),
+        "an unknown choice must not build"
+    );
+}
+
+#[test]
+fn from_choice_fields_matches_choice_case_insensitively_and_trims() {
+    let parsed = PerGoalAction::from_choice_fields(" Continue ", " ok ", "")
+        .expect("case-insensitive trimmed choice must build");
     assert_eq!(
         parsed,
         PerGoalAction::Continue {
@@ -274,11 +277,10 @@ fn from_recipe_envelope_matches_choice_case_insensitively_and_trims() {
 }
 
 #[test]
-fn from_recipe_envelope_bounds_a_runaway_reason() {
+fn from_choice_fields_bounds_a_runaway_reason() {
     // A runaway model reason is truncated so it cannot bloat logs/records.
     let huge = "z".repeat(5_000);
-    let raw = format!(r#"{{"choice":"wait","reason":"{huge}"}}"#);
-    let parsed = PerGoalAction::from_recipe_envelope(&raw).expect("must parse");
+    let parsed = PerGoalAction::from_choice_fields("wait", &huge, "").expect("must build");
     assert!(
         parsed.reason().chars().count() <= 501,
         "reason must be bounded, got {} chars",
@@ -287,16 +289,18 @@ fn from_recipe_envelope_bounds_a_runaway_reason() {
 }
 
 #[test]
-fn from_recipe_envelope_strips_ansi_and_control_from_reason_and_task_hint() {
+fn from_choice_fields_strips_ansi_and_control_from_reason_and_task_hint() {
     // SECURITY regression (mirror of #2751): `reason`/`task_hint` are
     // model-controlled and flow verbatim to operator stderr logs and the
-    // *persisted* BrainJudgmentRecord. A prompt-injected model must not be able
+    // *persisted* decision record. A prompt-injected model must not be able
     // to smuggle ANSI escapes / raw C0 control bytes into those sinks to spoof
     // or hide operator log lines and audit records.
-    let raw = "{\"choice\":\"spawn\",\
-        \"reason\":\"do \u{1b}[31mthing\u{1b}[0m now\u{7}\u{0}\",\
-        \"task_hint\":\"run \u{1b}[2Jclobber\u{1b}[H tests\"}";
-    let parsed = PerGoalAction::from_recipe_envelope(raw).expect("must parse");
+    let parsed = PerGoalAction::from_choice_fields(
+        "spawn",
+        "do \u{1b}[31mthing\u{1b}[0m now\u{7}\u{0}",
+        "run \u{1b}[2Jclobber\u{1b}[H tests",
+    )
+    .expect("must build");
     let reason = parsed.reason();
     assert!(
         !reason.contains('\u{1b}'),
