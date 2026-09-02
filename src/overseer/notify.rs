@@ -73,8 +73,12 @@ impl MergeNotification {
 /// of operator event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperatorNotification {
-    /// Event kind for the subject/logs: `"merge"` | `"deploy"` | `"goal-blocked"`
-    /// | `"workstream-gap"` | `"whisper"`.
+    /// Event kind for the subject/logs: `"merge"` | `"merge-reasoning-disabled"` |
+    /// `"deploy"` | `"deploy-starting"` | `"deploy-refused"` | `"goal-blocked"` |
+    /// `"workstream-gap"` | `"whisper"`. The suppressible subset
+    /// (`deploy-refused` | `goal-blocked` | `workstream-gap` |
+    /// `merge-reasoning-disabled` | `whisper`) is deduped by the notifier's
+    /// signature rail (#4579); the state-change kinds always dispatch.
     pub kind: &'static str,
     /// One-line headline (email subject core / Signal first line).
     pub headline: String,
@@ -152,6 +156,27 @@ impl OperatorNotification {
                 next = next,
             );
         }
+        // A STARTING self-deploy notice (#2590) is emitted before the
+        // process-replacing swap, so it is not yet "solved" work. Render it as
+        // an attempt notice rather than the merge/deploy completion template.
+        if self.kind == "deploy-starting" {
+            return format!(
+                "Notice — the Overseer is starting a self-deploy in {repo}.\n\nWhat is happening:\n  {problem}\n",
+                repo = self.repo,
+                problem = self.problem,
+            );
+        }
+        // A REFUSED/failed self-deploy attempt (#2590) is NOT "solved" work — it
+        // is an operator-visible notice that a guarded deploy did not proceed
+        // (gate refusal or a failed swap). Render an accurate heading rather than
+        // the merge/deploy "Problem solved:" template.
+        if self.kind == "deploy-refused" {
+            return format!(
+                "Notice — the Overseer refused/aborted a self-deploy in {repo}.\n\nWhat happened:\n  {problem}\n",
+                repo = self.repo,
+                problem = self.problem,
+            );
+        }
         let who = if self.autonomous {
             "The Overseer autonomously"
         } else {
@@ -179,6 +204,44 @@ impl OperatorNotification {
             kind: "deploy",
             headline: format!("deployed {}", short_commit(commit)),
             problem: format!("Deployed {commit} (previous {previous}); {gate_summary}"),
+            next_step: String::new(),
+            link: None,
+            repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build a pre-swap self-deploy notification (#2590). The guarded deployer
+    /// fires this after all refusal gates pass but BEFORE invoking the
+    /// process-replacing swap, so even a successful systemd/exec deploy that
+    /// never returns has notified the operator on both channels.
+    /// `target` is the merged head being deployed; `running` is the current
+    /// binary commit; `reason` summarizes the gate/canary state.
+    pub fn deploy_starting(target: &str, running: &str, repo: &str, reason: &str) -> Self {
+        Self {
+            kind: "deploy-starting",
+            headline: format!("self-deploy starting ({})", short_commit(target)),
+            problem: format!("Starting self-deploy to {target} (running {running}): {reason}"),
+            next_step: String::new(),
+            link: None,
+            repo: repo.to_string(),
+            autonomous: true,
+        }
+    }
+
+    /// Build a REFUSED/failed self-deploy notification (#2590). The guarded
+    /// deployer fires this on EVERY deploy attempt that does not swap — a gate
+    /// refusal (no-op / rollback / red-canary / crash-loop) or a failed binary
+    /// swap — so the operator is never blind to an aborted autonomous deploy.
+    /// `target` is the merged head the deploy aimed at; `running` is the current
+    /// binary's commit; `reason` is the refusal/failure detail.
+    pub fn deploy_refused(target: &str, running: &str, repo: &str, reason: &str) -> Self {
+        Self {
+            kind: "deploy-refused",
+            headline: format!("self-deploy refused ({})", short_commit(target)),
+            problem: format!(
+                "Refused/aborted self-deploy of {target} (running {running}): {reason}"
+            ),
             next_step: String::new(),
             link: None,
             repo: repo.to_string(),
@@ -334,6 +397,253 @@ fn short_commit(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
 }
 
+// ───────────────────── operator-notification signature dedup ────────────────
+//
+// #4579: while the running binary is behind origin/main the Overseer re-attempts
+// self-deploy every deploy cycle (~15-25 min); each red canary fires an
+// identical `deploy-refused` operator push, spamming Signal + email. This rail
+// suppresses IDENTICAL repeat pushes (keyed by a normalized failure signature)
+// while leaving the per-attempt WARN log + overseer status untouched — only the
+// operator PUSH is deduped, never the diagnostic signal.
+//
+// State is PROCESS-GLOBAL (a `static`), mirroring `global_deploy_throttle_allow`
+// in deploy_trigger.rs: `build_overseer` rebuilds the acting Overseer — and any
+// per-instance state — on EVERY tick, so a per-instance map would reset each
+// tick and never dedup. A static survives across ticks within the one long-lived
+// daemon process, which is exactly the window a persisting drift is re-observed
+// in. The map is ephemeral across process restarts (in-memory only) by design.
+
+/// Pure-failure kinds eligible for signature dedup. State-change kinds
+/// (`deploy`, `deploy-starting`, `merge`) are deliberately ABSENT so they always
+/// dispatch — a deploy start/success/recovery is genuine new signal and must
+/// never be suppressed. Keying off an explicit allowlist (not a blanket rule)
+/// keeps the `debug_assert!(dispatched())` paths in deploy.rs provably valid,
+/// since those use non-suppressible kinds.
+const SUPPRESSIBLE_KINDS: [&str; 5] = [
+    "deploy-refused",
+    "goal-blocked",
+    "workstream-gap",
+    "merge-reasoning-disabled",
+    "whisper",
+];
+
+/// Is this notification kind eligible for dedup? Non-suppressible kinds bypass
+/// the rail entirely and always dispatch (fail-open on any unknown kind).
+fn is_suppressible_kind(kind: &str) -> bool {
+    SUPPRESSIBLE_KINDS.contains(&kind)
+}
+
+/// Hard cap on distinct signatures retained, bounding memory under pathological
+/// high-variance failure text that survives normalization. Reached only after
+/// opportunistic staleness pruning fails to keep the map small.
+const NOTIFY_DEDUP_MAX_ENTRIES: usize = 1024;
+
+/// Default cooldown/digest window: a still-stuck identical failure re-dispatches
+/// at most once per hour rather than once per deploy cycle.
+const NOTIFY_DEDUP_DEFAULT_SECS: u64 = 3600;
+
+/// Process-global signature → last-dispatch-seconds map. `OnceLock<Mutex<..>>`
+/// so it initializes lazily and survives every per-tick Overseer rebuild.
+static NOTIFY_DEDUP: std::sync::OnceLock<Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::OnceLock::new();
+
+fn notify_dedup_map() -> &'static Mutex<std::collections::HashMap<String, u64>> {
+    NOTIFY_DEDUP.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Monotonic seconds-since-process-start. A process-global start `Instant`
+/// backs the production clock; tests inject synthetic `now_secs` via
+/// [`DualChannelNotifier::notify_at`] instead, so this is never on a test path.
+fn now_secs() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+}
+
+/// Resolve the cooldown window from `SIMARD_OVERSEER_NOTIFY_DEDUP_SECS`,
+/// defaulting to [`NOTIFY_DEDUP_DEFAULT_SECS`].
+fn notify_dedup_secs() -> u64 {
+    parse_dedup_secs(std::env::var("SIMARD_OVERSEER_NOTIFY_DEDUP_SECS").ok())
+}
+
+/// Defensive parse: trim, parse, fall back to the default on unset/empty/invalid
+/// so a fat-fingered env var can never crash the notifier or silently disable
+/// notifications. Mirrors the `deploy_min_interval_secs` idiom.
+fn parse_dedup_secs(raw: Option<String>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(NOTIFY_DEDUP_DEFAULT_SECS)
+}
+
+/// Should a push for `signature` proceed at `now_secs`? Returns `true` and
+/// RECORDS the dispatch when the signature is new or its cooldown has elapsed;
+/// returns `false` WITHOUT recording while an identical push is still inside the
+/// window. Recording only on dispatch yields "first immediate → suppress
+/// in-window → periodic digest per elapsed window".
+///
+/// Fail-OPEN: any lock poisoning is tolerated (`into_inner`) and never panics —
+/// a dedup fault must degrade to sending the notification, never to dropping it.
+fn dedup_allow(signature: &str, now_secs: u64, cooldown_secs: u64) -> bool {
+    let mut map = notify_dedup_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let allow = match map.get(signature) {
+        Some(&last) => now_secs.saturating_sub(last) >= cooldown_secs,
+        None => true,
+    };
+
+    if allow {
+        map.insert(signature.to_string(), now_secs);
+        prune_dedup_map(&mut map, now_secs, cooldown_secs);
+    }
+    allow
+}
+
+/// Bound map growth: drop entries whose window has long elapsed (older than 2x
+/// cooldown — they would dispatch anyway), then hard-cap by evicting the oldest.
+/// The just-inserted `now_secs` entry is the newest, so it is never evicted.
+fn prune_dedup_map(
+    map: &mut std::collections::HashMap<String, u64>,
+    now_secs: u64,
+    cooldown_secs: u64,
+) {
+    let horizon = cooldown_secs.saturating_mul(2);
+    map.retain(|_, last| now_secs.saturating_sub(*last) <= horizon);
+
+    if map.len() > NOTIFY_DEDUP_MAX_ENTRIES {
+        let mut by_age: Vec<(String, u64)> = map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        by_age.sort_by_key(|(_, ts)| *ts); // oldest first
+        let evict = map.len() - NOTIFY_DEDUP_MAX_ENTRIES;
+        for (k, _) in by_age.into_iter().take(evict) {
+            map.remove(&k);
+        }
+    }
+}
+
+/// Stable signature for dedup: `kind␟repo␟norm(headline)␟norm(problem)`, joined
+/// with U+001F (stripped from field text by [`normalize_volatile`] so a field
+/// value can never forge the separator). The failing gate / target-commit /
+/// running-commit discriminators live inside the normalized headline/problem;
+/// `next_step`/`link`/`autonomous` are excluded (not discriminating).
+fn notify_signature(n: &OperatorNotification) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        n.kind,
+        n.repo,
+        normalize_volatile(&n.headline),
+        normalize_volatile(&n.problem),
+    )
+}
+
+/// Strip volatile jitter so two pushes describing the SAME stuck failure hash
+/// equal, while genuine discriminators (commit shortcodes, gate names, test
+/// identifiers) survive. Hand-rolled (no regex → no ReDoS class): a char scan
+/// removes ANSI CSI escapes, Unicode braille spinner glyphs (U+2800–U+28FF), and
+/// control chars (incl. U+001F, the signature separator); then a token pass
+/// drops duration/timestamp tokens and collapses whitespace to single spaces.
+fn normalize_volatile(input: &str) -> String {
+    let mut stripped = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // ANSI/CSI escape: skip until a final byte in @A–Z[\]^_`a–z~.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for e in chars.by_ref() {
+                    if e.is_ascii_alphabetic() || e == '~' {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        // Unicode braille block: the spinner glyphs (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ …) live here.
+        if ('\u{2800}'..='\u{28ff}').contains(&c) {
+            continue;
+        }
+        // Control chars (including U+001F) become spaces so they can't forge the
+        // separator and so surrounding tokens still split cleanly.
+        if c.is_control() {
+            stripped.push(' ');
+            continue;
+        }
+        stripped.push(c);
+    }
+
+    stripped
+        .split_whitespace()
+        .filter(|tok| !is_volatile_token(tok))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A token that carries no failure identity — a duration (`12.3s`, `1200ms`,
+/// `5m`, `2h`) or a clock/ISO time (`12:04:07`, `…T21:51:43`).
+fn is_volatile_token(tok: &str) -> bool {
+    is_duration_token(tok) || is_time_token(tok)
+}
+
+fn is_duration_token(tok: &str) -> bool {
+    // Order matters: test "ms" before "s"/"m" so "1200ms" is not mis-split.
+    for unit in ["ms", "s", "m", "h"] {
+        if let Some(prefix) = tok.strip_suffix(unit) {
+            let has_digit = prefix.chars().any(|c| c.is_ascii_digit());
+            let only_num = prefix.chars().all(|c| c.is_ascii_digit() || c == '.');
+            if has_digit && only_num {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_time_token(tok: &str) -> bool {
+    // Take the time portion after any ISO 'T' separator, then require exactly
+    // 2–3 colon-separated all-digit fields (HH:MM or HH:MM:SS).
+    let time_part = tok.rsplit('T').next().unwrap_or(tok);
+    let fields: Vec<&str> = time_part.split(':').collect();
+    (2..=3).contains(&fields.len())
+        && fields
+            .iter()
+            .all(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Display-only short hash of a signature for suppression logs — never logs the
+/// raw headline/problem text, keeping the summary secret-safe like the existing
+/// per-channel summary.
+fn signature_hash(signature: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signature.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// TEST-ONLY: clear the process-global dedup map so a test that exercises it
+/// stays independent of ordering (mirrors `reset_global_deploy_throttle`).
+#[cfg(test)]
+fn reset_notify_dedup() {
+    notify_dedup_map()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+/// Serialises every test touching the shared dedup static, since `cargo test`
+/// runs in parallel threads (mirrors `DEPLOY_THROTTLE_TEST_LOCK`).
+#[cfg(test)]
+static NOTIFY_DEDUP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquire [`NOTIFY_DEDUP_TEST_LOCK`], tolerating poisoning from a panicking
+/// sibling test.
+#[cfg(test)]
+fn notify_dedup_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    NOTIFY_DEDUP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// The outcome of delivering to one channel. There is no "silently dropped"
 /// variant by construction — an unconfigured channel is [`Queued`], an error is
 /// [`Failed`], both of which are recorded and logged.
@@ -427,8 +737,51 @@ impl DualChannelNotifier {
 
     /// Fire every channel, recording each outcome. This is the single call the
     /// merge/deploy paths make; its `NotifyReport` proves the notification fired
-    /// on both channels.
+    /// on both channels. Suppressible-kind repeats are deduped by the #4579
+    /// signature rail (see [`notify_at`](DualChannelNotifier::notify_at)) using
+    /// the production monotonic clock and env-resolved cooldown.
     pub fn notify(&self, notification: &OperatorNotification) -> NotifyReport {
+        self.notify_at(notification, now_secs(), notify_dedup_secs())
+    }
+
+    /// Clock-injectable core of [`notify`](DualChannelNotifier::notify). Applies
+    /// the #4579 dedup gate — a suppressible-kind push whose normalized failure
+    /// signature is still inside `cooldown_secs` returns an EMPTY, undispatched
+    /// report (logged at INFO with `suppressed=true`) instead of hitting the
+    /// transport. State-change kinds and first/changed/digest signatures fall
+    /// through to fire every channel. `now_secs`/`cooldown_secs` are injected so
+    /// tests are deterministic (no sleeps, no wall-clock, no env races),
+    /// mirroring `global_deploy_throttle_allow`. Kept private (not part of the
+    /// public notifier API) — production always enters via [`notify`]; only the
+    /// in-file tests inject a synthetic clock.
+    fn notify_at(
+        &self,
+        notification: &OperatorNotification,
+        now_secs: u64,
+        cooldown_secs: u64,
+    ) -> NotifyReport {
+        if is_suppressible_kind(notification.kind) {
+            let signature = notify_signature(notification);
+            if !dedup_allow(&signature, now_secs, cooldown_secs) {
+                // Suppress ONLY the operator push. The caller's per-attempt WARN
+                // log and overseer status field are untouched — only this
+                // redundant notification is withheld. The log carries just the
+                // kind + a short hash, never the raw headline/problem, so no
+                // volatile or secret-adjacent text leaks.
+                tracing::info!(
+                    target: "overseer::notify",
+                    suppressed = true,
+                    kind = notification.kind,
+                    signature_hash = %signature_hash(&signature),
+                    cooldown_secs,
+                    "operator notification suppressed (identical failure within cooldown; WARN log + status stay per-attempt)"
+                );
+                return NotifyReport {
+                    per_channel: Vec::new(),
+                };
+            }
+        }
+
         let per_channel: Vec<(String, ChannelDelivery)> = self
             .channels
             .iter()
@@ -1334,6 +1687,23 @@ mod tests {
         assert!(body.contains("canary green"));
     }
 
+    #[test]
+    fn deploy_starting_notification_is_an_attempt_notice_not_success() {
+        let n = OperatorNotification::deploy_starting(
+            "abcdef1234567890",
+            "0011223344556677",
+            "rysweet/Simard",
+            "canary green (4/4 gates)",
+        );
+        assert_eq!(n.kind, "deploy-starting");
+        assert!(n.subject().contains("self-deploy starting"));
+        let body = n.plain_text();
+        assert!(body.contains("starting a self-deploy"));
+        assert!(body.contains("abcdef1234567890"));
+        assert!(body.contains("0011223344556677"));
+        assert!(!body.contains("Problem solved"));
+    }
+
     // ── security: email header / SMTP command injection (CWE-93) ─────────────
 
     #[test]
@@ -2227,5 +2597,428 @@ mod tests {
             report.all_sent(),
             "all_sent is true only when every channel delivered"
         );
+    }
+
+    // ── #4579: operator-notification signature dedup ─────────────────────────
+    //
+    // These tests pin the contract for the additive dedup/rate-limit rail added
+    // to the notifier so a still-stuck self-deploy stops spamming the operator
+    // with one identical "self-deploy refused …" notice per deploy cycle, while
+    // WARN logs + overseer status stay per-attempt (only the push is deduped).
+    //
+    // Time and cooldown are INJECTED (`notify_at(n, now_secs, cooldown_secs)`)
+    // mirroring `global_deploy_throttle_allow(now_secs, min_interval_secs)`, so
+    // every scenario is deterministic — no sleeps, no wall-clock, no env races.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// A channel that counts how many notifications actually reached the
+    /// transport. A suppressed notice must NOT increment this — proving the push
+    /// was withheld, not merely reported empty.
+    #[derive(Clone)]
+    struct CountingChannel {
+        name: String,
+        delivered: Arc<AtomicUsize>,
+    }
+    impl NotifyChannel for CountingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn deliver(&self, _n: &OperatorNotification) -> ChannelDelivery {
+            self.delivered.fetch_add(1, AtomicOrdering::SeqCst);
+            ChannelDelivery::Sent
+        }
+    }
+
+    /// Build a notifier over a single counting channel, returning the shared
+    /// delivery counter so a test can assert exactly how many pushes fired.
+    fn counting_notifier() -> (DualChannelNotifier, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let ch = CountingChannel {
+            name: "count".to_string(),
+            delivered: Arc::clone(&counter),
+        };
+        (DualChannelNotifier::new(vec![Box::new(ch)]), counter)
+    }
+
+    fn refused(target: &str, running: &str, reason: &str) -> OperatorNotification {
+        OperatorNotification::deploy_refused(target, running, "rysweet/Simard", reason)
+    }
+
+    const HOUR: u64 = 3600;
+
+    // (1) N identical deploy-refused notices within the cooldown → exactly ONE
+    // dispatched operator push. The other N-1 are suppressed (empty report,
+    // dispatched()==false) and never reach the transport.
+    #[test]
+    fn identical_deploy_refused_within_cooldown_dispatches_once() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let (notifier, counter) = counting_notifier();
+        let n = refused(
+            "abc1234def",
+            "0009999aaa",
+            "red canary (gate unit-test simard::overseer::deploy::red) Drop table",
+        );
+
+        let mut dispatched = 0usize;
+        for i in 0..6 {
+            // Six attempts spread across the deploy cycle (~15-25 min each) but
+            // all inside a single 60-min cooldown window.
+            let now = 10_000 + i * 300;
+            if notifier.notify_at(&n, now, HOUR).dispatched() {
+                dispatched += 1;
+            }
+        }
+
+        assert_eq!(
+            dispatched, 1,
+            "only the first of N identical refusals within cooldown dispatches"
+        );
+        assert_eq!(
+            counter.load(AtomicOrdering::SeqCst),
+            1,
+            "the transport received exactly one push; the rest were suppressed"
+        );
+
+        reset_notify_dedup();
+    }
+
+    // A suppressed notice returns an EMPTY report: dispatched()==false and no
+    // per-channel entries — the deploy-refused callers use `let _ =` so an empty
+    // report is safe, and no volatile text leaks to a channel.
+    #[test]
+    fn suppressed_notice_returns_empty_undispatched_report() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let (notifier, _counter) = counting_notifier();
+        let n = refused("aaaa111", "bbbb222", "red canary (gate unit-test x)");
+
+        let first = notifier.notify_at(&n, 1_000, HOUR);
+        assert!(first.dispatched(), "first distinct failure dispatches");
+
+        let second = notifier.notify_at(&n, 1_060, HOUR);
+        assert!(
+            !second.dispatched(),
+            "identical in-window failure is suppressed"
+        );
+        assert!(
+            second.per_channel.is_empty(),
+            "suppressed report carries no per-channel deliveries: {second:?}"
+        );
+
+        reset_notify_dedup();
+    }
+
+    // (2a) A CHANGED failure signature dispatches immediately — a different
+    // failing test / new target_commit is genuine new signal, never suppressed.
+    #[test]
+    fn changed_failure_signature_dispatches_immediately() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let (notifier, counter) = counting_notifier();
+
+        let first = refused("abc1234", "run9999", "red canary (gate unit-test alpha)");
+        assert!(notifier.notify_at(&first, 1_000, HOUR).dispatched());
+
+        // Same cooldown window, but a DIFFERENT failing gate → new signature.
+        let changed_gate = refused("abc1234", "run9999", "red canary (gate unit-test beta)");
+        assert!(
+            notifier.notify_at(&changed_gate, 1_100, HOUR).dispatched(),
+            "a different failing gate is new signal and must dispatch"
+        );
+
+        // Same cooldown window, but a DIFFERENT target_commit → new signature.
+        let changed_target = refused("zzz8888", "run9999", "red canary (gate unit-test alpha)");
+        assert!(
+            notifier
+                .notify_at(&changed_target, 1_200, HOUR)
+                .dispatched(),
+            "a new target_commit is new signal and must dispatch"
+        );
+
+        assert_eq!(
+            counter.load(AtomicOrdering::SeqCst),
+            3,
+            "three distinct signatures → three pushes"
+        );
+
+        reset_notify_dedup();
+    }
+
+    // (2b) State-change kinds are NEVER suppressed, even when fired repeatedly
+    // inside a cooldown window: deploy-starting, deploy (succeeded), merge.
+    #[test]
+    fn state_change_notices_are_never_suppressed() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let (notifier, counter) = counting_notifier();
+
+        let starting = OperatorNotification::deploy_starting(
+            "abc1234",
+            "run9999",
+            "rysweet/Simard",
+            "gates green",
+        );
+        let succeeded =
+            OperatorNotification::deploy("abc1234", "run9999", "rysweet/Simard", "canary green");
+        let merged = sample(); // kind == "merge"
+
+        // Fire each kind twice within the same window; all six must dispatch.
+        for now in [1_000u64, 1_050] {
+            assert!(
+                notifier.notify_at(&starting, now, HOUR).dispatched(),
+                "deploy-starting is a state change and must always dispatch"
+            );
+            assert!(
+                notifier.notify_at(&succeeded, now, HOUR).dispatched(),
+                "deploy (succeeded) is a state change and must always dispatch"
+            );
+            assert!(
+                notifier.notify_at(&merged, now, HOUR).dispatched(),
+                "merge is a state change and must always dispatch"
+            );
+        }
+
+        assert_eq!(
+            counter.load(AtomicOrdering::SeqCst),
+            6,
+            "state-change kinds bypass dedup entirely"
+        );
+
+        reset_notify_dedup();
+    }
+
+    // (3) After the cooldown elapses, a still-identical failure dispatches again
+    // as a periodic digest reminder — at most one per window, not one-per-attempt.
+    #[test]
+    fn identical_failure_redispatches_after_cooldown_elapses() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let (notifier, counter) = counting_notifier();
+        let n = refused("abc1234", "run9999", "red canary (gate unit-test gamma)");
+
+        // t=1000: first → dispatch.
+        assert!(notifier.notify_at(&n, 1_000, HOUR).dispatched());
+        // t=2800: still inside the 3600s window → suppressed.
+        assert!(!notifier.notify_at(&n, 2_800, HOUR).dispatched());
+        // t=4600 (>= 1000 + 3600): window elapsed → digest dispatch.
+        assert!(
+            notifier.notify_at(&n, 4_600, HOUR).dispatched(),
+            "a still-stuck failure re-dispatches once the cooldown elapses"
+        );
+        // t=5000: back inside the NEW window (opened at 4600) → suppressed again.
+        assert!(!notifier.notify_at(&n, 5_000, HOUR).dispatched());
+
+        assert_eq!(
+            counter.load(AtomicOrdering::SeqCst),
+            2,
+            "one push per elapsed cooldown window (digest cadence)"
+        );
+
+        reset_notify_dedup();
+    }
+
+    // (4) The dedup state is PROCESS-GLOBAL and survives the Overseer being
+    // rebuilt every tick: a fresh DualChannelNotifier each "tick" must still see
+    // the prior tick's dispatch and suppress the identical in-window repeat.
+    #[test]
+    fn dedup_state_survives_tick_rebuilds() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let n = refused("abc1234", "run9999", "red canary (gate unit-test delta)");
+        let shared = Arc::new(AtomicUsize::new(0));
+
+        let mut dispatched = 0usize;
+        for i in 0..4 {
+            // Simulate a tick: build a BRAND-NEW notifier instance (as
+            // build_overseer does every tick), sharing only the transport
+            // counter. Per-instance state would reset here; the static must not.
+            let notifier = DualChannelNotifier::new(vec![Box::new(CountingChannel {
+                name: "count".to_string(),
+                delivered: Arc::clone(&shared),
+            })]);
+            let now = 20_000 + i * 300; // all within one cooldown window
+            if notifier.notify_at(&n, now, HOUR).dispatched() {
+                dispatched += 1;
+            }
+        }
+
+        assert_eq!(
+            dispatched, 1,
+            "process-global dedup survives per-tick notifier rebuilds"
+        );
+        assert_eq!(
+            shared.load(AtomicOrdering::SeqCst),
+            1,
+            "only the first tick's push reached the transport"
+        );
+
+        reset_notify_dedup();
+    }
+
+    // ── normalization + signature ────────────────────────────────────────────
+
+    // Two red-canary details that differ ONLY by volatile spinner glyphs,
+    // whitespace runs, and durations must produce the SAME signature (so the
+    // spam is recognized as identical), while a different failing test must
+    // produce a DISTINCT signature (so real new signal is never merged away).
+    #[test]
+    fn normalization_collapses_volatile_but_preserves_discriminators() {
+        let _g = notify_dedup_test_guard();
+
+        let a = refused(
+            "abc1234",
+            "run9999",
+            "⠋ red canary   (gate unit-test simard::deploy::red)   after 12.3s Drop t",
+        );
+        let b = refused(
+            "abc1234",
+            "run9999",
+            "⠹ red canary (gate unit-test simard::deploy::red) after 4.8s Drop t",
+        );
+        assert_eq!(
+            notify_signature(&a),
+            notify_signature(&b),
+            "spinner/whitespace/duration jitter must not change the signature"
+        );
+
+        // A genuinely different failing test → different signature.
+        let c = refused(
+            "abc1234",
+            "run9999",
+            "⠋ red canary (gate unit-test simard::deploy::GREEN) after 3.1s Drop t",
+        );
+        assert_ne!(
+            notify_signature(&a),
+            notify_signature(&c),
+            "a different failing test is real new signal — signature must differ"
+        );
+    }
+
+    #[test]
+    fn normalize_volatile_strips_ansi_spinner_and_durations() {
+        let raw = "\x1b[31m⠸ gate\x1b[0m   failed  after 1200ms  at 12:04:07";
+        let norm = normalize_volatile(raw);
+        assert!(!norm.contains('\x1b'), "ANSI escapes stripped: {norm:?}");
+        assert!(
+            !norm.chars().any(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
+            "spinner glyphs stripped: {norm:?}"
+        );
+        assert!(!norm.contains("1200ms"), "durations stripped: {norm:?}");
+        assert!(!norm.contains("12:04:07"), "timestamps stripped: {norm:?}");
+        assert!(
+            norm.contains("gate"),
+            "discriminator token preserved: {norm:?}"
+        );
+        assert!(
+            norm.contains("failed"),
+            "discriminator token preserved: {norm:?}"
+        );
+        // Whitespace runs collapsed to single spaces, trimmed.
+        assert!(!norm.contains("  "), "whitespace runs collapsed: {norm:?}");
+        assert_eq!(norm, norm.trim(), "result is trimmed: {norm:?}");
+    }
+
+    #[test]
+    fn signature_separates_kind_and_repo() {
+        // Same headline/problem text but different repo → different signature.
+        let mut a = refused("abc1234", "run9999", "red canary (gate x)");
+        let mut b = a.clone();
+        a.repo = "rysweet/Simard".to_string();
+        b.repo = "rysweet/Other".to_string();
+        assert_ne!(
+            notify_signature(&a),
+            notify_signature(&b),
+            "repo participates in the signature"
+        );
+    }
+
+    // ── suppressible-kind allowlist ──────────────────────────────────────────
+
+    #[test]
+    fn suppressible_kinds_are_only_the_pure_failure_kinds() {
+        for k in [
+            "deploy-refused",
+            "goal-blocked",
+            "workstream-gap",
+            "merge-reasoning-disabled",
+            "whisper",
+        ] {
+            assert!(
+                is_suppressible_kind(k),
+                "{k} is a pure-failure kind and must be dedup-eligible"
+            );
+        }
+        for k in ["deploy", "deploy-starting", "merge", "unknown-kind"] {
+            assert!(
+                !is_suppressible_kind(k),
+                "{k} is a state-change/unknown kind and must bypass dedup"
+            );
+        }
+    }
+
+    // ── cooldown env resolution ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_dedup_secs_defaults_and_overrides() {
+        assert_eq!(parse_dedup_secs(None), 3600, "unset → 60-min default");
+        assert_eq!(
+            parse_dedup_secs(Some("900".to_string())),
+            900,
+            "valid override honored"
+        );
+        assert_eq!(
+            parse_dedup_secs(Some("  120  ".to_string())),
+            120,
+            "surrounding whitespace tolerated"
+        );
+        assert_eq!(
+            parse_dedup_secs(Some("garbage".to_string())),
+            3600,
+            "invalid value falls back to default"
+        );
+        assert_eq!(
+            parse_dedup_secs(Some(String::new())),
+            3600,
+            "empty value falls back to default"
+        );
+    }
+
+    // ── pure dedup core ──────────────────────────────────────────────────────
+
+    #[test]
+    fn dedup_allow_first_suppress_then_digest() {
+        let _g = notify_dedup_test_guard();
+        reset_notify_dedup();
+
+        let sig = "deploy-refused\u{1f}rysweet/Simard\u{1f}h\u{1f}p";
+        assert!(dedup_allow(sig, 100, HOUR), "first occurrence dispatches");
+        assert!(!dedup_allow(sig, 200, HOUR), "in-window repeat suppressed");
+        assert!(
+            !dedup_allow(sig, 3_600, HOUR),
+            "still in window (< 100+3600)"
+        );
+        assert!(dedup_allow(sig, 3_700, HOUR), "window elapsed → dispatch");
+        assert!(
+            !dedup_allow(sig, 3_800, HOUR),
+            "new window suppresses again"
+        );
+
+        // A distinct signature is independent.
+        let other = "deploy-refused\u{1f}rysweet/Simard\u{1f}h2\u{1f}p2";
+        assert!(
+            dedup_allow(other, 3_800, HOUR),
+            "distinct signature dispatches"
+        );
+
+        reset_notify_dedup();
     }
 }

@@ -60,6 +60,12 @@ fn run_command_inner(
     for key in CLEARED_GIT_ENV_VARS {
         command.env_remove(key);
     }
+    // Cap cargo parallelism to prevent OOM (issues #2199, #4778). Every other
+    // Simard-spawned cargo path applies this limit; run_command_inner was the
+    // single outlier, so cargo invocations here could ignore SIMARD_CARGO_JOBS.
+    if let Some((key, value)) = cargo_jobs_env(program) {
+        command.env(key, value);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| SimardError::ActionExecutionFailed {
@@ -133,6 +139,18 @@ fn run_command_inner(
     })
 }
 
+/// Pure decision seam for the cargo OOM guard (issues #2199, #4778).
+///
+/// Returns the `CARGO_BUILD_JOBS` env var (key + validated value from
+/// [`crate::cargo_jobs::cargo_jobs`]) to apply when the spawned program is
+/// `cargo`, and `None` for every other program so git invocations — the
+/// other consumer of `run_command_inner` — stay untouched. Kept pure so the
+/// invariant is unit-testable without spawning a process, matching how the
+/// sibling tmux spawn path is covered.
+fn cargo_jobs_env(program: &str) -> Option<(&'static str, String)> {
+    (program == "cargo").then(|| ("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs()))
+}
+
 pub(crate) fn trimmed_stdout(output: &CommandOutput) -> SimardResult<String> {
     let trimmed = output.stdout.trim();
     if trimmed.is_empty() {
@@ -161,4 +179,30 @@ pub(crate) fn parse_status_paths(stdout: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cargo_jobs_env;
+
+    #[test]
+    fn cargo_program_gets_build_jobs_cap() {
+        let applied = cargo_jobs_env("cargo");
+        assert_eq!(
+            applied,
+            Some(("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())),
+            "cargo invocations must carry the CARGO_BUILD_JOBS OOM guard (issues #2199, #4778)"
+        );
+    }
+
+    #[test]
+    fn non_cargo_programs_are_untouched() {
+        for program in ["git", "sh", "tmux", "rustc"] {
+            assert_eq!(
+                cargo_jobs_env(program),
+                None,
+                "{program} must not receive CARGO_BUILD_JOBS; only cargo is capped"
+            );
+        }
+    }
 }

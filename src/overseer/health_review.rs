@@ -4,10 +4,13 @@
 //! STEPS + PROMPTS — not a Rust "failure counter." This module is the only new
 //! Rust the feature needs, and it is deliberately thin:
 //!
-//! 1. [`HealthReviewer`] is the rail seam: one call returns the typed
-//!    [`Intervention`]s the recipe reasoned to (a `LaunchRecipe` for a systemic
-//!    fix, an `EscalateBlockedGoal` for a per-goal escalation), which the acting
-//!    Overseer gates and dispatches through its EXISTING capabilities.
+//! 1. [`HealthReviewer`] is the rail seam: one call returns a
+//!    [`HealthReviewOutcome`] — the typed [`Intervention`]s the recipe reasoned
+//!    to (a `LaunchRecipe` for a systemic fix, an `EscalateBlockedGoal` for a
+//!    per-goal escalation), plus the pass's one-line verdict `summary` — which
+//!    the acting Overseer gates + dispatches through its EXISTING capabilities
+//!    and surfaces on `ObservedState.health_review_status` (so a HEALTHY pass is
+//!    an observable "reviewed, nothing to do", never a silent no-op).
 //! 2. [`parse_health_review_output`] parses the recipe's plain-text DECISION
 //!    markers into those interventions — a mechanical rail, not judgment.
 //! 3. [`RecipeHealthReviewer`] invokes the `overseer-health-review` recipe
@@ -22,12 +25,32 @@
 //! observation and the remediation JUDGMENT live entirely in the recipe's agent
 //! step; the rail only schedules the tick and dispatches the typed decisions.
 //! See `docs/concepts/overseer-agentic-health-review.md`.
+//!
+//! ## Degraded-pass recovery: the shared escalation ladder
+//!
+//! A single agent pass can occasionally emit a truncated/malformed report that
+//! lacks the REQUIRED `HEALTH_REVIEW_COMPLETE` terminal marker. Rather than
+//! silently degrade that weak case to "no remediation" on the FIRST miss, the
+//! rail spends EXTRA compute only there: on a base parse-miss it drives a
+//! bounded escalation ladder — a schema-repair re-prompt, then a higher-effort
+//! tier — reusing the SAME composable primitives every other recipe-backed brain
+//! phase uses ([`build_phase_escalation_note`](crate::ooda_brain::build_phase_escalation_note),
+//! [`EscalationConfig`](crate::ooda_brain::EscalationConfig) with its shared
+//! `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` knob + hard cap, and
+//! [`LadderRung`](crate::ooda_brain::LadderRung)). The ladder is a bounded RETRY
+//! on a degraded parse — NOT a failure counter and NOT an N-identical-failure
+//! threshold; the health JUDGMENT still lives entirely in the recipe. It is
+//! fail-closed end to end: a base runner/infra fault still degrades with NO
+//! ladder (the base pass must succeed before it can be judged degraded), a
+//! rung's own invocation fault stops the ladder, and an exhausted ladder takes
+//! no remediation — never a fabricated launch or escalation.
 
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::error::{SimardError, SimardResult};
+use crate::ooda_brain::{EscalationConfig, LadderRung, build_phase_escalation_note};
 use crate::overseer::capabilities::RecipeBrief;
 use crate::overseer::intervention::Intervention;
 
@@ -73,18 +96,44 @@ pub trait HealthReviewRecipeRunner: Send + Sync {
     fn run(&self, request: &HealthReviewRequest) -> SimardResult<String>;
 }
 
+/// The observable OUTCOME of one health-review pass: the typed remediation
+/// [`Intervention`]s to gate + dispatch, PLUS the agent's one-line
+/// `HEALTH_REVIEW_COMPLETE=<summary>` verdict.
+///
+/// `summary` is `Some(_)` exactly when a pass produced an HONEST verdict — a
+/// clean base parse OR a rung the bounded escalation ladder recovered — so a
+/// HEALTHY pass (zero interventions) still leaves an OBSERVABLE trace instead of
+/// degrading to a silent no-op. It is `None` when the pass DEGRADED end to end
+/// (a base infra fault, a truncated report the ladder could not recover, a
+/// disabled ladder, or a rung fault), so the rail surfaces the weak pass LOUD
+/// and never fabricates a verdict. Mirrors how `merge_reasoning_status` surfaces
+/// WHY reasoning ran rather than leaving a silent gap (#4097).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HealthReviewOutcome {
+    /// Zero or more typed interventions to gate + dispatch. An empty vec with a
+    /// `Some` summary is a HEALTHY pass (nothing to do) — never fabricated work.
+    pub interventions: Vec<Intervention>,
+    /// The recipe's `HEALTH_REVIEW_COMPLETE=<summary>` verdict when the pass
+    /// parsed; `None` on a degraded pass (no honest verdict to surface).
+    pub summary: Option<String>,
+}
+
 /// The rail: run one health-review pass and return the typed remediation
-/// [`Intervention`]s the recipe reasoned to. Holds NO health state and reads no
-/// journal — the observation and the judgment both live inside the recipe.
+/// [`Intervention`]s the recipe reasoned to, plus its verdict summary. Holds NO
+/// health state and reads no journal — the observation and the judgment both
+/// live inside the recipe.
 pub trait HealthReviewer {
     /// Run one health-review pass.
     ///
-    /// - `Ok(vec)` — zero or more typed interventions (`LaunchRecipe` /
-    ///   `EscalateBlockedGoal`) to gate + dispatch. An empty vec is `HEALTHY`
-    ///   (nothing to do this tick) — never fabricate work.
+    /// - `Ok(outcome)` — the parsed interventions (`LaunchRecipe` /
+    ///   `EscalateBlockedGoal`) to gate + dispatch, plus the verdict `summary`.
+    ///   An empty `interventions` with `summary = Some(_)` is `HEALTHY` (nothing
+    ///   to do this tick) — never fabricated work; a `summary = None` marks a
+    ///   pass that degraded to no remediation.
     /// - `Err(_)` — reserved for a caller-visible fault; the default rail is
-    ///   fail-closed and prefers `Ok(vec![])` over fabricating a remediation.
-    fn review(&self) -> SimardResult<Vec<Intervention>>;
+    ///   fail-closed and prefers a degraded `Ok(_)` over fabricating a
+    ///   remediation.
+    fn review(&self) -> SimardResult<HealthReviewOutcome>;
 }
 
 // ─────────────────────────── decision markers ──────────────────────────────
@@ -132,9 +181,8 @@ pub struct HealthReviewReport {
 
 /// Parse the recipe's plain-text DECISION markers into typed interventions.
 ///
-/// This is the MECHANICAL rail (like `disk_health::parse_disk_health_text`): it
-/// moves the recipe's typed DECISIONS onto the capability path; it re-derives no
-/// judgment. Recognised markers, one per line:
+/// This is the MECHANICAL rail: it moves the recipe's typed DECISIONS onto the
+/// capability path; it re-derives no judgment. Recognised markers, one per line:
 ///
 /// ```text
 /// HEALTHY
@@ -152,12 +200,25 @@ pub struct HealthReviewReport {
 ///   fabricated intervention with missing text. Other decisions on the pass
 ///   still apply.
 /// - Unknown lines are ignored (a `HEALTHY` line carries no payload).
+/// - Benign markdown decoration an agent commonly wraps a decision line in — a
+///   leading `-`/`*`/`+`/`N.`/`N)` list bullet, a `>` blockquote caret, or
+///   surrounding inline-code backticks — is stripped BEFORE marker matching
+///   ([`strip_marker_decoration`]) so a well-formed decision is DISPATCHED
+///   rather than silently dropped. This never invents a marker: only the three
+///   distinctive markers are ever acted on, and a bulleted line of prose still
+///   matches nothing.
+/// - TRAILING text an agent appends after a decision's JSON object on the same
+///   line (e.g. `LAUNCH_RECIPE={…} — fixes the crash-loop`) is tolerated: the
+///   leading balanced object is extracted ([`extract_leading_json_object`])
+///   before serde parsing. This is the trailing-side sibling of decoration
+///   stripping; it stays fail-closed (an unbalanced/truncated object is still
+///   skipped, never half-parsed).
 pub fn parse_health_review_output(stdout: &str) -> Result<HealthReviewReport, String> {
     let mut interventions: Vec<Intervention> = Vec::new();
     let mut summary: Option<String> = None;
 
     for line in stdout.lines() {
-        let trimmed = line.trim();
+        let trimmed = strip_marker_decoration(line);
         if trimmed.is_empty() {
             continue;
         }
@@ -192,9 +253,129 @@ pub fn parse_health_review_output(stdout: &str) -> Result<HealthReviewReport, St
     })
 }
 
+/// Strip benign markdown decoration an agent commonly wraps a single decision
+/// line in, so a well-formed marker survives ordinary formatting instead of
+/// being silently dropped by the strict prefix match. Removes, in order:
+///
+/// 1. any leading `>` blockquote carets (each optionally space-padded),
+/// 2. a SINGLE leading list bullet — `-`/`*`/`+` or an ordered `N.`/`N)` — that
+///    is followed by whitespace (so a genuine `-`-prefixed marker is never
+///    mistaken as content, and prose bullets simply match no marker), and
+/// 3. one layer of surrounding inline-code backticks (```` ``` ```` or `` ` ``).
+///
+/// It is decoration-only and fail-closed: the returned slice is still matched
+/// against the three DISTINCTIVE markers, so this can never invent a decision —
+/// a decorated line of prose normalises to prose and matches nothing.
+fn strip_marker_decoration(line: &str) -> &str {
+    let mut s = line.trim();
+    // 1. Leading blockquote carets, possibly repeated (`> > `).
+    loop {
+        let t = s.trim_start();
+        match t.strip_prefix('>') {
+            Some(rest) => s = rest,
+            None => {
+                s = t;
+                break;
+            }
+        }
+    }
+    // 2. A single leading list bullet (unordered or ordered).
+    s = strip_leading_bullet(s.trim_start()).unwrap_or_else(|| s.trim_start());
+    // 3. One layer of surrounding inline-code backticks (triple before single).
+    s = s.trim();
+    for fence in ["```", "`"] {
+        if let Some(inner) = s.strip_prefix(fence) {
+            s = inner.strip_suffix(fence).unwrap_or(inner);
+            break;
+        }
+    }
+    s.trim()
+}
+
+/// Strip a SINGLE leading list bullet — unordered (`-`/`*`/`+`) or ordered
+/// (`N.`/`N)`) — plus its trailing whitespace, or `None` when `s` is not
+/// bulleted. The trailing-whitespace requirement keeps a bare marker (or prose)
+/// that merely starts with a bullet character from being mis-stripped.
+fn strip_leading_bullet(s: &str) -> Option<&str> {
+    for bullet in ['-', '*', '+'] {
+        if let Some(rest) = s.strip_prefix(bullet)
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(rest.trim_start());
+        }
+    }
+    let digit_len = s.chars().take_while(char::is_ascii_digit).count();
+    if digit_len > 0 {
+        let after = &s[digit_len..];
+        if let Some(rest) = after.strip_prefix('.').or_else(|| after.strip_prefix(')'))
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(rest.trim_start());
+        }
+    }
+    None
+}
+
+/// Extract the leading balanced JSON object from a decision-marker payload,
+/// tolerating any TRAILING text an agent appends after it on the same line —
+/// e.g. `{"task_description":"…"} — fixes the crash-loop` or a stray closing
+/// backtick decoration-stripping did not reach. Returns the `{…}` substring, or
+/// `None` when the payload does not START with a `{` or the braces never balance.
+///
+/// It is the trailing-side sibling of [`strip_marker_decoration`] (which removes
+/// LEADING framing): `serde_json::from_str` rejects a value with trailing
+/// non-whitespace, so without this a well-formed decision dressed with a trailing
+/// clause parses to nothing and a real remediation is dropped with no signal —
+/// exactly the silent-drop the decoration fix (#4514) closed on the leading side.
+///
+/// Fail-closed and mechanical: it never edits the JSON it returns (serde still
+/// validates it), and an UNBALANCED/truncated object yields `None` so the caller
+/// falls back to parsing the whole payload — which serde then rejects — rather
+/// than half-parsing a genuinely broken decision. JSON string contents (including
+/// escaped quotes) are respected so a `}` inside a string value never ends the
+/// object early. When several objects are concatenated it returns the FIRST,
+/// which the caller validates like any single decision.
+fn extract_leading_json_object(payload: &str) -> Option<&str> {
+    let s = payload.trim_start();
+    if !s.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[..i + c.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Parse one `LAUNCH_RECIPE=` JSON payload into an [`Intervention::LaunchRecipe`],
 /// or `None` (logged) when it is malformed or its `task_description` is empty.
-fn parse_launch_decision(json: &str) -> Option<Intervention> {
+/// Trailing text after the JSON object is tolerated via
+/// [`extract_leading_json_object`]; a payload with no balanced object falls
+/// through to the raw string, which serde then rejects (skipped fail-closed).
+fn parse_launch_decision(payload: &str) -> Option<Intervention> {
+    let json = extract_leading_json_object(payload).unwrap_or(payload);
     let decision: LaunchDecision = match serde_json::from_str(json) {
         Ok(d) => d,
         Err(e) => {
@@ -232,8 +413,10 @@ fn parse_launch_decision(json: &str) -> Option<Intervention> {
 /// [`Intervention::EscalateBlockedGoal`], or `None` (logged) when it is
 /// malformed or a required plain-English field is empty. An escalation with an
 /// empty `goal_id`/`problem`/`next_step` would surface a meaningless message to
-/// the operator, so it is dropped fail-closed.
-fn parse_escalate_decision(json: &str) -> Option<Intervention> {
+/// the operator, so it is dropped fail-closed. Trailing text after the JSON
+/// object is tolerated via [`extract_leading_json_object`].
+fn parse_escalate_decision(payload: &str) -> Option<Intervention> {
+    let json = extract_leading_json_object(payload).unwrap_or(payload);
     let decision: EscalateDecision = match serde_json::from_str(json) {
         Ok(d) => d,
         Err(e) => {
@@ -280,46 +463,172 @@ pub struct RecipeHealthReviewer<R: HealthReviewRecipeRunner> {
     service_unit: String,
     state_root: String,
     repo_path: String,
+    /// Bound on the degraded-pass escalation ladder. Reuses the SHARED brain
+    /// ladder config (`SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS`, hard-capped);
+    /// `max_escalations == 0` disables the ladder (byte-identical to a single
+    /// base pass).
+    escalation: EscalationConfig,
 }
 
 impl<R: HealthReviewRecipeRunner> RecipeHealthReviewer<R> {
     /// Build the rail over a concrete [`HealthReviewRecipeRunner`], pinning the
-    /// bounded context vars the recipe substitutes.
+    /// bounded context vars the recipe substitutes. The degraded-pass escalation
+    /// ladder is bounded by the shared [`EscalationConfig::from_env`] (the same
+    /// `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` knob every brain phase reads).
     pub fn new(runner: R, service_unit: String, state_root: String, repo_path: String) -> Self {
         Self {
             runner,
             service_unit,
             state_root,
             repo_path,
+            escalation: EscalationConfig::from_env(),
         }
+    }
+
+    /// Override the escalation-ladder bound (used by tests to drive the ladder
+    /// deterministically without env mutation).
+    #[cfg(test)]
+    pub fn with_escalation_config(mut self, escalation: EscalationConfig) -> Self {
+        self.escalation = escalation;
+        self
     }
 
     /// Borrow the underlying runner (used by tests to inspect the seam).
     pub fn runner(&self) -> &R {
         &self.runner
     }
-}
 
-impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
-    fn review(&self) -> SimardResult<Vec<Intervention>> {
+    /// Invoke the recipe once for a ladder rung with the given `escalation_note`
+    /// (empty on the base pass). All context vars stay bounded — the recipe reads
+    /// the unbounded journal/status/goal-list ITSELF.
+    fn run_pass(&self, escalation_note: &str) -> SimardResult<String> {
         let request = HealthReviewRequest {
             service_unit: self.service_unit.clone(),
             state_root: self.state_root.clone(),
             repo_path: self.repo_path.clone(),
-            escalation_note: String::new(),
+            escalation_note: escalation_note.to_string(),
         };
+        self.runner.run(&request)
+    }
 
-        let output = match self.runner.run(&request) {
+    /// Drive the bounded escalation ladder after a BASE parse-miss (a degraded
+    /// pass missing the required terminal marker). Reuses the shared
+    /// [`build_phase_escalation_note`] / [`EscalationConfig`] / [`LadderRung`]
+    /// primitives — a schema-repair re-prompt, then a higher-effort tier — and
+    /// returns the recovered [`HealthReviewOutcome`] (interventions + verdict
+    /// summary), or a DEGRADED outcome (`summary = None`, no interventions) when
+    /// the ladder is disabled, a rung's own invocation faults, or every rung is
+    /// exhausted. Never fabricates work and never fabricates a verdict.
+    fn escalate_after_parse_miss(
+        &self,
+        base_output: &str,
+        base_reason: &str,
+    ) -> SimardResult<HealthReviewOutcome> {
+        let max = self.escalation.max_escalations;
+        if max == 0 {
+            tracing::warn!(
+                target: "overseer::health_review",
+                reason = %base_reason,
+                "health-review: degraded base pass and escalation ladder disabled; taking no remediation (fabricating nothing)"
+            );
+            return Ok(HealthReviewOutcome::default());
+        }
+
+        // Feed each rung the latest malformed output so the schema-repair note
+        // quotes what actually came back.
+        let mut prior = base_output.to_string();
+        for rung_idx in 1..=max {
+            let rung = if rung_idx == 1 {
+                LadderRung::SchemaRepair
+            } else {
+                LadderRung::Escalate
+            };
+            let note = build_health_review_escalation_note(rung, &prior);
+            tracing::warn!(
+                target: "overseer::health_review",
+                rung = ?rung,
+                attempt = rung_idx + 1,
+                reason = %base_reason,
+                "health-review: degraded pass → escalating (bounded retry ladder)"
+            );
+            match self.run_pass(&note) {
+                Err(e) => {
+                    // A rung's own invocation faulted — stop the ladder and
+                    // degrade to no remediation (never fabricate on a fault).
+                    tracing::warn!(
+                        target: "overseer::health_review",
+                        rung = ?rung,
+                        error = %e,
+                        "health-review: escalation rung failed to invoke; stopping ladder, taking no remediation"
+                    );
+                    return Ok(HealthReviewOutcome::default());
+                }
+                Ok(output) => match parse_health_review_output(&output) {
+                    Ok(report) => {
+                        tracing::info!(
+                            target: "overseer::health_review",
+                            rung = ?rung,
+                            attempt = rung_idx + 1,
+                            decisions = report.interventions.len(),
+                            summary = %report.summary,
+                            "health-review: RECOVERED a degraded pass via the escalation ladder"
+                        );
+                        return Ok(HealthReviewOutcome {
+                            interventions: report.interventions,
+                            summary: Some(report.summary),
+                        });
+                    }
+                    // Still degraded — carry the latest output into the next rung.
+                    Err(_) => prior = output,
+                },
+            }
+        }
+
+        tracing::warn!(
+            target: "overseer::health_review",
+            attempts = max + 1,
+            reason = %base_reason,
+            "health-review: escalation ladder exhausted with no parseable pass; taking no remediation (fabricating nothing)"
+        );
+        Ok(HealthReviewOutcome::default())
+    }
+}
+
+/// Build the health-review `escalation_note` for a ladder rung, reminding the
+/// agent of the REQUIRED terminal-marker contract (the reason a pass degrades).
+/// Empty on [`LadderRung::Base`] so the base pass is byte-identical to a plain
+/// single invocation.
+fn build_health_review_escalation_note(rung: LadderRung, prior_output: &str) -> String {
+    build_phase_escalation_note(
+        rung,
+        prior_output,
+        "Re-run the health review and emit the typed DECISION markers as PLAIN TEXT \
+         (no code fences), then END with EXACTLY one non-empty terminal line \
+         `HEALTH_REVIEW_COMPLETE=<one-line summary>`. If nothing is wrong, emit `HEALTHY` \
+         then that terminal marker.",
+        "Re-read the journal / `simard status` / `simard goal list` carefully BEFORE deciding, \
+         then emit the decision markers followed by the required HEALTH_REVIEW_COMPLETE terminal line.",
+    )
+}
+
+impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
+    fn review(&self) -> SimardResult<HealthReviewOutcome> {
+        // Base pass — empty escalation note (byte-identical to pre-ladder).
+        let output = match self.run_pass("") {
             Ok(output) => output,
             Err(e) => {
-                // Fail-closed: a recipe/infra fault degrades to "no remediation",
-                // logged. It never aborts the tick and never fabricates work.
+                // Fail-closed: a base recipe/infra fault degrades to "no
+                // remediation", logged. It never aborts the tick, never
+                // fabricates work, and does NOT enter the ladder — the base pass
+                // must succeed before it can be judged merely degraded. The
+                // outcome carries NO verdict summary so the rail surfaces the
+                // degraded pass LOUD instead of a silent no-op.
                 tracing::warn!(
                     target: "overseer::health_review",
                     error = %e,
                     "health-review: recipe run failed; degrading to no remediation (fabricating nothing)"
                 );
-                return Ok(Vec::new());
+                return Ok(HealthReviewOutcome::default());
             }
         };
 
@@ -331,16 +640,16 @@ impl<R: HealthReviewRecipeRunner> HealthReviewer for RecipeHealthReviewer<R> {
                     summary = %report.summary,
                     "health-review pass parsed"
                 );
-                Ok(report.interventions)
+                Ok(HealthReviewOutcome {
+                    interventions: report.interventions,
+                    summary: Some(report.summary),
+                })
             }
             Err(reason) => {
-                // A pass missing its terminal marker is degraded, not actionable.
-                tracing::warn!(
-                    target: "overseer::health_review",
-                    reason = %reason,
-                    "health-review: degraded recipe output; taking no remediation (fabricating nothing)"
-                );
-                Ok(Vec::new())
+                // A degraded base pass (missing terminal marker): spend extra
+                // compute ONLY on this weak case via the bounded escalation
+                // ladder before giving up — never a silent degrade-on-first-miss.
+                self.escalate_after_parse_miss(&output, &reason)
             }
         }
     }
@@ -637,6 +946,203 @@ mod tests {
         assert_eq!(report.summary, "healthy");
     }
 
+    #[test]
+    fn parse_tolerates_bulleted_decision_lines() {
+        // Agents very commonly present their decisions as a markdown list. The
+        // strict prefix match used to DROP these silently, losing remediation on
+        // the critical self-heal path while still parsing "successfully".
+        let out = concat!(
+            r#"- LAUNCH_RECIPE={"task_description":"fix actor-binding crash-loop (286x)","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n",
+            r#"* ESCALATE_GOAL={"goal_id":"g-9","problem":"The done-gate cannot be measured.","next_step":"Pick a measurable target.","why":"unmeasurable done-gate","reason":"health-review:per-goal","link":null}"#,
+            "\n",
+            r#"1. LAUNCH_RECIPE={"task_description":"second systemic sweep on shared parse path","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n- HEALTH_REVIEW_COMPLETE=2 launched, 1 escalated\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 3);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert!(matches!(
+            report.interventions[1],
+            Intervention::EscalateBlockedGoal { .. }
+        ));
+        assert!(matches!(
+            report.interventions[2],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(report.summary, "2 launched, 1 escalated");
+    }
+
+    #[test]
+    fn parse_tolerates_blockquote_and_inline_code_wrapping() {
+        let out = concat!(
+            "> ",
+            r#"LAUNCH_RECIPE={"task_description":"fix crash-loop root cause","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n`HEALTH_REVIEW_COMPLETE=1 systemic launch`\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(report.summary, "1 systemic launch");
+    }
+
+    #[test]
+    fn parse_decoration_never_fabricates_from_bulleted_prose() {
+        // A bulleted line of ordinary prose must normalise to prose and match no
+        // marker — decoration-stripping is fail-closed, never marker-inventing.
+        let out = concat!(
+            "- The agent observed a crash-loop and reasoned about it.\n",
+            "> LAUNCH the fix soon (prose, not a marker).\n",
+            "HEALTH_REVIEW_COMPLETE=healthy\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert!(report.interventions.is_empty());
+        assert_eq!(report.summary, "healthy");
+    }
+
+    #[test]
+    fn strip_marker_decoration_is_identity_on_plain_lines() {
+        assert_eq!(strip_marker_decoration("HEALTHY"), "HEALTHY");
+        assert_eq!(
+            strip_marker_decoration("  HEALTH_REVIEW_COMPLETE=ok  "),
+            "HEALTH_REVIEW_COMPLETE=ok"
+        );
+        // A bullet char with no trailing whitespace is NOT a list bullet.
+        assert_eq!(strip_marker_decoration("-notabullet"), "-notabullet");
+    }
+
+    // ── trailing-text tolerance (the trailing-side sibling of decoration) ──
+
+    #[test]
+    fn parse_tolerates_trailing_text_after_launch_json() {
+        // Agents routinely append a short justification clause after the JSON.
+        // serde rejects trailing non-whitespace, so without extraction this
+        // well-formed systemic launch would be DROPPED and the crash-loop would
+        // go un-remediated with no signal (the terminal marker still parses).
+        let out = concat!(
+            r#"LAUNCH_RECIPE={"task_description":"fix actor-binding crash-loop (286x)","target_repo":"rysweet/Simard","sequence_group":null} — this addresses the systemic root cause"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 systemic launch\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        match &report.interventions[0] {
+            Intervention::LaunchRecipe { brief } => {
+                assert!(brief.task_description.contains("actor-binding"));
+                assert!(
+                    !brief.task_description.contains("addresses the systemic"),
+                    "the trailing clause must NOT leak into the parsed brief"
+                );
+            }
+            other => panic!("expected LaunchRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tolerates_trailing_text_after_escalate_json() {
+        let out = concat!(
+            r#"ESCALATE_GOAL={"goal_id":"g-42","problem":"The done-gate cannot be measured.","next_step":"Pick a measurable target.","why":"unmeasurable done-gate","reason":"health-review:per-goal","link":null}  (needs a human decision)"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 goal escalated\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        match &report.interventions[0] {
+            Intervention::EscalateBlockedGoal {
+                goal_id, next_step, ..
+            } => {
+                assert_eq!(goal_id, "g-42");
+                assert_eq!(
+                    next_step, "Pick a measurable target.",
+                    "the trailing clause must NOT leak into the operator-facing next_step"
+                );
+            }
+            other => panic!("expected EscalateBlockedGoal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tolerates_leading_decoration_and_trailing_text_together() {
+        // The two robustness rails compose: a bulleted decision line with a
+        // trailing justification clause is still dispatched.
+        let out = concat!(
+            r#"- LAUNCH_RECIPE={"task_description":"bound the parse-failure spike"} because it recurs across goals"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_trailing_text_never_ends_json_early_inside_a_string() {
+        // A `}` inside a JSON string value must NOT be mistaken for the object's
+        // close, or the brief would be truncated mid-value.
+        let out = concat!(
+            r#"LAUNCH_RECIPE={"task_description":"fix the `foo() -> Result<T, E>}` mis-binding"} trailing note"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        match &report.interventions[0] {
+            Intervention::LaunchRecipe { brief } => assert!(
+                brief.task_description.ends_with("mis-binding"),
+                "the whole quoted value (incl. its inner braces) is preserved"
+            ),
+            other => panic!("expected LaunchRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_still_skips_unbalanced_truncated_json_fail_closed() {
+        // An unbalanced object must NOT be half-parsed: extraction returns None,
+        // the raw payload is handed to serde, and serde rejects it → skipped.
+        let out = concat!(
+            r#"LAUNCH_RECIPE={"task_description":"truncated pass"#,
+            "\nHEALTH_REVIEW_COMPLETE=nothing actionable\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert!(
+            report.interventions.is_empty(),
+            "a truncated/unbalanced decision is dropped fail-closed, never half-parsed"
+        );
+    }
+
+    #[test]
+    fn extract_leading_json_object_basics() {
+        // Exact object, trailing text, brace-in-string, non-object, unbalanced.
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":1}"#),
+            Some(r#"{"a":1}"#)
+        );
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":1} tail"#),
+            Some(r#"{"a":1}"#)
+        );
+        assert_eq!(
+            extract_leading_json_object(r#"  {"a":{"b":2}} x"#),
+            Some(r#"{"a":{"b":2}}"#)
+        );
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":"}"} x"#),
+            Some(r#"{"a":"}"}"#)
+        );
+        assert_eq!(extract_leading_json_object("not an object"), None);
+        assert_eq!(extract_leading_json_object(r#"{"a":1"#), None);
+        // A concatenation returns the FIRST balanced object; the caller validates.
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":1}{"b":2}"#),
+            Some(r#"{"a":1}"#)
+        );
+    }
+
     // ── reviewer over the injectable seam ─────────────────────────────────
 
     enum Scripted {
@@ -687,6 +1193,9 @@ mod tests {
             "/tmp/state".to_string(),
             "/tmp/repo".to_string(),
         )
+        // Pin the ladder bound so tests are hermetic against the ambient
+        // SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS env var.
+        .with_escalation_config(EscalationConfig { max_escalations: 2 })
     }
 
     #[test]
@@ -708,30 +1217,306 @@ mod tests {
             "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
         );
         let r = reviewer(FakeRunner::ok(out));
-        let ivs = r.review().expect("review ok");
-        assert_eq!(ivs.len(), 1);
-        assert!(matches!(ivs[0], Intervention::LaunchRecipe { .. }));
+        let out = r.review().expect("review ok");
+        assert_eq!(out.interventions.len(), 1);
+        assert!(matches!(
+            out.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(
+            out.summary.as_deref(),
+            Some("1 launch"),
+            "a parsed pass surfaces the HEALTH_REVIEW_COMPLETE verdict"
+        );
     }
 
     #[test]
     fn review_degrades_to_empty_on_runner_error() {
         let r = reviewer(FakeRunner::err("boom"));
-        let ivs = r
+        let out = r
             .review()
             .expect("review must not surface the fault as Err");
-        assert!(ivs.is_empty(), "a runner fault fabricates no remediation");
+        assert!(
+            out.interventions.is_empty(),
+            "a runner fault fabricates no remediation"
+        );
+        assert!(
+            out.summary.is_none(),
+            "a base runner fault surfaces NO verdict (degraded, not a silent healthy)"
+        );
     }
 
     #[test]
     fn review_degrades_to_empty_on_missing_terminal_marker() {
-        // Recipe output without the terminal marker => degraded => no action.
+        // Recipe output without the terminal marker => degraded. The rail now
+        // drives the bounded escalation ladder; when every rung stays degraded
+        // (FakeRunner replays the same output) it exhausts and takes no action.
         let r = reviewer(FakeRunner::ok(
             "LAUNCH_RECIPE={\"task_description\":\"x\"}\n",
         ));
-        let ivs = r.review().expect("review ok");
+        let out = r.review().expect("review ok");
         assert!(
-            ivs.is_empty(),
+            out.interventions.is_empty(),
             "a degraded pass (no terminal marker) takes no remediation"
+        );
+        assert!(
+            out.summary.is_none(),
+            "an exhausted degraded pass surfaces NO verdict"
+        );
+        // Base pass + 2 escalation rungs (the pinned max_escalations).
+        assert_eq!(
+            r.runner().call_count(),
+            3,
+            "a degraded base pass drives the bounded escalation ladder"
+        );
+    }
+
+    // ── escalation ladder over a sequence-aware seam ──────────────────────
+
+    /// A [`HealthReviewRecipeRunner`] that replays a fixed SEQUENCE of scripted
+    /// outcomes (one per invocation) and records every request, so the bounded
+    /// escalation ladder can be exercised rung by rung.
+    struct SeqRunner {
+        scripted: Mutex<std::collections::VecDeque<Scripted>>,
+        calls: Mutex<Vec<HealthReviewRequest>>,
+    }
+
+    impl SeqRunner {
+        fn new(scripted: Vec<Scripted>) -> Self {
+            Self {
+                scripted: Mutex::new(scripted.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+        fn note_at(&self, idx: usize) -> String {
+            self.calls.lock().unwrap()[idx].escalation_note.clone()
+        }
+    }
+
+    impl HealthReviewRecipeRunner for SeqRunner {
+        fn run(&self, request: &HealthReviewRequest) -> SimardResult<String> {
+            self.calls.lock().unwrap().push(request.clone());
+            match self
+                .scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("SeqRunner: more invocations than scripted outcomes")
+            {
+                Scripted::Ok(o) => Ok(o),
+                Scripted::Err(r) => Err(SimardError::AdapterInvocationFailed {
+                    base_type: HEALTH_REVIEW_ADAPTER_TAG.to_string(),
+                    reason: r,
+                }),
+            }
+        }
+    }
+
+    fn seq_reviewer(runner: SeqRunner, max_escalations: u32) -> RecipeHealthReviewer<SeqRunner> {
+        RecipeHealthReviewer::new(
+            runner,
+            "simard-ooda.service".to_string(),
+            "/tmp/state".to_string(),
+            "/tmp/repo".to_string(),
+        )
+        .with_escalation_config(EscalationConfig { max_escalations })
+    }
+
+    const DEGRADED: &str = "LAUNCH_RECIPE={\"task_description\":\"x\"}\n"; // no terminal marker
+    const RECOVERED: &str = concat!(
+        r#"LAUNCH_RECIPE={"task_description":"fix systemic crash-loop"}"#,
+        "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
+    );
+
+    #[test]
+    fn review_recovers_on_the_schema_repair_rung() {
+        // Base degraded, first (schema-repair) rung recovers a valid pass.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(RECOVERED.to_string()),
+            ]),
+            2,
+        );
+        let out = r.review().expect("review ok");
+        assert_eq!(
+            out.interventions.len(),
+            1,
+            "the recovered rung's interventions are used"
+        );
+        assert!(matches!(
+            out.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(
+            out.summary.as_deref(),
+            Some("1 launch"),
+            "a ladder-recovered rung surfaces its verdict summary"
+        );
+        assert_eq!(r.runner().call_count(), 2, "base + one recovery rung");
+        // The base pass carries no note; the repair rung carries a schema-repair
+        // note that names the required terminal-marker contract.
+        assert_eq!(r.runner().note_at(0), "");
+        let repair = r.runner().note_at(1);
+        assert!(
+            repair.contains("SCHEMA REPAIR") && repair.contains("HEALTH_REVIEW_COMPLETE"),
+            "the repair note reminds the agent of the terminal-marker contract: {repair}"
+        );
+    }
+
+    #[test]
+    fn review_recovers_on_the_high_effort_rung() {
+        // Base + schema-repair both degraded; the final high-effort rung recovers.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(RECOVERED.to_string()),
+            ]),
+            2,
+        );
+        let out = r.review().expect("review ok");
+        assert_eq!(out.interventions.len(), 1);
+        assert!(
+            out.summary.is_some(),
+            "the high-effort rung recovered a verdict"
+        );
+        assert_eq!(r.runner().call_count(), 3, "base + two rungs");
+        let high = r.runner().note_at(2);
+        assert!(
+            high.contains("HIGH-EFFORT"),
+            "the final rung escalates to the higher-effort tier: {high}"
+        );
+    }
+
+    #[test]
+    fn review_exhausts_ladder_and_takes_no_remediation() {
+        // Every rung stays degraded → exhausted → no remediation, no fabrication.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Ok(DEGRADED.to_string()),
+            ]),
+            2,
+        );
+        let out = r.review().expect("review ok");
+        assert!(
+            out.interventions.is_empty(),
+            "an exhausted ladder fabricates nothing"
+        );
+        assert!(
+            out.summary.is_none(),
+            "an exhausted ladder surfaces no verdict"
+        );
+        assert_eq!(r.runner().call_count(), 3, "base + two exhausted rungs");
+    }
+
+    #[test]
+    fn review_disabled_ladder_makes_no_retry() {
+        // max_escalations == 0 disables the ladder: a degraded base pass degrades
+        // immediately (byte-identical to the pre-ladder single-pass behaviour).
+        let r = seq_reviewer(SeqRunner::new(vec![Scripted::Ok(DEGRADED.to_string())]), 0);
+        let out = r.review().expect("review ok");
+        assert!(out.interventions.is_empty());
+        assert!(
+            out.summary.is_none(),
+            "a disabled ladder surfaces no verdict"
+        );
+        assert_eq!(
+            r.runner().call_count(),
+            1,
+            "a disabled ladder never retries"
+        );
+    }
+
+    #[test]
+    fn review_stops_ladder_when_a_rung_faults() {
+        // Base degraded, then the schema-repair rung's OWN invocation faults:
+        // stop the ladder fail-closed (never fabricate on a fault), no further rung.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![
+                Scripted::Ok(DEGRADED.to_string()),
+                Scripted::Err("rung spawn failed".to_string()),
+            ]),
+            2,
+        );
+        let out = r.review().expect("review ok");
+        assert!(
+            out.interventions.is_empty(),
+            "a rung fault fabricates no remediation"
+        );
+        assert!(out.summary.is_none(), "a rung fault surfaces no verdict");
+        assert_eq!(
+            r.runner().call_count(),
+            2,
+            "the ladder stops at the faulting rung (no high-effort rung)"
+        );
+    }
+
+    #[test]
+    fn review_healthy_base_never_enters_the_ladder() {
+        // A clean base pass returns immediately — no escalation invocation.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![Scripted::Ok(
+                "HEALTHY\nHEALTH_REVIEW_COMPLETE=healthy\n".to_string(),
+            )]),
+            2,
+        );
+        let out = r.review().expect("review ok");
+        assert!(out.interventions.is_empty());
+        assert_eq!(
+            out.summary.as_deref(),
+            Some("healthy"),
+            "a clean HEALTHY base pass surfaces its verdict summary"
+        );
+        assert_eq!(
+            r.runner().call_count(),
+            1,
+            "a healthy base pass never retries"
+        );
+    }
+
+    #[test]
+    fn review_base_runner_error_never_enters_the_ladder() {
+        // A BASE infra/runner fault degrades with NO ladder — the base pass must
+        // succeed before it can be judged merely degraded.
+        let r = seq_reviewer(
+            SeqRunner::new(vec![Scripted::Err("base spawn failed".to_string())]),
+            2,
+        );
+        let out = r
+            .review()
+            .expect("review must not surface the fault as Err");
+        assert!(out.interventions.is_empty());
+        assert!(
+            out.summary.is_none(),
+            "a base runner fault surfaces no verdict (degraded, never a silent healthy)"
+        );
+        assert_eq!(
+            r.runner().call_count(),
+            1,
+            "a base runner fault does not enter the ladder"
+        );
+    }
+
+    #[test]
+    fn review_base_pass_carries_no_escalation_note() {
+        // Regression guard: the base pass note stays empty (byte-identical base).
+        let r = seq_reviewer(SeqRunner::new(vec![Scripted::Ok(RECOVERED.to_string())]), 2);
+        r.review().expect("review ok");
+        assert_eq!(r.runner().note_at(0), "");
+    }
+
+    #[test]
+    fn build_health_review_escalation_note_is_empty_on_base() {
+        // The Base rung allocates no note so the base pass is unchanged.
+        assert_eq!(
+            build_health_review_escalation_note(LadderRung::Base, "prior"),
+            ""
         );
     }
 

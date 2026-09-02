@@ -66,7 +66,7 @@ jobs:
 
       - name: Cache cargo
         if: steps.tag_check.outputs.exists == 'false'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -222,44 +222,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        # Idempotent publish. Delegates to scripts/release-create.sh, which
+        # re-checks the AUTHORITATIVE remote release state immediately before
+        # creating and treats an already-published release as success. This
+        # closes the TOCTOU race in the `tag_check` guard above (a stale, local
+        # `git rev-parse` snapshot taken ~11 min earlier): a concurrent/duplicate
+        # `release` run of an unbumped version can no longer red an otherwise
+        # fully-green build/sign pipeline. Genuine `gh` errors still fail loudly.
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "Simard ${{ steps.version.outputs.tag }}" \
-            --notes "## Install
-
-          \`\`\`bash
-          curl -L https://github.com/rysweet/Simard/releases/download/${{ steps.version.outputs.tag }}/simard-linux-x86_64.tar.gz | tar xz
-          \`\`\`
-
-          Or with cargo:
-          \`\`\`bash
-          cargo install --git https://github.com/rysweet/Simard.git --tag ${{ steps.version.outputs.tag }}
-          \`\`\`
-
-          ## Verify (cosign keyless + SBOM)
-
-          This release is signed with cosign (keyless) and ships a CycloneDX SBOM
-          that is **also** signed with the same identity.
-          See [Release integrity](https://github.com/rysweet/Simard/blob/main/docs/reference/release-integrity.md)
-          for full verification steps.
-
-          \`\`\`bash
-          # Verify the binary tarball:
-          cosign verify-blob \\
-            --certificate simard-linux-x86_64.tar.gz.pem \\
-            --signature   simard-linux-x86_64.tar.gz.sig \\
-            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
-            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
-            simard-linux-x86_64.tar.gz
-
-          # Verify the SBOM the same way (proves the dependency inventory is untampered):
-          cosign verify-blob \\
-            --certificate simard-${{ steps.version.outputs.version }}.cdx.json.pem \\
-            --signature   simard-${{ steps.version.outputs.version }}.cdx.json.sig \\
-            --certificate-identity-regexp '^https://github\.com/rysweet/Simard/\.github/workflows/release\.yml@refs/heads/main$' \\
-            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\
-            simard-${{ steps.version.outputs.version }}.cdx.json
-          \`\`\`" \
+          scripts/release-create.sh \
             target/release/simard-linux-x86_64.tar.gz \
             target/release/simard-linux-x86_64.tar.gz.sha256 \
             target/release/simard-linux-x86_64.tar.gz.sig \

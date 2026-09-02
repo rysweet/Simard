@@ -35,6 +35,11 @@ pub struct AssembleOptions {
     pub service_unit: String,
     /// Optional allowlist of section names to assemble; `None` = all.
     pub sections: Option<Vec<String>>,
+    /// Override for the `daemon_health.json` heartbeat path used when the
+    /// systemd unit is not loaded. `None` resolves the real process-global
+    /// path (`data_local_dir()/simard/daemon_health.json`). Tests inject a
+    /// hermetic path so they never read the host's live daemon heartbeat.
+    pub daemon_health_path: Option<PathBuf>,
 }
 
 impl Default for AssembleOptions {
@@ -43,6 +48,7 @@ impl Default for AssembleOptions {
             state_root: crate::state_root::simard_state_root(),
             service_unit: "simard.service".to_string(),
             sections: None,
+            daemon_health_path: None,
         }
     }
 }
@@ -119,7 +125,7 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
     // process-agnostic in non-systemd deployments (dev / worktree / container).
     match assemble_daemon_from_systemctl(opts) {
         Some(env) => env,
-        None => assemble_daemon_from_heartbeat(),
+        None => assemble_daemon_from_heartbeat(opts),
     }
 }
 
@@ -199,8 +205,15 @@ fn daemon_health_path() -> PathBuf {
 /// Fail-visible: a missing / unreadable / unparseable heartbeat degrades this
 /// one section to `absent` with the honest `systemctl: unit not loaded` note
 /// (never panics, never fabricates a running daemon).
-fn assemble_daemon_from_heartbeat() -> SectionEnvelope<Daemon> {
-    read_daemon_heartbeat(&daemon_health_path(), chrono::Utc::now())
+///
+/// The heartbeat path comes from `opts.daemon_health_path` when set (hermetic
+/// tests inject a path), otherwise the real process-global [`daemon_health_path`].
+fn assemble_daemon_from_heartbeat(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
+    let path = opts
+        .daemon_health_path
+        .clone()
+        .unwrap_or_else(daemon_health_path);
+    read_daemon_heartbeat(&path, chrono::Utc::now())
 }
 
 /// Read + map the heartbeat at `path` as of `now`. Split from
@@ -228,8 +241,11 @@ fn read_daemon_heartbeat(
 /// - stale  → `state = "stale (<phase>)"`,   `freshness = stale`
 /// - no/invalid timestamp → `state = "unknown"`, `freshness = stale`
 ///
-/// `as_of` is the heartbeat `timestamp`. `main_pid` / `n_restarts` are not
-/// recorded in the heartbeat, so they stay `None` (honest) rather than guessed.
+/// `as_of` is the heartbeat `timestamp`. `main_pid` is read defensively from
+/// the heartbeat when present (issue #4929) so `assemble_resources` can sample
+/// `/proc/<pid>` RSS + CPU; a missing or malformed value degrades to `None`
+/// (honest empty metric, never a guessed PID). `n_restarts` is not recorded in
+/// the heartbeat, so it stays `None`.
 fn daemon_from_heartbeat(
     health: &serde_json::Value,
     now: chrono::DateTime<chrono::Utc>,
@@ -240,6 +256,13 @@ fn daemon_from_heartbeat(
         .and_then(|p| p.as_str())
         .unwrap_or("")
         .trim();
+
+    // Defensive parse: `as_u64` yields `None` for strings, negatives, and
+    // non-numbers, so a malformed `main_pid` never panics or fabricates a PID.
+    let main_pid = health
+        .get("main_pid")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u32::try_from(p).ok());
 
     let fresh = timestamp
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -260,7 +283,7 @@ fn daemon_from_heartbeat(
     let daemon = Daemon {
         state,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        main_pid: None,
+        main_pid,
         deployed_commit: None,
         instance_uptime: None,
         running_since: None,
@@ -303,7 +326,7 @@ fn assemble_resources(
     }
 
     let resources = Resources {
-        cpu_pct: None,
+        cpu_pct: daemon_pid.and_then(read_process_cpu_pct),
         rss_bytes,
         cgroup_mem_peak_bytes: None,
         load_1,
@@ -329,6 +352,78 @@ fn read_process_rss_bytes(pid: u32) -> Option<u64> {
         }
     }
     None
+}
+
+/// Read the daemon's CPU utilisation as a percentage (issue #4756).
+///
+/// Reports the process's **lifetime-average** %CPU (matching `ps aux` %CPU):
+/// total CPU seconds consumed divided by wall-clock seconds alive. This is a
+/// single, NON-BLOCKING `/proc` read — no sampling sleep — so it never delays a
+/// `simard status` render, and it replaces the former hardcoded `cpu_pct: None`
+/// that rendered daemon CPU as `absent` (the same telemetry gap the rpc-health
+/// timeout exposed).
+///
+/// Defensive: every step degrades to `None` on any malformed / missing input
+/// and NEVER panics — a transient `/proc` read must not crash status.
+fn read_process_cpu_pct(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let cpu_ticks = parse_proc_stat_cpu_ticks(&stat)?;
+    let start_ticks = parse_proc_stat_starttime_ticks(&stat)?;
+    let clk_tck = clock_ticks_per_sec()?;
+    let uptime_secs = read_system_uptime_secs()?;
+    let start_secs = start_ticks as f64 / clk_tck;
+    let elapsed_secs = uptime_secs - start_secs;
+    // A not-yet-warm or clock-skewed sample can yield a non-positive elapsed
+    // time; degrade to None rather than emit a meaningless or infinite ratio.
+    if elapsed_secs <= 0.0 {
+        return None;
+    }
+    let cpu_secs = cpu_ticks as f64 / clk_tck;
+    let pct = cpu_secs / elapsed_secs * 100.0;
+    (pct.is_finite() && pct >= 0.0).then_some(pct)
+}
+
+/// Sum `utime` (field 14) + `stime` (field 15) cumulative CPU ticks out of a
+/// `/proc/<pid>/stat` line.
+///
+/// The `comm` (field 2) is parenthesized and may itself contain spaces and
+/// parentheses, so offsets are counted from the LAST `)` — the classic
+/// `/proc/<pid>/stat` pitfall a naive whitespace/first-`)` split gets wrong.
+/// Returns `None` on any malformed / truncated / non-numeric input.
+fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // Post-`)` field 0 is `state` (field 3); utime (field 14) is post-index 11
+    // and stime (field 15) is post-index 12.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    utime.checked_add(stime)
+}
+
+/// Read `starttime` (field 22, in clock ticks since boot) out of a
+/// `/proc/<pid>/stat` line, counting fields from the LAST `)` for the same
+/// parenthesized-`comm` safety as [`parse_proc_stat_cpu_ticks`]. `None` on any
+/// malformed / truncated / non-numeric input.
+fn parse_proc_stat_starttime_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    // Post-`)` index 19 is starttime (field 22).
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Clock ticks per second (`_SC_CLK_TCK`, typically 100 on Linux), used to
+/// convert `/proc/<pid>/stat` ticks to seconds. `None` if the query fails.
+fn clock_ticks_per_sec() -> Option<f64> {
+    // SAFETY: `sysconf` is a pure libc configuration query with no memory
+    // effects; a non-positive result (query failed) degrades to None below.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks > 0).then_some(ticks as f64)
+}
+
+/// System uptime in seconds from `/proc/uptime` (first field). `None` when
+/// `/proc` is unavailable or the value is unparseable.
+fn read_system_uptime_secs() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/uptime").ok()?;
+    text.split_whitespace().next()?.parse().ok()
 }
 
 /// Resolve and stat the operator's home mount for the disk row.
@@ -1375,6 +1470,92 @@ mod pure_helper_tests {
         assert_eq!(env.availability, Availability::Unavailable);
         assert_eq!(env.note.as_deref(), Some("systemctl: unit not loaded"));
     }
+
+    // ── F5 (#4929): heartbeat `main_pid` unblocks `simard status` RSS/CPU ──
+    // The daemon now stamps its own PID into `daemon_health.json`; the provider
+    // must read it so `assemble_resources` can sample `/proc/<pid>` RSS + CPU.
+    // Before the fix, `daemon_from_heartbeat` hardcoded `main_pid: None`, so
+    // status rendered daemon CPU/RSS as "absent" even with a fresh heartbeat.
+
+    /// A heartbeat carrying `main_pid` must surface it on the daemon section
+    /// (defensive `as_u64`), so status can sample the live process.
+    #[test]
+    fn daemon_from_heartbeat_reads_main_pid_when_present() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "status": "running",
+            "cycle_phase": "orient",
+            "main_pid": 81234,
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        let d = env.data.as_ref().expect("fresh heartbeat carries data");
+        assert_eq!(
+            d.main_pid,
+            Some(81234),
+            "a heartbeat main_pid must flow to the daemon section for RSS/CPU sampling"
+        );
+    }
+
+    /// A heartbeat with no `main_pid` stays honestly `None` (observability-only,
+    /// never fabricated). This must keep holding after the fix.
+    #[test]
+    fn daemon_from_heartbeat_missing_main_pid_stays_none() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "cycle_phase": "sleep",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert!(
+            env.data.as_ref().unwrap().main_pid.is_none(),
+            "absent main_pid degrades to None (empty metric), never a guess"
+        );
+    }
+
+    /// Defensive parse: a non-numeric / malformed `main_pid` degrades to `None`
+    /// (a total function — no panic, no silent bad-PID action).
+    #[test]
+    fn daemon_from_heartbeat_ignores_non_numeric_main_pid() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "cycle_phase": "act",
+            "main_pid": "not-a-pid",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert!(
+            env.data.as_ref().unwrap().main_pid.is_none(),
+            "a malformed main_pid must be ignored, not panic or fabricate a PID"
+        );
+    }
+
+    /// Wiring guard for the F5 end goal: given a real, live PID,
+    /// `assemble_resources` samples a non-empty RSS from `/proc/<pid>/status`.
+    /// This is the value the heartbeat `main_pid` feeds once it is read — the
+    /// reason plumbing the PID through makes `simard status` show RSS instead
+    /// of "absent".
+    #[test]
+    fn assemble_resources_reports_rss_for_a_live_pid() {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-rss-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The test's own PID is guaranteed live and readable under /proc.
+        let resources = assemble_resources(Some(std::process::id()), &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let data = resources
+            .data
+            .expect("resources section is live on a host with /proc");
+        assert!(
+            data.rss_bytes.is_some(),
+            "a live daemon PID must yield a VmRSS reading (not 'absent')"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1465,6 +1646,80 @@ mod goal_board_tests {
                 .active
                 .is_empty(),
             "an empty board is an empty active list, not `unavailable`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_cpu_sampling_4756 {
+    //! TDD (issue #4756 — self-deploy failure loop). `simard status` renders
+    //! daemon CPU as `absent` because `assemble_resources` hardcodes
+    //! `cpu_pct: None` (provider.rs). Once the memory-stats RPC responds again,
+    //! Brick D replaces that hardcode with defensive `/proc/<pid>/stat` sampling.
+    //!
+    //! The load-bearing, error-prone part is parsing the cumulative CPU ticks out
+    //! of a `stat` line whose `comm` (field 2) is parenthesized and may itself
+    //! contain spaces and parentheses — the classic `/proc/<pid>/stat` pitfall.
+    //! These tests are RED until the seam exists:
+    //!
+    //!   fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64>
+    //!
+    //! Contract: sum utime (field 14) + stime (field 15), counting fields from
+    //! the LAST `)`; return `None` on ANY malformed/missing input (degrade to
+    //! `None`, never panic).
+    use super::*;
+
+    // Canonical `/proc/<pid>/stat`: utime (field 14) = 111, stime (field 15) =
+    // 222, so the parser must return Some(333).
+    const STAT_UTIME_111_STIME_222: &str =
+        "4242 (simard) R 1 4242 4242 0 -1 4194304 100 0 0 0 111 222 0 0 20 0 1 0 5000 12345 678";
+
+    #[test]
+    fn parses_utime_plus_stime_from_a_well_formed_stat() {
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(STAT_UTIME_111_STIME_222),
+            Some(333),
+            "cpu ticks must be utime(111) + stime(222)"
+        );
+    }
+
+    #[test]
+    fn handles_comm_containing_spaces_and_parentheses() {
+        // `comm` is arbitrary and parenthesized; offsets MUST be counted from the
+        // LAST ')'. A naive split on the first ')' or on whitespace shifts every
+        // field and silently reads the wrong CPU numbers.
+        let stat =
+            "4242 (weird ) (name) R 1 4242 4242 0 -1 4194304 100 0 0 0 111 222 0 0 20 0 1 0 5000";
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(stat),
+            Some(333),
+            "a comm with spaces/parens must not shift the utime/stime offsets"
+        );
+    }
+
+    #[test]
+    fn truncated_stat_missing_cpu_fields_is_none() {
+        // Fields stop at ppid — utime/stime absent → None, never a panic or a 0.
+        assert_eq!(parse_proc_stat_cpu_ticks("4242 (simard) R 1"), None);
+    }
+
+    #[test]
+    fn non_numeric_cpu_fields_are_none() {
+        let stat = "4242 (simard) R 1 4242 4242 0 -1 4194304 100 0 0 0 xxx 222 0 0 20 0 1 0 5000";
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(stat),
+            None,
+            "a non-numeric utime must degrade to None, not panic"
+        );
+    }
+
+    #[test]
+    fn empty_and_unparenthesized_inputs_are_none() {
+        assert_eq!(parse_proc_stat_cpu_ticks(""), None, "empty input → None");
+        assert_eq!(
+            parse_proc_stat_cpu_ticks("4242 simard R 1 2 3"),
+            None,
+            "a stat line with no parenthesized comm is malformed → None"
         );
     }
 }

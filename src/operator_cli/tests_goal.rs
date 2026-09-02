@@ -192,6 +192,57 @@ fn simard_goal_unblock_clears_any_blocked_reason_unconditionally() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
+fn simard_goal_unblock_clears_the_ooda_quarantine_marker() {
+    // Recovery contract (see docs/howto/quarantine-and-recover-an-unclear-ooda-goal.md
+    // Option B and docs/concepts/steerable-ooda-daemon.md): a single-id
+    // `goal unblock` on a terminally-quarantined goal must clear the durable
+    // `ooda-breaker-quarantine` WipRef, not merely reset the status — otherwise
+    // the goal is restored to NotStarted while `reinvestigate_bare_blocked_goals`
+    // still skips it forever, and the documented "fresh bounded window" never
+    // materialises.
+    let (_tmp, root) = isolated_state_root();
+    let mut quarantined = active_goal(
+        "quarantined-goal",
+        GoalProgress::Blocked("[OODA-SAFEGUARD] why=UNCLEAR-CRITERIA".into()),
+    );
+    quarantined
+        .wip_refs
+        .push(crate::goal_curation::quarantine_marker());
+    seed_board(&root, vec![quarantined]);
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "unblock".to_string(),
+        "quarantined-goal".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "`simard goal unblock quarantined-goal` must exit 0; got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let board = load_board(&root);
+    let g = board
+        .active
+        .iter()
+        .find(|g| g.id == "quarantined-goal")
+        .expect("goal must survive unblock");
+    assert_eq!(
+        g.status,
+        GoalProgress::NotStarted,
+        "unblock must restore a quarantined goal to NotStarted; got {:?}",
+        g.status
+    );
+    assert!(
+        !crate::goal_curation::is_quarantined(g),
+        "unblock must clear the durable ooda-breaker-quarantine marker so the goal \
+         is no longer skipped by the re-investigation pass; wip_refs={:?}",
+        g.wip_refs
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
 fn simard_goal_unblock_unknown_id_returns_error() {
     let (_tmp, _root) = isolated_state_root();
     let result = dispatch_operator_cli(vec![
@@ -758,5 +809,160 @@ fn simard_goal_list_with_tag_filter_exits_zero() {
         r.is_ok(),
         "goal list --tag must exit 0: {:?}",
         r.err().map(|e| e.to_string())
+    );
+}
+
+// ─── `simard goal set-done-gate` — bind a machine-checkable finish line ──────
+
+/// A goal with a real (non-placeholder) description at priority 3.
+fn described_goal(id: &str, description: &str) -> ActiveGoal {
+    let mut g = active_goal(id, GoalProgress::NotStarted);
+    g.description = description.to_string();
+    g.priority = 3;
+    g
+}
+
+/// Seed the authoritative file store directly (board + optional no_progress) so
+/// the CLI's `load_or_migrate` sees a non-empty store and preserves it.
+fn seed_store(root: &Path, goal: ActiveGoal, park: bool) {
+    crate::goal_board_store::mutate(root, |s| {
+        if park {
+            s.no_progress.record_no_action(&goal.id);
+            s.no_progress.record_no_action(&goal.id);
+            s.no_progress.mark_guided_retry(&goal.id);
+        }
+        s.board.active.push(goal);
+    })
+    .expect("seed store");
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn set_done_gate_binds_pr_and_issue_and_resets_breaker() {
+    let (_tmp, root) = isolated_state_root();
+    seed_store(
+        &root,
+        described_goal(
+            "roster-goal",
+            "Move the stewarded-repo roster into identity state.",
+        ),
+        true,
+    );
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "set-done-gate".to_string(),
+        "roster-goal".to_string(),
+        "--pr".to_string(),
+        "4440".to_string(),
+        "--issue".to_string(),
+        "#4448".to_string(),
+        "--criteria".to_string(),
+        "the stewarded-repo roster is identity-owned and survives redeploy".to_string(),
+    ]);
+    assert!(
+        result.is_ok(),
+        "set-done-gate must exit 0; got: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+
+    let state = crate::goal_board_store::load(&root);
+    let g = state
+        .board
+        .active
+        .iter()
+        .find(|g| g.id == "roster-goal")
+        .expect("goal survives");
+
+    let pr = g
+        .wip_refs
+        .iter()
+        .find(|r| r.kind == "pr")
+        .expect("pr ref bound");
+    assert_eq!(pr.ref_id, "4440");
+    let issue = g
+        .wip_refs
+        .iter()
+        .find(|r| r.kind == "issue")
+        .expect("issue ref bound");
+    assert_eq!(issue.ref_id, "4448", "leading '#' must be stripped");
+
+    assert!(
+        g.description.contains("Done when:")
+            && g.description
+                .contains("PR #4440 is merged and issue #4448 is closed"),
+        "finish line must be appended in plain English; got: {}",
+        g.description
+    );
+    assert_eq!(g.status, GoalProgress::NotStarted);
+    assert_eq!(
+        state.no_progress.consecutive("roster-goal"),
+        0,
+        "breaker no-action count must reset"
+    );
+    assert!(
+        !state.no_progress.guided_retry_used("roster-goal"),
+        "spent guided-retry flag must clear"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn set_done_gate_requires_an_anchor() {
+    let (_tmp, root) = isolated_state_root();
+    seed_store(
+        &root,
+        described_goal("g", "Some real goal description here."),
+        false,
+    );
+
+    let result = dispatch_operator_cli(vec![
+        "goal".to_string(),
+        "set-done-gate".to_string(),
+        "g".to_string(),
+        "--criteria".to_string(),
+        "something unmeasurable".to_string(),
+    ]);
+    assert!(
+        result.is_err(),
+        "set-done-gate with neither --pr nor --issue must be rejected"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn set_done_gate_is_idempotent_on_finish_line() {
+    let (_tmp, root) = isolated_state_root();
+    seed_store(
+        &root,
+        described_goal("g", "Some real goal description here."),
+        false,
+    );
+
+    for _ in 0..2 {
+        let r = dispatch_operator_cli(vec![
+            "goal".to_string(),
+            "set-done-gate".to_string(),
+            "g".to_string(),
+            "--issue".to_string(),
+            "99".to_string(),
+            "--criteria".to_string(),
+            "roster is identity-owned".to_string(),
+        ]);
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.to_string()));
+    }
+
+    let state = crate::goal_board_store::load(&root);
+    let g = state.board.active.iter().find(|g| g.id == "g").unwrap();
+    assert_eq!(
+        g.description.matches("Done when:").count(),
+        1,
+        "repeated set-done-gate must not stack finish lines; got: {}",
+        g.description
+    );
+    let issue_refs = g.wip_refs.iter().filter(|r| r.kind == "issue").count();
+    assert_eq!(
+        issue_refs, 1,
+        "repeated bind must not duplicate the issue ref"
     );
 }

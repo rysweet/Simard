@@ -3,6 +3,12 @@ name: verify
 on:
   push:
   pull_request:
+  # Merge-queue live-lock remediation (issue #1050): run the same required
+  # contexts against the queued, freshly-merged result so strict
+  # up-to-date-before-merge can be relaxed to merge-queue semantics. This is
+  # ADDITIVE — the existing push/pull_request triggers and every required job
+  # are preserved so no required status-check context is renamed or dropped.
+  merge_group:
 
 permissions: {}
 
@@ -37,6 +43,13 @@ jobs:
 
       - name: Rust-only gate (no new .py / .js / .ts)
         run: scripts/check-rust-only-gate.sh
+
+      # Locks in the idempotent release-publish fix: hermetic (bundles its own
+      # mock `gh`, no network/cargo), so it runs early and fast. Guards against a
+      # regression to the non-idempotent "Create release" step that raced on an
+      # unbumped version and reddened otherwise-green release runs.
+      - name: Release-create idempotency gate
+        run: scripts/qa-release-create-idempotent.sh
 
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
@@ -145,6 +158,17 @@ jobs:
           cargo test --all-features --locked --no-fail-fast \
             -- --skip install_packages_runs_and_self_installs \
             2>&1 | tee target/ci-logs/cargo-test.log
+
+      - name: Self-deploy canary regression target (issue #4622)
+        # Proves the EXACT target name + feature the self-deploy UnitTest canary
+        # gate invokes (`cargo test --test self_deploy_canary --features
+        # canary-tests`, see src/self_relaunch/gates.rs::build_unit_test_command)
+        # stays valid on every push/PR. A rename or typo in the curated
+        # hermetic canary suite fails CI HERE — before it can redden the live
+        # self-deploy canary and wedge running_commit. The suite is
+        # hermetic-by-construction (owns its HOME/tempdir, #[serial], no network),
+        # so it is fast and deterministic.
+        run: cargo test --test self_deploy_canary --features canary-tests
 
       - name: Run full clippy gate (--all-targets --all-features --locked)
         # Runs AFTER cargo test on purpose: test compiles the entire crate
@@ -343,9 +367,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Run npm audit
         # Fails the build on any HIGH or CRITICAL advisory in the committed
@@ -368,9 +392,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Run .github/scripts unit tests
         run: node --test .github/scripts/*.test.mjs
@@ -436,9 +460,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install npm dependencies
         run: npm ci
@@ -462,7 +486,7 @@ jobs:
         # the job on a miss — the fallback build below reproduces the same
         # binary, so a default-branch infra blip never reds an all-green run.
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/debug

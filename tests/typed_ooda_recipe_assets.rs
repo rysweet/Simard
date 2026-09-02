@@ -95,6 +95,12 @@ fn migrated_recipe_assets_do_not_describe_prose_as_machine_authority() {
     let migrated_assets = [
         "prompt_assets/simard/recipes/goal-session-actor.yaml",
         "prompt_assets/simard/policies/goal-session-capabilities.toml",
+        // Group B (#4906): the two admission recipes are migrated to the
+        // tool-call form (agent RECORDS via `simard ooda record-admission` /
+        // `record-resource-admission`); no prose is machine-authoritative and no
+        // scrape helper is referenced.
+        "prompt_assets/simard/recipes/ooda-engineer-admission.yaml",
+        "prompt_assets/simard/recipes/ooda-resource-admission.yaml",
     ];
 
     for relative in migrated_assets {
@@ -102,6 +108,7 @@ fn migrated_recipe_assets_do_not_describe_prose_as_machine_authority() {
         for forbidden in [
             "parse_orchestrator_response",
             "parse_admission_decision",
+            "parse_resource_admission_decision",
             "extract the first",
             "strips any surrounding",
             "fenced ```json",
@@ -115,6 +122,50 @@ fn migrated_recipe_assets_do_not_describe_prose_as_machine_authority() {
                 "{relative} must not make agent prose machine-authoritative via {forbidden:?}"
             );
         }
+    }
+}
+
+#[test]
+fn admission_recipes_record_typed_verdicts_via_the_tool() {
+    // Group B (#4906): both admission recipes act by calling their zero-privilege
+    // record tool with the ctx-binding flags, and scrape NOTHING from stdout.
+    let cases = [
+        (
+            "prompt_assets/simard/recipes/ooda-engineer-admission.yaml",
+            "ooda record-admission",
+        ),
+        (
+            "prompt_assets/simard/recipes/ooda-resource-admission.yaml",
+            "ooda record-resource-admission",
+        ),
+    ];
+    for (relative, verb) in cases {
+        let recipe = read_required(relative);
+        assert!(
+            recipe.contains(verb),
+            "{relative} must record its verdict by calling `simard {verb}` once"
+        );
+        for flag in [
+            "--record-path",
+            "--goal-id",
+            "--cycle-number",
+            "--choice",
+            "--rationale",
+        ] {
+            assert!(
+                recipe.contains(flag),
+                "{relative}'s tool call must pass `{flag}`"
+            );
+        }
+        let lower = recipe.to_ascii_lowercase();
+        assert!(
+            lower.contains("none scraped from stdout") || lower.contains("no json"),
+            "{relative} must document that NOTHING is scraped from stdout"
+        );
+        assert!(
+            !recipe.contains("\"decision\""),
+            "{relative} must not carry a `{{\"decision\": ...}}` JSON envelope for scraping"
+        );
     }
 }
 

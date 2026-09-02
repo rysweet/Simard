@@ -11,7 +11,7 @@ description: >
   plain-English operator notification on both channels). Deliberately WITHOUT
   record_step_failure plumbing or an N-identical-failure threshold counter: the
   journal already contains every failure, and an agent reading it sees them all.
-last_updated: 2026-07-20
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -83,6 +83,27 @@ markers from a recipe run). Health-review blends both:
   into the SAME gate every other Overseer action uses. Rust never reads the
   journal, counts a failure, or encodes a threshold.
 
+### Recovering a degraded pass: the shared escalation ladder
+
+One agent pass occasionally emits a truncated or malformed report that lacks the
+REQUIRED `HEALTH_REVIEW_COMPLETE` terminal marker. Rather than silently degrade
+that weak case to "no remediation" on the FIRST miss, the rail spends extra
+compute ONLY there: on a base parse-miss it drives a **bounded escalation
+ladder** — a schema-repair re-prompt, then a higher-effort tier — reusing the
+exact same primitives every other recipe-backed brain phase (decide / orient /
+merge-judge / engineer-lifecycle) uses: `build_phase_escalation_note`,
+`EscalationConfig` (bounded by the shared `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS`
+knob and a hard cap), and the three-rung `LadderRung`. Each rung re-injects the
+recipe's `{{escalation_note}}` context var, quoting the prior malformed output
+and re-stating the terminal-marker contract.
+
+This is a bounded RETRY on a degraded *parse* — **not** a failure counter and
+**not** an N-identical-failure threshold; the health judgment still lives
+entirely in the recipe. It stays fail-closed end to end: a base runner/infra
+fault degrades with NO ladder (the base pass must succeed before it can be judged
+degraded), a rung's own invocation fault stops the ladder, and an exhausted
+ladder takes no remediation — never a fabricated launch or escalation.
+
 ### The typed decisions
 
 The agent emits plain-text marker lines; the rail parses them:
@@ -97,6 +118,65 @@ The agent emits plain-text marker lines; the rail parses them:
 `ESCALATE_GOAL` carries the same operator-facing split the goal-board health path
 uses: `problem` and `next_step` are **plain English** for the human, while
 `reason`/`why` are internal jargon for telemetry.
+
+The marker parse is **decoration-tolerant but fail-closed**. Agents routinely
+present their decisions as a markdown list, a blockquote, or an inline-code span,
+so the rail strips a leading `-`/`*`/`+`/`N.`/`N)` list bullet, a `>` blockquote
+caret, or surrounding backticks *before* matching a marker — otherwise a
+well-formed `LAUNCH_RECIPE=` line dressed as `- LAUNCH_RECIPE=…` would be
+silently dropped and a real crash-loop would go un-remediated with no signal
+(the terminal marker still parses, so the degraded-pass ladder never fires).
+Symmetrically, agents also append a short justification *after* a decision's JSON
+(`LAUNCH_RECIPE={…} — fixes the crash-loop`); because `serde_json` rejects a
+value with trailing non-whitespace, the rail first extracts the leading
+balanced JSON object (respecting braces inside string values) so that trailing
+clause is ignored rather than dropping the whole decision. Neither rail ever
+*invents* a decision: only the three distinctive markers are ever acted on, a
+bulleted line of prose normalises to prose and matches nothing, an
+unbalanced/truncated object is still skipped fail-closed, and a malformed-JSON or
+empty-field decision is still dropped.
+
+### The verdict is observable, never a silent pass
+
+The `HEALTH_REVIEW_COMPLETE=<summary>` marker is not just a gate — its one-line
+verdict is **surfaced** on the cycle's `ObservedState.health_review_status`
+rather than parsed-and-discarded, so a review that runs and finds nothing wrong
+still leaves an observable trace. This applies the same "no silent OFF"
+discipline that [agentic merge-queue reasoning](./agentic-merge-queue-reasoning.md)
+gives `merge_reasoning_status`: an operator can always tell the three cases apart.
+
+| `health_review_status` | Meaning |
+| --- | --- |
+| `NotRun` | no pass ran this tick — the rail is unwired or the tick is off-cadence (the additive default). An operator opt-out is **not** folded in here; it surfaces LOUD as `Disabled` |
+| `Disabled { reason }` | an operator EXPLICITLY opted out — either the dedicated `SIMARD_OVERSEER_HEALTH_REVIEW` knob or the shared `SIMARD_OVERSEER_GAP_SCAN` throttle; `reason` names WHICH knob so the disable is observable, never a silent `NotRun` |
+| `Reviewed { summary, decisions }` | a pass produced an honest verdict; `decisions` is the count of typed remediations it drove (`0` on a HEALTHY pass — an observable "reviewed, nothing to do", **not** a silent no-op) |
+| `Degraded` | a pass ran but degraded to no remediation (a base infra fault, or a truncated report the escalation ladder could not recover) — surfaced LOUD, never a silent OFF |
+
+The rail still fabricates nothing: `Disabled`, `Reviewed { decisions: 0 }`, and
+`Degraded` all leave the plan unchanged. The status only records WHAT the pass
+concluded (or WHY it did not run), so a quiet-but-green Simard is distinguishable
+from one whose self-review is opted out, never ran, or silently degraded.
+Surfacing the opt-out as `Disabled { reason }` — rather than letting the shared
+gap-scan throttle silently drop the crash-loop self-heal to `NotRun` — mirrors
+exactly how `observe_merge_queue` surfaces the SAME `SIMARD_OVERSEER_GAP_SCAN`
+opt-out on `merge_reasoning_status`.
+
+The surface is the cycle's `ObservedState` — the same reasoning-cycle field
+`merge_reasoning_status` lives on, carried on the `CycleReport` and asserted by
+the wiring tests. Like that precedent, this closes the *silent-pass* gap at the
+reasoning boundary (the verdict is no longer parsed-and-discarded).
+
+The verdict also reaches the **operator feed**: `observed_details_from`
+(`src/overseer/wiring.rs`) renders a `Reviewed` pass as a `health-review:
+<summary>` line, a `Degraded` pass as a loud `health-review: degraded …` line,
+and a `Disabled` opt-out as a loud `health-review: disabled — <reason>` line
+naming the knob, which `humanize_tick_details` surfaces (prefixed `observed:`)
+in `simard status`, the TUI Overseer pane, and the dashboard SPA. Only a
+`NotRun` tick (unwired rail / off-cadence) adds no line, keeping the feed quiet
+on what genuinely did not run — an operator opt-out is never folded into that
+silence. So the "never a silent no-op / never a silent OFF" guarantee holds at
+the operator surface, not only on the struct field — a HEALTHY pass leaves a
+visible breadcrumb instead of an empty tick, and a disabled reflex says so.
 
 ### Systemic vs per-goal
 
@@ -120,18 +200,21 @@ DO. Every parsed decision flows through the UNCHANGED gate and act loop:
   steward identity to dispatch — exactly like every other escalation.
 
 The rail is **fail-closed** end to end: an unwired reviewer, a disabled rail, an
-off cadence, a `HEALTHY` verdict, a malformed/missing-field decision, a missing
-terminal marker, or a failed recipe run all leave the plan unchanged — never a
-fabricated launch or escalation.
+off cadence, a `HEALTHY` verdict, a malformed/missing-field decision, or a failed
+recipe run all leave the plan unchanged — never a fabricated launch or
+escalation. A missing terminal marker first drives the bounded escalation ladder
+(above); only when that ladder is disabled, faults, or is exhausted does the pass
+leave the plan unchanged.
 
 ## Configuration
 
 | Env var | Effect | Default |
 | --- | --- | --- |
 | `SIMARD_OVERSEER_HEALTH_REVIEW` | opt-out for the whole rail | ON with the acting Overseer; an explicit falsey value (`0`/`false`/`no`/`off`) disables it |
-| `SIMARD_OVERSEER_GAP_SCAN` | shared throttle for ALL agentic Overseer scans | ON; also disables health-review when off |
+| `SIMARD_OVERSEER_GAP_SCAN` | shared throttle for ALL agentic Overseer scans | ON; when off it also disables health-review, surfaced LOUD as `health_review_status = Disabled` (never a silent skip) |
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | cadence divisor (run once every N ticks) | `1` (every tick), floored at `1` |
 | `SIMARD_OVERSEER_HEALTH_REVIEW_UNIT` | systemd `--user` unit whose journal to read | `simard-ooda.service` |
+| `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` | rungs the degraded-pass escalation ladder climbs after a base parse-miss (shared with the OODA brains); `0` disables the ladder | `2`, hard-capped at `3` |
 
 A disabled acting Overseer forces the rail off regardless of the flag — the
 review only makes sense while the Overseer runs.

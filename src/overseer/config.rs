@@ -103,6 +103,33 @@ pub const OVERSEER_AUTHOR_LOGIN_ENV: &str = "SIMARD_OVERSEER_AUTHOR_LOGIN";
 /// verifies/merges/deploys its OWN PRs and never re-opens its own goals.
 pub const DEFAULT_OVERSEER_AUTHOR_LOGIN: &str = "simard-overseer[bot]";
 
+/// Opt-in flag (default OFF, truthy-required) for the native Overseer Signal
+/// operator-liaison (issue #4911, Deliverable 1). Master-gated: an explicitly
+/// disabled Overseer forces it off regardless.
+pub const SIMARD_OVERSEER_SIGNAL_LIAISON_ENV: &str = "SIMARD_OVERSEER_SIGNAL_LIAISON";
+
+/// Opt-in flag (default OFF, truthy-required) for the autonomous PR rework loop
+/// (issue #4911, Deliverable 2). When OFF, a fixable hold stays held-with-reason.
+/// Master-gated.
+pub const SIMARD_OVERSEER_REWORK_ENV: &str = "SIMARD_OVERSEER_REWORK";
+
+/// Per-PR rework attempt cap (issue #4911). Parsed as an integer and clamped to
+/// `1..=10`; unset/empty/unparseable ⇒ [`DEFAULT_REWORK_MAX_ATTEMPTS`].
+pub const SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS_ENV: &str = "SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS";
+
+/// Default per-PR rework attempt cap: a small bound so a self-fighting loop
+/// escalates to a human quickly rather than churning.
+pub const DEFAULT_REWORK_MAX_ATTEMPTS: u32 = 3;
+
+/// Operator E.164 the liaison accepts messages from (mirrors
+/// `SIMARD_OVERSEER_EMAIL_TO`). Required for Deliverable 1 to act.
+pub const SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER_ENV: &str =
+    "SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER";
+
+/// Operator Signal group id the liaison acts on. Required for Deliverable 1 to
+/// act (both operator number AND group id must be configured).
+pub const SIMARD_OVERSEER_SIGNAL_GROUP_ID_ENV: &str = "SIMARD_OVERSEER_SIGNAL_GROUP_ID";
+
 /// Default observer cadence: 15 minutes — frequent enough to catch churn, far
 /// below any launch/merge cadence (M1 files at most one deduped issue per
 /// recurring signature, so a tighter interval adds no writes).
@@ -161,6 +188,48 @@ pub const DEFAULT_OVERSEER_BACKOFF_MULTIPLIER: i64 = 2;
 /// Default hard cap (24 h) on the gap-scan dedup backoff window: suppression is
 /// bounded so a real recurring gap always resurfaces within a day.
 pub const DEFAULT_OVERSEER_BACKOFF_MAX_SECS: i64 = 86_400;
+
+/// Opt-out flag (issue #4930) for the durable **issue-cooldown ledger** that
+/// de-duplicates the OODA-core auto-issue filers (`ooda-stuck`,
+/// `recurring_goal_reblock`, `workstream_gap:issue`) across daemon exec-reload,
+/// restart, and cross-client goal-board merges. ENABLED by default; only an
+/// explicit falsey value (`0`/`false`/`no`/`off`) disables it, in which case
+/// each filer falls back to its prior per-path dedup. Kept default-ON so the
+/// storm-suppression safety mechanism is never lost by stealth.
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_ENV: &str = "SIMARD_OVERSEER_ISSUE_COOLDOWN";
+
+/// Env var (issue #4930) setting the BASE cooldown window (seconds) of the
+/// [`crate::overseer::issue_cooldown::IssueCooldownLedger`]. Clamped UP to at
+/// least one full OODA cycle ([`overseer_interval_secs`]) so the same
+/// `(goal, finding)` can never re-file every cycle — the storm's defining
+/// symptom. Unset/empty/unparseable/zero/negative fall back to
+/// [`DEFAULT_ISSUE_COOLDOWN_BASE_SECS`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS";
+
+/// Env var (issue #4930) setting the hard CAP (seconds) on the issue-cooldown
+/// window. Clamped UP to `>= base` so the window can never be negative. A
+/// still-open finding therefore re-surfaces at least once per cap. Unset/empty/
+/// unparseable/zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_MAX_SECS`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS";
+
+/// Env var (issue #4930) setting the rolling-hour emit budget shared with the
+/// [`crate::overseer::guardrails::WhisperGate`] semantics. Unset/empty/
+/// unparseable/zero fall back to [`DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR";
+
+/// Default base issue-cooldown window: 6 h — already well above the one-OODA-cycle
+/// hard floor, favouring quiet-by-default while still re-surfacing daily.
+pub const DEFAULT_ISSUE_COOLDOWN_BASE_SECS: i64 = 21_600;
+
+/// Default issue-cooldown window cap: 24 h, so a still-open finding is never
+/// permanently silenced.
+pub const DEFAULT_ISSUE_COOLDOWN_MAX_SECS: i64 = 86_400;
+
+/// Default rolling-hour emit budget for the issue-cooldown ledger.
+pub const DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR: usize = 20;
 
 /// Resolve the Overseer master flag from an env resolver. Fail-safe: only an
 /// explicit truthy value (`1`/`true`/`yes`/`on`, case-insensitive) enables the
@@ -438,6 +507,96 @@ pub fn overseer_backoff_max_secs() -> i64 {
     overseer_backoff_max_secs_from(|k| std::env::var(k).ok())
 }
 
+/// Resolve whether the durable issue-cooldown ledger (issue #4930) is enabled
+/// from an env resolver. Opt-out: ENABLED unless an explicit falsey value
+/// (`0`/`false`/`no`/`off`) is set. Unset/empty/garbage all leave the ledger ON
+/// so the storm-suppression mechanism is never lost by stealth.
+pub fn issue_cooldown_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(
+        lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_ENV)
+            .as_deref()
+            .map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_enabled() -> bool {
+    issue_cooldown_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown BASE window (seconds) from an env resolver,
+/// clamped UP to at least one full OODA cycle ([`resolve_interval_secs`]) so the
+/// same `(goal, finding)` can never re-file every cycle. Unset/empty/unparseable/
+/// zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_BASE_SECS`]; the cycle
+/// floor is then applied regardless.
+pub fn issue_cooldown_base_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    let requested = match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_BASE_SECS),
+        _ => DEFAULT_ISSUE_COOLDOWN_BASE_SECS,
+    };
+    // Never drop below one OODA cycle — the storm's defining symptom.
+    requested.max(resolve_interval_secs(&lookup) as i64)
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_base_secs() -> i64 {
+    issue_cooldown_base_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown window CAP (seconds) from an env resolver, clamped
+/// UP to `>= base` so the window is never negative. Unset/empty/unparseable/
+/// zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_MAX_SECS`].
+pub fn issue_cooldown_cap_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    let requested = match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_MAX_SECS),
+        _ => DEFAULT_ISSUE_COOLDOWN_MAX_SECS,
+    };
+    requested.max(issue_cooldown_base_secs_from(&lookup))
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_cap_secs() -> i64 {
+    issue_cooldown_cap_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown rolling-hour emit budget from an env resolver.
+/// Unset/empty/unparseable/zero fall back to
+/// [`DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR`] — a bad value never collapses the
+/// budget to `0` and permanently silences a finding.
+pub fn issue_cooldown_cap_per_hour_from(lookup: impl Fn(&str) -> Option<String>) -> usize {
+    match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR),
+        _ => DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_cap_per_hour() -> usize {
+    issue_cooldown_cap_per_hour_from(|k| std::env::var(k).ok())
+}
+
 /// Resolve whether the stale-engineer-claim reaper (issue #4099) is enabled.
 ///
 /// Enabled by default (the reaper closes the `engineer_claims` leak); DISABLED
@@ -582,6 +741,22 @@ pub fn automerge_author() -> Option<String> {
 /// a substring or loose match would let a spoofed look-alike label
 /// (`not-simard-autonomous`, `simard-autonomous-ish`) through the gate.
 pub const SIMARD_ENGINEER_PR_LABEL: &str = "simard-autonomous";
+
+/// The environment-variable name the amplihack publish step
+/// (`workflow_publish_pr.sh`, amplihack-rs #979) reads for the comma-separated
+/// list of best-effort labels to stamp on a PR at `gh pr create` time.
+///
+/// This is the SHELL CONTRACT wire name: `workflow_publish_pr.sh` greps for the
+/// literal `WORKFLOW_PR_LABELS`, so this constant's VALUE is frozen — renaming
+/// the Rust identifier is fine, but changing the string would silently break the
+/// contract and make every engineer PR invisible to the self-merge queue again.
+///
+/// Every Simard-side PR-producing spawn/recipe site sets this env var to
+/// [`SIMARD_ENGINEER_PR_LABEL`] so the published PR carries the durable
+/// engineer marker. The variable is INERT until amplihack-rs #979 lands the
+/// consumer (`workflow_publish_pr.sh`); until then it is a harmless,
+/// backward-compatible no-op (unset => existing behavior).
+pub const WORKFLOW_PR_LABELS_ENV: &str = "WORKFLOW_PR_LABELS";
 
 /// The Rust-deterministic, engineer-EXCLUSIVE head-branch namespaces. These are
 /// code-generated and NEVER hand-typed by a human operator, so a head branch
@@ -760,6 +935,92 @@ fn is_truthy(v: &str) -> bool {
 fn is_falsey(v: &str) -> bool {
     let norm = v.trim().to_ascii_lowercase();
     matches!(norm.as_str(), "0" | "false" | "no" | "off")
+}
+
+/// Resolve whether the native Overseer **Signal operator-liaison** (issue #4911,
+/// Deliverable 1) is enabled. **Default OFF** — explicit truthy required — AND
+/// only while the acting Overseer itself is enabled (an explicitly-disabled
+/// Overseer forces it off regardless of the liaison flag).
+pub fn signal_liaison_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    matches!(
+        lookup(SIMARD_OVERSEER_SIGNAL_LIAISON_ENV).as_deref().map(str::trim),
+        Some(v) if is_truthy(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_liaison_enabled() -> bool {
+    signal_liaison_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the autonomous **PR rework loop** (issue #4911, Deliverable 2)
+/// is enabled. **Default OFF** — explicit truthy required — AND master-gated by
+/// the acting Overseer flag. When OFF, a fixable hold stays held-with-reason.
+pub fn rework_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    matches!(
+        lookup(SIMARD_OVERSEER_REWORK_ENV).as_deref().map(str::trim),
+        Some(v) if is_truthy(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn rework_enabled() -> bool {
+    rework_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the per-PR rework attempt cap. Default [`DEFAULT_REWORK_MAX_ATTEMPTS`]
+/// (3); a parsed value is clamped to `1..=10`; unset/empty/unparseable falls back
+/// to the default. Never panics and never yields 0 (which would disable rework
+/// by stealth).
+pub fn rework_max_attempts_from(lookup: impl Fn(&str) -> Option<String>) -> u32 {
+    match lookup(SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => match s.parse::<u32>() {
+            Ok(n) => n.clamp(1, 10),
+            Err(_) => DEFAULT_REWORK_MAX_ATTEMPTS,
+        },
+        _ => DEFAULT_REWORK_MAX_ATTEMPTS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn rework_max_attempts() -> u32 {
+    rework_max_attempts_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the configured operator E.164 the liaison accepts messages from.
+/// Trimmed; `None` when unset or empty.
+pub fn signal_operator_number_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    non_empty_trimmed(lookup(SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER_ENV))
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_operator_number() -> Option<String> {
+    signal_operator_number_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the configured operator Signal group id the liaison acts on. Trimmed;
+/// `None` when unset or empty.
+pub fn signal_group_id_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    non_empty_trimmed(lookup(SIMARD_OVERSEER_SIGNAL_GROUP_ID_ENV))
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_group_id() -> Option<String> {
+    signal_group_id_from(|k| std::env::var(k).ok())
+}
+
+/// Trim a looked-up value and return `None` if it is absent or empty.
+fn non_empty_trimmed(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -1063,6 +1324,22 @@ mod tests {
             SIMARD_ENGINEER_PR_LABEL, "simard-autonomous",
             "the engineer-PR label must be the exact durable machine marker \
              engineers stamp at `gh pr create` time"
+        );
+    }
+
+    /// The env var name the amplihack publish step (`workflow_publish_pr.sh`,
+    /// amplihack-rs #979) reads for best-effort PR labels is a FROZEN wire
+    /// contract. The shell consumer greps for the literal `WORKFLOW_PR_LABELS`;
+    /// renaming the constant's VALUE (even while keeping the Rust identifier)
+    /// would silently break the contract and make every engineer PR invisible
+    /// to the self-merge queue again. Pin the exact string so a rename can't
+    /// pass CI unnoticed.
+    #[test]
+    fn workflow_pr_labels_env_is_the_frozen_wire_name() {
+        assert_eq!(
+            WORKFLOW_PR_LABELS_ENV, "WORKFLOW_PR_LABELS",
+            "the env var name is a shell-contract shared with \
+             workflow_publish_pr.sh (amplihack-rs #979); its value must not drift"
         );
     }
 

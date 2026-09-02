@@ -106,6 +106,20 @@ pub enum Intervention {
         pr: u32,
         duplicate_of: u32,
     },
+    /// REWORK a fixable-held PR autonomously (issue #4911, Deliverable 2). A THIN
+    /// dispatch tag: its `act()` REUSES the [`Intervention::LaunchRecipe`] path
+    /// against default-workflow, delivering the plain-English `concern` the
+    /// merge-readiness judge recorded via a ContextFile referenced by
+    /// `concern_path` (never argv/env → no E2BIG). The rework rail
+    /// ([`crate::overseer::rework_loop`]) only emits this when the typed verdict
+    /// records `reworkable = true`, the per-PR attempt cap is not hit, it is not
+    /// a duplicate of an in-flight rework, and the PR is not the Overseer's own.
+    /// Capability: `RecipeLauncher` (reused).
+    ReworkPr {
+        repo: String,
+        pr: u32,
+        concern_path: String,
+    },
 }
 
 /// Build the positional `gh` argv for a [`Intervention::FlagStalePr`] comment
@@ -164,6 +178,7 @@ impl Intervention {
             Self::FlagWorkstreamGaps { .. } => "flag_workstream_gaps",
             Self::FlagStalePr { .. } => "flag_stale_pr",
             Self::CloseDuplicatePr { .. } => "close_duplicate_pr",
+            Self::ReworkPr { .. } => "rework_pr",
         }
     }
 }

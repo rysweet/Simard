@@ -159,6 +159,17 @@ pub struct LibraryCognitiveMemory {
     /// on open from the maximum sequence already persisted so it keeps advancing
     /// across reopens.
     fact_seq: AtomicU64,
+    /// Maintained, always-primed snapshot of the six cognitive-memory counts
+    /// served by [`Self::get_statistics`] WITHOUT taking the heavy `inner`
+    /// mutex (issue #4756). Before this, `get_statistics` locked `inner`, so a
+    /// long-held write lock during heavy canary startup starved the
+    /// memory-stats RPC past the 30s rpc-health probe window and reddened every
+    /// self-deploy canary. The snapshot is primed at construction and refreshed
+    /// off the read path via `try_lock` (see [`Self::refresh_stats_snapshot`]),
+    /// so the read path never blocks on `inner`. `None` only before the very
+    /// first prime; [`Self::get_statistics`] surfaces that as a retryable error
+    /// rather than forging an empty reading (no silent "absent").
+    stats_snapshot: Mutex<Option<CognitiveStatistics>>,
     /// The `state_root` this handle was opened against (`None` for the
     /// in-memory test constructor). Used **only** by the `cfg(test)`
     /// hermetic-state-root guard in [`Self::lock_write`], which preserves the
@@ -215,9 +226,14 @@ impl LibraryCognitiveMemory {
                 }
             })?;
         let fact_seq = AtomicU64::new(recover_fact_seq(&inner));
+        // Prime the statistics snapshot BEFORE `inner` is locked behind the
+        // Mutex so the very first `get_statistics` (and the daemon's pre-spawn
+        // prime) serves a populated reading, never `absent` (issue #4756).
+        let stats_snapshot = Mutex::new(Some(stats_from_memory(&inner)));
         Ok(Self {
             inner: Mutex::new(inner),
             fact_seq,
+            stats_snapshot,
             state_root: Some(state_root.to_path_buf()),
             open_guard: Some(open_guard),
         })
@@ -246,9 +262,14 @@ impl LibraryCognitiveMemory {
                 reason: e.to_string(),
             }
         })?;
+        // Prime the statistics snapshot at construction (all-zero for an empty
+        // in-memory store) so `get_statistics` serves a populated reading
+        // immediately (issue #4756).
+        let stats_snapshot = Mutex::new(Some(stats_from_memory(&inner)));
         Ok(Self {
             inner: Mutex::new(inner),
             fact_seq: AtomicU64::new(0),
+            stats_snapshot,
             state_root: None,
             open_guard: None,
         })
@@ -319,6 +340,26 @@ fn map_op_err(method: &str, err: MemoryError) -> SimardError {
         endpoint: STORE_NAME.to_string(),
         method: method.to_string(),
         reason: err.to_string(),
+    }
+}
+
+/// Fold the library's `HashMap<String, usize>` category counts into the typed
+/// [`CognitiveStatistics`] DTO (issue #4756).
+///
+/// Shared by the snapshot primer (constructors) and the off-path refresher so
+/// the snapshot is byte-for-byte identical to what the former direct-lock
+/// `get_statistics` produced — the wire payload shape is unchanged. Any
+/// category the library does not emit defaults to 0 (divergence A7).
+fn stats_from_memory(inner: &CognitiveMemory) -> CognitiveStatistics {
+    let stats = inner.get_statistics();
+    let get = |key: &str| stats.get(key).copied().unwrap_or(0) as u64;
+    CognitiveStatistics {
+        sensory_count: get("sensory"),
+        working_count: get("working"),
+        episodic_count: get("episodic"),
+        semantic_count: get("semantic"),
+        procedural_count: get("procedural"),
+        prospective_count: get("prospective"),
     }
 }
 
@@ -684,6 +725,14 @@ fn partition_fact_query(query: &str) -> FactQueryNeedles {
 ///
 /// Both fields are checked because the library matches a query against concept
 /// AND content, so gating on content alone would drop a legitimate concept hit.
+///
+/// This word-boundary judgment is the **served** relevance definition (#1 of the
+/// three the cognition stack carries — issue #4378). It deliberately differs from
+/// the substring-proxy oracle the `recall_precision_at_k` self-metric uses
+/// ([`crate::cognitive_memory::metrics::precision_at_k`]): a fact this gate
+/// EXCLUDES on an interior/suffix hit can still count as relevant for that metric.
+/// The divergence is intentional and pinned by
+/// `cognitive_memory::tests_relevance_definition_divergence`.
 fn fact_shares_query_relevance(concept: &str, content: &str, needles: &FactQueryNeedles) -> bool {
     if !needles.clean.is_empty()
         && (shares_word_prefix(content, &needles.clean)
@@ -1742,19 +1791,67 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
-        // Divergence (A7): the library returns a `HashMap<String, usize>` keyed
-        // by `MemoryCategory::as_str()`. Fold it into the typed DTO; any key the
-        // library does not emit defaults to 0.
-        let stats = self.lock()?.get_statistics();
-        let get = |key: &str| stats.get(key).copied().unwrap_or(0) as u64;
-        Ok(CognitiveStatistics {
-            sensory_count: get("sensory"),
-            working_count: get("working"),
-            episodic_count: get("episodic"),
-            semantic_count: get("semantic"),
-            procedural_count: get("procedural"),
-            prospective_count: get("prospective"),
+        // FAST PATH (issue #4756): serve the maintained snapshot WITHOUT taking
+        // the heavy `inner` mutex. Locking `inner` here is what let a long-held
+        // write lock during canary startup starve the memory-stats RPC past the
+        // 30s rpc-health probe window, reddening every self-deploy canary.
+        //
+        // A best-effort off-path refresh keeps the snapshot fresh; under
+        // contention it is a no-op (`try_lock`) and we serve the last good
+        // value. Divergence (A7): the counts come from the library's
+        // `HashMap<String, usize>` folded into the typed DTO in
+        // `stats_from_memory` — identical to the former direct-lock path, so the
+        // payload shape is unchanged.
+        self.refresh_stats_snapshot();
+        let snapshot = self
+            .stats_snapshot
+            .lock()
+            .map_err(|_| SimardError::StoragePoisoned {
+                store: STORE_NAME.to_string(),
+            })?;
+        // No silent fallback: an uninitialized snapshot that could not be
+        // recomputed (heavy mutex held during the brief init gap) surfaces a
+        // RETRYABLE error — never `Ok(CognitiveStatistics::default())`, which
+        // would forge a healthy-but-empty reading and defeat fail-closed.
+        snapshot.clone().ok_or_else(|| {
+            crate::cognitive_memory::metrics::increment("stats_snapshot", "uninitialized");
+            tracing::warn!(
+                target: "simard::memory",
+                "get_statistics: stats snapshot uninitialized and un-recomputable \
+                 (inner mutex contended during init); returning retryable error",
+            );
+            SimardError::RpcCallFailed {
+                endpoint: STORE_NAME.to_string(),
+                method: "get_statistics".to_string(),
+                reason: "statistics snapshot not yet initialized (retryable)".to_string(),
+            }
         })
+    }
+
+    fn refresh_stats_snapshot(&self) {
+        // Recompute OFF the read path via `try_lock`: this NEVER blocks and
+        // NEVER holds the heavy `inner` mutex for a read, so it cannot
+        // reintroduce the lock-starvation the snapshot exists to remove
+        // (issue #4756). On contention (or a poisoned lock) we keep the last
+        // good snapshot rather than clobbering it to zero — a bounded-stale but
+        // populated reading beats a false empty.
+        let Ok(guard) = self.inner.try_lock() else {
+            crate::cognitive_memory::metrics::increment("stats_snapshot_refresh", "contended_skip");
+            tracing::trace!(
+                target: "simard::memory",
+                "stats snapshot refresh skipped: inner mutex contended (kept last good)",
+            );
+            return;
+        };
+        let fresh = stats_from_memory(&guard);
+        drop(guard);
+        match self.stats_snapshot.lock() {
+            Ok(mut snap) => *snap = Some(fresh),
+            Err(_) => tracing::error!(
+                target: "simard::memory",
+                "stats snapshot mutex poisoned; cannot publish refreshed statistics",
+            ),
+        }
     }
 
     fn is_read_only(&self) -> bool {
@@ -1823,12 +1920,19 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn checkpoint(&self) -> SimardResult<()> {
-        // The library exposes durability via `close`, which issues a LadybugDB
-        // CHECKPOINT (collapsing the WAL into the main file) while keeping the
-        // store usable. Flushing here mirrors the native backend's CHECKPOINT so
-        // a subsequent reopen of the same path observes all committed writes.
-        self.lock()?.close();
-        Ok(())
+        // Delegate to the library's purpose-built `CognitiveMemory::checkpoint`,
+        // which issues a LadybugDB CHECKPOINT (collapsing the WAL into the main
+        // file) and — crucially — leaves the store's warm schema/id caches
+        // intact. `close` would also work the CHECKPOINT, but it is a pre-drop
+        // teardown that clears those caches (forcing a schema reload on the next
+        // op) AND logs-and-swallows a failed CHECKPOINT, so routing through it
+        // would make this method return `Ok(())` even when the flush failed.
+        // `checkpoint` PROPAGATES the failure instead, so the daemon's bounded
+        // WAL-retention cadence (issue #4929) surfaces checkpoint errors rather
+        // than silently swallowing them.
+        self.lock()?
+            .checkpoint()
+            .map_err(|e| map_op_err("checkpoint", e))
     }
 }
 
@@ -2118,5 +2222,169 @@ mod fact_query_gate_tests {
             "the s3 storage layer synced",
             &n
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests_stats_snapshot_readiness_4756 {
+    //! TDD (issue #4756 — self-deploy failure loop). Every recent canary reddens
+    //! on the `rpc-health` gate with `rpc health timed out after 30s (memory
+    //! stats did not return)`. Root cause: `get_statistics` takes the global
+    //! `Mutex<CognitiveMemory>`, which is held for a long time during heavy
+    //! canary startup, so the memory-stats RPC never returns inside the probe
+    //! window.
+    //!
+    //! These tests pin the **snapshot fast-path** contract for
+    //! [`LibraryCognitiveMemory`] (design Brick A). They are RED until the fix
+    //! lands and reference the required implementation seams:
+    //!
+    //!   * field `stats_snapshot: Mutex<Option<CognitiveStatistics>>` — a
+    //!     maintained, primed snapshot served by `get_statistics` WITHOUT taking
+    //!     the heavy `inner` mutex.
+    //!   * `refresh_stats_snapshot(&self)` — recomputes the snapshot via
+    //!     `try_lock` so it never blocks and never holds the heavy mutex.
+    //!   * an uninitialized snapshot (`None`) that cannot be recomputed
+    //!     propagates a retryable `Err`, never `Ok(CognitiveStatistics::default())`
+    //!     (no silent "absent"/empty reading).
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// A read/refresh on the fast path must complete far inside this budget even
+    /// when the heavy mutex is held — it is the whole point of the fix (vs the
+    /// 30s hard timeout the deploy gate hits today).
+    const NON_BLOCKING_BUDGET: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn fresh_adapter_serves_primed_zero_snapshot() {
+        // The snapshot must be PRIMED at construction so every existing caller
+        // (and the daemon at startup) gets an immediate, populated response —
+        // all-zero for an empty store, never `absent`/error.
+        let mem = LibraryCognitiveMemory::in_memory().expect("in-memory adapter");
+        let stats = mem
+            .get_statistics()
+            .expect("a freshly-constructed adapter must serve a primed snapshot, not error");
+        assert_eq!(
+            stats.total(),
+            0,
+            "an empty store's primed snapshot is all-zero, never absent"
+        );
+    }
+
+    #[test]
+    fn get_statistics_serves_cached_snapshot_while_heavy_mutex_is_held() {
+        // Reproduces the exact deploy failure: while the global
+        // `Mutex<CognitiveMemory>` is held for a long time, `get_statistics` must
+        // return the last good snapshot PROMPTLY without touching `inner`.
+        let mem = LibraryCognitiveMemory::in_memory().expect("in-memory adapter");
+        mem.store_fact("rust", "systems language", 0.9, &[], "test")
+            .expect("store_fact");
+        mem.refresh_stats_snapshot();
+        assert_eq!(
+            mem.get_statistics().expect("stats").semantic_count,
+            1,
+            "an uncontended refresh must reflect the stored fact"
+        );
+
+        let mem = Arc::new(mem);
+        let holder = Arc::clone(&mem);
+        let (locked_tx, locked_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _guard = holder.inner.lock().expect("hold heavy mutex");
+            locked_tx.send(()).expect("signal heavy mutex acquired");
+            // Keep the heavy mutex held until the reader has finished timing.
+            release_rx.recv().expect("await release");
+        });
+
+        locked_rx.recv().expect("await heavy-mutex acquisition");
+        let start = Instant::now();
+        let stats = mem
+            .get_statistics()
+            .expect("get_statistics must serve the cached snapshot, not error, under lock");
+        let elapsed = start.elapsed();
+        release_tx.send(()).expect("release holder");
+        handle.join().expect("join holder");
+
+        assert!(
+            elapsed < NON_BLOCKING_BUDGET,
+            "get_statistics must NOT block on the heavy mutex (took {elapsed:?}); \
+             blocking here is the 30s rpc-health timeout the fix removes"
+        );
+        assert_eq!(
+            stats.semantic_count, 1,
+            "the served snapshot must be the last good populated value, never empty/absent"
+        );
+    }
+
+    #[test]
+    fn refresh_stats_snapshot_is_non_blocking_under_contention() {
+        // `refresh_stats_snapshot` recomputes via `try_lock`: under contention it
+        // must return promptly WITHOUT blocking and WITHOUT clobbering the last
+        // good snapshot down to zero.
+        let mem = LibraryCognitiveMemory::in_memory().expect("in-memory adapter");
+        mem.store_fact("rust", "systems language", 0.9, &[], "test")
+            .expect("store_fact");
+        mem.refresh_stats_snapshot();
+
+        let mem = Arc::new(mem);
+        let holder = Arc::clone(&mem);
+        let (locked_tx, locked_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _guard = holder.inner.lock().expect("hold heavy mutex");
+            locked_tx.send(()).expect("signal heavy mutex acquired");
+            release_rx.recv().expect("await release");
+        });
+
+        locked_rx.recv().expect("await heavy-mutex acquisition");
+        let start = Instant::now();
+        mem.refresh_stats_snapshot();
+        let elapsed = start.elapsed();
+        release_tx.send(()).expect("release holder");
+        handle.join().expect("join holder");
+
+        assert!(
+            elapsed < NON_BLOCKING_BUDGET,
+            "refresh_stats_snapshot must use try_lock and return promptly under \
+             contention (took {elapsed:?})"
+        );
+        assert_eq!(
+            mem.get_statistics().expect("stats").semantic_count,
+            1,
+            "a contended refresh must leave the last good snapshot intact, not zero it"
+        );
+    }
+
+    #[test]
+    fn uninitialized_snapshot_propagates_retryable_error_never_default() {
+        // No silent fallback: an uninitialized snapshot that also cannot be
+        // recomputed (heavy mutex held) must surface a retryable Err — never
+        // `Ok(CognitiveStatistics::default())`, which would forge a healthy but
+        // empty reading and defeat the fail-closed contract.
+        let mem = LibraryCognitiveMemory::in_memory().expect("in-memory adapter");
+        *mem.stats_snapshot.lock().expect("snapshot lock") = None;
+
+        let mem = Arc::new(mem);
+        let holder = Arc::clone(&mem);
+        let (locked_tx, locked_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _guard = holder.inner.lock().expect("hold heavy mutex");
+            locked_tx.send(()).expect("signal heavy mutex acquired");
+            release_rx.recv().expect("await release");
+        });
+
+        locked_rx.recv().expect("await heavy-mutex acquisition");
+        let result = mem.get_statistics();
+        release_tx.send(()).expect("release holder");
+        handle.join().expect("join holder");
+
+        assert!(
+            result.is_err(),
+            "an uninitialized, un-recomputable snapshot must fail closed as a \
+             retryable Err, never Ok(default): got {result:?}"
+        );
     }
 }

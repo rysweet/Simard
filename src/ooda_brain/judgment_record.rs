@@ -22,7 +22,7 @@ use std::cell::RefCell;
 
 use super::{
     DecideJudgment, EngineerAdmissionDecision, EngineerLifecycleDecision, GoalOutcomeDecision,
-    OrientJudgment, ParseFailureRecord, ResourceAdmissionDecision,
+    OrientJudgment, ParseFailureRecord, PerGoalAction, ResourceAdmissionDecision,
 };
 
 /// Which recipe-backed brain phase produced the judgment. Serialised as
@@ -54,6 +54,9 @@ pub enum BrainPhase {
     /// #2706): can the host afford another engineer (disk/build-cache/load)?
     /// Serialises as `"resource_admission"`.
     ResourceAdmission,
+    /// Per-goal, per-cycle agentic next-action decision (issue #4453). Recorded
+    /// once for EVERY active goal EVERY cycle. Serialises as `"per_goal_cycle"`.
+    PerGoalCycle,
 }
 
 impl BrainPhase {
@@ -70,6 +73,7 @@ impl BrainPhase {
             BrainPhase::OutcomeVerify => "outcome_verify",
             BrainPhase::EngineerAdmission => "engineer_admission",
             BrainPhase::ResourceAdmission => "resource_admission",
+            BrainPhase::PerGoalCycle => "per_goal_cycle",
         }
     }
 }
@@ -161,6 +165,28 @@ impl BrainJudgmentRecord {
             context_summary: truncate(&format!("engineer-lifecycle goal_id={goal_id}")),
             decision: label.to_string(),
             rationale: rationale.to_string(),
+            confidence: if fallback { 0.5 } else { 1.0 },
+            fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build a `PerGoalCycle`-phase record from a per-goal, per-cycle action
+    /// (issue #4453). Recorded once for EVERY active goal EVERY cycle so no goal
+    /// is ever left idle without both a chosen action and its reason. The
+    /// `PerGoalAction` carries the mandatory reason on each variant.
+    pub fn from_per_goal_cycle(
+        goal_id: &str,
+        action: &PerGoalAction,
+        fallback: bool,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase: BrainPhase::PerGoalCycle,
+            context_summary: truncate(&format!("per-goal-cycle goal_id={goal_id}")),
+            decision: action.variant_label().to_string(),
+            rationale: action.reason().to_string(),
             confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
             prompt_version: prompt_version.into(),

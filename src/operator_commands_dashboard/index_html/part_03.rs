@@ -399,15 +399,33 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     }
 
     /* --- Recent Memories (plain-English view, #1997) --- */
+    // Honest caption for the #mem-recent-count headline (#4318). The count is
+    // net long-term growth since the baseline snapshot; that window is ~1h in
+    // steady state but can be arbitrarily LONGER when memory-history snapshots
+    // are sparse (a gap wider than an hour straddling the 1h mark). Label the
+    // TRUE window so the dashboard never claims "in the last hour" for a 2.6h
+    // delta. `null`/near-1h ⇒ keep the plain "in the last hour" copy.
+    function formatWindowCaption(windowSecs){
+      if(windowSecs==null||!isFinite(windowSecs)) return 'in the last hour';
+      // ±15 min tolerance around one hour reads as "the last hour".
+      if(Math.abs(windowSecs-3600)<=900) return 'in the last hour';
+      if(windowSecs<3600){
+        const m=Math.round(windowSecs/60);
+        return m<=1?'in the last minute':('in the last '+m+' min');
+      }
+      return 'in the last '+(windowSecs/3600).toFixed(1)+'h';
+    }
     async function fetchRecentMemories(){
       const countEl=document.getElementById('mem-recent-count');
       const totalEl=document.getElementById('mem-recent-total');
       const listEl=document.getElementById('mem-recent-list');
+      const winEl=document.getElementById('mem-recent-window');
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
         countEl.textContent=d.last_hour_count;
+        if(winEl) winEl.textContent=formatWindowCaption(d.last_hour_window_secs);
         totalEl.textContent=(d.total||0).toLocaleString()+' total';
         if(!d.items||d.items.length===0){
           const total=d.total||0;

@@ -163,6 +163,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         // read-only status snapshot; left empty here so this projection stays
         // additive and side-effect free.
         recent_step_failures: Vec::new(),
+        // Deploy-drift (#2590) is surfaced by the ACTING Overseer's Observe pass
+        // (the `observe_deploy_drift` rail runs the fail-safe ReconcileDetector),
+        // not from the read-only status snapshot; left `None` here so this
+        // projection stays additive and side-effect free.
+        deploy_drift: None,
         // Agentic merge-queue reasoning (#4097: reasoned_prs / triaged_issues /
         // merge_reasoning_status) is populated by the acting Overseer's Observe
         // pass via the `observe-merge-queue` recipe rail, not from the read-only
@@ -171,6 +176,11 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         reasoned_prs: Vec::new(),
         triaged_issues: Vec::new(),
         merge_reasoning_status: crate::overseer::capabilities::MergeReasoningStatus::Unknown,
+        // The agentic health-review verdict ([standing]) is set by the acting
+        // Overseer's `health_review` pass, not from the read-only status
+        // snapshot; left NotRun here so this projection stays additive and
+        // side-effect free.
+        health_review_status: crate::overseer::capabilities::HealthReviewStatus::NotRun,
     }
 }
 
@@ -600,6 +610,10 @@ impl CognitiveThread for OverseerSensorThread {
         SchedulePolicy::Interval(Duration::from_secs(self.interval_secs))
     }
 
+    fn purpose(&self) -> &'static str {
+        "Read-only observe of Simard's own telemetry, filing anomaly issues"
+    }
+
     fn priority(&self) -> Priority {
         // Background, never-critical: it must never steal budget from OODA.
         Priority::Low
@@ -697,6 +711,8 @@ impl CognitiveThread for OverseerSensorThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

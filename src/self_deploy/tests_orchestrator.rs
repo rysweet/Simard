@@ -224,8 +224,8 @@ mod fake_sequence {
     use crate::safe_update::SafeUpdateError;
     use crate::self_deploy::backup::ProtectiveBackup;
     use crate::self_deploy::health::{
-        BrainsLlmBackedProbe, GoalBoardIntactProbe, MemoryIntactProbe, NoQuarantineProbe,
-        SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
+        BrainsLlmBackedProbe, EntrypointParityProbe, GoalBoardIntactProbe, MemoryIntactProbe,
+        NoQuarantineProbe, SelfHealthProbes, SelfHealthReport, VersionAdvancedProbe,
     };
     use crate::self_deploy::orchestrator::{DeployEffects, run_sequence};
 
@@ -293,6 +293,17 @@ mod fake_sequence {
             no_quarantine: NoQuarantineProbe {
                 healthy: true,
                 quarantined: false,
+                fresh_quarantines: 0,
+                retained: 0,
+            },
+            entrypoint_parity: EntrypointParityProbe {
+                healthy,
+                installed_version: "simard 0.35.0".into(),
+                path_version: "simard 0.35.0".into(),
+                resolved_path: "/home/you/.local/bin/simard".into(),
+                canonical_path: "/home/you/.simard/bin/simard".into(),
+                path_mismatch: false,
+                foreign_shadow: false,
             },
         })
     }

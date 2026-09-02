@@ -109,3 +109,4 @@ This audit closes the "is the codebase riddled with silent error swallows?" ques
 - PR #1259 (Simard) — rpc_subprocess_launcher fail-open conversion (Round 5)
 - PR #1274 (Simard) — advance_goal.rs error propagation (4 sites, #1264)
 - PR #1275 (Simard) — vacate handler error propagation (#1263)
+- Issue #4631 (Simard) — fail-open `worker_present` in the per-goal reasoner: a leaked/dead `engineer_worktrees` entry read as "worker present … alive" forever, starving the goal. Fixed by liveness-verifying the presence read; see [Worker-Presence Liveness Verification](concepts/worker-presence-liveness-verification.md).

@@ -103,16 +103,59 @@ require_test 'parse_missing_terminal_marker_is_error'
 # Fail-closed: malformed / missing-field decisions are dropped, never fabricated.
 require_test 'parse_skips_malformed_json_but_keeps_valid_decisions'
 require_test 'parse_skips_escalation_missing_plain_english_fields'
+# Robustness: a well-formed decision is DISPATCHED, not silently dropped, when the
+# agent wraps it in ordinary markdown/prose framing — trailing justification text
+# after the JSON object (the trailing-side sibling of the #4514 leading-decoration
+# fix) — while an unbalanced/truncated object is still skipped fail-closed and the
+# trailing clause never leaks into the parsed brief / operator-facing text.
+require_test 'parse_tolerates_trailing_text_after_launch_json'
+require_test 'parse_tolerates_trailing_text_after_escalate_json'
+require_test 'parse_tolerates_leading_decoration_and_trailing_text_together'
+require_test 'parse_trailing_text_never_ends_json_early_inside_a_string'
+require_test 'parse_still_skips_unbalanced_truncated_json_fail_closed'
+require_test 'extract_leading_json_object_basics'
 # The rail degrades safely on a runner error / a missing terminal marker.
 require_test 'review_degrades_to_empty_on_runner_error'
 require_test 'review_degrades_to_empty_on_missing_terminal_marker'
+# Degraded-pass recovery: the bounded escalation ladder (shared brain ladder
+# primitives) recovers a truncated pass, exhausts fail-closed, honors its
+# disable knob, stops on a rung fault, and never fires on a clean/base-fault pass.
+require_test 'review_recovers_on_the_schema_repair_rung'
+require_test 'review_recovers_on_the_high_effort_rung'
+require_test 'review_exhausts_ladder_and_takes_no_remediation'
+require_test 'review_disabled_ladder_makes_no_retry'
+require_test 'review_stops_ladder_when_a_rung_faults'
+require_test 'review_healthy_base_never_enters_the_ladder'
+require_test 'review_base_runner_error_never_enters_the_ladder'
 # The rail forwards ONLY bounded context vars to the recipe seam (no context files).
 require_test 'review_forwards_bounded_context_vars_to_the_seam'
 # END-TO-END wiring: both decisions flow through the SAME gate as every action.
 require_test 'health_review_routes_launch_and_escalate_into_gated_plan'
-# The shared gap-scan throttle AND the dedicated opt-out each disable the rail.
-require_test 'health_review_skipped_when_gap_scan_disabled'
-require_test 'health_review_skipped_when_dedicated_flag_disabled'
+# OBSERVABILITY: the pass's HEALTH_REVIEW_COMPLETE verdict is SURFACED on the
+# observed state (never discarded) — a HEALTHY pass is an observable
+# `Reviewed { 0 }` (not a silent no-op), a fault is a LOUD `Degraded`, and an
+# unwired/off-cadence tick stays `NotRun`. Same "no silent OFF" discipline as
+# merge-queue reasoning (#4097).
+require_test 'health_review_healthy_verdict_surfaces_reviewed_with_zero_decisions'
+require_test 'health_review_failure_surfaces_degraded_status'
+require_test 'health_review_ok_without_verdict_surfaces_degraded_status'
+require_test 'health_review_unwired_leaves_status_not_run'
+require_test 'health_review_off_cadence_leaves_status_not_run'
+# OPERATOR-FEED surfacing: the verdict is not only on the struct field — it is
+# rendered into the operator-visible `observed:` feed (simard status / TUI /
+# dashboard via `humanize_tick_details`). A Reviewed pass leaves a
+# `health-review: <summary>` breadcrumb (a HEALTHY pass included), a Degraded
+# pass is LOUD, and a NotRun tick stays quiet.
+require_test 'health_review_verdict_surfaces_in_the_operator_feed'
+require_test 'health_review_degraded_surfaces_loud_in_the_operator_feed'
+require_test 'health_review_disabled_surfaces_loud_in_the_operator_feed'
+require_test 'health_review_not_run_stays_quiet_in_the_operator_feed'
+# The shared gap-scan throttle AND the dedicated opt-out each disable the rail,
+# and each does so LOUD: the reviewer is never invoked and the observed status is
+# `Disabled { reason }` naming the knob — never a silent `NotRun` (#4097), exactly
+# as `observe_merge_queue` surfaces the SAME `SIMARD_OVERSEER_GAP_SCAN` opt-out.
+require_test 'health_review_disabled_when_gap_scan_disabled_surfaces_loud_status'
+require_test 'health_review_disabled_when_dedicated_flag_disabled_surfaces_loud_status'
 # Cadence: the rail honors its every-N knob.
 require_test 'health_review_respects_every_n_cadence'
 # An unwired rail is a pure no-op (bare constructor / tests behave as before).

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::agent_supervisor::types::SubordinateConfig;
+use crate::overseer::config;
 
 /// POSIX shell single-quote escape: wrap the value in single quotes,
 /// replacing any embedded `'` with the sequence `'\''`.
@@ -132,6 +133,11 @@ fn default_cargo_target_for_worktree(
 ///    - `SIMARD_AGENT_NAME`        = `config.agent_name`
 ///    - `SIMARD_SUBORDINATE_DEPTH` = `config.current_depth + 1`
 ///    - `CARGO_BUILD_JOBS`         = `cargo_jobs_from(SIMARD_CARGO_JOBS)` (issues #373, #2199 OOM guard)
+///    - `WORKFLOW_PR_LABELS`       = `simard-autonomous` (engineer-PR marker for
+///      the amplihack publish step, #4097). Unlike the other seeds this is NOT a
+///      `SIMARD_*` var, so it is not covered by rule (3)'s auto-forwarding — it
+///      is seeded explicitly here because the direct-exec `Command::env()` in
+///      spawn.rs never crosses the tmux boundary.
 /// 2. `CARGO_TARGET_DIR` honors a `parent_env` override; otherwise defaults
 ///    to a **per-worktree** path so concurrent engineers never share one
 ///    cargo target dir (which would deadlock cargo's file lock or corrupt
@@ -175,6 +181,17 @@ where
             (config.current_depth + 1).to_string(),
         ),
         ("CARGO_BUILD_JOBS".to_string(), cargo_jobs),
+        // Best-effort engineer-PR label for the amplihack publish step
+        // (workflow_publish_pr.sh, amplihack-rs #979). Production engineers are
+        // tmux-wrapped, and `WORKFLOW_PR_LABELS` is NOT a `SIMARD_*` var, so the
+        // `Command::env()` set on the direct-exec path in spawn.rs never crosses
+        // the tmux boundary — it MUST be seeded here explicitly or the label
+        // silently no-ops for every real engineer PR (#4097). Keyed by the shared
+        // constants so there is a single grep-able source of truth.
+        (
+            config::WORKFLOW_PR_LABELS_ENV.to_string(),
+            config::SIMARD_ENGINEER_PR_LABEL.to_string(),
+        ),
     ];
 
     let cargo_target = parent_pairs
@@ -198,4 +215,60 @@ where
     tmux_env.extend(simard_extras);
 
     tmux_env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_roles::AgentRole;
+    use crate::overseer::config;
+    use std::path::PathBuf;
+
+    fn make_config(name: &str) -> SubordinateConfig {
+        SubordinateConfig {
+            agent_name: name.to_string(),
+            goal: "do the thing".to_string(),
+            role: AgentRole::Engineer,
+            worktree_path: PathBuf::from("/tmp/wt/engineer-x"),
+            current_depth: 0,
+        }
+    }
+
+    /// Seam (b): production engineers are tmux-wrapped, and `compute_tmux_env`
+    /// only auto-forwards `SIMARD_*` vars from the parent env plus a fixed seed
+    /// set. `WORKFLOW_PR_LABELS` is NOT a `SIMARD_*` var, so a `Command::env()`
+    /// set in spawn.rs never reaches the tmux path. It MUST be seeded explicitly
+    /// here or the label silently no-ops for every real engineer PR. This test
+    /// pins that the seeded pair is always present, keyed by the shared
+    /// constants (never a magic string) and valued at the engineer label.
+    #[test]
+    fn compute_tmux_env_seeds_workflow_pr_labels() {
+        let cfg = make_config("engineer-1");
+        // Empty parent env: the pair must be seeded unconditionally, not merely
+        // forwarded from the parent.
+        let env = compute_tmux_env(&cfg, std::iter::empty());
+
+        let pair = env
+            .iter()
+            .find(|(k, _)| k == config::WORKFLOW_PR_LABELS_ENV)
+            .expect("compute_tmux_env must seed WORKFLOW_PR_LABELS into the tmux -e vec");
+        assert_eq!(
+            pair.1,
+            config::SIMARD_ENGINEER_PR_LABEL,
+            "the seeded label must be the durable engineer-PR marker"
+        );
+    }
+
+    /// The seeded key is the exact frozen wire name — guards against a silent
+    /// constant-value rename breaking the shell contract with #979.
+    #[test]
+    fn compute_tmux_env_uses_frozen_wire_name() {
+        let cfg = make_config("engineer-2");
+        let env = compute_tmux_env(&cfg, std::iter::empty());
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "WORKFLOW_PR_LABELS" && v == "simard-autonomous"),
+            "expected literal WORKFLOW_PR_LABELS=simard-autonomous in the tmux env vec"
+        );
+    }
 }

@@ -16,6 +16,7 @@ status: current
 related:
   - ./autonomous-merge-review-gate.md
   - ./cross-repo-merge-authority.md
+  - ./merge-record-verdict-cli.md
   - ../concepts/autonomous-merge-review-gate.md
   - ../concepts/autonomous-self-merge-sensor.md
   - ../howto/enable-autonomous-self-merge-canary.md

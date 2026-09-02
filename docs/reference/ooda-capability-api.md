@@ -1,12 +1,13 @@
 ---
 title: OODA capability API
 description: Implemented typed terminal, authorization, idempotency, actor-session, and effect-outbox contracts for parser-free goal-session execution.
-last_updated: 2026-07-14
+last_updated: 2026-07-30
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./actor-session-startup-purge.md
   - ../architecture/typed-ooda-loop.md
   - ../howto/spawn-engineers-from-ooda-daemon.md
   - ../operations/deploy-and-roll-back-typed-ooda.md
@@ -32,6 +33,15 @@ bound to:
 The random token is passed through an owner-private context file. `ooda
 terminal` must present that token and the exact session, cycle, and goal.
 Expired or mismatched sessions return `Unauthenticated`.
+
+Actor sessions are process-transient even though their SQLite rows are
+persistent. The authoritative OODA daemon clears every inherited
+`actor_sessions` row once at startup, before goal-cycle work. This lets the
+stable per-goal session ID bind to the new process's scope after a restart or
+posture change. A scope change against a session registered in the current
+process still returns
+`AuthorizationScopeViolation`. See the
+[actor-session startup purge](./actor-session-startup-purge.md).
 
 The terminal actor's tool schemas do not accept caller-supplied session, cycle,
 goal, repository authority, or grants. Those values come from the authenticated

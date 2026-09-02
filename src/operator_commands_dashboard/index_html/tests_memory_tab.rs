@@ -352,3 +352,72 @@ fn recent_memories_empty_state_branches_on_last_hour_count() {
          when total is zero (#2358); body: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #4318: honest last-hour WINDOW caption. The #mem-recent-count headline is net
+// long-term growth since the baseline snapshot; that window is ~1h in steady
+// state but can be MUCH wider when memory-history snapshots are sparse. The
+// caption must therefore reflect the true window (`last_hour_window_secs`)
+// instead of hardcoding "in the last hour".
+// ---------------------------------------------------------------------------
+
+/// The caption under the big number must be an addressable element the renderer
+/// can rewrite, not a hardcoded "in the last hour" literal.
+#[test]
+fn recent_memories_caption_is_addressable_for_honest_window() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains(r#"id="mem-recent-window""#),
+        "the last-hour caption must live in an addressable #mem-recent-window \
+         element so the renderer can label the TRUE covered window (#4318), not \
+         a hardcoded 'in the last hour' literal"
+    );
+}
+
+/// `formatWindowCaption` must implement the honest-window rule: keep "in the
+/// last hour" only near 1h (±15 min) or when the window is unknown, and
+/// otherwise render the real span in hours.
+#[test]
+fn format_window_caption_labels_the_true_window() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "formatWindowCaption");
+    assert!(
+        body.contains("in the last hour"),
+        "formatWindowCaption must keep the plain 'in the last hour' copy for the \
+         ~1h / unknown case; body: {body}"
+    );
+    assert!(
+        body.contains("900"),
+        "formatWindowCaption must apply a ±15 min (900s) tolerance around one \
+         hour before it claims 'in the last hour'; body: {body}"
+    );
+    assert!(
+        body.contains("3600"),
+        "formatWindowCaption must compare against the one-hour (3600s) edge; \
+         body: {body}"
+    );
+    assert!(
+        body.contains("/3600"),
+        "formatWindowCaption must render a wider window as hours (windowSecs/3600); \
+         body: {body}"
+    );
+}
+
+/// `fetchRecentMemories` must actually WIRE the true window into the caption
+/// element, feeding `last_hour_window_secs` through `formatWindowCaption`.
+#[test]
+fn fetch_recent_memories_wires_the_true_window_caption() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "fetchRecentMemories");
+    assert!(
+        body.contains("formatWindowCaption(d.last_hour_window_secs)"),
+        "fetchRecentMemories must label the caption from the live \
+         last_hour_window_secs so a 2.6h delta is never shown as 'in the last \
+         hour' (#4318); body: {body}"
+    );
+    assert!(
+        body.contains("mem-recent-window"),
+        "fetchRecentMemories must update the #mem-recent-window caption element; \
+         body: {body}"
+    );
+}

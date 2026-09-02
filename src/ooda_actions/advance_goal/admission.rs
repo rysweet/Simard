@@ -420,6 +420,13 @@ mod tests {
             unreachable!("admission tests never take the lifecycle path")
         }
 
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
+            unreachable!("admission tests never take the per-goal-cycle path")
+        }
+
         fn decide_engineer_admission(
             &self,
             _ctx: &EngineerAdmissionCtx,

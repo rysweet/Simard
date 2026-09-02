@@ -1,10 +1,13 @@
-//! Recipe-runner-backed disk health check (issue #2020, fix #2212).
+//! Recipe-runner-backed disk health check (issue #2020; reworked in #4722).
 //!
 //! Two-tier approach:
 //!   1. **Deterministic emergency cleanup** — pure Rust, no LLM, runs when disk
 //!      is critically full (≥95%). Deletes known-safe build artifacts immediately.
-//!   2. **Recipe-based cleanup** — LLM agent for intelligent cleanup when disk
-//!      is moderately full (≥80%). Can make nuanced decisions.
+//!   2. **Agentic recipe trigger** — when disk is moderately full, the daemon
+//!      runs the `disk-health-check` recipe. The recipe *acts* through the
+//!      safety-enforcing `simard disk` tool and prints no envelope; this module
+//!      is a **thin trigger** that records success/failure by the recipe child's
+//!      exit status alone (issue #4722). It no longer parses recipe stdout.
 //!
 //! The emergency tier exists because the recipe tier needs disk space to spawn
 //! an agent process. At 100% disk, the recipe deadlocks.
@@ -12,7 +15,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::error::{SimardError, SimardResult};
@@ -21,25 +23,10 @@ use crate::runtime_config::RuntimeConfig;
 const ADAPTER_TAG: &str = "disk-health-check";
 const RECIPE_FILENAME: &str = "disk-health-check.yaml";
 
-/// JSON envelope returned by `recipe-runner-rs --output-format json`.
-#[derive(Debug, Deserialize)]
-pub(crate) struct RecipeOutput {
-    pub success: bool,
-    pub step_results: Vec<StepResult>,
-}
-
-/// A single step's result inside the [`RecipeOutput`] envelope.
-#[derive(Debug, Deserialize)]
-pub(crate) struct StepResult {
-    #[allow(dead_code)] // Part of JSON contract; used in tests.
-    pub step_id: String,
-    pub output: String,
-}
-
-/// Structured report returned by the disk-health-check recipe.
-///
-/// Built by parsing text markers (`DISK_USED_PCT=`, `FREED_BYTES=`,
-/// `ACTION:`) from the agent step output extracted from the JSON envelope.
+/// Deterministic result of the Tier-1 emergency cleanup (pure Rust, no recipe,
+/// no LLM). This is **not** recipe-output scraping — it is the direct return of
+/// the in-process `rm` pass, so it stays after the issue #4722 rework that
+/// removed all recipe-stdout parsing from this file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiskHealthReport {
     /// Current disk usage percentage (0–100).
@@ -48,30 +35,6 @@ pub struct DiskHealthReport {
     pub freed_bytes: u64,
     /// Human-readable list of cleanup actions taken.
     pub actions_taken: Vec<String>,
-}
-
-impl DiskHealthReport {
-    /// Whether cleanup was actually performed (usage was above threshold).
-    pub fn cleanup_performed(&self) -> bool {
-        self.freed_bytes > 0 || !self.actions_taken.is_empty()
-    }
-
-    /// One-line summary suitable for daemon log.
-    pub fn summary(&self) -> String {
-        if self.cleanup_performed() {
-            format!(
-                "disk health: {}% used, freed {} bytes, {} actions",
-                self.disk_used_pct,
-                self.freed_bytes,
-                self.actions_taken.len()
-            )
-        } else {
-            format!(
-                "disk health: {}% used, no cleanup needed",
-                self.disk_used_pct
-            )
-        }
-    }
 }
 
 /// Resolve the recipe YAML path. Checks, in order:
@@ -255,24 +218,31 @@ fn dir_size_bytes(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Run the disk health check recipe via `recipe-runner-rs`.
+/// Run the disk-health-check recipe via `recipe-runner-rs` as a thin trigger
+/// (issue #4722).
 ///
-/// `state_root` is the Simard state directory (typically `~/.simard`),
-/// passed to the recipe as a context var so the bash script knows where
-/// to find worktrees, backups, and cargo target dirs.
+/// The recipe now *acts* through the `simard disk` tool (which enforces the
+/// disk-safety heuristic internally) and prints **no** JSON envelope. This
+/// function therefore no longer parses recipe stdout: it records success/failure
+/// by the child's **exit status alone**.
 ///
-/// `repo_root` is used to locate the recipe YAML file.
+/// `state_root` is the Simard state directory (typically `~/.simard`), passed to
+/// the recipe as a context var. `repo_root` is used to locate the recipe YAML.
+/// `home_override` lets tests supply a fake home directory without mutating the
+/// process-wide `HOME`.
 ///
-/// `home_override` allows tests to supply a fake home directory without
-/// mutating the process-wide `HOME` environment variable.
-///
-/// Returns the parsed [`DiskHealthReport`] on success, or a
-/// [`SimardError::AdapterInvocationFailed`] on any failure.
+/// Returns:
+///   - `Ok(true)`  — the recipe child exited `0`.
+///   - `Ok(false)` — the recipe child exited non-zero (recorded as a failure;
+///     stderr is warn-logged for diagnostics but never parsed).
+///   - `Err(..)`   — the recipe file could not be resolved or the child could
+///     not be spawned. These are structural failures, distinct from a recipe
+///     that ran and reported failure.
 pub fn run_disk_health_check(
     repo_root: &Path,
     state_root: &Path,
     home_override: Option<&Path>,
-) -> SimardResult<DiskHealthReport> {
+) -> SimardResult<bool> {
     let recipe_path = resolve_recipe_path(repo_root, home_override).ok_or_else(|| {
         SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
@@ -284,10 +254,10 @@ pub fn run_disk_health_check(
 
     let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
 
+    // No `--output-format json`: the recipe acts via the `simard disk` tool and
+    // prints no envelope. We interpret the run by exit status only.
     let output = Command::new("recipe-runner-rs")
         .arg(recipe_path.as_os_str())
-        .arg("--output-format")
-        .arg("json")
         .env("AMPLIHACK_AGENT_BINARY", agent_binary)
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
@@ -299,45 +269,28 @@ pub fn run_disk_health_check(
             reason: format!("recipe-runner-rs spawn failed: {e}"),
         })?;
 
-    if !output.status.success() {
+    let success = child_exit_indicates_success(&output.status);
+    if !success {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!(
-                "recipe exited with {}: {}",
-                output.status,
-                truncate(&stderr, 500)
-            ),
-        });
+        warn!(
+            status = %output.status,
+            stderr = %truncate(stderr.trim(), 500),
+            "disk-health recipe exited non-zero"
+        );
     }
+    Ok(success)
+}
 
-    let envelope: RecipeOutput = serde_json::from_slice(&output.stdout).map_err(|e| {
-        SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!("failed to deserialize recipe JSON output: {e}"),
-        }
-    })?;
-
-    if !envelope.success {
-        return Err(SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: "recipe reported success=false in JSON output".to_string(),
-        });
-    }
-
-    let step_output = envelope
-        .step_results
-        .first()
-        .map(|s| s.output.as_str())
-        .ok_or_else(|| SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: "no step results in recipe JSON output".to_string(),
-        })?;
-
-    parse_disk_health_text(step_output).map_err(|e| SimardError::AdapterInvocationFailed {
-        base_type: ADAPTER_TAG.to_string(),
-        reason: format!("failed to parse recipe text output: {e}"),
-    })
+/// The exit-status → success contract for the reworked thin trigger (issue
+/// #4722). `run_disk_health_check` records success/failure by the recipe child's
+/// **exit status alone** — it no longer parses recipe stdout. The recipe acts
+/// via the `simard disk` tool and prints no JSON envelope.
+///
+/// `true` iff the child exited `0`; `false` for any non-zero exit (including
+/// signals). A spawn failure is a distinct `Err` at the call site, never mapped
+/// here.
+pub(crate) fn child_exit_indicates_success(status: &std::process::ExitStatus) -> bool {
+    status.success()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -350,232 +303,40 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Parse key=value and ACTION: lines from recipe stdout text.
-///
-/// Expected format (bash recipe outputs this directly):
-/// ```text
-/// DISK_USED_PCT=87
-/// FREED_BYTES=1024
-/// ACTION: removed stale worktrees
-/// ACTION: cleaned cargo target dirs
-/// ```
-///
-/// This replaces the brittle `serde_json::from_slice::<DiskHealthReport>`
-/// pattern — the recipe is a bash step, not an LLM. Bash can emit key=value
-/// lines trivially; asking it to emit valid JSON was the source of fragility.
-pub fn parse_disk_health_text(stdout: &str) -> Result<DiskHealthReport, String> {
-    let mut disk_used_pct: Option<u8> = None;
-    let mut freed_bytes: u64 = 0;
-    let mut actions_taken: Vec<String> = Vec::new();
-
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(val) = trimmed.strip_prefix("DISK_USED_PCT=") {
-            disk_used_pct = Some(
-                val.trim()
-                    .parse::<u8>()
-                    .map_err(|e| format!("invalid DISK_USED_PCT value '{val}': {e}"))?,
-            );
-        } else if let Some(val) = trimmed.strip_prefix("FREED_BYTES=") {
-            freed_bytes = val
-                .trim()
-                .parse::<u64>()
-                .map_err(|e| format!("invalid FREED_BYTES value '{val}': {e}"))?;
-        } else if let Some(action) = trimmed.strip_prefix("ACTION:") {
-            let action = action.trim();
-            if !action.is_empty() {
-                actions_taken.push(action.to_string());
-            }
-        }
-        // Unknown lines are silently ignored (forward-compat).
-    }
-
-    let disk_used_pct =
-        disk_used_pct.ok_or_else(|| "missing DISK_USED_PCT line in recipe output".to_string())?;
-
-    Ok(DiskHealthReport {
-        disk_used_pct,
-        freed_bytes,
-        actions_taken,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
 
     // ------------------------------------------------------------------
-    // Text-based parser (issue #1980 — replaces JSON deserialization)
+    // Thin exit-status trigger contract (issue #4722 — TDD, written first)
+    //
+    // After the rework the disk-health trigger records success/failure by the
+    // recipe child's EXIT STATUS alone; it no longer parses recipe stdout. These
+    // tests pin that contract on the pure `child_exit_indicates_success` seam so
+    // the reworked `run_disk_health_check` can adopt `SimardResult<bool>` without
+    // reintroducing any output scraping.
     // ------------------------------------------------------------------
 
     #[test]
-    fn text_parse_no_cleanup() {
-        let text = "DISK_USED_PCT=65\nFREED_BYTES=0\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 65);
-        assert_eq!(report.freed_bytes, 0);
-        assert!(report.actions_taken.is_empty());
-    }
-
-    #[test]
-    fn text_parse_with_cleanup_actions() {
-        let text = "\
-DISK_USED_PCT=87
-FREED_BYTES=53687091200
-ACTION: removed 12 stale engineer worktrees
-ACTION: cleaned cargo target dirs in worktrees
-ACTION: pruned LadybugDB backups to 5 most recent
-ACTION: cleaned shared-target dir
-";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 87);
-        assert_eq!(report.freed_bytes, 53_687_091_200);
-        assert_eq!(report.actions_taken.len(), 4);
-        assert!(report.actions_taken[0].contains("worktrees"));
-    }
-
-    #[test]
-    fn text_parse_boundary_100_percent() {
-        let text = "DISK_USED_PCT=100\nFREED_BYTES=1024\nACTION: emergency cleanup\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 100);
-        assert_eq!(report.freed_bytes, 1024);
-        assert_eq!(report.actions_taken.len(), 1);
-    }
-
-    #[test]
-    fn text_parse_boundary_0_percent() {
-        let text = "DISK_USED_PCT=0\nFREED_BYTES=0\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 0);
-    }
-
-    #[test]
-    fn text_parse_missing_disk_used_pct_is_error() {
-        let text = "FREED_BYTES=0\n";
-        let result = parse_disk_health_text(text);
-        assert!(result.is_err(), "should reject missing DISK_USED_PCT");
-        assert!(result.unwrap_err().contains("missing DISK_USED_PCT"));
-    }
-
-    #[test]
-    fn text_parse_invalid_pct_value_is_error() {
-        let text = "DISK_USED_PCT=high\nFREED_BYTES=0\n";
-        let result = parse_disk_health_text(text);
-        assert!(result.is_err(), "should reject non-numeric DISK_USED_PCT");
-    }
-
-    #[test]
-    fn text_parse_empty_string_is_error() {
-        let result = parse_disk_health_text("");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn text_parse_freed_bytes_defaults_to_zero_when_absent() {
-        let text = "DISK_USED_PCT=50\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.freed_bytes, 0);
-        assert!(report.actions_taken.is_empty());
-    }
-
-    #[test]
-    fn text_parse_ignores_unknown_lines() {
-        let text = "DISK_USED_PCT=42\nSOME_OTHER_KEY=foo\nFREED_BYTES=100\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 42);
-        assert_eq!(report.freed_bytes, 100);
-    }
-
-    #[test]
-    fn text_parse_handles_whitespace_around_values() {
-        let text = "  DISK_USED_PCT=42  \n  FREED_BYTES=100  \n  ACTION: did things  \n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 42);
-        assert_eq!(report.freed_bytes, 100);
-        assert_eq!(report.actions_taken, vec!["did things"]);
-    }
-
-    #[test]
-    fn text_parse_skips_blank_lines() {
-        let text = "\n\nDISK_USED_PCT=50\n\nFREED_BYTES=0\n\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.disk_used_pct, 50);
-    }
-
-    #[test]
-    fn text_parse_action_without_text_is_skipped() {
-        let text = "DISK_USED_PCT=50\nACTION:\nACTION: real action\n";
-        let report = parse_disk_health_text(text).unwrap();
-        assert_eq!(report.actions_taken, vec!["real action"]);
-    }
-
-    // ------------------------------------------------------------------
-    // DiskHealthReport methods
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn cleanup_performed_true_when_freed_bytes_nonzero() {
-        let report = DiskHealthReport {
-            disk_used_pct: 85,
-            freed_bytes: 1024,
-            actions_taken: vec![],
-        };
-        assert!(report.cleanup_performed());
-    }
-
-    #[test]
-    fn cleanup_performed_true_when_actions_nonempty() {
-        let report = DiskHealthReport {
-            disk_used_pct: 85,
-            freed_bytes: 0,
-            actions_taken: vec!["did something".to_string()],
-        };
-        assert!(report.cleanup_performed());
-    }
-
-    #[test]
-    fn cleanup_performed_false_when_nothing_happened() {
-        let report = DiskHealthReport {
-            disk_used_pct: 50,
-            freed_bytes: 0,
-            actions_taken: vec![],
-        };
-        assert!(!report.cleanup_performed());
-    }
-
-    #[test]
-    fn summary_no_cleanup() {
-        let report = DiskHealthReport {
-            disk_used_pct: 42,
-            freed_bytes: 0,
-            actions_taken: vec![],
-        };
-        let s = report.summary();
-        assert!(s.contains("42%"), "summary should contain pct: {s}");
+    fn child_exit_zero_is_success() {
+        let status = std::process::Command::new("true")
+            .status()
+            .expect("spawn `true`");
         assert!(
-            s.contains("no cleanup"),
-            "summary should say no cleanup: {s}"
+            child_exit_indicates_success(&status),
+            "exit 0 must record success"
         );
     }
 
     #[test]
-    fn summary_with_cleanup() {
-        let report = DiskHealthReport {
-            disk_used_pct: 87,
-            freed_bytes: 53_000_000_000,
-            actions_taken: vec!["removed worktrees".to_string(), "cleaned cargo".to_string()],
-        };
-        let s = report.summary();
-        assert!(s.contains("87%"), "summary should contain pct: {s}");
-        assert!(s.contains("2 actions"), "summary should count actions: {s}");
+    fn child_exit_nonzero_is_failure() {
+        let status = std::process::Command::new("false")
+            .status()
+            .expect("spawn `false`");
         assert!(
-            s.contains("53000000000"),
-            "summary should contain freed bytes: {s}"
+            !child_exit_indicates_success(&status),
+            "a non-zero exit must record failure"
         );
     }
 
@@ -633,10 +394,11 @@ ACTION: cleaned shared-target dir
     // cognitive_memory serial group so it never runs concurrently with a
     // provider/state-root env reader.
     #[serial(cognitive_memory)]
-    fn run_returns_error_when_recipe_runner_unavailable_or_recipe_invalid() {
-        // Create a syntactically-invalid recipe file. If recipe-runner-rs
-        // is installed it will reject it (non-zero exit); if it's missing
-        // the spawn itself fails. Either way we get AdapterInvocationFailed.
+    fn run_records_failure_when_recipe_runner_unavailable_or_recipe_invalid() {
+        // Create a syntactically-invalid recipe file. Under the thin-trigger
+        // contract (issue #4722): if recipe-runner-rs is missing the spawn fails
+        // -> Err; if it's installed it rejects the recipe with a non-zero exit
+        // -> Ok(false). Either way this is a *failure* outcome, never Ok(true).
         let tmp = tempfile::tempdir().unwrap();
         let recipe_dir = tmp.path().join("prompt_assets/simard/recipes");
         std::fs::create_dir_all(&recipe_dir).unwrap();
@@ -649,127 +411,21 @@ ACTION: cleaned shared-target dir
         unsafe { std::env::set_var("SIMARD_LLM_PROVIDER", "copilot") };
         let result = run_disk_health_check(tmp.path(), tmp.path(), Some(tmp.path()));
         unsafe { std::env::remove_var("SIMARD_LLM_PROVIDER") };
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        match &err {
-            SimardError::AdapterInvocationFailed { base_type, reason } => {
+
+        match result {
+            // recipe-runner-rs missing: spawn failure surfaces as a structural Err.
+            Err(SimardError::AdapterInvocationFailed { base_type, reason }) => {
                 assert_eq!(base_type, ADAPTER_TAG);
-                // Either "spawn failed" (binary missing) or "recipe exited"
-                // (binary found, recipe invalid).
                 assert!(
-                    reason.contains("spawn failed") || reason.contains("recipe exited"),
-                    "reason should mention spawn failure or recipe exit: {reason}"
+                    reason.contains("spawn failed"),
+                    "spawn-failure reason expected: {reason}"
                 );
             }
-            other => panic!("expected AdapterInvocationFailed, got: {other:?}"),
+            // recipe-runner-rs present: the invalid recipe exits non-zero, which
+            // the thin trigger records as Ok(false) (no stdout parsing).
+            Ok(false) => {}
+            other => panic!("expected Err(spawn failed) or Ok(false), got: {other:?}"),
         }
-    }
-
-    // ------------------------------------------------------------------
-    // JSON envelope deserialization (issue #2212 — TDD: tests written first)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn json_envelope_deserialization() {
-        // Full pipeline: JSON envelope → RecipeOutput → step_results[0].output → parse_disk_health_text → DiskHealthReport
-        let json = r#"{
-            "success": true,
-            "step_results": [{
-                "step_id": "disk-health-step",
-                "output": "DISK_USED_PCT=72\nFREED_BYTES=1024\nACTION: cleaned worktrees\n"
-            }]
-        }"#;
-        let envelope: RecipeOutput = serde_json::from_str(json).unwrap();
-        assert!(envelope.success);
-        assert_eq!(envelope.step_results.len(), 1);
-        assert_eq!(envelope.step_results[0].step_id, "disk-health-step");
-
-        let report = parse_disk_health_text(&envelope.step_results[0].output).unwrap();
-        assert_eq!(report.disk_used_pct, 72);
-        assert_eq!(report.freed_bytes, 1024);
-        assert_eq!(report.actions_taken, vec!["cleaned worktrees"]);
-    }
-
-    #[test]
-    fn json_envelope_empty_step_results() {
-        // When step_results is empty, extracting step output should fail gracefully.
-        let json = r#"{"success": true, "step_results": []}"#;
-        let envelope: RecipeOutput = serde_json::from_str(json).unwrap();
-        assert!(envelope.step_results.is_empty());
-    }
-
-    #[test]
-    fn json_envelope_multiple_steps_uses_first() {
-        // Only step_results[0].output is used for parsing.
-        let json = r#"{
-            "success": true,
-            "step_results": [
-                {"step_id": "step-1", "output": "DISK_USED_PCT=55\nFREED_BYTES=0\n"},
-                {"step_id": "step-2", "output": "some other output"}
-            ]
-        }"#;
-        let envelope: RecipeOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(envelope.step_results.len(), 2);
-
-        let report = parse_disk_health_text(&envelope.step_results[0].output).unwrap();
-        assert_eq!(report.disk_used_pct, 55);
-    }
-
-    // ------------------------------------------------------------------
-    // Noisy agent output (issue #2212 — markers in LLM conversation text)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn parse_markers_from_agent_output_with_noise() {
-        // The agent's step output contains LLM reasoning, df output, and
-        // bash prompts — the parser must extract markers from this noise.
-        let noisy_output = "\
-I'll check the disk usage now.
-
-Running df -h to check disk space...
-
-Filesystem      Size  Used Avail Use% Mounted on
-/dev/sda1       100G   72G   28G  72% /
-
-The disk is at 72% usage, which is below the 80% threshold.
-No cleanup actions are needed.
-
-DISK_USED_PCT=72
-FREED_BYTES=0
-";
-        let report = parse_disk_health_text(noisy_output).unwrap();
-        assert_eq!(report.disk_used_pct, 72);
-        assert_eq!(report.freed_bytes, 0);
-        assert!(report.actions_taken.is_empty());
-    }
-
-    #[test]
-    fn parse_markers_from_noisy_output_with_cleanup() {
-        let noisy_output = "\
-Checking disk usage...
-
-Filesystem      Size  Used Avail Use% Mounted on
-/dev/sda1       100G   87G   13G  87% /
-
-Disk usage is at 87%, exceeding 80% threshold. Performing cleanup.
-
-Removing stale worktrees...
-Done. Removed 12 worktrees.
-
-Cleaning cargo target directories...
-Done.
-
-DISK_USED_PCT=87
-FREED_BYTES=53687091200
-ACTION: removed 12 stale engineer worktrees
-ACTION: cleaned cargo target dirs
-";
-        let report = parse_disk_health_text(noisy_output).unwrap();
-        assert_eq!(report.disk_used_pct, 87);
-        assert_eq!(report.freed_bytes, 53_687_091_200);
-        assert_eq!(report.actions_taken.len(), 2);
-        assert!(report.actions_taken[0].contains("worktrees"));
-        assert!(report.actions_taken[1].contains("cargo"));
     }
 
     // ------------------------------------------------------------------

@@ -18,6 +18,7 @@ doc_type: reference
 status: implemented
 related:
   - ./overseer-activity-feed.md
+  - ./overseer-deploy-canary-diagnostics.md
   - ./overseer-tick-details.md
   - ./overseer-self-observation-stability.md
   - ../design/overseer.md

@@ -160,6 +160,23 @@ pub struct ObservedState {
     /// (`SIMARD_MERGE_REASONING_SCOPE=off`), so a disable is LOUD (WARN log +
     /// surfaced status), never a silent OFF. Unset env is NOT disabled.
     pub merge_reasoning_status: MergeReasoningStatus,
+    /// WHAT the agentic health-review pass concluded this tick ([standing]).
+    /// Default [`HealthReviewStatus::NotRun`] (additive — existing constructors
+    /// compile unchanged), left unchanged when the rail is unwired or the pass is
+    /// off-cadence this tick. An operator OPT-OUT — the dedicated
+    /// `SIMARD_OVERSEER_HEALTH_REVIEW` knob or the shared `SIMARD_OVERSEER_GAP_SCAN`
+    /// throttle — surfaces LOUD as [`HealthReviewStatus::Disabled`] naming the
+    /// knob, never a silent `NotRun` (#4097). A pass that RAN and parsed a verdict
+    /// sets [`HealthReviewStatus::Reviewed`] with the agent's one-line
+    /// `HEALTH_REVIEW_COMPLETE` summary + the count of typed decisions it drove —
+    /// so a HEALTHY pass (zero interventions) still leaves an OBSERVABLE trace
+    /// instead of a silent no-op, exactly as
+    /// [`merge_reasoning_status`](Self::merge_reasoning_status) surfaces WHY
+    /// reasoning ran. A pass that RAN but DEGRADED (a truncated report the
+    /// bounded escalation ladder could not recover, or a base infra fault) sets
+    /// [`HealthReviewStatus::Degraded`] so the weak pass is LOUD, never a silent
+    /// OFF. Set by the acting Overseer's `health_review` pass; never fabricated.
+    pub health_review_status: HealthReviewStatus,
     /// Structured diagnoses of decision-cycle / engineer / terminal-shell steps
     /// that failed since the last Observe pass (issue #2640, PART 2). The acting
     /// Overseer drains these from the process-global failure sink
@@ -168,6 +185,29 @@ pub struct ObservedState {
     /// so a caught failure drives a fix instead of a silent log. Empty when no
     /// step failed this window.
     pub recent_step_failures: Vec<FailureDiagnosis>,
+    /// Autonomous self-deploy drift observed this pass (issue #2590): the running
+    /// daemon binary is behind merged `origin/main` and a target commit resolved.
+    /// Populated by the acting Overseer's drift-observe rail (fail-safe: a git or
+    /// source error, a current daemon, or an unresolved head all leave this
+    /// `None`). `signals_from` lifts it into a `Signal::DeployDriftDetected` that
+    /// Decide maps to a guarded `Intervention::Deploy`. `None` when there is
+    /// nothing to deploy or the rail is disabled/unwired.
+    pub deploy_drift: Option<DeployDriftObservation>,
+}
+
+/// The self-deploy drift the Overseer observed this pass (issue #2590): the
+/// running binary is behind merged `main`, and `target_commit` is the resolved
+/// merged head a guarded deploy should converge on. Carried on
+/// [`ObservedState::deploy_drift`] so `signals_from` can lift it into a
+/// [`Signal::DeployDriftDetected`] purely (the effectful git probe stays in the
+/// observe rail).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeployDriftObservation {
+    /// Merged-head commit the daemon should deploy to (a non-empty git rev).
+    pub target_commit: String,
+    /// Commits the running binary is behind `origin/main` (`0` when only pins
+    /// drifted).
+    pub behind_commits: usize,
 }
 
 /// A `(repo, pr)` pair. `repo` is an `owner/name` slug.
@@ -262,6 +302,41 @@ pub enum MergeReasoningStatus {
     /// An operator EXPLICITLY disabled reasoning. `reason` carries the raw signal
     /// (e.g. `SIMARD_MERGE_REASONING_SCOPE=off`) so the disable is loud.
     Disabled { reason: String },
+}
+
+/// WHAT the agentic Overseer health-review pass concluded this tick ([standing]).
+///
+/// Mirrors [`MergeReasoningStatus`]: the distinction the observability hinges on
+/// is that a pass that RAN and found nothing wrong is NOT the same as a pass
+/// that never ran. Default [`Self::NotRun`] (the additive default) covers an
+/// unwired / disabled / off-cadence tick; a pass that produced an honest verdict
+/// sets [`Self::Reviewed`] (so a HEALTHY pass leaves an observable trace, never a
+/// silent no-op); and a pass that degraded to no remediation sets
+/// [`Self::Degraded`] so the weak pass is LOUD in status rather than a silent OFF.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum HealthReviewStatus {
+    /// No pass ran this tick because the rail is UNWIRED (the build could not
+    /// resolve `recipe-runner-rs`/the recipe) or the tick is simply OFF-CADENCE
+    /// (the additive default so existing constructors compile unchanged). An
+    /// operator OPT-OUT is NOT folded in here — that surfaces LOUD as
+    /// [`Self::Disabled`], never a silent `NotRun`.
+    #[default]
+    NotRun,
+    /// An operator EXPLICITLY disabled the pass — either the dedicated
+    /// `SIMARD_OVERSEER_HEALTH_REVIEW` opt-out or the shared
+    /// `SIMARD_OVERSEER_GAP_SCAN` throttle that disables ALL agentic overseer
+    /// scans. `reason` names WHICH knob so the disable is observable, mirroring
+    /// [`MergeReasoningStatus::Disabled`] — #4097 exists to kill silent hard-OFFs.
+    Disabled { reason: String },
+    /// A pass RAN and parsed an honest verdict. `summary` is the recipe's
+    /// one-line `HEALTH_REVIEW_COMPLETE` text; `decisions` is the count of typed
+    /// remediation interventions it drove (`0` on a HEALTHY pass — an observable
+    /// "reviewed, nothing to do", never a fabricated action).
+    Reviewed { summary: String, decisions: usize },
+    /// A pass RAN but DEGRADED end to end (a truncated report the bounded
+    /// escalation ladder could not recover, or a base infra fault) and took no
+    /// remediation. Surfaced so the weak pass is LOUD, never a silent OFF.
+    Degraded,
 }
 
 /// A cluster of failing checks for one repo over the observation window.
@@ -763,6 +838,7 @@ fn signal_keyword(s: &Signal) -> Option<String> {
         Signal::StalePrDetected { repo, pr } => format!("stale-pr:{repo}#{pr}"),
         Signal::DuplicatePrDetected { repo, pr, .. } => format!("dup-pr:{repo}#{pr}"),
         Signal::IssueNeedsWorkstream { repo, issue, .. } => format!("issue-ws:{repo}#{issue}"),
+        Signal::DeployDriftDetected { .. } => "deploy-drift".to_string(),
     };
     if kw.is_empty() { None } else { Some(kw) }
 }

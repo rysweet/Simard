@@ -234,6 +234,8 @@ mod tests {
             systemd_user_dir: root.join("systemd"),
             ooda_unit_path: root.join("systemd/simard-ooda.service"),
             signal_unit_path: root.join("systemd/simard-signal.service"),
+            entrypoint_path: root.join(".local/bin/simard"),
+            orphan_paths: vec![root.join(".cargo/bin/simard")],
             transaction_id: "test-tx".to_string(),
         }
     }

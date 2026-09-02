@@ -418,3 +418,305 @@ fn process_run_rejects_empty_error_text() {
 fn _unused_refcell_anchor() -> RefCell<()> {
     RefCell::new(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #4721 (WS-2): thin deterministic merge-judge RAIL + draft gate.
+//
+// TDD tests for the reworked `recipe_merge_judge.rs`. They pin the contract for
+// the NOT-YET-IMPLEMENTED deterministic decision seam that replaces the deleted
+// `parse_merge_verdict_from_text` / JSON-envelope stdout scrape:
+//
+//   crate::stewardship::recipe_merge_judge::resolve_final_verdict(
+//       read: &ReadOutcome, snapshot: &PrSnapshot, base_allowlist: &[String],
+//   ) -> JudgeOutcome
+//
+// Rules (design R3/R4):
+//   * Ready  iff the freshness-checked record says `merge` AND every hard gate
+//     passes (base allow-list, MERGEABLE, CI green, NOT draft).
+//   * NotReady if the record says `hold`, OR says `merge` but any gate fails
+//     (a LOUD refusal — the agent verdict is advisory; the rail is authority).
+//   * Unclear (fail-closed) if there is no valid record for this run
+//     (Missing / Mismatch).
+//
+// Plus the fail-closed draft gate added to `evaluate_objective_gates`
+// (design R7): `Some(true)` and `None` both refuse; only `Some(false)` passes.
+//
+// These are expected to FAIL TO COMPILE until the rework lands (TDD red).
+#[cfg(test)]
+mod issue_4721_rail_tests {
+    use crate::stewardship::merge_authority::{
+        CheckRollupEntry, PrSnapshot, evaluate_objective_gates,
+    };
+    use crate::stewardship::merge_judge::Verdict;
+    use crate::stewardship::merge_verdict_store::{MergeVerdictRecord, ReadOutcome, VerdictKind};
+    use crate::stewardship::recipe_merge_judge::resolve_final_verdict;
+
+    fn allowlist() -> Vec<String> {
+        vec!["main".to_string()]
+    }
+
+    /// A snapshot that PASSES every hard gate: on `main`, MERGEABLE, one green
+    /// check, explicitly not a draft.
+    fn green_snapshot() -> PrSnapshot {
+        PrSnapshot {
+            body: "body".into(),
+            mergeable: "MERGEABLE".into(),
+            review_decision: "APPROVED".into(),
+            checks: vec![CheckRollupEntry {
+                name: "ci".into(),
+                state: "SUCCESS".into(),
+            }],
+            base_ref_name: "main".into(),
+            labels: vec![],
+            is_draft: Some(false),
+        }
+    }
+
+    fn merge_record() -> ReadOutcome {
+        ReadOutcome::Found(MergeVerdictRecord::new(
+            1,
+            "o/r",
+            VerdictKind::Merge,
+            "crusty passed",
+            "tok",
+        ))
+    }
+
+    fn hold_record() -> ReadOutcome {
+        ReadOutcome::Found(MergeVerdictRecord::new(
+            1,
+            "o/r",
+            VerdictKind::Hold,
+            "crusty flagged",
+            "tok",
+        ))
+    }
+
+    // ── the one "yes" path ──────────────────────────────────────────────────
+
+    #[test]
+    fn merge_verdict_with_all_gates_green_is_ready() {
+        let out = resolve_final_verdict(&merge_record(), &green_snapshot(), &allowlist());
+        assert_eq!(
+            out.verdict,
+            Verdict::Ready,
+            "merge record + all gates green must authorize the merge"
+        );
+    }
+
+    // ── the "loud refusal" paths (acceptance R4/R9) ─────────────────────────
+
+    #[test]
+    fn merge_verdict_with_red_ci_is_refused() {
+        let mut snap = green_snapshot();
+        snap.checks = vec![CheckRollupEntry {
+            name: "ci".into(),
+            state: "FAILURE".into(),
+        }];
+        let out = resolve_final_verdict(&merge_record(), &snap, &allowlist());
+        assert_eq!(
+            out.verdict,
+            Verdict::NotReady,
+            "a `merge` verdict against RED CI MUST be refused by the rail"
+        );
+        assert!(
+            !out.rationale.trim().is_empty(),
+            "the refusal must be loud (non-empty rationale naming the failed gate)"
+        );
+    }
+
+    #[test]
+    fn merge_verdict_with_draft_pr_is_refused() {
+        let mut snap = green_snapshot();
+        snap.is_draft = Some(true);
+        let out = resolve_final_verdict(&merge_record(), &snap, &allowlist());
+        assert_eq!(out.verdict, Verdict::NotReady, "draft PR must be refused");
+        assert!(
+            out.rationale.to_lowercase().contains("draft"),
+            "refusal rationale should name the draft gate, got: {}",
+            out.rationale
+        );
+    }
+
+    #[test]
+    fn merge_verdict_with_unknown_draft_state_fails_closed() {
+        let mut snap = green_snapshot();
+        snap.is_draft = None; // gh output missing isDraft ⇒ treat as draft
+        let out = resolve_final_verdict(&merge_record(), &snap, &allowlist());
+        assert_eq!(
+            out.verdict,
+            Verdict::NotReady,
+            "unknown draft state must fail closed (refuse), never merge"
+        );
+    }
+
+    #[test]
+    fn merge_verdict_with_non_mergeable_pr_is_refused() {
+        let mut snap = green_snapshot();
+        snap.mergeable = "CONFLICTING".into();
+        let out = resolve_final_verdict(&merge_record(), &snap, &allowlist());
+        assert_eq!(
+            out.verdict,
+            Verdict::NotReady,
+            "a non-mergeable PR must be refused regardless of the recorded verdict"
+        );
+    }
+
+    #[test]
+    fn merge_verdict_with_wrong_base_branch_is_refused() {
+        let mut snap = green_snapshot();
+        snap.base_ref_name = "stale-parent".into();
+        let out = resolve_final_verdict(&merge_record(), &snap, &allowlist());
+        assert_eq!(out.verdict, Verdict::NotReady);
+    }
+
+    // ── the agent said "hold" ───────────────────────────────────────────────
+
+    #[test]
+    fn hold_verdict_is_not_ready_even_when_gates_green() {
+        let out = resolve_final_verdict(&hold_record(), &green_snapshot(), &allowlist());
+        assert_eq!(
+            out.verdict,
+            Verdict::NotReady,
+            "a `hold` verdict must never merge, even with all gates green"
+        );
+    }
+
+    // ── no valid record for THIS run ────────────────────────────────────────
+
+    #[test]
+    fn missing_record_is_unclear() {
+        let out = resolve_final_verdict(&ReadOutcome::Missing, &green_snapshot(), &allowlist());
+        assert_eq!(
+            out.verdict,
+            Verdict::Unclear,
+            "no record for this run ⇒ fail-closed Unclear (merge authority refuses)"
+        );
+    }
+
+    #[test]
+    fn stale_or_foreign_record_mismatch_is_unclear() {
+        let out = resolve_final_verdict(
+            &ReadOutcome::Mismatch("run_token mismatch".into()),
+            &green_snapshot(),
+            &allowlist(),
+        );
+        assert_eq!(
+            out.verdict,
+            Verdict::Unclear,
+            "a stale/foreign record (Mismatch) must fail closed, never merge"
+        );
+    }
+
+    // ── draft gate wired into evaluate_objective_gates (design R7) ───────────
+
+    #[test]
+    fn objective_gates_reject_draft_pr() {
+        let mut snap = green_snapshot();
+        snap.is_draft = Some(true);
+        let err = evaluate_objective_gates(&snap, &allowlist())
+            .expect_err("draft PR must fail the objective gates");
+        assert!(
+            err.to_lowercase().contains("draft"),
+            "gate error should name the draft state, got: {err}"
+        );
+    }
+
+    #[test]
+    fn objective_gates_reject_unknown_draft_state_fail_closed() {
+        let mut snap = green_snapshot();
+        snap.is_draft = None;
+        assert!(
+            evaluate_objective_gates(&snap, &allowlist()).is_err(),
+            "unknown draft state (None) must fail closed in the objective gates"
+        );
+    }
+
+    #[test]
+    fn objective_gates_pass_for_non_draft_green_pr() {
+        assert!(
+            evaluate_objective_gates(&green_snapshot(), &allowlist()).is_ok(),
+            "an explicitly non-draft, green, mergeable PR on main must pass"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #4721 (WS-2): source-contract acceptance — the forbidden JSON-scrape
+// pattern must be GONE from recipe_merge_judge.rs, and the safety rail's
+// hard-coded invariants must remain. These are deterministic file-content
+// assertions (no LLM, no subprocess).
+#[cfg(test)]
+mod issue_4721_source_contract_tests {
+    use std::path::PathBuf;
+
+    fn read_source(rel: &str) -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path:?}: {e}"))
+    }
+
+    #[test]
+    fn recipe_merge_judge_has_no_json_scrape_or_verdict_text_parser() {
+        let src = read_source("src/stewardship/recipe_merge_judge.rs");
+        for forbidden in [
+            "parse_merge_verdict_from_text",
+            "step_results",
+            "extract_recipe_decision_output",
+            "parse_merge_outcome",
+            "run_brain_ladder",
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "recipe_merge_judge.rs must no longer reference `{forbidden}` \
+                 (the forbidden JSON-emit→scrape→act pattern was removed)"
+            );
+        }
+        assert!(
+            !src.contains("--output-format"),
+            "the rail must not run the recipe with `--output-format json` anymore; \
+             the verdict now arrives via the typed record, not stdout"
+        );
+    }
+
+    #[test]
+    fn recipe_merge_judge_reads_typed_record_and_reverifies_gates() {
+        let src = read_source("src/stewardship/recipe_merge_judge.rs");
+        assert!(
+            src.contains("merge_verdict_store"),
+            "the rail must READ the typed verdict via merge_verdict_store, not scrape stdout"
+        );
+        assert!(
+            src.contains("evaluate_objective_gates"),
+            "the rail must INDEPENDENTLY re-verify the objective gates before authorizing a merge"
+        );
+        assert!(
+            src.contains("resolve_final_verdict"),
+            "the rail's deterministic decision seam must exist"
+        );
+    }
+
+    #[test]
+    fn recipe_merge_judge_never_uses_admin_or_no_verify() {
+        // Safety invariant (R8): the rail must never weaken the gate.
+        let src = read_source("src/stewardship/recipe_merge_judge.rs");
+        assert!(!src.contains("--admin"), "NEVER pass --admin");
+        assert!(!src.contains("--no-verify"), "NEVER pass --no-verify");
+    }
+
+    #[test]
+    fn merge_readiness_recipe_records_verdict_via_tool_and_prints_no_json() {
+        let src = read_source("prompt_assets/simard/recipes/merge-readiness-judge.yaml");
+        assert!(
+            src.contains("merge record-verdict"),
+            "the recipe must record its verdict via `simard merge record-verdict` (act-via-tool)"
+        );
+        assert!(
+            src.contains("run_token"),
+            "the recipe must thread the rail-supplied run_token to the record-verdict tool"
+        );
+        assert!(
+            !src.contains(r#"{"verdict""#),
+            "the recipe must NOT print a JSON verdict envelope for the daemon to scrape"
+        );
+    }
+}

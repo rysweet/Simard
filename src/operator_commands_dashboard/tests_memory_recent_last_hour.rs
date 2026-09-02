@@ -35,6 +35,7 @@ use crate::memory_ipc::{
 };
 use crate::operator_commands_dashboard::memory::{
     MemorySnapshot, memory_recent_at, save_history, select_last_hour_baseline,
+    select_last_hour_baseline_snapshot,
 };
 use crate::test_support::HermeticState;
 
@@ -500,5 +501,159 @@ fn baseline_is_none_for_empty_history() {
         select_last_hour_baseline(&[], 1_000_000.0),
         None,
         "empty history has no baseline snapshot",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4318: honest last-hour WINDOW — surface the actual span the count covers
+// ---------------------------------------------------------------------------
+
+/// `select_last_hour_baseline_snapshot` MUST return the SAME snapshot the scalar
+/// `select_last_hour_baseline` reduces to a `long_term_total`, and expose its
+/// `epoch_secs` so the handler can compute the true covered window. Guards the
+/// contract that the snapshot- and scalar-returning helpers never diverge.
+#[test]
+fn baseline_snapshot_matches_scalar_and_exposes_epoch() {
+    let now = 1_000_000.0;
+    let history = vec![
+        snapshot(now - 10_800.0, 5), // 3h ago
+        snapshot(now - 9_360.0, 12), // 2.6h ago — most recent <= cutoff
+        snapshot(now - 60.0, 99),    // in-window — ignored
+    ];
+    let snap = select_last_hour_baseline_snapshot(&history, now)
+        .expect("a snapshot older than the window edge exists");
+    assert_eq!(
+        snap.long_term_total,
+        select_last_hour_baseline(&history, now).unwrap(),
+        "snapshot- and scalar-returning helpers must agree on the baseline total",
+    );
+    assert_eq!(
+        snap.epoch_secs,
+        now - 9_360.0,
+        "the exposed baseline epoch must be the most-recent snapshot at-or-before now-3600",
+    );
+    // The window the handler would report is now − baseline.epoch = 9360s (2.6h).
+    assert_eq!(now - snap.epoch_secs, 9_360.0);
+}
+
+/// Empty history has no baseline snapshot — the helper reports absence so the
+/// handler renders `last_hour_window_secs: null` in the fail-closed branches.
+#[test]
+fn baseline_snapshot_is_none_for_empty_history() {
+    assert!(
+        select_last_hour_baseline_snapshot(&[], 1_000_000.0).is_none(),
+        "empty history has no baseline snapshot",
+    );
+}
+
+/// THE #4318 REGRESSION PIN. When `memory_history.json` has a gap wider than an
+/// hour straddling the 1 h mark, the chosen baseline is ~2.6 h old, so
+/// `last_hour_count` is net growth over 2.6 h — NOT one hour. The endpoint MUST
+/// surface `last_hour_window_secs ≈ 9360` so the caption can tell the truth
+/// ("in the last 2.6h") instead of the hardcoded, dishonest "in the last hour".
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_surfaces_true_window_when_snapshots_are_sparse() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+
+    let t0 = live_long_term_total(guard.ops());
+
+    // Seed a single baseline 2.6 h old recording the pre-write total. There is
+    // NO snapshot near the 1 h mark, so the trailing-hour baseline is this
+    // 2.6 h-old one — the exact sparse-history hazard #4318 describes.
+    let gap_secs = 9_360.0; // 2.6h
+    seed_history_baseline(&state, gap_secs, t0);
+
+    // Grow long-term memory by N inside that (over-wide) window.
+    for i in 0..N_IN_WINDOW {
+        guard
+            .ops()
+            .store_fact(
+                &format!("wide-window-concept-{i}"),
+                &format!("fact {i}"),
+                1.0,
+                &[] as &[String],
+                "tdd-4318",
+            )
+            .expect("store_fact must persist a new long-term node");
+    }
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    // The count is the net growth over the WHOLE 2.6h window.
+    assert_eq!(
+        val["last_hour_count"],
+        serde_json::json!(N_IN_WINDOW),
+        "count is net long-term growth since the (2.6h-old) baseline: {val}",
+    );
+
+    // The endpoint must now DISCLOSE that the covered window is ~2.6h, not 1h.
+    let window = val["last_hour_window_secs"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("last_hour_window_secs must be numeric: {val}"));
+    assert!(
+        (9_300.0..=9_500.0).contains(&window),
+        "the covered window must reflect the true ~9360s (2.6h) baseline age, \
+         not be silently labeled 'last hour'; got {window}: {val}",
+    );
+    assert!(
+        window > 3600.0 + 900.0,
+        "the window must be materially wider than an hour (the #4318 defect): {val}",
+    );
+}
+
+/// In steady state (a baseline snapshot ~1 h old), the window is within the
+/// ±15 min "reads as an hour" tolerance, so the endpoint reports ~3600s and the
+/// caption legitimately stays "in the last hour".
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_reports_about_one_hour_window_in_steady_state() {
+    let state = HermeticState::new();
+    let guard = SharedMemoryGuard::register(&state);
+
+    let t0 = live_long_term_total(guard.ops());
+    // Baseline 61 min old — comfortably past the window edge but within the
+    // ±15 min "last hour" tolerance.
+    seed_history_baseline(&state, ONE_HOUR_SECS + 60.0, t0);
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    let window = val["last_hour_window_secs"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("last_hour_window_secs must be numeric: {val}"));
+    assert!(
+        (3600.0..=3720.0).contains(&window),
+        "a ~61-min-old baseline must yield a ~3660s window: got {window}: {val}",
+    );
+    assert!(
+        (window - 3600.0).abs() <= 900.0,
+        "the steady-state window must fall inside the ±15 min 'last hour' band: {val}",
+    );
+}
+
+/// Cold start (no seeded history): the handler seeds a fresh snapshot at `now`,
+/// so the baseline is that same instant and the window is a small, honest
+/// near-zero — a numeric value, never the misleading fixed 3600. This documents
+/// that the field degrades gracefully rather than fabricating a full hour.
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn memory_recent_window_is_small_on_cold_start() {
+    let state = HermeticState::new();
+    let _guard = SharedMemoryGuard::register(&state);
+    // No memory_history.json seeded.
+
+    let resp = memory_recent_at(state.state_root()).await;
+    let val = &resp.0;
+
+    let window = val["last_hour_window_secs"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("cold start must still return a numeric window: {val}"));
+    assert!(
+        (0.0..=5.0).contains(&window),
+        "cold start seeds a now-snapshot, so the covered window is ~0s, not a \
+         fabricated 3600: got {window}: {val}",
     );
 }

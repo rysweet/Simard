@@ -1,0 +1,79 @@
+name: kgpacks-rs-graphrag-multihop
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-Q5** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge handler answers a
+  `knowledge.query` by traversing the pack's knowledge graph — its `entities`
+  and `relationships` tables (the SQLite port of upstream `Entity` /
+  `ENTITY_RELATION`), multi-hop — rather than only running a single-table LIKE
+  scan over `articles`.
+
+  Before this fix `knowledge.query` answered solely from an `articles` LIKE
+  scan, an approximation of the Python `KnowledgeGraphAgent.query()` that never
+  followed relationship edges. A new `query_graph(conn, keywords, limit)` now
+  runs BEFORE the article fallback: it (1) selects keyword-matched **seed**
+  entities — reusing the same parameterized `like_contains_pattern` LIKE search
+  and title/content coverage ranking as `query_articles`, and projecting the
+  entity `url` for citations — then (2) traverses `relationships` edges
+  breadth-first up to `MAX_GRAPH_HOPS` (2), pulling in the **linked** entities a
+  keyword never matched, and (3) grounds the answer in those entities and the
+  relations joining them. It returns `None` — falling back to the article scan,
+  so article-only packs are unchanged — when either graph table is absent or no
+  seed entity matches. Edge/entity ids and keywords are all bound as parameters,
+  so the traversal carries no injection surface.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the corrected contract:
+    - `query_graph_traverses_relationships_for_linked_entities` — a query that
+      only matches "Ownership" surfaces the graph-linked "Borrowing" (hop 1) and
+      its citation URL, proving a graph join;
+    - `query_graph_reaches_two_hop_neighbor` — "Lifetimes", two relationship
+      hops from the seed, is retrieved (multi-hop traversal);
+    - `query_graph_returns_none_without_graph_tables` and
+      `query_graph_ignores_pack_with_entities_but_no_relationships` — packs
+      lacking a full graph fall back to the article scan unchanged;
+    - `query_graph_returns_none_when_no_seed_entity_matches` — no matching seed
+      falls back rather than emitting an empty graph answer;
+    - `query_graph_empty_url_and_null_url_yield_no_citation` — empty/NULL entity
+      urls degrade to no citation (None);
+    - `native_knowledge_transport_query_graph_surfaces_linked_entity` — the
+      graph-linked entity appears in the wire response end-to-end.
+  The same run re-asserts the pre-existing KGP-Q1/Q4/Q8/T3 citation,
+  parameterized-search, ranking, and connection-reuse behaviour is unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-Q5 GraphRAG
+  # multi-hop tests and the pre-existing citation / ranking / parameterized-search
+  # / connection-reuse behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the graph query path is
+  # exercised end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
