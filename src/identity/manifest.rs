@@ -30,8 +30,22 @@ pub struct SeedGoal {
     /// breaker's `!is_perpetual()` exemption applies and the goal is never
     /// re-parked or issue-filed for lack of convergence. Additive and
     /// defaulting `false`, so every existing seed goal stays
-    /// convergence-required exactly as before.
+    /// convergence-required exactly as before. This stays the single boolean
+    /// the cold-seed path keys off — `true` marks perpetual, `false` (whether
+    /// omitted or explicit) is an ordinary convergence-required goal.
     pub standing: bool,
+    /// Whether the `standing` value was *explicitly declared* in the source
+    /// (issue #4927 conservative reversal). This is the narrow provenance bit
+    /// that distinguishes an omitted/default non-standing seed — built via
+    /// [`SeedGoal::new`], which never authorizes reversal — from one that
+    /// explicitly declares `standing = false` (via [`SeedGoal::non_standing`],
+    /// or TOML `standing = false`), which alone authorizes the standing
+    /// reconciler to REVERSE a marker it previously added. Kept `pub(crate)`
+    /// because it is a reconciliation-only detail; callers read it through the
+    /// [`authorizes_standing_reversal`](SeedGoal::authorizes_standing_reversal)
+    /// accessor rather than the raw field, so cold seeding and the public API
+    /// keep treating omitted and explicit-false identically.
+    pub(crate) standing_explicit: bool,
 }
 
 impl SeedGoal {
@@ -47,6 +61,7 @@ impl SeedGoal {
             description: description.into(),
             repo,
             standing: false,
+            standing_explicit: false,
         }
     }
 
@@ -55,11 +70,42 @@ impl SeedGoal {
     /// description; the standing marker is applied later at the seed→
     /// [`crate::goal_curation::ActiveGoal`] conversion so
     /// [`crate::goal_curation::ActiveGoal::is_perpetual`] stays the single
-    /// source of truth.
+    /// source of truth. Records the declaration as explicit, but since it is a
+    /// `true` declaration it never authorizes a reversal.
     #[must_use]
     pub fn standing(mut self) -> Self {
         self.standing = true;
+        self.standing_explicit = true;
         self
+    }
+
+    /// Builder: declare this seed *explicitly* non-standing (issue #4927
+    /// conservative reversal). Unlike an omitted/default seed from
+    /// [`SeedGoal::new`] — which is also non-standing but stays inert — this is
+    /// a deliberate `standing = false` declaration. It leaves `standing` false
+    /// (so cold seeding still treats it as an ordinary convergence-required
+    /// goal, exactly like an omitted seed) but records the declaration as
+    /// explicit, which is the ONLY thing that authorizes the standing
+    /// reconciler to REVERSE a marker it previously added to the matching
+    /// `source:seed` goal. Used by the identity file loader when TOML says
+    /// `standing = false`.
+    #[must_use]
+    pub fn non_standing(mut self) -> Self {
+        self.standing = false;
+        self.standing_explicit = true;
+        self
+    }
+
+    /// Whether this seed authorizes the standing reconciler to REVERSE a prior
+    /// standing marker (issue #4927). True *only* for an explicit
+    /// `standing = false` declaration (via [`SeedGoal::non_standing`] or TOML) —
+    /// never for an omitted/default non-standing seed from [`SeedGoal::new`],
+    /// and never for a `standing = true` seed (that adds, it does not reverse).
+    /// This is the single predicate the reconciler uses so that omission stays
+    /// inert while an explicit false is conservatively reversible.
+    #[must_use]
+    pub fn authorizes_standing_reversal(&self) -> bool {
+        self.standing_explicit && !self.standing
     }
 }
 

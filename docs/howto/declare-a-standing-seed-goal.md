@@ -93,10 +93,53 @@ defaults to `false`); `.standing()` is the opt-in.
 2. **Warm board (goal already persisted).** On every cycle, right after the board
    is loaded, `reconcile_standing_markers` stamps the standing marker onto any
    already-persisted goal whose **exact id or normalized title-slug** matches a
-   `standing` seed. This self-heals a goal that a pre-#4927 build persisted
-   without the marker — no need to reseed or delete the board.
+   `standing = true` seed. This self-heals a goal that a pre-#4927 build persisted
+   without the marker — no need to reseed or delete the board. The seed set is
+   resolved **once per cycle** and reused for both cold seeding and this
+   reconcile, so the two paths always agree.
 3. **Effect.** From then on the goal is exempt from the no-progress breaker
    (no re-parking, no `ooda-stuck` issue) and is never marked `Completed`.
+
+## Reverting a standing declaration
+
+The declaration is **reversible** without wiping the board, but reversal must be
+**explicit**. Set the seed's flag to `standing = false` (in Rust, use the
+`.non_standing()` builder) — do **not** just delete the seed or drop the flag:
+
+```toml
+[[identities.seed_goals]]
+priority = 2
+title = "Articulate repo-hygiene backlog"
+description = "…"
+standing = false          # ← explicit reversal (must be present)
+```
+
+```rust
+// Rust: the explicit-false builder — NOT merely omitting `.standing()`.
+SeedGoal::new(2, "Articulate repo-hygiene backlog", "…", Some("hyenas".into()))
+    .non_standing();
+```
+
+On the next cycle `reconcile_standing_markers` strips the leading `[standing] `
+marker it previously added and the goal converges (and trips the breaker) again.
+The reversal is deliberately conservative:
+
+- It removes **only a leading `[standing] ` marker**, and **only** from a goal
+  carrying the exact `source:seed` label — i.e. one this seeding path created. A
+  user-created goal that merely shares the slug is never demoted.
+- **Only an *explicit* `standing = false` reverses.** An **omitted** flag is
+  inert: a seed that simply leaves `standing` out (the default from
+  `SeedGoal::new`) never strips a marker. This is the three-state distinction —
+  omitted, explicit true, and explicit false are all preserved distinctly, so an
+  ordinary non-standing seed can never accidentally demote a perpetual goal.
+- **Deleting a seed does not reverse anything.** A removed seed leaves its goal
+  untouched (so an accidental manifest edit can't silently re-arm a safety
+  breaker on a goal you meant to keep perpetual). Reversal happens only when the
+  seed is still present *and* carries an explicit `standing = false`.
+- **Standing *phrases* in the prose are never edited.** If a goal's description
+  independently reads as standing (e.g. it literally contains "standing goal"),
+  stripping the leading marker leaves it perpetual — only the sentinel prefix is
+  ever removed.
 
 See the [standing seed-goal declaration API reference](../reference/standing-seed-goal-declaration-api.md)
 for the exact types and functions.
@@ -105,8 +148,8 @@ for the exact types and functions.
 
 **A running goal self-heals to standing.** After deploying the declaration, watch
 one cycle of the OODA daemon (see [run the OODA daemon](./run-ooda-daemon.md)).
-`reconcile_standing_markers` emits a bounded structured log line (ids/slugs and a
-count only) when it stamps a goal:
+The cycle logs a bounded line with the reconcile counts (added/removed only) when
+it stamps or reverses a goal:
 
 ```console
 $ simard status --goals

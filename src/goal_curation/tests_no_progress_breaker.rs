@@ -382,7 +382,7 @@ fn standing_seed_goal_reads_as_perpetual_and_is_breaker_exempt() {
     let mut warm = GoalBoard::new();
     warm.active.push(live);
     assert_eq!(
-        reconcile_standing_markers(&mut warm, std::slice::from_ref(&standing)),
+        reconcile_standing_markers(&mut warm, std::slice::from_ref(&standing)).added,
         1
     );
     assert!(

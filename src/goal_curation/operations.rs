@@ -1441,7 +1441,29 @@ pub fn seed_board_from_seed_goals(
     goals.len()
 }
 
-/// Warm-board self-heal for standing seed declarations (issue #4927).
+/// Outcome of a single [`reconcile_standing_markers`] pass — how many persisted
+/// goals were newly marked standing (`added`) and how many had a leading
+/// standing marker reversed (`removed`). Both are zero on a settled board, so a
+/// caller can log an accurate, bounded before/after without re-deriving counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StandingReconciliation {
+    /// Persisted goals that a `standing = true` seed newly stamped perpetual.
+    pub added: usize,
+    /// Persisted `source:seed` goals whose leading standing marker an explicit
+    /// `standing = false` seed reversed.
+    pub removed: usize,
+}
+
+impl StandingReconciliation {
+    /// True when this pass changed nothing — no add and no reversal.
+    #[must_use]
+    pub fn is_noop(self) -> bool {
+        self.added == 0 && self.removed == 0
+    }
+}
+
+/// Warm-board reconcile of standing seed declarations against the persisted
+/// board (issue #4927).
 ///
 /// A `standing = true` seed only reaches a *cold* board via
 /// [`seed_board_from_seed_goals`] (which no-ops on a non-empty board). The live
@@ -1449,36 +1471,78 @@ pub fn seed_board_from_seed_goals(
 /// cognitive-memory board with an UNMARKED description — the exact defect that
 /// re-parked it every OODA cycle and fed the `UNCLEAR-CRITERIA` issue storm
 /// (#4927/#4930/#4934), because the breaker's `!is_perpetual()` exemption never
-/// fired for it.
+/// fired for it. This heals that in place, and — so the declaration is
+/// conservatively reversible — also honours an *explicit* `standing = false`.
 ///
-/// This stamps the standing marker onto each persisted active goal whose id
-/// matches a `standing` seed's normalized title slug, turning it perpetual in
-/// place. Matching is EXACT (by [`crate::goals::goal_slug`]), never by fuzzy
-/// prose — a non-matching or genuinely stuck goal must never be silently
-/// exempted from the safety breaker. It is idempotent (an already-perpetual
-/// goal is skipped, so a repeat pass heals nothing and never double-stamps) and
-/// a no-op when no seed is standing. Returns the number of goals healed.
+/// Matching is EXACT (by [`crate::goals::goal_slug`] against a seed's normalized
+/// title), never by fuzzy prose, so a non-matching or genuinely stuck goal is
+/// never silently exempted from (nor re-exposed to) the safety breaker.
+///
+/// Two directions, both keyed on an exact-slug match to a present seed:
+///
+/// - **`standing = true`** stamps [`STANDING_MARKER_PREFIX`] onto a matching
+///   persisted goal that is not already perpetual (as the original self-heal
+///   did). Idempotent — an already-perpetual goal is skipped, so a repeat pass
+///   heals nothing and never double-stamps.
+/// - **explicit `standing = false`** reverses a *previously reconciled*
+///   declaration by stripping ONLY a leading [`STANDING_MARKER_PREFIX`], and
+///   ONLY from a matching goal that carries the exact [`SOURCE_SEED`] label —
+///   i.e. a goal this seeding path itself created. "Explicit" is load-bearing:
+///   only a seed built via [`crate::identity::SeedGoal::non_standing`] (or TOML
+///   `standing = false`) reverses. An **omitted** `standing` — a default seed
+///   from [`crate::identity::SeedGoal::new`] — is inert and never reverses,
+///   exactly like **seed absence** (deleting a seed entirely leaves its goal
+///   untouched). It also never edits a user-created goal (no `source:seed`
+///   label) and never rewrites a standing *phrase* in the prose (so a goal
+///   whose prose independently reads perpetual stays perpetual).
+///
+/// A no-op when no seed matches. Returns the add/remove counts.
+///
+/// [`SOURCE_SEED`]: crate::goal_curation::labels::SOURCE_SEED
 pub fn reconcile_standing_markers(
     board: &mut GoalBoard,
     seeds: &[crate::identity::SeedGoal],
-) -> usize {
-    let standing_ids: std::collections::BTreeSet<String> = seeds
+) -> StandingReconciliation {
+    use std::collections::BTreeSet;
+
+    let standing_true: BTreeSet<String> = seeds
         .iter()
         .filter(|seed| seed.standing)
         .map(|seed| crate::goals::goal_slug(&seed.title))
         .collect();
-    if standing_ids.is_empty() {
-        return 0;
+    // An explicit `standing = false` reverses only where the same slug is not
+    // *also* declared standing elsewhere (a `true` declaration always wins).
+    // Crucially this keys off `authorizes_standing_reversal()` — an EXPLICIT
+    // false — never merely `!seed.standing`, so an omitted/default seed (which
+    // is also non-standing) stays inert and never reverses a marker (#4927).
+    let standing_false: BTreeSet<String> = seeds
+        .iter()
+        .filter(|seed| seed.authorizes_standing_reversal())
+        .map(|seed| crate::goals::goal_slug(&seed.title))
+        .filter(|slug| !standing_true.contains(slug))
+        .collect();
+    if standing_true.is_empty() && standing_false.is_empty() {
+        return StandingReconciliation::default();
     }
 
-    let mut healed = 0;
+    let mut out = StandingReconciliation::default();
     for goal in &mut board.active {
-        if standing_ids.contains(&goal.id) && !goal.is_perpetual() {
-            goal.mark_standing_in_place();
-            healed += 1;
+        if standing_true.contains(&goal.id) {
+            if !goal.is_perpetual() {
+                goal.mark_standing_in_place();
+                out.added += 1;
+            }
+        } else if standing_false.contains(&goal.id)
+            && goal
+                .labels
+                .iter()
+                .any(|l| l == crate::goal_curation::labels::SOURCE_SEED)
+            && goal.unmark_standing_in_place()
+        {
+            out.removed += 1;
         }
     }
-    healed
+    out
 }
 
 // ---------------------------------------------------------------------------

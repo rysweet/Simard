@@ -1,5 +1,7 @@
 use super::operations::*;
-use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
+use super::types::{
+    ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX,
+};
 
 fn make_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
@@ -1744,6 +1746,13 @@ fn ordinary_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
     crate::identity::SeedGoal::new(2, title, desc, None)
 }
 
+/// An *explicit* `standing = false` seed (issue #4927): non-standing for cold
+/// seeding, yet the only non-standing form that authorizes conservative
+/// reversal — as opposed to [`ordinary_seed`], whose omitted flag is inert.
+fn non_standing_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
+    crate::identity::SeedGoal::new(2, title, desc, None).non_standing()
+}
+
 #[test]
 fn seed_board_from_seed_goals_marks_a_standing_seed_as_perpetual() {
     // Cold start: a `standing = true` seed must produce an ActiveGoal that reads
@@ -1797,9 +1806,10 @@ fn reconcile_standing_markers_self_heals_a_persisted_goal_by_id() {
     let healed =
         reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
     assert_eq!(
-        healed, 1,
+        healed.added, 1,
         "the matching persisted goal must be healed exactly once"
     );
+    assert_eq!(healed.removed, 0, "an add pass must not remove any marker");
     assert!(
         board.active[0].is_perpetual(),
         "reconcile must make the persisted hygiene goal read as perpetual (issue #4927)"
@@ -1828,7 +1838,7 @@ fn reconcile_standing_markers_matches_by_normalized_title_slug() {
             HYGIENE_DESC,
         )],
     );
-    assert_eq!(healed, 1);
+    assert_eq!(healed.added, 1);
     assert!(board.active[0].is_perpetual());
 }
 
@@ -1843,11 +1853,10 @@ fn reconcile_standing_markers_is_idempotent() {
     board.active.push(goal);
     let seeds = [standing_seed(HYGIENE_TITLE, HYGIENE_DESC)];
 
-    assert_eq!(reconcile_standing_markers(&mut board, &seeds), 1);
+    assert_eq!(reconcile_standing_markers(&mut board, &seeds).added, 1);
     let after_first = board.active[0].description.clone();
-    assert_eq!(
-        reconcile_standing_markers(&mut board, &seeds),
-        0,
+    assert!(
+        reconcile_standing_markers(&mut board, &seeds).is_noop(),
         "a second reconcile must heal nothing"
     );
     assert_eq!(
@@ -1867,14 +1876,19 @@ fn reconcile_standing_markers_ignores_unmatched_goals() {
 
     let healed =
         reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
-    assert_eq!(healed, 0, "no non-matching goal may be stamped standing");
+    assert!(
+        healed.is_noop(),
+        "no non-matching goal may be stamped standing"
+    );
     assert!(!board.active[0].is_perpetual());
 }
 
 #[test]
 fn reconcile_standing_markers_ignores_non_standing_seeds() {
-    // A seed with standing=false must NEVER stamp a matching persisted goal —
-    // otherwise every seed would silently become breaker-exempt.
+    // A seed with standing=false must NEVER stamp (add a marker to) a matching
+    // persisted goal — otherwise every seed would silently become breaker-exempt.
+    // (An explicit false may *reverse* a leading marker, but only on a
+    // `source:seed` goal that actually carries one — covered separately below.)
     let id = crate::goals::goal_slug(HYGIENE_TITLE);
     let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
     goal.status = GoalProgress::NotStarted;
@@ -1884,8 +1898,8 @@ fn reconcile_standing_markers_ignores_non_standing_seeds() {
     let healed =
         reconcile_standing_markers(&mut board, &[ordinary_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
     assert_eq!(
-        healed, 0,
-        "an ordinary (standing=false) seed must heal nothing"
+        healed.added, 0,
+        "an ordinary (standing=false) seed must never stamp a goal standing"
     );
     assert!(!board.active[0].is_perpetual());
 }
@@ -1902,6 +1916,186 @@ fn reconcile_standing_markers_skips_already_perpetual_goals() {
 
     let healed =
         reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
-    assert_eq!(healed, 0, "an already-perpetual goal is not healed again");
+    assert!(
+        healed.is_noop(),
+        "an already-perpetual goal is not healed again"
+    );
     assert_eq!(board.active[0].description, before);
+}
+
+// ===========================================================================
+// Conservative REVERSAL of a standing declaration (issue #4927 rework)
+//
+// A standing declaration must be reversible without a board wipe: flipping a
+// seed back to `standing = false` should strip the marker the reconciler itself
+// added. The reversal is deliberately narrow — leading sentinel only, exact
+// slug, `source:seed` label only — so it can never demote a user-created goal,
+// never edit standing *phrases* in prose, and never fire for seed *absence*.
+// ===========================================================================
+
+/// A persisted seed goal (carries the `source:seed` label the seeding path
+/// stamps) whose id is `HYGIENE_TITLE`'s slug and whose description is unmarked.
+fn persisted_seed_goal(desc: &str) -> ActiveGoal {
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut g = ActiveGoal::new(id, desc, 2).with_label(crate::goal_curation::labels::SOURCE_SEED);
+    g.status = GoalProgress::NotStarted;
+    g
+}
+
+#[test]
+fn reconcile_standing_markers_reverses_explicit_false_on_source_seed_goal() {
+    // add-then-reverse: a standing=true pass marks the source:seed goal, then a
+    // standing=false pass on the SAME exact slug strips the leading marker.
+    let mut board = GoalBoard::new();
+    board.active.push(persisted_seed_goal(HYGIENE_DESC));
+
+    let added =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(added.added, 1);
+    assert!(board.active[0].is_perpetual());
+
+    let reversed = reconcile_standing_markers(
+        &mut board,
+        &[non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)],
+    );
+    assert_eq!(
+        (reversed.added, reversed.removed),
+        (0, 1),
+        "an explicit standing=false must reverse exactly the marker it added"
+    );
+    assert!(
+        !board.active[0].is_perpetual(),
+        "after reversal the goal is convergence-required again"
+    );
+    assert_eq!(
+        board.active[0].description, HYGIENE_DESC,
+        "reversal must restore the original description byte-for-byte"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_does_not_reverse_without_source_seed_label() {
+    // A user-created goal (no source:seed) that happens to share the slug and
+    // carry a leading marker must NOT be demoted by an explicit standing=false —
+    // reversal only touches goals this seeding path created.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut user_goal = ActiveGoal::new(id, HYGIENE_DESC, 2).mark_standing();
+    user_goal.status = GoalProgress::NotStarted;
+    assert!(user_goal.is_perpetual());
+    let before = user_goal.description.clone();
+    let mut board = GoalBoard::new();
+    board.active.push(user_goal);
+
+    let reversed = reconcile_standing_markers(
+        &mut board,
+        &[non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)],
+    );
+    assert!(
+        reversed.is_noop(),
+        "a goal without source:seed must never be reversed"
+    );
+    assert_eq!(board.active[0].description, before);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_omitted_seed_does_not_reverse() {
+    // The three-state guarantee (issue #4927): an OMITTED `standing` — a default
+    // `SeedGoal::new` seed — must NEVER reverse a marker, even on the exact-slug
+    // `source:seed` goal that an explicit `standing = false` WOULD reverse. This
+    // is the case distinct from explicit-false reversal
+    // (`reconcile_standing_markers_reverses_explicit_false_on_source_seed_goal`).
+    let mut board = GoalBoard::new();
+    let mut marked = persisted_seed_goal(HYGIENE_DESC);
+    marked.mark_standing_in_place();
+    assert!(marked.is_perpetual());
+    let before = marked.description.clone();
+    board.active.push(marked);
+
+    // Same exact slug + source:seed label, but the seed OMITS `standing`.
+    let omitted = ordinary_seed(HYGIENE_TITLE, HYGIENE_DESC);
+    assert!(
+        !omitted.authorizes_standing_reversal(),
+        "sanity: an omitted seed must not authorize reversal"
+    );
+    let reversed = reconcile_standing_markers(&mut board, &[omitted]);
+    assert!(
+        reversed.is_noop(),
+        "an omitted (default) seed must never reverse a marker — only explicit false does"
+    );
+    assert_eq!(board.active[0].description, before);
+    assert!(
+        board.active[0].is_perpetual(),
+        "the omitted seed leaves the standing goal perpetual"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_does_not_reverse_on_seed_absence() {
+    // Deleting a seed entirely (slug not present in the seed set) must leave its
+    // marked goal untouched — only an EXPLICIT standing=false reverses.
+    let mut board = GoalBoard::new();
+    let mut marked = persisted_seed_goal(HYGIENE_DESC);
+    marked.mark_standing_in_place();
+    assert!(marked.is_perpetual());
+    let before = marked.description.clone();
+    board.active.push(marked);
+
+    // An unrelated seed set that does not mention the hygiene slug at all.
+    let unrelated = crate::identity::SeedGoal::new(1, "Some other seed", "x", None);
+    let reversed = reconcile_standing_markers(&mut board, &[unrelated]);
+    assert!(
+        reversed.is_noop(),
+        "seed absence must never reverse a marker (only explicit false does)"
+    );
+    assert_eq!(board.active[0].description, before);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_reversal_strips_only_the_leading_sentinel_prose_stays_perpetual() {
+    // Prefix-only guarantee: a source:seed goal whose PROSE independently reads
+    // as standing keeps a leading sentinel stripped on reversal, yet stays
+    // perpetual because the phrase in the prose is never edited.
+    let mut board = GoalBoard::new();
+    // A source:seed goal whose prose already reads perpetual AND that the
+    // reconciler previously stamped with a leading sentinel.
+    let mut goal = persisted_seed_goal("standing goal: keep grooming the backlog");
+    goal.description = format!("{STANDING_MARKER_PREFIX}standing goal: keep grooming the backlog");
+    board.active.push(goal);
+    assert!(board.active[0].is_perpetual());
+
+    let reversed = reconcile_standing_markers(
+        &mut board,
+        &[non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)],
+    );
+    assert_eq!(reversed.removed, 1, "the leading sentinel must be stripped");
+    assert!(
+        !board.active[0]
+            .description
+            .starts_with(STANDING_MARKER_PREFIX),
+        "the leading sentinel is gone"
+    );
+    assert!(
+        board.active[0].is_perpetual(),
+        "the untouched standing phrase in prose keeps the goal perpetual"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_reversal_is_idempotent() {
+    // A second explicit-false pass after reversal changes nothing.
+    let mut board = GoalBoard::new();
+    let mut marked = persisted_seed_goal(HYGIENE_DESC);
+    marked.mark_standing_in_place();
+    board.active.push(marked);
+
+    let seeds = [non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)];
+    assert_eq!(reconcile_standing_markers(&mut board, &seeds).removed, 1);
+    let after = board.active[0].description.clone();
+    assert!(
+        reconcile_standing_markers(&mut board, &seeds).is_noop(),
+        "a second reversal pass must be a no-op"
+    );
+    assert_eq!(board.active[0].description, after);
 }

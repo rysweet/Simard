@@ -365,6 +365,29 @@ impl ActiveGoal {
         }
     }
 
+    /// Strip a single leading [`STANDING_MARKER_PREFIX`] sentinel from this
+    /// goal's description, in place. Returns `true` iff the description changed.
+    ///
+    /// This is the deliberately-narrow inverse of [`mark_standing_in_place`],
+    /// used to reverse a standing declaration that was applied by the seed
+    /// reconciler (issue #4927). It removes **only** the leading sentinel — it
+    /// never rewrites standing *phrases* embedded in the prose (e.g. a
+    /// description that literally reads "standing goal …"). A goal whose prose
+    /// independently marks it perpetual therefore stays
+    /// [`is_perpetual`](ActiveGoal::is_perpetual) after this call, and a goal
+    /// without the leading sentinel is left byte-for-byte unchanged (returns
+    /// `false`).
+    ///
+    /// [`mark_standing_in_place`]: ActiveGoal::mark_standing_in_place
+    pub fn unmark_standing_in_place(&mut self) -> bool {
+        if let Some(rest) = self.description.strip_prefix(STANDING_MARKER_PREFIX) {
+            self.description = rest.to_string();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Roll a standing/perpetual goal into a fresh cycle after its current unit
     /// of work finishes, instead of terminating it (issue #2580). Resets the
     /// goal to an actionable, re-dispatchable state: status back to
@@ -858,6 +881,40 @@ mod tests {
         // Idempotent: a goal already read as standing is not double-marked.
         let again = g.clone().mark_standing();
         assert_eq!(again.description, g.description);
+    }
+
+    #[test]
+    fn unmark_standing_in_place_strips_only_the_leading_sentinel() {
+        // Round-trips a reconciler-added marker and reports the change.
+        let mut g = ActiveGoal::new("g", "watch CI", 1).mark_standing();
+        assert!(g.is_perpetual());
+        assert!(g.unmark_standing_in_place(), "must report it changed");
+        assert_eq!(g.description, "watch CI");
+        assert!(!g.is_perpetual());
+        // A second call is a byte-for-byte no-op returning false.
+        assert!(!g.unmark_standing_in_place());
+        assert_eq!(g.description, "watch CI");
+    }
+
+    #[test]
+    fn unmark_standing_in_place_never_edits_a_standing_phrase_in_prose() {
+        // Prose independently makes it perpetual; stripping the (absent) leading
+        // sentinel is a no-op and the goal stays perpetual.
+        let mut g = ActiveGoal::new("g", "Steward CI. Standing goal.", 1);
+        assert!(g.is_perpetual());
+        assert!(
+            !g.unmark_standing_in_place(),
+            "no leading sentinel to strip"
+        );
+        assert!(g.is_perpetual(), "the prose phrase is never edited");
+
+        // With BOTH a leading sentinel and a prose phrase, only the sentinel is
+        // removed; the prose keeps it perpetual.
+        let mut both = ActiveGoal::new("g", "Standing goal: steward CI.", 1);
+        both.description = format!("{STANDING_MARKER_PREFIX}{}", both.description);
+        assert!(both.unmark_standing_in_place());
+        assert!(!both.description.starts_with(STANDING_MARKER_PREFIX));
+        assert!(both.is_perpetual(), "prose keeps the goal perpetual");
     }
 
     #[test]

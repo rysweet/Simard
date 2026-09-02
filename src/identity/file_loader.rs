@@ -81,7 +81,16 @@ impl FileIdentityLoader {
                     g.description.clone(),
                     g.repo.clone(),
                 );
-                if g.standing { seed.standing() } else { seed }
+                // #4927 three-state mapping: preserve the omitted/explicit
+                // distinction the `Option<bool>` carries. Omitted (`None`) is an
+                // inert non-standing seed; explicit `false` maps to
+                // `.non_standing()` (authorizes conservative reversal); `true`
+                // maps to `.standing()`.
+                match g.standing {
+                    Some(true) => seed.standing(),
+                    Some(false) => seed.non_standing(),
+                    None => seed,
+                }
             })
             .collect();
         let target_repos = identity.target_repos.clone();
@@ -1167,6 +1176,50 @@ posture = "read-only"
         assert!(!manifest.authority.allow_ado_writes);
         assert!(!manifest.authority.allow_github_writes);
         assert!(!manifest.authority.permits_spawn());
+    }
+
+    #[test]
+    fn file_loader_preserves_standing_declaration_three_state() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[[identities.seed_goals]]
+priority = 1
+title = "Explicit standing"
+description = "d"
+standing = true
+
+[[identities.seed_goals]]
+priority = 2
+title = "Explicit non-standing"
+description = "d"
+standing = false
+
+[[identities.seed_goals]]
+priority = 3
+title = "Omitted standing"
+description = "d"
+"#;
+        let manifest = load_crocutus(toml).expect("three-state identity must load");
+        assert_eq!(manifest.seed_goals.len(), 3);
+
+        let explicit_standing = &manifest.seed_goals[0];
+        assert!(explicit_standing.standing);
+        assert!(!explicit_standing.authorizes_standing_reversal());
+
+        let explicit_non_standing = &manifest.seed_goals[1];
+        assert!(!explicit_non_standing.standing);
+        assert!(explicit_non_standing.authorizes_standing_reversal());
+
+        let omitted = &manifest.seed_goals[2];
+        assert!(!omitted.standing);
+        assert!(!omitted.authorizes_standing_reversal());
     }
 
     #[test]

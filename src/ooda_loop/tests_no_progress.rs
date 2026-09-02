@@ -1324,7 +1324,7 @@ fn reconciled_standing_hygiene_goal_is_exempt_from_the_no_progress_breaker() {
     .standing();
     let healed = crate::goal_curation::reconcile_standing_markers(&mut board, &[standing]);
     assert_eq!(
-        healed, 1,
+        healed.added, 1,
         "reconcile must self-heal the one matching live goal"
     );
     assert!(
@@ -1418,5 +1418,100 @@ fn unmarked_hygiene_goal_still_escalates_proving_the_tag_is_the_fix() {
     assert!(
         !filer.calls.borrow().is_empty(),
         "the pre-fix unmarked goal must still file exactly the escalation issue"
+    );
+}
+
+#[test]
+fn reverted_standing_seed_goal_re_enters_the_no_progress_breaker() {
+    // #4927 rework: a standing declaration is conservatively reversible. A
+    // source:seed goal marked standing, then reverted by an explicit
+    // `standing = false` seed, must lose its breaker exemption and escalate
+    // again exactly like an ordinary stuck goal — proving the reversal actually
+    // re-arms the safety breaker.
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let title = "Articulate repo-hygiene backlog";
+    let id = crate::goals::goal_slug(title);
+    let mut goal = ActiveGoal::new(
+        id.clone(),
+        "Turn observations into prioritized repo-hygiene goals.",
+        2,
+    )
+    .with_label(crate::goal_curation::labels::SOURCE_SEED);
+    goal.status = GoalProgress::NotStarted;
+
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    // 1) Declare standing -> exempt.
+    let standing = crate::identity::SeedGoal::new(
+        2,
+        title,
+        "Turn observations into prioritized repo-hygiene goals.",
+        None,
+    )
+    .standing();
+    assert_eq!(
+        crate::goal_curation::reconcile_standing_markers(&mut board, &[standing]).added,
+        1
+    );
+    assert!(board.active[0].is_perpetual());
+
+    // 2) Revert with an explicit standing=false seed of the SAME slug -> the
+    //    reconciler strips the marker it added; the goal converges again. The
+    //    reversal MUST be explicit (`.non_standing()`), never a merely-omitted
+    //    seed, which stays inert (#4927 three-state semantics).
+    let reverted = crate::identity::SeedGoal::new(
+        2,
+        title,
+        "Turn observations into prioritized repo-hygiene goals.",
+        None,
+    )
+    .non_standing();
+    assert!(
+        reverted.authorizes_standing_reversal(),
+        "sanity: an explicit standing=false seed authorizes reversal"
+    );
+    assert_eq!(
+        crate::goal_curation::reconcile_standing_markers(&mut board, &[reverted]).removed,
+        1
+    );
+    assert!(
+        !board.active[0].is_perpetual(),
+        "after reversal the goal is no longer breaker-exempt"
+    );
+
+    // 3) Drive the breaker: the reverted goal must escalate and file an issue.
+    let mut state = OodaState::new(board);
+    let evidence = FakeEvidence {
+        pr_merged: false,
+        issue_closed: false,
+        deployed: false,
+    };
+    let filer = RecordingFiler::default();
+
+    let mut fired = false;
+    for _ in 1..=(threshold + 1) {
+        let report = apply_no_progress_breaker_with_threshold(
+            &mut state,
+            &[no_action_outcome(&id)],
+            &evidence,
+            &filer,
+            threshold,
+        );
+        assert!(
+            report.perpetual_idled.is_empty(),
+            "a reverted goal must never be treated as a perpetual idle"
+        );
+        if report.fired() {
+            fired = true;
+        }
+    }
+    assert!(
+        fired,
+        "a reverted standing goal must trip the no-progress breaker again"
+    );
+    assert!(
+        !filer.calls.borrow().is_empty(),
+        "the reverted goal must file the escalation issue like any ordinary stuck goal"
     );
 }
