@@ -1940,6 +1940,14 @@ pub fn run_ooda_daemon(
                 let tick_generation = overseer_tick_generation.load(Ordering::SeqCst);
                 let running = Arc::clone(&overseer_tick_running);
                 let generation_for_tick = Arc::clone(&overseer_tick_generation);
+                // #4981: two more handles on the SAME shared generation token so
+                // the worker can (a) cooperatively cancel — stop acting the moment
+                // the watchdog reclaim bumps the generation past `tick_generation`
+                // — and (b) gate its own stale publications on generation
+                // equality. Both reuse the single fencing token the ClearOnDrop /
+                // watchdog already coordinate on; no new token is introduced.
+                let generation_for_cancel = Arc::clone(&overseer_tick_generation);
+                let generation_for_publish = Arc::clone(&overseer_tick_generation);
                 let consecutive_transient_counter = Arc::clone(&overseer_consecutive_transient);
                 let transient_ceiling = overseer_transient_ceiling;
                 let mem_for_tick = Arc::clone(&shared_mem);
@@ -2005,9 +2013,42 @@ pub fn run_ooda_daemon(
                             // (name + purpose + cadence) captured from
                             // `Mind::health()` above, so the deterministic
                             // oversight pass can reason about each thread.
-                            .with_thread_registry(thread_healths.clone());
+                            .with_thread_registry(thread_healths.clone())
+                            // #4981: cooperative cancellation fenced on the SAME
+                            // generation token. Returns `true` once the watchdog
+                            // reclaim has bumped the shared generation past the
+                            // one THIS tick captured — i.e. a catch-up tick has
+                            // superseded this one. The tick then stops taking
+                            // further actions (an in-flight act still finishes).
+                            .with_cancel_check(Box::new(move || {
+                                generation_for_cancel.load(Ordering::SeqCst) != tick_generation
+                            }));
                         let (report, problem_entries) =
                             crate::overseer::run_overseer_tick_isolated_detailed(&mut overseer);
+                        // #4981: gate BOTH stale publications on generation
+                        // equality. If the liveness watchdog reclaimed this
+                        // tick's slot mid-flight (bumping the shared generation
+                        // past the one captured at arm time), this worker is
+                        // STALE: it must publish NEITHER the daemon-log tick
+                        // summary NOR the durable activity-feed record, so it can
+                        // never overwrite the fresh catch-up tick's state (or its
+                        // self-heal counter) with its superseded outcome. Emit one
+                        // bounded warning — generations + the observational
+                        // `superseded` flag only, never any tick payload — and
+                        // return. `ClearOnDrop` is already a no-op for a stale
+                        // generation, so returning here does not touch the guard.
+                        if generation_for_publish.load(Ordering::SeqCst) != tick_generation {
+                            tracing::warn!(
+                                target: "simard.overseer.watchdog",
+                                tick_generation,
+                                current_generation =
+                                    generation_for_publish.load(Ordering::SeqCst),
+                                superseded = report.superseded,
+                                "overseer tick superseded by watchdog reclaim; suppressing \
+                                 stale publication (no tick summary, no activity-feed write)"
+                            );
+                            return;
+                        }
                         daemon_log(
                             &state_root_for_tick,
                             &format!(

@@ -423,6 +423,21 @@ pub struct Overseer {
     /// candidate PR via the tested `rework_loop::poll_rework` fail-closed rail and
     /// gates the resulting rework/escalation.
     rework_port: Option<Box<dyn rework_loop::ReworkPort>>,
+    /// Optional cooperative-cancellation predicate (issue #4981). `None` (the
+    /// default) means "never cancelled" — the Overseer behaves exactly as
+    /// before. When wired, `overseer_tick_detailed` consults it AFTER `run_cycle`,
+    /// BEFORE every planned `act`, and once more AFTER the action loop before the
+    /// observation write-back: the first time it returns `true` the tick stops
+    /// taking further actions, writes back no observation, and marks its report
+    /// `superseded`. The daemon
+    /// injects a predicate that returns `true` once the shared tick-generation
+    /// token has moved past the generation THIS tick captured — i.e. the liveness
+    /// watchdog reclaimed the slot and a newer catch-up tick has superseded this
+    /// one. This is COOPERATIVE only: it gates the decision to START the next
+    /// action; a syscall or `act` already in flight is allowed to complete (it
+    /// cannot be killed). Bounding an individual external call is separate
+    /// hardening (per-call timeouts), not this predicate's job.
+    cancel_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 /// The reaper's injected dependencies, bundled so the `Overseer` carries one
@@ -590,6 +605,7 @@ impl Overseer {
             thread_registry: Vec::new(),
             liaison_port: None,
             rework_port: None,
+            cancel_check: None,
         }
     }
 
@@ -674,6 +690,34 @@ impl Overseer {
     pub fn with_rework_port(mut self, port: Box<dyn rework_loop::ReworkPort>) -> Self {
         self.rework_port = Some(port);
         self
+    }
+
+    /// Wire the cooperative-cancellation predicate (issue #4981). `None` (the
+    /// default) preserves the prior behavior exactly (no cancellation — every
+    /// planned, admitted action runs). When wired, `overseer_tick_detailed`
+    /// checks it after `run_cycle`, before each planned `act`, and once more
+    /// after the action loop before the observation write-back; the first
+    /// `true` stops all further actions, skips the write-back, and marks the
+    /// tick `superseded`. The
+    /// daemon injects `move || generation.load() != my_generation`, reusing the
+    /// SAME `Arc<AtomicU64>` tick-generation token and captured worker generation
+    /// the watchdog/`ClearOnDrop` fencing already uses — so a watchdog reclaim
+    /// (which bumps the generation) both frees the overlap slot AND cooperatively
+    /// tells the hung tick to stop acting. Cooperative only: an `act`/syscall
+    /// already in flight completes; it is never killed.
+    pub fn with_cancel_check(mut self, check: Box<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.cancel_check = Some(check);
+        self
+    }
+
+    /// Whether this tick has been cooperatively superseded (issue #4981):
+    /// `true` only when a cancellation predicate is wired AND currently reports
+    /// cancellation. `false` (never superseded) when no predicate is wired —
+    /// the default, preserving prior behavior. Consulted by
+    /// `overseer_tick_detailed` after `run_cycle`, before every planned act, and
+    /// again after the action loop before the observation write-back.
+    pub fn is_superseded(&self) -> bool {
+        self.cancel_check.as_ref().is_some_and(|check| check())
     }
 
     /// Wire the live agentic observe/orient merge-queue reasoner rail (#4097):
