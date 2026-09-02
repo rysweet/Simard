@@ -471,7 +471,7 @@
 <g id="node38" class="node">
 <title>rustls_native_certs</title>
 <path fill="#fffaf0" stroke="#b36b00" d="M264,-146C264,-146 123,-146 123,-146 117,-146 111,-140 111,-134 111,-134 111,-122 111,-122 111,-116 117,-110 123,-110 123,-110 264,-110 264,-110 270,-110 276,-116 276,-122 276,-122 276,-134 276,-134 276,-140 270,-146 264,-146"/>
-<text text-anchor="middle" x="193.5" y="-124.3" font-family="Arial" font-size="14.00">rustls&#45;native&#45;certs =0.8.3</text>
+<text text-anchor="middle" x="193.5" y="-124.3" font-family="Arial" font-size="14.00">rustls&#45;native&#45;certs =0.8.4</text>
 </g>
 <!-- simard&#45;&gt;rustls_native_certs -->
 <g id="edge37" class="edge">
