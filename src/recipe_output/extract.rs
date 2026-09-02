@@ -499,6 +499,25 @@ mod issue_2496_launcher_tests {
     }
 
     #[test]
+    fn narrow_preamble_signature_recognizes_only_unambiguous_launcher_lines() {
+        assert!(is_copilot_launcher_preamble_signature(INFO_MARKER));
+        assert!(is_copilot_launcher_preamble_signature(LAUNCHING));
+
+        for ordinary_title in [
+            UPDATE_NAG,
+            "INFO redesign the dashboard",
+            "WARN retire the legacy exporter",
+            "Document NODE_OPTIONS for operators",
+            "{\"content\":\"launching copilot binary=/x\"}",
+        ] {
+            assert!(
+                !is_copilot_launcher_preamble_signature(ordinary_title),
+                "ordinary title must survive: {ordinary_title:?}"
+            );
+        }
+    }
+
+    #[test]
     fn drops_copilot_update_nag_line() {
         assert!(is_copilot_launcher_line(UPDATE_NAG));
         assert!(is_noise_line(UPDATE_NAG));
