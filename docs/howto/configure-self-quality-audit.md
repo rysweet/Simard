@@ -148,27 +148,33 @@ review — they are not force-merged.
 ## Manually trigger a run
 
 To run the agentic recipe directly (the same way the daemon invokes it), use
-`recipe-runner-rs` with the JSON envelope:
+`recipe-runner-rs`, supplying the `record_path` the hook would derive:
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/monthly-self-quality-audit.yaml \
   --output-format json \
   -c state_root="$HOME/.simard" \
-  -c repo_path="/home/azureuser/src/Simard"
+  -c repo_path="/home/azureuser/src/Simard" \
+  -c record_path="$HOME/.simard/self_quality_audit/record.json"
 ```
 
-This prints a JSON envelope whose `step_results[*].output` strings contain the
-text markers the Rust shim parses:
+The recipe's final ACT step calls `simard cognition record-self-quality-audit`,
+which writes the typed record the hook reads back. Inspect it directly:
+
+```bash
+cat "$HOME/.simard/self_quality_audit/record.json" | jq .
+```
 
 ```json
 {
-  "success": true,
-  "step_results": [
-    {
-      "step_id": "self-quality-audit",
-      "output": "AUDIT_STARTED\nWAVE_START=1\nWAVE_COMPLETE=1\nPR_OPENED=https://github.com/rysweet/Simard/pull/2601\nCRUSTY_APPROVED=https://github.com/rysweet/Simard/pull/2601\nPR_MERGED=https://github.com/rysweet/Simard/pull/2601\n...\nAUDIT_COMPLETE=5 waves, 4 PRs opened, 3 merged, 1 crusty-unresolved\n"
-    }
-  ]
+  "schema": "self-quality-audit/v1",
+  "written_at_epoch": 1793558400,
+  "waves_completed": 5,
+  "prs_opened": ["https://github.com/rysweet/Simard/pull/2601"],
+  "prs_merged": ["https://github.com/rysweet/Simard/pull/2601"],
+  "crusty_approved": ["https://github.com/rysweet/Simard/pull/2601"],
+  "crusty_unresolved": [],
+  "summary_line": "5 waves, 4 PRs opened, 3 merged, 1 crusty-unresolved"
 }
 ```
 
@@ -232,18 +238,26 @@ The waves open PRs and the self-merge step uses `gh`. If `gh` is
 unauthenticated, the run cannot open or merge PRs; the completion summary will
 show `0 PRs opened`.
 
-### 4. Parse error mentioning AUDIT_COMPLETE
+### 4. Record read failure (`R{n}`) in the daemon log
 
-The parser **requires** a non-empty `AUDIT_COMPLETE=` line. If the agent emitted
-none (e.g. it aborted mid-audit), the shim returns a parse error. Inspect the
-raw output:
+The hook reads the recipe's typed record **fail-closed** over the R1–R7 matrix. A
+`WARN: self quality-audit failed: self-quality-audit record R{n}: …` line means the
+recipe ran but wrote no valid record. Common cases:
+
+- **R1** — no record at `~/.simard/self_quality_audit/record.json`: the recipe never
+  reached its final `record-self-quality-audit` ACT step (e.g. it aborted mid-audit).
+- **R5** — bounds break: `waves_completed > 5`, an over-long URL list, or an unknown
+  field.
+- **R6** — empty `summary_line`: the recipe must record a non-empty terminal summary.
+
+Inspect the record the recipe wrote:
 
 ```bash
-recipe-runner-rs prompt_assets/simard/recipes/monthly-self-quality-audit.yaml \
-  --output-format json \
-  -c state_root="$HOME/.simard" -c repo_path="/home/azureuser/src/Simard" \
-  | python3 -m json.tool
+cat "$HOME/.simard/self_quality_audit/record.json" | jq .
 ```
+
+See the [R1–R7 read matrix](../reference/record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7)
+for the full table.
 
 ### 5. Audit isn't firing when you expect
 
@@ -255,7 +269,7 @@ grep "self quality-audit interval" ~/.simard/ooda.log | tail -1   # =0s means di
 date -d @"$(cat ~/.simard/self_quality_audit_last_run 2>/dev/null || echo 0)"
 ```
 
-Remember the **init-to-now** rule: a *missing* marker waits a full interval
+Remember the **init-to-now** rule: a *missing* last-run file waits a full interval
 before the first run. If you want it due now, write an old epoch
 (`echo 0 > ~/.simard/self_quality_audit_last_run`) rather than deleting the file.
 
@@ -264,10 +278,10 @@ before the first run. If you want it due now, write an old epoch
 Every PR the waves open is proxy-reviewed by `crusty-old-engineer` on operator
 Ryan's behalf, looping up to **3 rounds**:
 
-- **Approved within 3 rounds** → the PR self-merges **iff CI is also green**
-  (`PR_MERGED`). Branch protection is respected.
-- **Still unsatisfied after 3 rounds** → the PR is **left open**
-  (`CRUSTY_UNRESOLVED`) for you to review. It is never force-merged.
+- **Approved within 3 rounds** → the PR self-merges **iff CI is also green** (recorded
+  under `prs_merged`). Branch protection is respected.
+- **Still unsatisfied after 3 rounds** → the PR is **left open** (recorded under
+  `crusty_unresolved`) for you to review. It is never force-merged.
 
 So the completion summary's `merged` count is always PRs that passed **both**
 crusty and CI, and `crusty-unresolved` is your human follow-up queue.
@@ -275,6 +289,7 @@ crusty and CI, and `crusty-unresolved` is your human follow-up queue.
 ## Related
 
 - [Monthly self-quality-audit (architecture)](../architecture/monthly-self-quality-audit.md) — design rationale, restart-persistence, safety model
-- [Self-quality-audit API (reference)](../reference/self-quality-audit-api.md) — module API, structs, markers, config
+- [Self-quality-audit API (reference)](../reference/self-quality-audit-api.md) — module API, structs, typed record, config
+- [record-brain-introspection / record-self-quality-audit CLI](../reference/record-brain-introspection-self-audit-cli.md) — the gated record verb, schema, and R1–R7 read matrix
 - [Configure and monitor brain introspection](./configure-brain-introspection.md) — the sibling periodic task whose pattern this reuses
 - [Configure and monitor the disk health check](./configure-disk-health-check.md) — the pure recipe-invoker sibling

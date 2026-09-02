@@ -118,46 +118,48 @@ grep brain_introspection ~/.simard/metrics/metrics.jsonl | tail -8
 | `brain_introspection_consolidated`    | facts/procedures added (hook-measured delta)   |
 
 These accumulate the rolling baseline; a run compares itself to the previous
-`SIMARD_BRAIN_INTROSPECTION_BASELINE_RUNS` runs and reports `REGRESSION:` lines
-in the issue when a signal worsens. The **first run** reports
-`BRAIN_HEALTH: no prior baseline`.
+`SIMARD_BRAIN_INTROSPECTION_BASELINE_RUNS` runs and records `regressions` lines
+in the issue when a signal worsens. The **first run** records
+`brain_health: ["no prior baseline"]`.
 
 ## Manually trigger a run
 
 To run the agentic recipe directly (the same way the daemon invokes it), use
-`recipe-runner-rs` with the JSON envelope:
+`recipe-runner-rs`, supplying the `record_path` the hook would derive:
 
 ```bash
 recipe-runner-rs prompt_assets/simard/recipes/brain-introspection.yaml \
   --output-format json \
   -c state_root="$HOME/.simard" \
   -c repo_path="/home/azureuser/src/Simard" \
+  -c record_path="$HOME/.simard/brain_introspection/record.json" \
   -c max_prune=25 \
   -c baseline_runs=7 \
   -c stats='{}'
 ```
 
-This prints a JSON envelope whose `step_results[*].output` strings contain the
-text markers the Rust shim parses:
+The recipe's final ACT step calls `simard cognition record-brain-introspection`,
+which writes the typed record the hook reads back. Inspect it directly:
+
+```bash
+cat "$HOME/.simard/brain_introspection/record.json" | jq .
+```
 
 ```json
 {
-  "success": true,
-  "step_results": [
-    {
-      "step_id": "brain-health",
-      "output": "BRAIN_HEALTH: fallback rate 1.1% (baseline 1.0%) — nominal\nREGRESSION: 0-succeeded-action cycles up 3x vs baseline\n"
-    },
-    {
-      "step_id": "output",
-      "output": "PRUNE_REQUESTED=4\nCONSOLIDATED_FACTS=6\nISSUE_URL=https://github.com/rysweet/Simard/issues/2531\n"
-    }
-  ]
+  "schema": "brain-introspection/v1",
+  "written_at_epoch": 1793558400,
+  "brain_health": ["fallback rate 1.1% (baseline 1.0%) — nominal"],
+  "patterns": [],
+  "regressions": ["0-succeeded-action cycles up 3x vs baseline"],
+  "prune_candidates": ["duplicate semantic fact #A/#B (superseded)"],
+  "prune_requested": 4,
+  "issue_url": "https://github.com/rysweet/Simard/issues/2531"
 }
 ```
 
 > **Note:** Running the recipe directly exercises only the *agentic* half
-> (analysis + issue). The deterministic memory operations
+> (analysis + issue + record write). The deterministic memory operations
 > (`get_statistics`, `prune_expired_sensory`, `consolidate_episodes`)
 > run in the Rust hook (`run_brain_introspection`), which the daemon calls on its
 > interval. To exercise the **whole** pass on demand (without waiting a day),
@@ -215,23 +217,32 @@ gh auth status
 
 The `output` step uses `gh issue` to create/update the brain-introspection
 issue. If `gh` is unauthenticated, the run still completes the analysis and
-hygiene but emits no `ISSUE_URL=`; `summary()` shows `issue=none`.
+hygiene but the record's `issue_url` is absent; `summary()` shows `issue=none`.
 
-### 4. Parse error mentioning BRAIN_HEALTH
+### 4. Record read failure (`R{n}`) in the daemon log
 
-The parser **requires** at least one non-empty `BRAIN_HEALTH:` line. If the
-agent emitted none (e.g. it failed to read `metrics.jsonl`), the shim returns a
-parse error. Inspect the raw output:
+The hook reads the recipe's typed record **fail-closed** over the R1–R7 matrix. A
+`WARN: brain introspection failed: brain-introspection record R{n}: …` line means the
+recipe ran but wrote no valid record. Common cases:
+
+- **R1** — no record at `~/.simard/brain_introspection/record.json`: the recipe never
+  reached its final `record-brain-introspection` ACT step (e.g. it failed to read
+  `metrics.jsonl`). Check that `~/.simard/metrics/metrics.jsonl` and
+  `~/.simard/ooda.log` exist and are readable.
+- **R6** — `brain_health` empty: the recipe must record at least one brain-health line
+  (the first run records `["no prior baseline"]`).
+- **R7** — stale/replayed record: normally impossible in production (the hook
+  pre-truncates the path before spawn); if you ran the recipe manually earlier, delete
+  the stale file and re-run.
+
+Inspect the record the recipe wrote:
 
 ```bash
-recipe-runner-rs prompt_assets/simard/recipes/brain-introspection.yaml \
-  --output-format json \
-  -c state_root="$HOME/.simard" -c repo_path="/home/azureuser/src/Simard" \
-  | python3 -m json.tool
+cat "$HOME/.simard/brain_introspection/record.json" | jq .
 ```
 
-Check that `~/.simard/metrics/metrics.jsonl` and `~/.simard/ooda.log` exist and
-are readable.
+See the [R1–R7 read matrix](../reference/record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7)
+for the full table.
 
 ## Verify safety
 
@@ -254,6 +265,7 @@ auto-deleted in this increment (see the
 ## Related
 
 - [Brain introspection + memory hygiene (architecture)](../architecture/brain-introspection.md) — design rationale and safety model
-- [Brain introspection API (reference)](../reference/brain-introspection-api.md) — module API, structs, markers, config
+- [Brain introspection API (reference)](../reference/brain-introspection-api.md) — module API, structs, typed record, config
+- [record-brain-introspection / record-self-quality-audit CLI](../reference/record-brain-introspection-self-audit-cli.md) — the gated record verb, schema, and R1–R7 read matrix
 - [Configure and monitor the disk health check](./configure-disk-health-check.md) — the sibling periodic-recipe pass
 - [Configure episode hygiene and promotion](./configure-episode-hygiene-and-promotion.md) — the per-cycle consolidation this pass reuses

@@ -77,6 +77,8 @@ nav:
     - Episode Distillation: architecture/episode-distillation.md
     - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
     - Reflective Cognitive Threads Act via Tools: architecture/reflective-cognitive-threads.md
+    - The Metacognitive Model (OODA + overseer + threads): architecture/metacognitive-model.md
+    - The Metacognitive Atlas (code-derived diagrams): architecture/metacognitive-atlas.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -301,6 +303,7 @@ nav:
     - Configure the Cognitive-Thread Batch: howto/configure-cognitive-thread-batch.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
     - Configure the Reflective Cognitive Threads: howto/configure-reflective-cognitive-threads.md
+    - Read a Cognitive Thread's Reasoning Summary: howto/read-cognitive-thread-reasoning.md
     - Record an Investigation Finding (issue/memory, not a repo doc): howto/record-an-investigation-finding.md
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
@@ -393,6 +396,7 @@ nav:
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
     - OODA Record-Orient/Decide Tools: reference/ooda-record-orient-decide-cli.md
+    - Cognition Record-Thread-Reasoning Tool: reference/simard-cognition-record-thread-reasoning-cli.md
     - OODA Record-Admission Tools: reference/ooda-record-admission-cli.md
     - OODA Record-Idea-Dedup/Consolidation Tools: reference/ooda-record-idea-dedup-consolidation-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
@@ -488,6 +492,7 @@ nav:
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Cognition Record-Brain-Introspection/Self-Quality-Audit Tools: reference/record-brain-introspection-self-audit-cli.md
     - Disk-Health API: reference/disk-health-api.md
     - Disk Reclaim API: reference/disk-reclaim-api.md
     - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md
