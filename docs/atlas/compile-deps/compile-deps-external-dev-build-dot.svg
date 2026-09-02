@@ -56,7 +56,7 @@
 <g id="node5" class="node">
 <title>chrono_build</title>
 <path fill="#f6ffed" stroke="#2da44e" d="M386.5,-500C386.5,-500 297.5,-500 297.5,-500 291.5,-500 285.5,-494 285.5,-488 285.5,-488 285.5,-474 285.5,-474 285.5,-468 291.5,-462 297.5,-462 297.5,-462 386.5,-462 386.5,-462 392.5,-462 398.5,-468 398.5,-474 398.5,-474 398.5,-488 398.5,-488 398.5,-494 392.5,-500 386.5,-500"/>
-<text text-anchor="middle" x="342" y="-484.8" font-family="Arial" font-size="14.00">chrono =0.4.44</text>
+<text text-anchor="middle" x="342" y="-484.8" font-family="Arial" font-size="14.00">chrono =0.4.45</text>
 <text text-anchor="middle" x="342" y="-469.8" font-family="Arial" font-size="14.00">build timestamp</text>
 </g>
 <!-- build_deps&#45;&gt;chrono_build -->

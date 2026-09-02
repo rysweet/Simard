@@ -1,6 +1,12 @@
 
 # cargo-vet audits file
 
+[[audits.chrono]]
+who = "Simard operator (rysweet)"
+criteria = "safe-to-deploy"
+delta = "0.4.44 -> 0.4.45"
+notes = "Reviewed 0.4.44 -> 0.4.45 for the pinned runtime and build dependency; no new unsafe code, process execution, network behavior, or dependencies."
+
 [[audits.crossbeam-epoch]]
 who = "Simard operator (rysweet)"
 criteria = "safe-to-deploy"
