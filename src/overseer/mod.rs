@@ -1867,23 +1867,17 @@ impl Overseer {
             .collect();
         for (key, status) in done {
             self.inflight_investigations.remove(&key);
-            // Observability for the verdict write-back gap (#4467): this
-            // reconcile only frees the in-flight dedup slot — it does NOT itself
-            // persist the concluded recipe's verdict into the store the
-            // claim-reaper reads (`StaleEngineerInvestigator::investigate`). A
-            // stale-engineer investigation that finishes here without a later
-            // write-back leaves the reaper stuck on `Pending` and re-archiving
-            // evidence every sweep. Logging the conclusion turns that otherwise
-            // silent event into a diagnosable signal (root cause: goal
-            // `advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c`,
-            // 2026-07-22, hourly re-archival with verdict=pending).
-            tracing::info!(
-                target: "overseer::investigation",
-                investigation_key = %key,
-                terminal_status = ?status,
-                "[simard] stale-engineer investigation recipe concluded; in-flight \
-                 slot released (verdict write-back tracked separately: #4467)",
-            );
+            // Reconciliation releases the stale-investigation dedup slot but
+            // does not persist the recipe verdict consumed by the claim reaper.
+            if key.starts_with(crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX) {
+                tracing::info!(
+                    target: "overseer::investigation",
+                    investigation_key = %key,
+                    terminal_status = ?status,
+                    "[simard] stale-engineer investigation recipe concluded; in-flight \
+                     slot released (verdict write-back tracked separately: #4467)",
+                );
+            }
         }
     }
 
@@ -3832,6 +3826,7 @@ mod tests {
     use super::capabilities::*;
     use super::*;
     use crate::error::SimardResult;
+    use std::sync::Mutex;
 
     // ── Fakes: each satisfies one capability with canned values. ────────────
     struct FakeStatus(ObservedState);
@@ -5316,6 +5311,64 @@ mod tests {
         }
     }
 
+    struct FailingInvestigation;
+    impl RecipeLauncher for FailingInvestigation {
+        fn launch(&self, _brief: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+            Ok(WorkstreamHandle {
+                id: "ws-error".to_string(),
+            })
+        }
+
+        fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+            Err(OverseerError::Capability {
+                what: "poll investigation",
+                detail: "transient failure".to_string(),
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("log capture mutex")).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log capture mutex")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_investigation_logs(run: impl FnOnce()) -> String {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        capture.contents()
+    }
+
     /// A concluded investigation recipe frees its in-flight dedup slot so a
     /// re-observed signature is no longer held (the observable half of #4467).
     #[test]
@@ -5338,6 +5391,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconcile_logs_completed_stale_engineer_investigation() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(CompletingInvestigation);
+        let mut ov = Overseer::new(c);
+        let key = format!(
+            "{}bounded-claim-key",
+            crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX
+        );
+        ov.inflight_investigations.insert(
+            key.clone(),
+            WorkstreamHandle {
+                id: "ws-done".to_string(),
+            },
+        );
+
+        let logs = capture_investigation_logs(|| ov.reconcile_inflight_investigations());
+
+        assert!(logs.contains("overseer::investigation"), "{logs}");
+        assert!(logs.contains(&key), "{logs}");
+        assert!(logs.contains("ProducedPr"), "{logs}");
+        assert!(
+            logs.contains("stale-engineer investigation recipe concluded"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn reconcile_does_not_mislabel_generic_recipe_completion() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(CompletingInvestigation);
+        let mut ov = Overseer::new(c);
+        ov.inflight_investigations.insert(
+            "generic recipe description that must not be logged".to_string(),
+            WorkstreamHandle {
+                id: "ws-done".to_string(),
+            },
+        );
+
+        let logs = capture_investigation_logs(|| ov.reconcile_inflight_investigations());
+
+        assert!(
+            !logs.contains("stale-engineer investigation recipe concluded"),
+            "{logs}"
+        );
+        assert!(ov.inflight_investigations.is_empty());
+    }
+
     /// Fail-closed: a still-running investigation (FakeRecipes::poll => Running)
     /// is KEPT, so the reaper never drops an investigation it cannot confirm has
     /// finished.
@@ -5357,6 +5458,30 @@ mod tests {
             ov.inflight_investigations.len(),
             1,
             "a still-running investigation must be kept — fail closed"
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_investigation_when_poll_fails_without_logging_completion() {
+        let mut c = caps(ObservedState::default(), false, vec![]);
+        c.recipes = Box::new(FailingInvestigation);
+        let mut ov = Overseer::new(c);
+        ov.inflight_investigations.insert(
+            format!(
+                "{}poll-error",
+                crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX
+            ),
+            WorkstreamHandle {
+                id: "ws-error".to_string(),
+            },
+        );
+
+        let logs = capture_investigation_logs(|| ov.reconcile_inflight_investigations());
+
+        assert_eq!(ov.inflight_investigations.len(), 1);
+        assert!(
+            !logs.contains("stale-engineer investigation recipe concluded"),
+            "{logs}"
         );
     }
 }
