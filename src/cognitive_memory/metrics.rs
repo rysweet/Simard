@@ -272,6 +272,105 @@ pub fn record_provenance_coverage_metric(facts_with_provenance: u64, facts_total
     }
 }
 
+// ─────────────────────── graph-memory snapshot dedup hygiene ────────────────
+//
+// A graph-memory *hygiene* signal complementary to grounding coverage above.
+// Goal-board snapshot facts are revisioned: each new revision SUPERSEDES the
+// prior one, and `prune_superseded` (controlled forgetting) reclaims archived
+// revisions over time. `snapshot_facts_total` counts every goal-board snapshot
+// revision the store still holds (live + not-yet-pruned superseded);
+// `distinct_snapshot_caller_keys` counts the distinct logical streams behind
+// them. Their ratio is the average *liveness* of the goal-board snapshot layer:
+// 1.0 when
+// every stream holds exactly one revision, falling toward 0 as superseded
+// revisions accumulate faster than pruning reclaims them. That accumulation is
+// exactly the monotonic-growth failure controlled forgetting exists to prevent,
+// and — like grounding coverage — it was previously visible only as raw
+// `graph_stats()` counts, never as a durable, comparable `metrics.jsonl`
+// series. Emitting the ratio gives operators a store-size-independent history
+// for manual and future automated regression analysis.
+
+/// Durable self-metric name for goal-board snapshot dedup hygiene, emitted to
+/// `metrics.jsonl` after each successful OODA cycle when `graph_stats()` succeeds
+/// by
+/// [`record_goal_board_snapshot_dedup_ratio_metric`].
+pub const GOAL_BOARD_SNAPSHOT_DEDUP_RATIO_METRIC: &str = "goal_board_snapshot_dedup_ratio";
+
+/// Average liveness of goal-board snapshot facts
+/// (`distinct_snapshot_caller_keys / snapshot_facts_total`), in `[0.0, 1.0]`.
+/// Higher is healthier: `1.0` means every goal-board stream holds a single live
+/// revision; a value approaching `0` means superseded revisions have piled up
+/// When every snapshot fact has a valid caller key, the inverse — total /
+/// distinct — is the mean revisions retained per stream.
+///
+/// Returns `None` (undefined, **not** `0.0`) when the store holds no goal-board
+/// snapshot facts, so an empty goal-board snapshot layer contributes no
+/// misleading `0.0` sample — the same "skip rather than drag the series to
+/// zero" convention [`provenance_coverage`] and [`precision_at_k`] use.
+/// `distinct_snapshot_caller_keys` is clamped to `snapshot_facts_total`
+/// defensively (a stream always has ≥1 revision, so distinct ≤ total holds), so
+/// a backend that miscounts can never yield a ratio above `1.0`.
+pub fn goal_board_snapshot_dedup_ratio(
+    distinct_snapshot_caller_keys: u64,
+    snapshot_facts_total: u64,
+) -> Option<f64> {
+    if snapshot_facts_total == 0 {
+        return None;
+    }
+    let distinct = distinct_snapshot_caller_keys.min(snapshot_facts_total);
+    Some(distinct as f64 / snapshot_facts_total as f64)
+}
+
+/// Emit one durable [`GOAL_BOARD_SNAPSHOT_DEDUP_RATIO_METRIC`] sample (the
+/// goal-board snapshot liveness ratio over the current `graph_stats()` snapshot)
+/// to `metrics.jsonl`.
+///
+/// Called after each successful OODA cycle when the daemon's metric sweep can
+/// read `graph_stats()`, from the same block that records OpenTelemetry edge
+/// gauges and [`record_provenance_coverage_metric`], so it adds no extra store
+/// read. A snapshot-shaped metric (store state, not a per-cycle accumulator).
+///
+/// No-op when the store holds no goal-board snapshot facts (undefined ratio —
+/// see [`goal_board_snapshot_dedup_ratio`]), so the series carries signal only.
+/// Best-effort: a metrics-write failure is logged, never propagated.
+pub fn record_goal_board_snapshot_dedup_ratio_metric(
+    distinct_snapshot_caller_keys: u64,
+    snapshot_facts_total: u64,
+) {
+    if cfg!(test) {
+        return;
+    }
+    if let Err(e) = record_goal_board_snapshot_dedup_ratio_metric_with(
+        distinct_snapshot_caller_keys,
+        snapshot_facts_total,
+        crate::self_metrics::record_metric,
+    ) {
+        tracing::warn!(
+            target: "simard::memory",
+            error = %e,
+            "failed to record goal_board_snapshot_dedup_ratio metric (memory unaffected)",
+        );
+    }
+}
+
+pub(crate) fn record_goal_board_snapshot_dedup_ratio_metric_with<E>(
+    distinct_snapshot_caller_keys: u64,
+    snapshot_facts_total: u64,
+    writer: impl FnOnce(&str, f64, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(ratio) =
+        goal_board_snapshot_dedup_ratio(distinct_snapshot_caller_keys, snapshot_facts_total)
+    else {
+        return Ok(());
+    };
+    let context = serde_json::json!({
+        "snapshot_facts": snapshot_facts_total,
+        "distinct_caller_keys": distinct_snapshot_caller_keys,
+    })
+    .to_string();
+    writer(GOAL_BOARD_SNAPSHOT_DEDUP_RATIO_METRIC, ratio, &context)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +513,62 @@ mod tests {
         // panic or touch global state.
         record_provenance_coverage_metric(3, 4);
         record_provenance_coverage_metric(0, 0);
+    }
+
+    // ── graph-memory snapshot dedup hygiene: pure math ──────────────────────
+
+    #[test]
+    fn snapshot_dedup_ratio_is_distinct_streams_over_total_revisions() {
+        // Two streams, four revisions retained → each stream averages two
+        // revisions → liveness 0.5. One-revision-per-stream is a healthy 1.0.
+        assert_eq!(goal_board_snapshot_dedup_ratio(2, 4), Some(0.5));
+        assert_eq!(goal_board_snapshot_dedup_ratio(4, 4), Some(1.0));
+        assert_eq!(goal_board_snapshot_dedup_ratio(1, 8), Some(0.125));
+        // Snapshot facts present but none carry a grouping key → distinct 0 over
+        // a nonzero total is a real, maximally-unhealthy 0.0 (emit it), NOT the
+        // undefined None reserved for an empty goal-board snapshot layer.
+        assert_eq!(goal_board_snapshot_dedup_ratio(0, 4), Some(0.0));
+    }
+
+    #[test]
+    fn snapshot_dedup_ratio_is_none_for_an_empty_snapshot_layer() {
+        // No snapshot facts → undefined ratio (skip, do NOT emit a misleading
+        // 0.0), matching the provenance_coverage / precision@k convention. A
+        // nonzero distinct count with a zero denominator is still None.
+        assert_eq!(goal_board_snapshot_dedup_ratio(0, 0), None);
+        assert_eq!(goal_board_snapshot_dedup_ratio(3, 0), None);
+    }
+
+    #[test]
+    fn snapshot_dedup_ratio_clamps_overcount_to_one() {
+        // distinct ≤ total always holds (a stream has ≥1 revision); a backend
+        // that miscounts must never yield a ratio above 1.0.
+        assert_eq!(goal_board_snapshot_dedup_ratio(9, 4), Some(1.0));
+    }
+
+    #[test]
+    fn record_goal_board_snapshot_dedup_ratio_metric_builds_expected_entry() {
+        let mut recorded = None;
+        record_goal_board_snapshot_dedup_ratio_metric_with(2, 4, |name, value, context| {
+            recorded = Some((name.to_string(), value, context.to_string()));
+            Ok::<(), ()>(())
+        })
+        .expect("record metric through injected writer");
+
+        let (name, value, context) = recorded.expect("one metric entry");
+        assert_eq!(name, GOAL_BOARD_SNAPSHOT_DEDUP_RATIO_METRIC);
+        assert_eq!(value, 0.5);
+        let context: serde_json::Value =
+            serde_json::from_str(&context).expect("metric context JSON");
+        assert_eq!(context["snapshot_facts"], 4);
+        assert_eq!(context["distinct_caller_keys"], 2);
+
+        let mut called = false;
+        record_goal_board_snapshot_dedup_ratio_metric_with(0, 0, |_, _, _| {
+            called = true;
+            Ok::<(), ()>(())
+        })
+        .expect("empty snapshot layer is a no-op");
+        assert!(!called);
     }
 }
