@@ -20,7 +20,7 @@ digraph compile_deps_external_runtime {
     tokio [label="tokio =1.52.1\nrt process net macros sync"];
     axum [label="axum =0.8.9\nws"];
     tower_http [label="tower-http =0.6.8\ncors auth"];
-    uuid [label="uuid =1.23.1\nv4 v7"];
+    uuid [label="uuid =1.23.4\nv4 v7"];
     chrono [label="chrono =0.4.44"];
     chrono_tz [label="chrono-tz =0.10.4"];
     dirs [label="dirs =6.0.0"];
@@ -42,7 +42,7 @@ digraph compile_deps_external_runtime {
     url [label="url =2.5.8\noptional"];
     base64 [label="base64 =0.22.1"];
     rustls [label="rustls =0.23.38\nring"];
-    rustls_native_certs [label="rustls-native-certs =0.8.3"];
+    rustls_native_certs [label="rustls-native-certs =0.8.4"];
     webpki_roots [label="webpki-roots =1.0.7"];
     libc [label="libc =0.2.185\nunix target"];
 

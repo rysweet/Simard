@@ -45,7 +45,7 @@ This layer maps Simard's direct Cargo dependencies and a one-hop view of the lar
 | `tokio` | `=1.52.1`, features `rt`, `rt-multi-thread`, `process`, `io-util`, `time`, `net`, `macros`, `sync` | Async runtime, subprocess, networking, and synchronization foundation. |
 | `axum` | `=0.8.9`, feature `ws` | HTTP and websocket dashboard or operator services. |
 | `tower-http` | `=0.6.8`, features `cors`, `auth` | HTTP middleware for CORS and auth layers. |
-| `uuid` | `=1.23.1`, features `v4`, `v7` | Stable identifiers for sessions, facts, and domain records. |
+| `uuid` | `=1.23.4`, features `v4`, `v7` | Stable identifiers for sessions, facts, and domain records. |
 | `chrono` | `=0.4.44` | Date and time handling in runtime code. |
 | `chrono-tz` | `=0.10.4` | Time-zone aware dashboard timestamp formatting. |
 | `dirs` | `=6.0.0` | User directory discovery for state and configuration paths. |
@@ -67,7 +67,7 @@ This layer maps Simard's direct Cargo dependencies and a one-hop view of the lar
 | `url` | `=2.5.8`, optional | URL parsing behind `dashboard-audit`. |
 | `base64` | `=0.22.1` | SMTP AUTH LOGIN payload encoding. |
 | `rustls` | `=0.23.38`, feature `ring` | TLS for authenticated SMTP relay and network clients. |
-| `rustls-native-certs` | `=0.8.3` | Native trust roots for TLS. |
+| `rustls-native-certs` | `=0.8.4` | Native trust roots for TLS. |
 | `webpki-roots` | `=1.0.7` | WebPKI trust roots for TLS fallback. |
 | `libc` | `=0.2.185`, Unix target dependency | Unix FFI bindings. |
 | `chrono` build dependency | `=0.4.44` | Build-time timestamp formatting in `build.rs`. |
