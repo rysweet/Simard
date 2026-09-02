@@ -401,7 +401,7 @@ nav:
     - OODA Record-Idea-Dedup/Consolidation Tools: reference/ooda-record-idea-dedup-consolidation-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
-    - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
+    - Historical Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Memory Write CLI (remember): reference/simard-memory-remember-cli.md
