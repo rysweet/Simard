@@ -6,6 +6,7 @@ mod format;
 mod goals;
 mod probe;
 mod recipes;
+mod signal_notify;
 mod state_root;
 mod validation;
 
@@ -36,6 +37,7 @@ pub use dispatch::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, dispatch_probe_with_context, gym_usage,
 };
 pub use probe::{run_bootstrap_probe, run_copilot_submit_probe, run_handoff_probe};
+pub use signal_notify::run_signal_notify_probe;
 
 // Re-export pub(crate) items from sub-modules so callers using
 // `crate::operator_commands::<item>` continue to compile.

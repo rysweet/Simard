@@ -83,6 +83,15 @@ fn dispatch_operator_probe_missing_required_args() {
     assert!(err.to_string().contains("expected identity"));
 }
 
+#[test]
+fn dispatch_operator_probe_signal_notify_missing_message() {
+    let err = dispatch_operator_probe(args(&["signal-notify"])).unwrap_err();
+    assert!(
+        err.to_string().contains("expected message"),
+        "signal-notify with no message must fail asking for the message; got {err}"
+    );
+}
+
 // --- dispatch_legacy_gym_cli: argument validation ---
 
 #[test]
