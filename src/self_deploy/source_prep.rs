@@ -317,6 +317,40 @@ impl GitSourcePreparer {
         }
         None
     }
+
+    /// Prepare only an already-existing canonical source repo for an autonomous
+    /// pre-swap canary: validate `target_commit`, resolve via
+    /// [`resolve_existing_repo`](Self::resolve_existing_repo), fetch `origin`,
+    /// and check out the target detached.
+    ///
+    /// Unlike [`SelfDeploySourcePreparer::prepare`], this never clones from the
+    /// current working directory. The autonomous deploy observer is responsible
+    /// for maintaining the canonical checkout before it raises a deploy signal;
+    /// if no checkout exists here, the caller fails safe instead of silently
+    /// canarying cwd or creating a fresh source from a possibly unrelated cwd.
+    pub(crate) fn prepare_existing_repo(
+        &self,
+        target_commit: &str,
+    ) -> Result<PathBuf, SafeUpdateError> {
+        validate_full_sha(target_commit)?;
+        let repo =
+            self.resolve_existing_repo()
+                .ok_or_else(|| SafeUpdateError::SourceResolveFailed {
+                    detail: "no existing canonical self-deploy source checkout found".to_string(),
+                })?;
+        self.fetch_origin(&repo)?;
+        // Issue #4878 Mode (a): reset+clean the disposable canonical checkout
+        // before checkout so a wedged tree from a prior deploy cannot abort
+        // `checkout --detach`. Gated to the canonical source dir only (never a
+        // caller-supplied override).
+        if is_canonical_src_repo(&repo) {
+            reset_source_tree(&repo)?;
+        }
+        git_capture(&repo, &["checkout", "--detach", target_commit])
+            .map(|_| ())
+            .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
+        Ok(repo)
+    }
 }
 
 /// Validate a `--check` source override, warning **loudly** (never silently
@@ -363,6 +397,19 @@ impl SelfDeploySourcePreparer for GitSourcePreparer {
         // network blip after the head was read.
         if !commit_present(&repo, target_commit) {
             self.fetch_origin(&repo)?;
+        }
+        // Issue #4878 Mode (a): a previous self-deploy can leave the disposable
+        // canonical checkout wedged with local modifications to tracked files
+        // (e.g. `.github/hooks/amplihack-hooks.json`), so the next
+        // `checkout --detach` aborts with "Your local changes ... would be
+        // overwritten by checkout: Aborting". Reset+clean the disposable source
+        // tree *before* checkout — on BOTH the fetch and the skip-fetch
+        // (commit-already-present) paths — so a redeploy cannot wedge. Gated to
+        // the canonical throwaway checkout only: a caller-supplied override's
+        // working tree must never be destroyed (it still fails loud at checkout
+        // if dirty).
+        if is_canonical_src_repo(&repo) {
+            reset_source_tree(&repo)?;
         }
         git_capture(&repo, &["checkout", "--detach", target_commit])
             .map(|_| ())
@@ -582,6 +629,81 @@ fn git_capture(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether `repo` is the canonical, disposable self-deploy source checkout
+/// ([`self_deploy_src_dir`]) — the *only* tree [`reset_source_tree`] is allowed
+/// to hard-reset and clean.
+///
+/// Both paths are canonicalized so symlink/`..`/trailing-slash spelling
+/// differences cannot cause a false negative (which would leave the canonical
+/// tree wedged) or a false positive (which would wipe a caller-supplied
+/// override). If either path cannot be canonicalized — e.g. the canonical
+/// checkout does not exist because this deploy is a `repo_override` /
+/// `SIMARD_SELF_DEPLOY_REPO` run — the answer is `false` (fail closed: never
+/// reset a tree we cannot prove is the throwaway checkout). Issue #4878.
+fn is_canonical_src_repo(repo: &Path) -> bool {
+    match (repo.canonicalize(), self_deploy_src_dir().canonicalize()) {
+        (Ok(actual), Ok(canonical)) => actual == canonical,
+        _ => false,
+    }
+}
+
+/// Reset the disposable canonical self-deploy source checkout to a pristine
+/// tree at its current `HEAD` (`git reset --hard`) and remove untracked files
+/// and directories (`git clean -fd`), so a subsequent `checkout --detach` of
+/// the merged head cannot abort on locally-modified tracked files left by a
+/// prior wedged deploy (issue #4878, Mode (a)).
+///
+/// **Destructive — strictly scoped.** As defense in depth on top of the
+/// [`is_canonical_src_repo`] gate at every call site, this re-asserts that
+/// `repo` canonicalizes to exactly [`self_deploy_src_dir`] and fails closed
+/// (returning [`SafeUpdateError::CheckoutFailed`]) on any mismatch or if either
+/// path cannot be canonicalized. It therefore can never reset the operator's
+/// cwd or a caller-supplied `repo_override` / `SIMARD_SELF_DEPLOY_REPO` tree.
+///
+/// `git clean` is run as `-fd` (**never** `-x`) so ignored files — secrets,
+/// caches, and notably the separate warm cargo target dir
+/// ([`self_deploy_target_dir`]) — are preserved and self-deploys stay
+/// incremental. Both git invocations go through the env-scrubbed
+/// [`git_capture`] (no shell, argv-array exec) so a hostile ambient env cannot
+/// hijack them, and any failure maps to the existing
+/// [`SafeUpdateError::CheckoutFailed`] variant (no new error types).
+fn reset_source_tree(repo: &Path) -> Result<(), SafeUpdateError> {
+    let canonical = repo
+        .canonicalize()
+        .map_err(|e| SafeUpdateError::CheckoutFailed {
+            detail: format!(
+                "refusing to reset self-deploy source: cannot canonicalize {}: {e}",
+                repo.display()
+            ),
+        })?;
+    let expected =
+        self_deploy_src_dir()
+            .canonicalize()
+            .map_err(|e| SafeUpdateError::CheckoutFailed {
+                detail: format!(
+                    "refusing to reset self-deploy source: cannot resolve canonical source dir: {e}"
+                ),
+            })?;
+    if canonical != expected {
+        return Err(SafeUpdateError::CheckoutFailed {
+            detail: format!(
+                "refusing to reset non-canonical self-deploy source tree {} (expected {})",
+                canonical.display(),
+                expected.display()
+            ),
+        });
+    }
+
+    tracing::debug!(repo = %canonical.display(), "resetting disposable self-deploy source checkout before checkout");
+    git_capture(repo, &["reset", "--hard"])
+        .map(|_| ())
+        .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
+    git_capture(repo, &["clean", "-fd"])
+        .map(|_| ())
+        .map_err(|detail| SafeUpdateError::CheckoutFailed { detail })?;
+    Ok(())
+}
+
 /// Compose source preparation with the warm-target build: the exact step the
 /// self-deploy orchestrator's `build_candidate` performs as step 1 of the
 /// load-bearing sequence (issue #2467).
@@ -610,6 +732,59 @@ pub(crate) fn prepare_and_build(
     target_commit: &str,
     target_dir: &Path,
 ) -> Result<PathBuf, SafeUpdateError> {
+    with_self_deploy_build_lock(|| {
+        let repo = source.prepare(target_commit)?;
+        crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir).map_err(|e| {
+            SafeUpdateError::BuildFailed {
+                detail: e.to_string(),
+            }
+        })
+    })
+}
+
+/// Compose source preparation with the warm-target build and relaunch canary
+/// gates: the production pre-swap canary used by the autonomous deploy rail.
+///
+/// This intentionally uses the same cwd-independent source preparer and shared
+/// [`crate::self_relaunch::build_self_deploy_candidate`] builder as the
+/// load-bearing self-deploy orchestrator, then runs the existing relaunch gates
+/// against that target artifact. The build lock covers prepare → build → verify
+/// so the shared persistent checkout cannot be rewritten between the target
+/// checkout and the gate suite.
+pub(crate) fn prepare_build_and_verify_canary(
+    source: &dyn SelfDeploySourcePreparer,
+    target_commit: &str,
+    target_dir: &Path,
+) -> Result<Vec<crate::self_relaunch::GateResult>, SafeUpdateError> {
+    with_self_deploy_build_lock(|| {
+        let repo = source.prepare(target_commit)?;
+        let candidate = crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir)
+            .map_err(|e| SafeUpdateError::BuildFailed {
+                detail: e.to_string(),
+            })?;
+        let config = crate::self_relaunch::RelaunchConfig {
+            manifest_dir: repo,
+            canary_target_dir: target_dir.to_path_buf(),
+            // #4440 root-cause repair: supply the deploy-shape signals a healthy
+            // candidate's gates legitimately need (scrubbed to a deny-by-default
+            // floor + this audited allow-list), so a genuinely-healthy binary
+            // renders a GREEN verdict and the self-deploy loop converges.
+            canary_env: crate::self_relaunch::canary_gate_env_allowlist(),
+            ..Default::default()
+        };
+        let gates = crate::self_relaunch::default_gates();
+        crate::self_relaunch::verify_canary(&candidate, &gates, &config).map_err(|e| {
+            SafeUpdateError::GateFailed {
+                gate: "target-canary".to_string(),
+                detail: e.to_string(),
+            }
+        })
+    })
+}
+
+fn with_self_deploy_build_lock<R>(
+    f: impl FnOnce() -> Result<R, SafeUpdateError>,
+) -> Result<R, SafeUpdateError> {
     let _build_guard = BuildLock::new(&simard_state_root())
         .acquire(BUILD_LOCK_TIMEOUT)
         .map_err(|e| SafeUpdateError::BuildFailed {
@@ -618,11 +793,5 @@ pub(crate) fn prepare_and_build(
                  (another self-deploy build may be running): {e}"
             ),
         })?;
-
-    let repo = source.prepare(target_commit)?;
-    crate::self_relaunch::build_self_deploy_candidate(&repo, target_dir).map_err(|e| {
-        SafeUpdateError::BuildFailed {
-            detail: e.to_string(),
-        }
-    })
+    f()
 }

@@ -1,0 +1,119 @@
+name: fact-recall-word-boundary-precision
+app_type: cli
+description: |
+  qa-team outside-in gate for the perpetual-cognition sub-goals "recall quality"
+  and "distillation fact-yield". `LibraryCognitiveMemory::search_facts` — the
+  fact-recall seam the OODA turn/context path (`base_type_turn::
+  prepare_turn_context`) and every natural-language fact caller reach — now
+  applies a marker-safe WORD-BOUNDARY relevance gate, the fact-path analogue of
+  the episodic recall gate (`search_episodes_by_keywords` /
+  `recall_episodes_ranked`, PR #4241 lineage).
+
+  The upstream library matches each query token as a raw case-insensitive
+  SUBSTRING of a fact's concept OR content, so a clean natural-language token
+  floated facts in on the INTERIOR/SUFFIX of an unrelated word — "act" recalled
+  "re(act)or" and "artif(act)", "own" recalled "d(own)load", "test" recalled
+  "la(test)". Those off-topic facts crowd the capped working-context recall fed
+  to reasoning, dragging fact recall precision (and effective distillation
+  fact-yield) down.
+
+  The gate partitions the query the same way keyword episode recall does:
+    * a CLEAN alphanumeric token is kept only when it is a prefix of a whole word
+      in the concept OR content (word-boundary), dropping interior/suffix noise
+      while preserving inflectional recall ("deploy" -> "deployed");
+    * a RAW token (a hyphenated concept like "bug-pattern" or a marker like
+      "journal:2026-07-18") keeps the library's exact substring semantics its
+      callers store and re-filter on; a query with no clean token bypasses the
+      gate entirely, so concept/marker callers are unaffected.
+  Truncation to `limit` is deferred until AFTER the gate, and wildcard/empty
+  queries are never gated.
+
+  These properties are pinned end-to-end over the live in-memory cognitive store
+  plus the pure gate helpers. Hermetic: no network, no live host mutation; the
+  CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Headline: the end-to-end fact-recall gate over the real in-memory backend —
+  # interior/suffix false positives dropped, word-boundary + inflectional recall
+  # preserved, concept-field match, marker substring preserved, deferred
+  # truncation honours limit, wildcard/empty bypass.
+  - action: run
+    params:
+      command: "cargo test --locked --lib tests_fact_recall_word_boundary"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "interior_substring_no_longer_spuriously_recalls_fact ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "word_boundary_and_inflectional_recall_preserved ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "concept_and_marker_queries_keep_substring_semantics ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "gate_defers_truncation_and_still_honours_limit ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "wildcard_and_empty_queries_bypass_gate ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Pure gate helpers (partition_fact_query / fact_shares_query_relevance):
+  # clean/raw partition, interior-vs-word-boundary, inflection, concept-field,
+  # marker substring, mixed query.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_query_gate_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression guard: the sibling episodic word-boundary gate this fix mirrors
+  # stays green — the two recall gates share the `shares_word_prefix` helper.
+  - action: run
+    params:
+      command: "cargo test --locked --lib tests_whole_word_episode_recall"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+metadata:
+  tags:
+    - cli
+    - memory
+    - cognitive-memory
+    - recall-quality
+    - recall-precision
+    - fact-yield
+    - regression
+  priority: high
+  author: copilot
+  test_type: outside-in

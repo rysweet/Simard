@@ -41,8 +41,37 @@ const DEFERRAL_MARKERS: &[&str] = &[
 ];
 
 /// Substrings (case-insensitive) that mark a cycle as making forward progress —
-/// launching an engineer or producing an artifact.
-const PROGRESS_MARKERS: &[&str] = &["pr #", "commit", "launched", "dispatched"];
+/// launching an engineer, landing artifacts, or committing a real action /
+/// completing a goal.
+///
+/// The bare token `commit` was previously listed here, but it is a false friend:
+/// the typed OODA outcome ledger records *every* terminal with the verb
+/// "committed" — including the two that are **not** progress:
+///
+/// | Terminal   | ledger detail                                      | progress? |
+/// |------------|----------------------------------------------------|-----------|
+/// | `Action`   | `typed action committed and effect completed: …`   | yes       |
+/// | `Completed`| `typed completed terminal committed: …`            | yes       |
+/// | `NoAction` | `typed no-action committed: …`                     | **no**    |
+/// | `Blocked`  | `typed blocked terminal committed: …`              | **no**    |
+///
+/// (see `ooda_actions::advance_goal::typed_goal_session`). Matching `commit`
+/// therefore mislabelled every no-action *and* blocked cycle as `progressing`,
+/// hiding the fact that a goal was making no shippable progress. We instead key
+/// on the unambiguous phrases that mark real progress — the `effect completed`
+/// (Action) and `completed terminal` (Completed) suffixes, a subordinate's
+/// landed `commit(s)`, an improvement cycle that actually `committed=true`, a
+/// `pr #` reference, or `launched` / `dispatched` engineer work — none of which
+/// a no-action or blocked terminal ever emits (#4292).
+const PROGRESS_MARKERS: &[&str] = &[
+    "pr #",
+    "effect completed",
+    "completed terminal",
+    "commit(s)",
+    "committed=true",
+    "launched",
+    "dispatched",
+];
 
 /// Disposition of one thinking cycle for display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,6 +457,150 @@ mod tests {
             "outcomes": [{"detail": "spawn_engineer skipped: goal 'g1' already assigned to subordinate 'engineer-x'"}],
         });
         assert_eq!(classify_cycle(&r).0, Disposition::Deferring);
+    }
+
+    /// Regression: a pure no-action cycle must NOT be labelled `progressing`.
+    ///
+    /// The typed OODA outcome ledger commits every terminal — including a
+    /// no-action — with the verb "committed"
+    /// (`ooda_actions::advance_goal::typed_goal_session`). The old `commit`
+    /// progress marker matched the substring inside "no-action committed", so
+    /// 100% of no-action cycles were mislabelled `progressing`, masking goals
+    /// that were making no shippable progress. A no-action carries no live
+    /// spawn and no "effect completed" suffix, so it must classify as
+    /// `reasoning`.
+    #[test]
+    fn no_action_committed_cycle_is_not_progressing() {
+        let r = json!({
+            "cycle_number": 1826,
+            "summary": "cycle 1826",
+            "outcomes": [
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "not yet started",
+                    "success": true,
+                    "detail": "typed no-action committed: outcome=019f71cd-d87c-7441-988e-f68887f32d08",
+                },
+            ],
+        });
+        assert_eq!(
+            classify_cycle(&r).0,
+            Disposition::Reasoning,
+            "a no-action committed to the outcome ledger is not forward progress"
+        );
+    }
+
+    /// A committed action whose effect completed IS forward progress — the
+    /// ledger's "…and effect completed" suffix (emitted only for
+    /// `TerminalKind::Action`) is the real progress signal that replaced the
+    /// ambiguous bare `commit` marker.
+    #[test]
+    fn action_committed_with_effect_completed_is_progressing() {
+        let r = json!({
+            "cycle_number": 1825,
+            "summary": "cycle 1825",
+            "outcomes": [
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "opened a fix",
+                    "success": true,
+                    "detail": "typed action committed and effect completed: outcome=019f71c1-9559-7052-9065-dd960ae92934",
+                },
+            ],
+        });
+        assert_eq!(
+            classify_cycle(&r).0,
+            Disposition::Progressing,
+            "a committed action whose effect completed is forward progress"
+        );
+    }
+
+    /// A blocked terminal is *not* progress: it shares the ledger's "committed"
+    /// verb ("typed blocked terminal committed") but reached no forward state.
+    /// The old bare `commit` marker mislabelled it `progressing`; it must now
+    /// classify as `reasoning`.
+    #[test]
+    fn blocked_terminal_committed_is_not_progressing() {
+        let r = json!({
+            "cycle_number": 1827,
+            "summary": "cycle 1827",
+            "outcomes": [
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "blocked",
+                    "success": true,
+                    "detail": "typed blocked terminal committed: outcome=019f71d0-aaaa-7bbb-8ccc-1122334455",
+                },
+            ],
+        });
+        assert_eq!(classify_cycle(&r).0, Disposition::Reasoning);
+    }
+
+    /// A completed goal terminal IS progress — the "completed terminal" phrase
+    /// (`TerminalKind::Completed`) is a genuine forward step and must survive
+    /// the removal of the ambiguous `commit` marker.
+    #[test]
+    fn completed_terminal_committed_is_progressing() {
+        let r = json!({
+            "cycle_number": 1828,
+            "summary": "cycle 1828",
+            "outcomes": [
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "goal done",
+                    "success": true,
+                    "detail": "typed completed terminal committed: outcome=019f71d1-bbbb-7ccc-8ddd-2233445566",
+                },
+            ],
+        });
+        assert_eq!(classify_cycle(&r).0, Disposition::Progressing);
+    }
+
+    /// A subordinate that landed real commits and PRs IS progress — the
+    /// `commit(s)` artifact phrase must survive the removal of the ambiguous
+    /// bare `commit` marker so genuine engineer output is not downgraded to
+    /// `reasoning`.
+    #[test]
+    fn subordinate_landed_commits_is_progressing() {
+        let r = json!({
+            "cycle_number": 1829,
+            "summary": "cycle 1829",
+            "outcomes": [
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "subordinate finished",
+                    "success": true,
+                    "detail": "subordinate 'engineer-x' completed goal 'g1' with 3 commit(s) and 2 PR(s)",
+                },
+            ],
+        });
+        assert_eq!(classify_cycle(&r).0, Disposition::Progressing);
+    }
+
+    /// A mixed cycle — one goal deferred to a no-action while another launches
+    /// real work — is progressing on the strength of the real work, not
+    /// suppressed by the no-action sibling.
+    #[test]
+    fn mixed_no_action_plus_launch_is_progressing() {
+        let r = json!({
+            "cycle_number": 1824,
+            "summary": "cycle 1824",
+            "outcomes": [
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "not yet started",
+                    "success": true,
+                    "detail": "typed no-action committed: outcome=aaa",
+                },
+                {
+                    "action_kind": "advance-goal",
+                    "action_description": "launched sub-agent",
+                    "success": true,
+                    "detail": "launched sub-agent, opened PR #7",
+                },
+            ],
+        });
+        assert_eq!(classify_cycle(&r).0, Disposition::Progressing);
     }
 
     #[test]

@@ -183,6 +183,14 @@ pub trait GhClient {
 The only subprocess surface in the stewardship module. Two implementations
 are shipped:
 
+> **Reused by the Overseer gap-scan (#4717).** The same `GhClient` trait,
+> `RealGhClient`, and eventually-consistent-search-resilient dedup logic back
+> the Overseer's durable workstream-gap open-issue check. It injects a
+> `GhClient` via `Overseer::with_gap_issue_client(..)` and keys the search on
+> `GapItem::dedup_key()` = `workstream-gap:<signature>`, matching the same
+> `stewardship-signature:<key> in:body` body marker documented here. See the
+> [gap-scan durable dedup reference](./overseer-gap-scan-durable-dedup.md).
+
 ### `RealGhClient`
 
 `std::process::Command`-based.

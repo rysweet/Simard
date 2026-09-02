@@ -32,6 +32,16 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             (cur?' <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:6px" onclick="setGoalTagFilter(\'\')">Clear</button>':'');
         }
         renderGoalTagFilter(d.active||[]);
+        // Human-readable breakdown of the active board by lifecycle state, so
+        // the count line distinguishes goals actually in progress from ones
+        // that are blocked / paused / not-yet-archived Completed. Only nonzero
+        // buckets are shown, in a fixed, meaningful order.
+        function goalBreakdownText(bd){
+          if(!bd||typeof bd!=='object') return '';
+          const order=[['in_progress','in progress'],['blocked','blocked'],['paused','paused'],['not_started','not started'],['proposed','proposed'],['completed','completed']];
+          const parts=order.filter(function(p){ return (bd[p[0]]||0)>0; }).map(function(p){ return bd[p[0]]+' '+p[1]; });
+          return parts.length?(' \u2014 '+parts.join(' \u00b7 ')):'';
+        }
         const activeFiltered=(d.active||[]).filter(goalMatchesTagFilter);
         if(d.active?.length){
           // Issue #2695 follow-up: render the active goals as a priority-ordered
@@ -141,7 +151,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
             ${rowsHtml}
           </table>
-          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${window.goalsTagFilter?(activeFiltered.length+' / '+d.active_count+' active goal(s) (filtered by tag)'):(d.active_count+' active goal(s)')}</div>`;
+          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${window.goalsTagFilter?(activeFiltered.length+' / '+d.active_count+' active goal(s) (filtered by tag)'):(d.active_count+' active goal(s)'+goalBreakdownText(d.active_status_breakdown))}</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
@@ -389,21 +399,49 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     }
 
     /* --- Recent Memories (plain-English view, #1997) --- */
+    // Honest caption for the #mem-recent-count headline (#4318). The count is
+    // net long-term growth since the baseline snapshot; that window is ~1h in
+    // steady state but can be arbitrarily LONGER when memory-history snapshots
+    // are sparse (a gap wider than an hour straddling the 1h mark). Label the
+    // TRUE window so the dashboard never claims "in the last hour" for a 2.6h
+    // delta. `null`/near-1h ⇒ keep the plain "in the last hour" copy.
+    function formatWindowCaption(windowSecs){
+      if(windowSecs==null||!isFinite(windowSecs)) return 'in the last hour';
+      // ±15 min tolerance around one hour reads as "the last hour".
+      if(Math.abs(windowSecs-3600)<=900) return 'in the last hour';
+      if(windowSecs<3600){
+        const m=Math.round(windowSecs/60);
+        return m<=1?'in the last minute':('in the last '+m+' min');
+      }
+      return 'in the last '+(windowSecs/3600).toFixed(1)+'h';
+    }
     async function fetchRecentMemories(){
       const countEl=document.getElementById('mem-recent-count');
       const totalEl=document.getElementById('mem-recent-total');
       const listEl=document.getElementById('mem-recent-list');
+      const winEl=document.getElementById('mem-recent-window');
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
         countEl.textContent=d.last_hour_count;
+        if(winEl) winEl.textContent=formatWindowCaption(d.last_hour_window_secs);
         totalEl.textContent=(d.total||0).toLocaleString()+' total';
         if(!d.items||d.items.length===0){
           const total=d.total||0;
-          listEl.innerHTML=total>0
-            ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
-            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          const lastHour=d.last_hour_count||0;
+          if(lastHour>0){
+            // Per-item detail is unavailable on the library backend, but memories
+            // WERE recorded this hour — never contradict the big last-hour count
+            // with "no new memories" (that misreports live memory health). Surface
+            // an honest, consistent summary that agrees with the headline number.
+            const noun=lastHour===1?'memory':'memories';
+            listEl.innerHTML='<span style="color:#8b949e">'+lastHour.toLocaleString()+' '+noun+' recorded in the last hour. Per-item detail isn\u2019t available on this backend yet — see the memory graph for the per-type breakdown. '+total.toLocaleString()+' total stored.</span>';
+          }else{
+            listEl.innerHTML=total>0
+              ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
+              :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          }
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};

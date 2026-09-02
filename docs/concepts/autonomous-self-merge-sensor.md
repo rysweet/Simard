@@ -20,7 +20,9 @@ related:
   - ./enrichment-observability.md
   - ./stewardship-mode.md
   - ./autonomous-merge-review-gate.md
+  - ./draft-pr-merge-exclusion.md
   - ../reference/ready-prs-sensor-api.md
+  - ../reference/draft-pr-exclusion-gate.md
   - ../reference/cross-repo-merge-authority.md
   - ../howto/enable-autonomous-self-merge-canary.md
   - ../howto/triage-stale-pull-requests.md

@@ -1,11 +1,12 @@
 ---
 title: How to run the OODA daemon
 description: Procedure for installing Simard through the canonical installer rail, running the OODA and Signal services as user-level systemd units, and verifying the autonomous loop.
-last_updated: 2026-07-09
+last_updated: 2026-07-30
 review_schedule: as-needed
 owner: simard
 doc_type: howto
 related:
+  - ../reference/actor-session-startup-purge.md
   - ../reference/simard-installer.md
   - ../reference/simard-cli.md
   - ../architecture/overview.md
@@ -90,6 +91,22 @@ journalctl --user -u simard-signal.service -n 100 --no-pager
 ```
 
 The OODA service should emit cycle summaries. The Signal service is expected to stay running when the `[signal]` table is configured; if Signal is not configured, it exits or reports the missing configuration according to the Signal channel contract.
+
+!!! note "Actor-session startup cleanup (#5005)"
+    Every OODA daemon start clears prior-process actor sessions before
+    goal-cycle work.
+
+The cleanup makes restarts, state-root migrations, and changes to
+`SIMARD_OBSERVE_ONLY` self-healing even when copied leases have future expiry
+times. It affects only the transient `actor_sessions` table in
+`$SIMARD_HOME/typed-ooda/outcomes.sqlite3`; durable outcomes, requests, effects,
+and claims must remain intact.
+
+The startup path fails if the ledger cannot be opened or purged instead of
+running cycles against stale lease state. Do not work around startup failures
+with a manual SQLite `DELETE`; correct the reported path, permission, lock, or
+storage error and restart the service. See the
+[actor-session startup purge reference](../reference/actor-session-startup-purge.md).
 
 If your provider depends on environment variables, import them into the user
 systemd manager before restarting services:
@@ -210,6 +227,7 @@ See [How to set up the Signal channel](./set-up-the-signal-channel.md).
 
 ## See also
 
+- [Actor-session startup purge](../reference/actor-session-startup-purge.md)
 - [Simard installer reference](../reference/simard-installer.md)
 - [Simard CLI reference](../reference/simard-cli.md)
 - [Daemon mode](../daemon-mode.md)

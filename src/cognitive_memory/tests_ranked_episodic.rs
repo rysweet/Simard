@@ -256,6 +256,82 @@ fn recall_episodes_ranked_backfill_gate_is_word_boundary() {
     );
 }
 
+/// Recall-quality fix: the gate folds a PLURAL query token onto the SINGULAR
+/// form in episode content, closing the asymmetry a prefix-only word-boundary
+/// gate leaves open. A prefix gate already recalls `test` → "tests" but NOT the
+/// reverse (`"test".starts_with("tests")` is false), so an objective phrased in
+/// the plural (`"stabilize the flaky tests"`) would miss an episode that used
+/// the singular ("wrote a test …"). Mirrors the singular/plural folding
+/// `knowledge_context` applies to pack selection (PR #4241 lineage).
+#[test]
+fn recall_episodes_ranked_gate_folds_plural_query_onto_singular_content() {
+    let mem = test_mem();
+    mem.store_episode(
+        "wrote a test for the payment parser",
+        "engineer-cycle",
+        None,
+    )
+    .expect("store singular-form episode");
+    mem.store_episode("an unrelated caching note", "engineer-cycle", None)
+        .expect("store unrelated");
+
+    let ranked = mem
+        .recall_episodes_ranked("tests", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+
+    assert_eq!(
+        ranked.len(),
+        1,
+        "the plural query `tests` must recall the singular-form episode \"test\""
+    );
+    assert!(
+        ranked[0].content.contains("test for the payment parser"),
+        "the recalled episode is the singular-form one, not the unrelated note"
+    );
+}
+
+/// Recall-precision fix: a natural-language query carrying a sub-threshold
+/// (single-char) clean token — a possessive fragment ("Rust's" tokenizes to
+/// {rust, s, ...}), an initial, or a stray separator — must not let that lone
+/// character prefix-match every episode holding a word that starts with it. The
+/// gate drops such tokens (MIN_CLEAN_NEEDLE_LEN), mirroring the cut
+/// `knowledge_context` applies to objective tokens, so only the genuine
+/// multi-char tokens drive recall.
+#[test]
+fn recall_episodes_ranked_gate_drops_sub_threshold_query_token() {
+    let mem = test_mem();
+    // Off-topic: shares ONLY the stray "s" needle (starts with 's'), nothing else.
+    mem.store_episode("the storage bill spiked overnight", "engineer-cycle", None)
+        .expect("store off-topic episode");
+    // On-topic: genuinely about rust ownership.
+    let on_topic = mem
+        .store_episode(
+            "fixed a rust ownership borrow error",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store on-topic episode");
+
+    let ranked = mem
+        .recall_episodes_ranked("Rust's ownership model", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+    let ids: std::collections::HashSet<&str> = ranked.iter().map(|e| e.node_id.as_str()).collect();
+
+    assert!(
+        ids.contains(on_topic.as_str()),
+        "the genuinely relevant rust-ownership episode is recalled"
+    );
+    assert_eq!(
+        ranked.len(),
+        1,
+        "the lone 's' from \"Rust's\" must not float the storage episode in, got {:?}",
+        ranked
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 // ─── recall_episodes_ranked: default back-compat ─────────────────────────────
 /// Invariant #6 (default back-compat): a backend that does NOT override
 /// `recall_episodes_ranked` falls back to `search_episodes_by_keywords`, with
@@ -431,6 +507,7 @@ impl CognitiveMemoryOps for EchoKeywordsMock {
             source_label: "mock".into(),
             temporal_index: 0,
             compressed: false,
+            created_at: None,
         }])
     }
 }

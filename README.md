@@ -1,14 +1,15 @@
 # Simard
 
-A terminal-native engineering agent who drives and curates agentic coding systems.
+A continuously running engineering agent who drives and curates an ecosystem of related repositories. 
+Also: a pltform for building any type of continuously running agentic system. 
 
 Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
 
 ## What is Simard?
 
-Simard is a focused engineering runtime, written in Rust, that operates like a disciplined software engineer. She inspects local repositories, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops.
+Simard is a continuously running agentic platform that operates like a disciplined software engineer. She inspects the repositories under management, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops, all driven by durable goals and long term memory.
 
-Simard is **not** a wrapper around any single agent framework. She is a terminal-native identity with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the amplihack / amplihack-rs goal-seeking agent. Each substrate is one option among several; none of them define what Simard is.
+Simard is **not** a wrapper around any single agent framework. She is an agentic engineering director with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the rustyclawd/amplihack-rs goal-seeking agents. Each substrate is one option among several; The engineering director is one implementation - but the plat form can be used to build other types of continuously running autonomous agents.
 
 For the full design contract, see [Specs/ProductArchitecture.md](Specs/ProductArchitecture.md).
 
@@ -18,7 +19,7 @@ Simard exposes five user-visible operating modes, each with its own success crit
 
 | Mode | Purpose | v1 status |
 |------|---------|-----------|
-| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through terminal actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
+| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through coding agent actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
 | **Meeting** | Help humans think, decide, and record architecture or planning outcomes without silently drifting into implementation. | v1 shipped — CLI REPL and durable meeting record readback; explicit handoff into engineer mode through a shared `state-root`. |
 | **Goal-curation** | Curate a durable backlog and an explicit active top-5 goal list without pretending implementation work happened. | v1 shipped — durable goal register with active/backlog separation and read-only inspection. |
 | **Improvement-curation** | Consume persisted review findings, require explicit operator approval or deferral, and promote accepted improvements into durable priorities without mutating code. | v1 shipped — approve / defer / promote workflow with read-only state inspection. |
@@ -338,6 +339,16 @@ which drives OpenSCAD (with optional FreeCAD/Blender) on the host — never
 compiled into Simard. Load it with `load_example_identity(..., "atelier", …)`
 from [`examples/identities/atelier/`](examples/identities/atelier/). See
 [Design furniture with Atelier](docs/howto/design-with-atelier.md).
+
+### Vitruvia example identity (architecture & interior design)
+Vitruvia is an **example**, data-only pluggable identity — not a `simard`
+subcommand. It takes a program/site-brief JSON end-to-end to a code-aware BIM
+floor plan, interior layout, technical drawings (plans and elevations), and a
+rendered walkthrough via two agentic recipes, which drive Blender + BlenderBIM /
+IfcOpenShell (with optional FreeCAD) on the host — never compiled into Simard.
+Load it with `load_example_identity(..., "vitruvia", …)` from
+[`examples/identities/vitruvia/`](examples/identities/vitruvia/). See
+[Design buildings with Vitruvia](docs/howto/design-with-vitruvia.md).
 
 ### Self-management
 ```bash

@@ -13,7 +13,10 @@ mod coverage_tests;
 
 // Re-export all public items so `crate::identity::X` still works.
 pub use contract::ManifestContract;
-pub use example_loader::{DEFAULT_EXAMPLE_IDENTITIES_DIR, load_example_identity};
+pub use example_loader::{
+    DEFAULT_EXAMPLE_IDENTITIES_DIR, list_example_identities, load_example_identity,
+    render_identity_index,
+};
 pub use file_loader::FileIdentityLoader;
 pub use loader::{BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader};
 pub use manifest::{

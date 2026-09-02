@@ -31,6 +31,10 @@ related:
   - ../reference/stewardship-api.md
   - ../reference/self-deploy-api.md
   - ../reference/cross-repo-merge-authority.md
+  - ../reference/overseer-signal-liaison.md
+  - ../reference/overseer-rework-loop.md
+  - ../howto/configure-overseer-signal-liaison-and-rework.md
+  - ../concepts/agentic-recipes-first-principle.md
 ---
 
 # Overseer — an embedded operator/observer co-process (design spike)
@@ -129,7 +133,7 @@ flowchart TB
   subgraph daemon["simard daemon process"]
     subgraph loop["daemon loop — src/operator_commands_ooda/daemon/mod.rs"]
       ooda["OODA inline cycle\n(external repos + own features)"]
-      mind["Mind.run_due()\nbackground CognitiveThreads\n(off by default)"]
+      mind["Mind.run_due()\nbackground CognitiveThreads\n(on by default, opt-out)"]
     end
     store[("shared durable store\n~/.simard: cognitive/, goal-board,\ntelemetry/metrics_snapshot.json,\ncosts/ledger.jsonl")]
     overseer["Overseer co-process\n(meta-OODA; guarded capabilities)\n— M2+ sibling task —"]
@@ -162,7 +166,7 @@ daemon already flushes — it never reads daemon RAM, so it is process-agnostic:
 The daemon loop lives in `src/operator_commands_ooda/daemon/mod.rs`. Each iteration
 it runs the authoritative OODA cycle inline, then ticks the `Mind`
 (`mind.run_due(&mut ctx)`, ~L959–984; the `Mind` is wired ~L517–562, additive and
-**off by default** via `SIMARD_COGNITIVE_THREADS_ENABLED`). Two future wiring
+**on by default (opt-out)** via `SIMARD_COGNITIVE_THREADS_ENABLED`). Two future wiring
 options — **neither implemented in this spike**:
 
 - **M1 read-only sensor:** register an `impl CognitiveThread` next to
@@ -203,6 +207,7 @@ is an orchestrator over shipped code, not a reimplementation.
 | `Intervention` | Capability trait | Existing Simard reuse (file:line) |
 |----------------|------------------|-----------------------------------|
 | `LaunchRecipe{brief}` | `RecipeLauncher` | `amplihack recipe run amplifier-bundle/recipes/smart-orchestrator.yaml -c task_description=…` (`src/bin/simard_engineer_loop_recipe.rs:51`, `src/bin/simard_self_improve_recipe.rs:50`); `recipe-runner-rs` + `AMPLIHACK_AGENT_BINARY` (`src/stewardship/recipe_merge_judge.rs:191`); concurrency via `agent_supervisor::spawn_subordinate` (`src/agent_supervisor/lifecycle/spawn.rs:27`); output parse `recipe_output::extract` (`src/recipe_output/extract.rs`). |
+| `ReworkPr{repo,pr,concern_path}` | (dispatch tag) | **Reuses** `LaunchRecipe` → **default-workflow** on the PR's branch, concern via [ContextFile](../reference/recipe-context-file-transport.md). Reads the extended `MergeVerdictRecord` (`reworkable`+`concern`, fail-closed) and enforces a per-PR attempt cap + dedup + own-PR guard. See [Overseer autonomous PR rework loop](../reference/overseer-rework-loop.md). |
 | `VerifyAndMergePr{repo,pr}` | `PrOps::verify` + `PrOps::merge` | objective pre-filter `evaluate_objective_gates` (`src/stewardship/merge_authority.rs:495`); authoritative review+merge `merge_pr_if_merge_ready_with_judge` (`src/stewardship/merge_authority.rs`) driven by the agentic merge-judge `build_merge_judge` over `prompt_assets/simard/merge_readiness_judge.md`. **No `review_pipeline` in the merge path** — the merge-judge is the sole reviewer (see [autonomous-merge review gate](../concepts/autonomous-merge-review-gate.md)). |
 | `ResolveConflict{repo,pr}` | `PrOps::resolve_conflict` | `git_guardrails::check_git_safety` (`src/git_guardrails.rs:41`) around the union-merge / `--no-verify` push. |
 | `Deploy{commit}` | `Deployer` | `self_deploy::orchestrator::SelfDeployOrchestrator::run` (`src/self_deploy/orchestrator.rs:229`); `self_relaunch::{build_canary,verify_canary,all_gates_passed,default_gates,handover}` (`src/self_relaunch/*`); marker `env!("SIMARD_GIT_HASH")` via `self_deploy::health`. |
@@ -441,7 +446,7 @@ Each phase is independently shippable, additive, and gated behind an env flag
 | Milestone | Scope | Reuse | Test strategy | Exit criteria |
 |-----------|-------|-------|---------------|---------------|
 | **M1 — read-only observer** | Observe + Orient + `Report` + `FileIssue` only. Optional packaging as an `impl CognitiveThread` sensor. No launches, no merges, no deploy. | `status::assemble`; `stewardship::process_orchestrator_run` (deduped issues); `cost_tracking`. | Unit: `signals_from` thresholds; `orient` dedup vs in-flight; issue-filer idempotency with a fake `GhClient` (no network). | Runs behind flag; emits a report + files deduped issues; provably takes no write action beyond issue-filing. |
-| **M2 — autonomous fix-launching + PR verify/merge** | `LaunchRecipe` (smart-orchestrator), poll → PR, `VerifyAndMergePr` for green/merge-ready PRs (routine autonomy). | `spawn_subordinate` / recipe runner; `merge_pr_if_merge_ready_with_judge` + `build_merge_judge` (agentic merge-judge, sole reviewer); `evaluate_objective_gates`; NEW pr-verify diff-scans (Bridge / `print!` / additive / PRD). | Unit: budget gate holds launches; per-cycle launch cap; pr-verify checklist pass/fail on fixture diffs; merge only when `ready`. Integration: fake recipe runner + fake `PrGhClient`. | Launches a fix for a seeded process problem and merges the resulting green PR through the gated authority, in a fixture. |
+| **M2 — autonomous fix-launching + PR verify/merge** | `LaunchRecipe` (smart-orchestrator), poll → PR, `VerifyAndMergePr` for green/merge-ready PRs (routine autonomy). Also the two **self-sufficiency** capabilities that retire the external steward: the native **Signal operator-liaison** (`SIMARD_OVERSEER_SIGNAL_LIAISON`, default off) and the autonomous **PR rework loop** (`ReworkPr` + `SIMARD_OVERSEER_REWORK`, default off). | `spawn_subordinate` / recipe runner; `merge_pr_if_merge_ready_with_judge` + `build_merge_judge` (agentic merge-judge, sole reviewer); `evaluate_objective_gates`; NEW pr-verify diff-scans (Bridge / `print!` / additive / PRD); signal-cli JSON-RPC group transport + typed liaison/rework records (fail-closed, 0o600). | Unit: budget gate holds launches; per-cycle launch cap; pr-verify checklist pass/fail on fixture diffs; merge only when `ready`; rework attempt-cap + dedup + own-PR guard; liaison HWM/dedup + echo-suppression + operator#∧group-id filter; fail-closed reader matrix for both new/extended typed records. Integration: fake recipe runner + fake `PrGhClient` + fixture Signal payloads (incl. `groupId`); held→rework→re-review→merge round-trip. | Launches a fix for a seeded process problem and merges the resulting green PR through the gated authority; ingests an operator Signal message, answers on the same group, and launches a fix; reworks a fixable held PR to merge or cleanly escalates after the capped attempts — all in fixtures. See [Signal operator-liaison](../reference/overseer-signal-liaison.md) and [PR rework loop](../reference/overseer-rework-loop.md). |
 | **M3 — guarded deploy + goal transfer** | `Deploy` (HIGH-RISK, opt-in) via canary gates + marker update; `ResolveConflict`; `TransferGoal` via meeting REPL. | `SelfDeployOrchestrator` + `self_relaunch` gates + marker; `git_guardrails`; `run_meeting_repl` + handoff. | Unit: deploy gate refuses no-op/rollback/red-canary/crash-loop; HIGH-RISK gated off by default; recursion guard refuses own PRs. Integration: fake deployer/canary; meeting handoff round-trip. | With opt-in, advances the deployed-commit marker only on a green canary; otherwise escalates. Never touches `~/.simard/worktrees`. |
 | **M4 — audits + self-tuning** | `RunAudit` loops (crusty-old-engineer-gated) on demand; recurring self-audit; threshold self-tuning of `SIMARD_OVERSEER_*` knobs. | `self_quality_audit::run_self_quality_audit`; `monthly-self-quality-audit.yaml`; telemetry history. | Unit: audit scope routing; tuning stays within clamped floors; no unbounded growth. | Runs a bounded audit loop and adjusts thresholds within floors, all observable in telemetry. |
 

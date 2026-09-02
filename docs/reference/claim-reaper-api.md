@@ -14,6 +14,8 @@ doc_type: reference
 status: implemented
 related:
   - ../concepts/stale-engineer-claim-reaper.md
+  - ../concepts/investigate-stale-engineer-before-reap.md
+  - ./investigate-stale-engineer-api.md
   - ./engineer-claim-release-api.md
   - ./engineer-worktree-sweep-safety.md
   - ./overseer-tick-details.md
@@ -290,6 +292,9 @@ Required gates (merge blockers): `cargo fmt`, `cargo clippy -D warnings`, and
 ## Related
 
 - [Stale-Engineer-Claim Reaper (concept)](../concepts/stale-engineer-claim-reaper.md)
+- [Investigate-Before-Reap (concept)](../concepts/investigate-stale-engineer-before-reap.md) —
+  the investigation the `HeartbeatStale` branch now drives before any reclaim.
+- [Investigate-Before-Reap API](./investigate-stale-engineer-api.md)
 - [Engineer-Claim Release & Reclaim API](./engineer-claim-release-api.md)
 - [Worktree Reaping Safety Guards](./engineer-worktree-sweep-safety.md)
 - [Claim-Reaper Kill Switch & Tuning](../operations/claim-reaper-kill-switch.md)

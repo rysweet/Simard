@@ -10,8 +10,10 @@
 #
 # Asserts that disabled/cancelled/in-progress signals never fail the fleet,
 # that a genuine active-CI failure does, that the exit code follows the
-# verdict, and that the opt-in `--file-issues` write is guarded off the offline
-# fixture path (a live-only sweep) and advertised in help.
+# verdict, that the opt-in `--file-issues` write is guarded off the offline
+# fixture path (a live-only sweep) and advertised in help, and that a cross-repo
+# authorization skip (an unwritable governed sibling) is a resilient reported
+# skip — not a sweep-aborting error — per the advertised contract.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -130,5 +132,19 @@ if [ "$EXITZERO_CODE" -ne 0 ]; then
 fi
 # The flag is advertised in help as the scheduled-sweep escape hatch.
 printf '%s\n' "$HELP_OUT" | grep -F -- "--exit-zero" >/dev/null
+
+# ── 8. Cross-repo authorization skips are resilient, not sweep-aborting ──────
+# A failing governed *sibling* repo the run's token cannot write (the default
+# GITHUB_TOKEN when STEWARD_GH_TOKEN is absent) is reported as an unauthorized
+# skip and must NOT abort the sweep — every writable repo is still reconciled
+# and the scheduled run stays green, avoiding the self-referential red-run loop
+# that a fail-the-whole-run abort used to cause. The offline path cannot
+# exercise a live cross-repo denial, but the CLI's documented contract must
+# advertise the resilient-skip behavior (behavioural coverage is in the
+# ci_health unit tests: steward_issue_filing::a_cross_repo_write_denial_*,
+# a_forbidden_403_*, a_non_authorization_gh_error_still_fails_loud, and
+# steward_issue_resolution::a_cross_repo_read_denial_*).
+printf '%s\n' "$HELP_OUT" | grep -F "unauthorized skip" >/dev/null
+printf '%s\n' "$HELP_OUT" | grep -F "STEWARD_GH_TOKEN" >/dev/null
 
 echo "ci-health-sweep: PASS"

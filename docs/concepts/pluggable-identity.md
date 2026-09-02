@@ -175,8 +175,7 @@ legitimately live in `src/`. This does not change.
 
 ### Example non-engineering identities → data-only packages
 
-Identities that merely *demonstrate* what the framework can produce —
-cartographer, atelier, concierge, gastronome, bursar, loremaster, and the like — are **not**
+Identities that merely *demonstrate* what the framework can produce are **not**
 part of Simard's daemon. They are authored as **data-only packages**
 under [`examples/identities/<name>/`](../../examples/identities/README.md):
 
@@ -223,25 +222,13 @@ fallback. There is **no** `BuiltinIdentityLoader` arm for an example identity.
 Engineers building an identity must follow
 [`prompt_assets/simard/identity_authoring.md`](../../prompt_assets/simard/identity_authoring.md),
 which spells out the prohibitions (no domain Rust, no `BuiltinIdentityLoader`
-arm, no `operator_cli` subcommand, no `src/bin/*`). The reference package is
-[`examples/identities/cartographer/`](../../examples/identities/cartographer/);
-[`examples/identities/bursar/`](../../examples/identities/bursar/) is a second
-example (an investment-portfolio research/advisory identity — advisory only,
-never order execution) that likewise ships as pure data with zero `src/` changes.
-[`examples/identities/concierge/`](../../examples/identities/concierge/) is a
-further hospitality-domain example (a data-only package with no compiled-in
-`simard-concierge` counterpart), also pure data with zero `src/` changes.
-
-[`atelier/`](../../examples/identities/atelier/) and
-[`concierge/`](../../examples/identities/concierge/) demonstrate the same pattern
-in the industrial-design and hospitality domains, each driving its domain tooling
-(OpenSCAD/CAD; a booking-software scaffold) entirely from its recipes.
-[`loremaster/`](../../examples/identities/loremaster/) is a tabletop-RPG
-campaign-designer / game-master example (open SRD content, Foundry VTT): it turns
-a campaign brief into a playable module — world lore, NPCs, XP-budget-balanced
-encounters, session prep — and then runs a session end to end (initiative →
-combat → resolution, seeded dice), again driving its domain tooling (an SRD rules
-engine, a seeded dice roller, a Foundry VTT exporter) entirely from its recipes.
+arm, no `operator_cli` subcommand, no `src/bin/*`). The shipped example packages —
+and the reference [`cartographer/`](../../examples/identities/cartographer/) —
+are indexed, with a self-describing README per package, in
+[`examples/identities/README.md`](../../examples/identities/README.md). That index
+is **derived from the package directories**, so this document intentionally does
+not re-enumerate the examples: adding one is a pure data change under
+`examples/identities/<name>/`, with zero edits here.
 
 ## What this is not
 

@@ -40,6 +40,10 @@ in `CONTRIBUTING.md`) into the plan steps and their `expected_outcome`s:
   `docs/` instead; a pr-verify scan `scan_no_point_in_time_report_docs` blocks a
   PR that adds a report doc.
 
+> **Agentic-recipes-first (extends engineer `G3`).** When a problem requires intelligence or judgment, solve it by composing, reusing, or inventing deterministic recipes of agentic steps run via the recipe runner — never by writing brittle imperative code or one-off heuristics. Reuse existing recipes/sub-recipes first; invent a new agentic recipe when none fits.
+> Imperative code is only for the thin deterministic rails (dispatch, I/O, storage, scheduling ticks) — the reasoning itself lives in agentic recipe steps.
+> This is the reasoning-time application of engineer `G3` (`engineer_system.md`, "Engineering Guidelines"); it does not change your output contract below.
+
 Return ONLY the JSON array — no markdown fences, no prose preamble, no trailing commentary.
 
 Example for objective "verify issue 915 exists and read its body":

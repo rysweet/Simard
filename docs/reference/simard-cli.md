@@ -427,11 +427,16 @@ Canonical host deployment rail. This command installs the currently executing
 Simard binary to `$SIMARD_HOME/bin/simard`, installs matching prompt assets to
 `$SIMARD_HOME/prompt_assets`, writes the user systemd units
 `simard-ooda.service` and `simard-signal.service`, preserves the previous live
-binary under `$SIMARD_HOME/.install-backups/`, and restarts both services via
-`systemctl --user`.
+binary under `$SIMARD_HOME/.install-backups/`, restarts both services via
+`systemctl --user`, and **owns the `simard` PATH entrypoint** — it repairs
+`~/.local/bin/simard` to a symlink at `$SIMARD_HOME/bin/simard` and prunes
+verified-ours stale orphans (e.g. `~/.cargo/bin/simard`) so a deploy never
+leaves a version-skewed `simard` shadowing the fresh one on PATH. See the
+[installer reference](./simard-installer.md#path-entrypoint-ownership-guarantee).
 
 ```text
 simard install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]
+               [--entrypoint-dir PATH] [--orphan-dir PATH ...]
 ```
 
 `SIMARD_HOME` defaults to `~/.simard`; `--simard-home` overrides it for this
@@ -449,8 +454,10 @@ Contract: [Simard installer reference](./simard-installer.md).
 ### `simard self-health [--json] [--pre-deploy-facts=N]`
 
 Run the post-deploy health probe against the live store and print a report. The
-five probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
-`brains_llm_backed`, and `no_quarantine`; the report is healthy only when every
+six probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
+`brains_llm_backed`, `no_quarantine`, and `entrypoint_parity` (the PATH-resolved
+`simard --version` matches the installed binary — no stale entrypoint or foreign
+shadow); the report is healthy only when every
 probe is. `--json` emits the structured `SelfHealthReport`; `--pre-deploy-facts=N`
 supplies the memory baseline the self-deploy orchestrator captures before the
 swap. Exit code is `0` when healthy, non-zero otherwise. See the

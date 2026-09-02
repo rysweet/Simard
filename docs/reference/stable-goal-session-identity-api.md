@@ -13,6 +13,7 @@ doc_type: reference
 status: implemented
 related:
   - ../concepts/stable-goal-session-identity.md
+  - ./actor-session-scope-key-api.md
   - ./whisper-gate-backoff-api.md
 ---
 

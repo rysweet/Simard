@@ -13,6 +13,10 @@ Be conservative and specific. Prefer a short list of well-evidenced problems ove
 a long speculative one. A signal that is already being handled by an in-flight
 engineer is **not** a problem — drop it.
 
+> **Agentic-recipes-first (extends engineer `G3`).** When a problem requires intelligence or judgment, solve it by composing, reusing, or inventing deterministic recipes of agentic steps run via the recipe runner — never by writing brittle imperative code or one-off heuristics. Reuse existing recipes/sub-recipes first; invent a new agentic recipe when none fits.
+> Imperative code is only for the thin deterministic rails (dispatch, I/O, storage, scheduling ticks) — the reasoning itself lives in agentic recipe steps.
+> This is the reasoning-time application of engineer `G3` (`engineer_system.md`, "Engineering Guidelines"); it does not change your output contract below.
+
 ## INPUTS
 
 You are given three inputs (as file paths, so unbounded lists never overflow a

@@ -1,0 +1,73 @@
+name: cognitive-memory-skipguard-serial-isolation
+app_type: cli
+description: |
+  Regression guard for the `SkipGuard` env-race deflake. The
+  `SIMARD_SKIP_GYM` writers in `src/gym_runner_client.rs` mutate a
+  process-global env var through the `SkipGuard` RAII helper but previously
+  carried a BARE `#[serial]` attribute — an INDEPENDENT lock, not the shared
+  `cognitive_memory` key. That let them run concurrently with
+  `#[serial(cognitive_memory)]` cognitive-memory tests; their `setenv`/
+  `unsetenv` could `realloc`/free `environ` and tear a concurrent `getenv`
+  of `HOME` in `cost_tracking::ledger_path`, dropping the meeting-turn cost
+  entry and flaking the Simard `verify` workflow on `main`
+  (base_type_copilot meeting_turn_records_full_enriched_prompt_tokens test).
+
+  The fix re-keys all 15 SkipGuard tests to `#[serial(cognitive_memory)]`
+  and teaches the `serial_guard` meta-test to recognize
+  `SkipGuard::set`/`clear` as an env-mutation trigger so any revert to a
+  bare key is an auto-caught build failure. This scenario proves both: the
+  new recognizer meta-test, and that the previously-racing pair (all gym
+  runner tests + the meeting cost test) now pass together in one process.
+  All steps are source-only or hermetic, so they are safe on the live host.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # 1. The new recognizer meta-test: SkipGuard::set/clear without the
+  #    cognitive_memory key must be flagged, and with the key accepted.
+  #    A revert of the deflake fails this test at build time.
+  - action: run
+    params:
+      command: "cargo test --locked --lib test_support::serial_guard::skip_guard_helper_mutation_requires_the_key"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 2. The whole-suite invariant still holds: every env-mutating lib test
+  #    (now including the 15 re-keyed SkipGuard writers) shares the key, so
+  #    the serial-guard meta-test reports zero offenders.
+  - action: run
+    params:
+      command: "cargo test --locked --lib test_support::serial_guard::every_env_mutating_test_is_serialized"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # 3. Deflake proof: the formerly-racing pair — all gym_runner_client tests
+  #    (the env writers) and the meeting-turn cost regression (the HOME
+  #    reader) — now run together in one test process and both pass.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- gym_runner_client meeting_turn_records_full_enriched"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -16,7 +16,14 @@ use super::thread::{CognitiveThread, Priority, ThreadContext, ThreadHealth, Thre
 /// Env var controlling the per-tick non-critical fan-out budget.
 const BUDGET_ENV: &str = "SIMARD_MIND_MAX_NONCRITICAL_PER_TICK";
 /// Default non-critical fan-out per tick when the env var is unset/invalid.
-const DEFAULT_BUDGET: usize = 2;
+///
+/// Sized to cover the full default-ON scheduled non-critical roster (issue
+/// #4845, requirement 4): maintenance + engineer-log + the ten reflective
+/// threads + creative-ideas = 13. OODA is `Critical` and budget-exempt. A
+/// smaller default (the historical `2`) starves long-cadence threads on a tick
+/// where several come due, which would make the Overseer's stall detector
+/// false-positive. Operators can still throttle via `SIMARD_MIND_MAX_NONCRITICAL_PER_TICK`.
+const DEFAULT_BUDGET: usize = 13;
 
 /// Base delay of the per-thread capped-exponential backoff.
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
@@ -196,14 +203,20 @@ impl Mind {
         entry.last_success = Some(outcome.success);
         entry.next_run = schedule::next_run_epoch(&entry.thread.policy(), entry.last_run, now);
 
-        telemetry::record_run(&id, &outcome);
+        telemetry::record_run(&id, &outcome, now);
         telemetry::record_next_run(&id, entry.next_run);
 
         if outcome.success {
             entry.consecutive_errors = 0;
             entry.backoff_until = None;
         } else {
+            // Errors flow to the Overseer on BOTH channels (issue #4786): the
+            // per-thread `failures` counter (bumped inside `record_run`) AND a
+            // durable, Overseer-drained `FailureDiagnosis`, so a caught thread
+            // failure drives a corrective `Signal::StepFailureDiagnosed` instead
+            // of being swallowed inside the thread.
             telemetry::record_error(&id, &outcome.summary);
+            record_thread_failure(&id, &outcome.summary);
             if !critical {
                 entry.consecutive_errors = entry.consecutive_errors.saturating_add(1);
                 entry.backoff_until = Some(schedule::backoff_until_epoch(
@@ -232,6 +245,11 @@ impl Mind {
                 last_success: e.last_success,
                 consecutive_errors: e.consecutive_errors,
                 backoff_until_epoch: e.backoff_until,
+                // Single source of truth for the Overseer's thread registry
+                // (#4786): purpose from the thread itself, cadence derived from
+                // its schedule policy — no hand-maintained duplicate list.
+                purpose: e.thread.purpose().to_string(),
+                cadence_secs: e.thread.policy().cadence_secs(),
             })
             .collect()
     }
@@ -250,5 +268,63 @@ impl Mind {
 impl Default for Mind {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Record a durable [`FailureDiagnosis`] for a failed cognitive-thread tick into
+/// the process-global Overseer [`failure_sink`], so the failure surfaces as a
+/// corrective `Signal::StepFailureDiagnosed` on the next Observe pass (issue
+/// #4786). Evidence carries the thread id and its summary, bounded to
+/// [`FailureDiagnosis`]'s evidence cap so a pathological summary can never
+/// inflate the sink or a downstream notification.
+fn record_thread_failure(id: &str, summary: &str) {
+    use crate::overseer::diagnosis::{FailureCause, FailureDiagnosis, MAX_EVIDENCE_LEN};
+    use crate::overseer::failure_sink;
+
+    let raw = format!("thread {id}: {summary}");
+    let evidence: String = if raw.chars().count() <= MAX_EVIDENCE_LEN {
+        raw
+    } else {
+        raw.chars().take(MAX_EVIDENCE_LEN).collect()
+    };
+    failure_sink::record_step_failure(FailureDiagnosis {
+        cause: FailureCause::CognitiveThread,
+        exit_code: None,
+        evidence,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4845 — TDD contract (Step 7) for the per-tick budget default
+// (design component C3 / requirement 4). Authored BEFORE the bump, so this is
+// RED until `DEFAULT_BUDGET` is raised from 2 to cover the full scheduled
+// non-critical roster (~13 threads). With the old default of 2, a tick where
+// many long-cadence threads come due would starve all but two of them, and the
+// Overseer's staleness detector would then false-positive on the starved ones.
+// The budget default is the single source of truth for that fan-out ceiling.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod default_budget_tests {
+    use super::DEFAULT_BUDGET;
+
+    /// The full default-ON scheduled non-critical roster after issue #4845:
+    /// maintenance + engineer-log + the ten reflective threads + creative-ideas
+    /// = 13. OODA is `Critical` and budget-EXEMPT, so it is not counted here.
+    const SCHEDULED_NONCRITICAL_ROSTER: usize = 13;
+
+    #[test]
+    #[allow(
+        clippy::assertions_on_constants,
+        reason = "deliberate compile-time invariant: the budget default must \
+                  cover the whole scheduled roster; both operands are consts"
+    )]
+    fn default_budget_covers_the_full_scheduled_roster() {
+        assert!(
+            DEFAULT_BUDGET >= SCHEDULED_NONCRITICAL_ROSTER,
+            "the per-tick non-critical budget default ({DEFAULT_BUDGET}) must cover every \
+             scheduled non-critical thread ({SCHEDULED_NONCRITICAL_ROSTER}) so a tick where \
+             they all come due never starves the long-cadence ones (which would make the \
+             Overseer's stall detector false-positive). RED under the old default of 2."
+        );
     }
 }

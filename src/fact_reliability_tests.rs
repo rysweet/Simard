@@ -557,6 +557,159 @@ fn commit_gated_fact_dedups_whitespace_variant_restatement() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Identity dedup must survive a concept neighborhood larger than the fixed
+// prior-scan window. The distillation vocabulary is a tiny CLOSED set
+// (KNOWN_CONCEPTS), so many genuinely distinct facts share one concept label. A
+// same-concept prior scan of only DEDUP_PRIOR_SCAN_LIMIT results — ranked
+// confidence-descending — can push a real content-duplicate out of the window
+// once enough higher-confidence facts share its concept, letting the duplicate
+// be promoted a second time. Retrieving dedup candidates by the fact's CONTENT
+// as well surfaces the exact restatement regardless of how crowded its concept
+// is, WITHOUT merging across concepts.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A content-duplicate whose concept is crowded past `DEDUP_PRIOR_SCAN_LIMIT` by
+/// higher-confidence same-concept facts must still dedup. Five full-strength
+/// (0.9) bug-pattern facts on disjoint vocabulary saturate a width-5
+/// confidence-descending same-concept scan; a weaker (0.75) two-word victim then
+/// sits at position 6 — outside the concept window. A concept-only prior scan
+/// misses its re-commit and promotes a redundant copy; a content-keyed scan
+/// surfaces it and dedups. Before this fix the re-commit below was STORED.
+#[test]
+fn commit_gated_fact_dedups_duplicate_crowded_out_of_concept_window() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for window dedup", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // Saturate the concept with DEDUP_PRIOR_SCAN_LIMIT (5) full-strength (0.9)
+    // bug-pattern facts, each ≥3 distinct informative words on disjoint
+    // vocabulary (none contains "phantom" or "read"). A confidence-descending
+    // same-concept scan of width 5 is now entirely consumed by these five.
+    let crowd = [
+        "cache invalidation races on restart",
+        "timeout cascades across dependent services",
+        "lock ordering causes a deadlock cycle",
+        "buffer overflow corrupts an adjacent frame",
+        "retry storm saturates the upstream pool",
+    ];
+    for c in crowd {
+        let d = commit_gated_fact(&mem, "bug-pattern", c, true, &source, &tags, &episode_ids)
+            .expect("commit must not error");
+        assert!(d.stored(), "each distinct crowd fact must be stored: {c}");
+    }
+
+    // A weaker (0.75) two-word victim: grounded + known concept but only two
+    // informative words, so it scores strictly below every 0.9 crowd fact and
+    // lands at position 6 in a confidence-descending same-concept scan — OUTSIDE
+    // the width-5 window. Its vocabulary is disjoint from the crowd, so a content
+    // scan returns essentially only itself.
+    let victim = "phantom read";
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        victim,
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        stored.stored(),
+        "victim fact is first-seen and must be stored"
+    );
+
+    // Re-commit the exact victim content. A concept-only prior scan misses it
+    // (crowded out by the five 0.9 facts); the content scan surfaces it → dedup
+    // quarantine, its score still clearing the threshold.
+    let dup = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        victim,
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !dup.stored(),
+        "a content-duplicate crowded out of the concept window must still dedup, not be promoted twice"
+    );
+    assert!(
+        dup.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // Exactly one copy of the victim content exists — the re-commit added none.
+    let victim_hits = mem
+        .search_facts(victim, 50, 0.0)
+        .expect("search_facts")
+        .into_iter()
+        .filter(|f| f.content == victim && f.concept == "bug-pattern")
+        .count();
+    assert_eq!(
+        victim_hits, 1,
+        "the crowded-out duplicate must not create a second copy of the victim fact"
+    );
+}
+
+/// The content-keyed dedup scan must NOT merge across concepts: identical content
+/// under a DIFFERENT concept is a distinct identity and stays stored. This guards
+/// the content scan from introducing a false cross-concept merge — dedup keys on
+/// (canonical concept + content), not content alone.
+#[test]
+fn commit_gated_fact_content_scan_preserves_cross_concept_identity() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for cross-concept", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    // Store "phantom read" under bug-pattern.
+    let bug = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "phantom read",
+        true,
+        &source,
+        &[String::from("bug-pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(bug.stored(), "first-seen bug-pattern fact must be stored");
+
+    // The SAME content under lesson-learned is a distinct identity: the content
+    // scan surfaces the bug-pattern prior, but the concept guard rejects it, so
+    // this fact is still promoted.
+    let lesson = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        "phantom read",
+        true,
+        &source,
+        &[String::from("lesson-learned")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(lesson, FactGateDecision::Stored { .. }),
+        "same content under a different concept is a distinct identity and must be stored, got {lesson:?}"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Concept canonicalization at the write boundary. A concept that maps into the
 // closed KNOWN_CONCEPTS set is scored, deduped, AND stored under its canonical
 // label, so surface variants an LLM routinely emits ("PR-Pattern", "pr_pattern",

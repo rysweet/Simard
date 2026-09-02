@@ -1,0 +1,54 @@
+name: "Stewarded-roster agentic curation surface"
+description: "End-to-end operator/agent coverage for `simard roster`: the runtime CURATION surface for Simard's stewarded-repo roster. The framework already moves the roster out of committed code into identity-scoped, install-durable state (`identity_curated_state` seeded from `prompt_assets/simard/identity/stewarded_repos.seed.toml`); this scenario proves the missing agentic verb — actually curating that durable state at runtime. Drives the real `simard` binary against a throwaway state root and verifies: `roster list` seeds 10 repos on first use (including rysweet/Simard, excluding the deprecated Python rysweet/amplihack) and writes the durable file; `roster add <slug> [note]` upserts a stewarded repo (now 11) and persists it; a SEPARATE process sees the curated edit (survives a restart — the proxy for surviving a self-deploy, since install never overwrites the state root); `roster remove <slug>` drops it back to 10 and rewrites the durable file; a malformed slug is rejected with a non-zero exit and NEVER mutates state; and `roster --help` advertises the verbs. Complements the storage/resolution scenario `identity-curated-stewarded-roster` with the mutable-curation half of 'the roster is who Simard is, not a committed file'."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "roster list seeds, add/remove curate durably, malformed slug is rejected, help advertises verbs"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/stewarded-roster-curation.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "identity"
+    - "roster"
+    - "stewardship"
+    - "curation"
+    - "outside-in"
+  priority: "high"
+  author: "simard-engineer"
+  test_type: "outside-in"

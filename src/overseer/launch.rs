@@ -113,6 +113,27 @@ pub fn smart_orchestrator_args(brief: &RecipeBrief) -> Vec<String> {
     ]
 }
 
+/// Build the `amplihack recipe run …` [`Command`] for an Overseer fix-launch.
+///
+/// Sets the argv from [`smart_orchestrator_args`] and exports
+/// [`WORKFLOW_PR_LABELS_ENV`](crate::overseer::config::WORKFLOW_PR_LABELS_ENV) =
+/// [`SIMARD_ENGINEER_PR_LABEL`](crate::overseer::config::SIMARD_ENGINEER_PR_LABEL)
+/// so the PR this recipe opens carries the durable engineer marker and is
+/// visible to the self-merge queue (#4097). Inert until the amplihack publish
+/// consumer (#979) lands. `AMPLIHACK_AGENT_BINARY` is inherited from the caller
+/// (Copilot/Claude parity) and is deliberately not overridden here.
+///
+/// Extracted as a seam so the env contract is unit-testable via
+/// [`Command::get_envs`] without spawning `amplihack`.
+pub fn build_overseer_recipe_command(brief: &RecipeBrief) -> std::process::Command {
+    let mut cmd = std::process::Command::new("amplihack");
+    cmd.args(smart_orchestrator_args(brief)).env(
+        crate::overseer::config::WORKFLOW_PR_LABELS_ENV,
+        crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+    );
+    cmd
+}
+
 /// Extract the first `owner/repo` + PR number from recipe output. Recognises a
 /// `https://github.com/<owner>/<repo>/pull/<n>` URL after the shipped
 /// noise-stripping. Pure + unit-tested.
@@ -228,7 +249,7 @@ impl SpawnedChild for RealChild {
 struct RealChildSpawner;
 impl ChildSpawner for RealChildSpawner {
     fn spawn(&self, brief: &RecipeBrief) -> std::io::Result<(Box<dyn SpawnedChild>, PathBuf)> {
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let log_path = std::env::temp_dir().join(format!(
             "overseer-recipe-{}.log",
@@ -252,12 +273,10 @@ impl ChildSpawner for RealChildSpawner {
         })?;
         let log_err = log.try_clone()?;
 
-        let mut cmd = Command::new("amplihack");
-        cmd.args(smart_orchestrator_args(brief))
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(log_err));
-        // Preserve AMPLIHACK_AGENT_BINARY if the caller set it (Copilot/Claude
-        // parity) — inherited automatically; we do not override it.
+        let mut cmd = build_overseer_recipe_command(brief);
+        cmd.stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
+        // AMPLIHACK_AGENT_BINARY is inherited from the caller (Copilot/Claude
+        // parity); WORKFLOW_PR_LABELS is set inside build_overseer_recipe_command.
 
         let child = cmd.spawn().map_err(|e| {
             // Pre-exec spawn failure (E2BIG and siblings) has no child; classify
@@ -535,6 +554,42 @@ mod tests {
                 .any(|a| a == "task_description=fix distillation banner pollution")
         );
         assert!(args.iter().any(|a| a == "target_repo=rysweet/Simard"));
+    }
+
+    /// Seam (c): the Overseer `RealChildSpawner` is a real PR producer (it runs
+    /// `amplihack recipe run smart-orchestrator`, which opens PRs against
+    /// rysweet/Simard). Its Command must export `WORKFLOW_PR_LABELS` so the
+    /// published PR carries the engineer label and is visible to the self-merge
+    /// queue. The build seam exists so this contract is unit-testable via
+    /// `Command::get_envs()` without spawning anything.
+    #[test]
+    fn overseer_recipe_command_exports_workflow_pr_labels() {
+        use std::ffi::OsStr;
+
+        let brief = RecipeBrief {
+            task_description: "fix the thing".to_string(),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let cmd = build_overseer_recipe_command(&brief);
+
+        assert_eq!(
+            cmd.get_program(),
+            OsStr::new("amplihack"),
+            "the overseer recipe command must invoke amplihack"
+        );
+
+        let found = cmd.get_envs().any(|(k, v)| {
+            k == OsStr::new(crate::overseer::config::WORKFLOW_PR_LABELS_ENV)
+                && v == Some(OsStr::new(
+                    crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+                ))
+        });
+        assert!(
+            found,
+            "build_overseer_recipe_command must set \
+             WORKFLOW_PR_LABELS=simard-autonomous via the shared constants"
+        );
     }
 
     #[test]

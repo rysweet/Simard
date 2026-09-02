@@ -1,0 +1,4 @@
+digraph DataFlowSignal { rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  operator -> cli -> recv -> parse -> guards -> auth -> inbound -> index -> session -> backend -> append -> file; backend -> out -> send -> sendline -> cli -> operator;
+  operator [label="Signal operator"]; cli [label="signal-cli JSON-RPC"]; recv [label="JsonRpcTransport recv_line"]; parse [label="parse_incoming"]; guards [label="self/sync/echo guards"]; auth [label="allowlist + command gate"]; inbound [label="authorized turn"]; index [label="operators.json active session", fillcolor="#fff6df"]; session [label="load_session_at"]; backend [label="MeetingBackend"]; append [label="append turns"]; file [label="signal_sessions/<session_id>.json", fillcolor="#fff6df"]; out [label="Outbound response"]; send [label="SignalConversation::send"]; sendline [label="JsonRpcTransport send_line"];
+}

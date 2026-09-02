@@ -3,6 +3,12 @@ name: verify
 on:
   push:
   pull_request:
+  # Merge-queue live-lock remediation (issue #1050): run the same required
+  # contexts against the queued, freshly-merged result so strict
+  # up-to-date-before-merge can be relaxed to merge-queue semantics. This is
+  # ADDITIVE — the existing push/pull_request triggers and every required job
+  # are preserved so no required status-check context is renamed or dropped.
+  merge_group:
 
 permissions: {}
 
@@ -37,6 +43,13 @@ jobs:
 
       - name: Rust-only gate (no new .py / .js / .ts)
         run: scripts/check-rust-only-gate.sh
+
+      # Locks in the idempotent release-publish fix: hermetic (bundles its own
+      # mock `gh`, no network/cargo), so it runs early and fast. Guards against a
+      # regression to the non-idempotent "Create release" step that raced on an
+      # unbumped version and reddened otherwise-green release runs.
+      - name: Release-create idempotency gate
+        run: scripts/qa-release-create-idempotent.sh
 
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
@@ -145,6 +158,17 @@ jobs:
           cargo test --all-features --locked --no-fail-fast \
             -- --skip install_packages_runs_and_self_installs \
             2>&1 | tee target/ci-logs/cargo-test.log
+
+      - name: Self-deploy canary regression target (issue #4622)
+        # Proves the EXACT target name + feature the self-deploy UnitTest canary
+        # gate invokes (`cargo test --test self_deploy_canary --features
+        # canary-tests`, see src/self_relaunch/gates.rs::build_unit_test_command)
+        # stays valid on every push/PR. A rename or typo in the curated
+        # hermetic canary suite fails CI HERE — before it can redden the live
+        # self-deploy canary and wedge running_commit. The suite is
+        # hermetic-by-construction (owns its HOME/tempdir, #[serial], no network),
+        # so it is fast and deterministic.
+        run: cargo test --test self_deploy_canary --features canary-tests
 
       - name: Run full clippy gate (--all-targets --all-features --locked)
         # Runs AFTER cargo test on purpose: test compiles the entire crate

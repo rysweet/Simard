@@ -1,0 +1,40 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Mirrors tests/qa-scenarios/dashboard-daily-report-window.yaml (the repo's
+# canonical exemplar): a single `cli` agent runs a hermetic regression script;
+# the runner treats the script's non-zero exit as a step failure, so this is a
+# real pass/fail gate (not a cosmetic assertion).
+name: simard-dashboard-freshness-window
+description: >-
+  A metrics snapshot flushed once per OODA cycle reads as `live`, not a false
+  `stale`, while the daemon is running (#4278). The freshness window is
+  single-sourced at telemetry::snapshot::FRESHNESS_SECS=900 and referenced by
+  BOTH the status provider (snapshot_is_stale) and the GET /api/enrichment
+  endpoint, so neither can drift back to the pre-fix 300s hardcode that fired
+  `stale` on essentially every healthy cycle and contradicted the dashboard's
+  own 900s daemon-liveness check.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - enrichment
+    - freshness
+  priority: high
+steps:
+  - name: Run the dashboard snapshot-freshness window regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-freshness-window.sh
+    timeout: 300000

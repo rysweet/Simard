@@ -1,0 +1,47 @@
+name: vitruvia-example-identity
+app_type: cli
+description: |
+  Outside-in coverage for the DATA-ONLY `vitruvia` EXAMPLE identity package under
+  `examples/identities/vitruvia/` (architecture & interior design). This is a
+  demonstration of Simard's pluggable-identity framework — with no compiled-in
+  `simard-vitruvia` counterpart — and it must carry a ZERO-line `src/` footprint:
+  it is defined entirely as data (identity.toml + prompts + recipes) and loaded
+  by the data-driven `load_example_identity`.
+
+  Verified end to end via `tests/vitruvia_example_identity_valid.rs`:
+  - the `examples/identities/vitruvia` package loads through the real
+    data-driven loader in engineer mode with its system + six phase prompts
+    (NOT via `BuiltinIdentityLoader`);
+  - every prompt asset the manifest references is a real, non-empty file that
+    resolves as a contained `prompts/*.md` path;
+  - the system prompt states the identity contract (untrusted-input handling,
+    the inspect -> act -> verify -> persist loop, the Blender + BlenderBIM/IFC
+    and FreeCAD toolkit, and durable persistence);
+  - the `vitruvia-massing-plan` recipe drives program -> massing -> plan through
+    real domain tooling, authors a BIM/IFC model, and verifies egress
+    (code-aware);
+  - the `vitruvia-drawings-walkthrough` recipe drives interiors -> drawings ->
+    walkthrough and produces the deliverables (plans, elevations, walkthrough),
+    persisted durably from the IFC model;
+  - a missing example package fails visibly (no silent builtin fallback).
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the integration suite reports `test result: ok`.
+metadata:
+  tags:
+    - cli
+    - vitruvia
+    - identity
+    - example
+    - pluggable-identity
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --test vitruvia_example_identity_valid 2>&1 | tee /tmp/vitruvia-example-qa.log | grep -q \"test result: ok\"'"
+    timeout: 600000

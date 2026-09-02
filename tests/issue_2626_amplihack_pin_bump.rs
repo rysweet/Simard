@@ -45,12 +45,15 @@ use std::path::PathBuf;
 
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
 const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
-/// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
-/// PR #131's squash-merge — the lbug storage-compatibility fix. It pins `lbug`
-/// to the rysweet/ladybug-rust fork commit whose crate version is `0.17.1`, so
-/// Simard does not accidentally link a v41-capable `0.17.0` fork engine against
-/// a live v42 cognitive store.
-const MEMORY_TARGET_REV: &str = "c266e15d1399967c04324370e77cf281990b8be1";
+/// amplihack-memory-lib commit carrying the `amplihack-memory` crate.
+///
+/// Superseded by issue #4687: originally the #2626 bump target
+/// (`c266e15d…`, PR #131's lbug storage-compatibility fix), this now tracks the
+/// #4687 WAL crash-consistency fix commit `0031505b…`, which is the same
+/// storage-compatible line (still pins `lbug` to the fork rev whose crate
+/// version is `0.17.1`, store format v42) plus the single-owner / fsync-durable
+/// WAL fix. See `tests/issue_4687_amplihack_pin_bump.rs` for the #4687 guard.
+const MEMORY_TARGET_REV: &str = "0031505b911151bf47409694a6c45f8b778d91b9";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
@@ -206,8 +209,8 @@ fn cargo_toml_pins_amplihack_memory_to_target_main_rev() {
         .expect("Cargo.toml must declare a git `amplihack-memory` dependency with a `rev`");
     assert_eq!(
         rev, MEMORY_TARGET_REV,
-        "amplihack-memory must be pinned to amplihack-memory-lib `main` HEAD \
-         {MEMORY_TARGET_REV} (#2626 bump). Found `{rev}`."
+        "amplihack-memory must be pinned to the #4687 WAL crash-consistency fix \
+         rev {MEMORY_TARGET_REV} (supersedes the #2626 bump target). Found `{rev}`."
     );
 }
 

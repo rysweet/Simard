@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - "src/**"
+  # Also run in the GitHub merge queue (issue #1050) so coverage evaluates the
+  # queued, freshly-merged result consistently with the required `verify`
+  # contexts. Additive: the pull_request trigger above is unchanged.
+  merge_group:
 
 permissions: {}
 

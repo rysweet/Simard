@@ -73,7 +73,9 @@ mod precommit;
 use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
 pub(crate) use discovery::goal_id_from_worktree_dir;
-pub use discovery::{LiveEngineerWorktree, live_claimed_engineers};
+pub use discovery::{
+    LiveEngineerWorktree, live_claimed_engineers, live_claimed_engineers_in_worktrees,
+};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
 ///

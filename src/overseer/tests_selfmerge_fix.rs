@@ -166,6 +166,7 @@ fn snapshot(mergeable: &str, checks: Vec<CheckRollupEntry>, labels: Vec<String>)
         checks,
         base_ref_name: "main".to_string(),
         labels,
+        is_draft: Some(false),
     }
 }
 
@@ -559,6 +560,9 @@ fn open_pr(number: u32, author: &str, head: &str, labels: &[&str]) -> OpenPrSumm
         url: format!("https://github.com/rysweet/Simard/pull/{number}"),
         author: author.to_string(),
         labels: labels.iter().map(|s| s.to_string()).collect(),
+        // Default fixtures are non-draft so the pre-existing green survey cases
+        // stay green; the #4339 draft tests below override this per-case.
+        is_draft: Some(false),
     }
 }
 
@@ -662,6 +666,86 @@ fn survey_fail_closed_when_automerge_author_unresolved() {
     assert!(
         ops.survey_ready_prs(&[REPO.to_string()]).is_empty(),
         "an unresolved automerge author must fail closed to an empty candidate list"
+    );
+}
+
+// ───────────────────── draft-PR exclusion (#4339) ────────────────────────────
+
+/// #4339 draft guardrail: a DRAFT PR (`isDraft=true`) — same engineer author,
+/// carrying the `simard-autonomous` label, green + mergeable — is EXCLUDED from
+/// the survey. A draft can never be merged (`gh pr merge` fails deterministically
+/// with "Pull Request is still a draft"), so it must NEVER become a candidate
+/// even when author + engineer label + CI + mergeable all pass. Pure narrowing.
+#[test]
+fn survey_excludes_draft_pr_even_when_all_other_gates_pass() {
+    let gh = SurveyGh::new(vec![OpenPrSummary {
+        is_draft: Some(true),
+        ..open_pr(
+            4336,
+            ENGINEER_AUTHOR,
+            "engineer/4336-draft",
+            &[crate::overseer::config::SIMARD_ENGINEER_PR_LABEL],
+        )
+    }]);
+    let ops = survey_ops(gh.clone(), Some(ENGINEER_AUTHOR));
+    assert!(
+        ops.survey_ready_prs(&[REPO.to_string()]).is_empty(),
+        "a draft PR must never be a survey candidate, even when author + engineer \
+         label + CI + mergeable all pass"
+    );
+    assert_eq!(gh.merges(), 0, "the survey rail must never merge a draft");
+}
+
+/// #4339 counterpart: the SAME PR as non-draft (`isDraft=false`) IS a candidate.
+/// The guardrail is a pure NARROWING — it only removes drafts and must never
+/// broaden auto-merge eligibility. Proves the exclusion keys on draft state, not
+/// on some incidental field of the draft fixture.
+#[test]
+fn survey_includes_identical_non_draft_pr() {
+    let gh = SurveyGh::new(vec![OpenPrSummary {
+        is_draft: Some(false),
+        ..open_pr(
+            4336,
+            ENGINEER_AUTHOR,
+            "engineer/4336-draft",
+            &[crate::overseer::config::SIMARD_ENGINEER_PR_LABEL],
+        )
+    }]);
+    let ops = survey_ops(gh, Some(ENGINEER_AUTHOR));
+    assert_eq!(
+        ops.survey_ready_prs(&[REPO.to_string()]),
+        vec![PrRef {
+            repo: REPO.to_string(),
+            pr: 4336,
+        }],
+        "the same PR that is NOT a draft is an eligible candidate — the draft gate \
+         only removes drafts, it never broadens eligibility"
+    );
+}
+
+/// #4339 fail-closed: when draft state is missing/unknown from the listing
+/// (`isDraft` absent ⇒ `None`), the PR is treated as NOT ready and EXCLUDED —
+/// mirroring the survey's existing fail-closed posture. Admit ONLY `Some(false)`.
+#[test]
+fn survey_excludes_pr_with_unknown_draft_state_fail_closed() {
+    let gh = SurveyGh::new(vec![OpenPrSummary {
+        is_draft: None,
+        ..open_pr(
+            4336,
+            ENGINEER_AUTHOR,
+            "engineer/4336-unknown",
+            &[crate::overseer::config::SIMARD_ENGINEER_PR_LABEL],
+        )
+    }]);
+    let ops = survey_ops(gh.clone(), Some(ENGINEER_AUTHOR));
+    assert!(
+        ops.survey_ready_prs(&[REPO.to_string()]).is_empty(),
+        "unknown draft state must fail closed to exclusion (admit only isDraft==Some(false))"
+    );
+    assert_eq!(
+        gh.merges(),
+        0,
+        "the survey rail must never merge on unknown draft state"
     );
 }
 

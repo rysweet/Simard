@@ -721,12 +721,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_rejects_wellformed_json_with_schema_invalid_entry() {
+        // A realistic agent slip: valid JSON, right container, but an entry is
+        // missing the required `done_criterion`. serde enforces the field, so
+        // this is a LOUD `sub_goals` error — never a half-populated proposal.
+        let text = r#"{"sub_goals":[{"description":"A only, no done_criterion"}]}"#;
+        let err = parse_subgoals_json(text)
+            .expect_err("a sub-goal missing a required field must be rejected loudly");
+        match err {
+            SimardError::InvalidGoalRecord { field, .. } => assert_eq!(field, "sub_goals"),
+            other => panic!("expected InvalidGoalRecord{{field:\"sub_goals\"}}, got {other:?}"),
+        }
+    }
+
     // ── Group B: `harvest_subgoals_file` is the hermetic AGENT→SIMARD transport
     //    seam. It reads the dedicated result FILE the agent wrote and NEVER
     //    parses stdout. Constructed with a synthetic `std::process::Output` so
     //    the "stdout noise is inert" contract is provable without a subprocess.
-    //    Mirrors distillation's `harvest_facts_file`, but STRICTER (adds a size
-    //    cap + an empty/whitespace rejection distill lacks). ────────────────────
+    //    Mirrors distillation's *former* file-channel reader
+    //    (`harvest_facts_file`, since retired for its direct-to-memory semantic
+    //    handoff), but STRICTER: it adds a size cap + an empty/whitespace
+    //    rejection that reader lacked. ────────────────────────────────────────
 
     /// A realistic slice of noisy recipe-runner stdout: ANSI, tracing lines, and
     /// the copilot launcher banner. Under the old code its outermost `{…}` slice

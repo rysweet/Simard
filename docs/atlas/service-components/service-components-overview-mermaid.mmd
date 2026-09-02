@@ -1,0 +1,66 @@
+graph TD
+    Daemon["OODA daemon and scheduler"]
+    Ooda["OODA loop and actions"]
+    Threads["Cognitive threads"]
+    Memory["Cognitive memory lbug store"]
+    Overseer["Acting Overseer"]
+    Goals["Goal board and curation"]
+    Meetings["Meetings and facilitator"]
+    Engineer["Engineer loop and worktrees"]
+    Gym["Gym and benchmarking"]
+    SelfImprove["Self-improve and self-deploy"]
+    Signal["Signal conversation"]
+    Operator["Operator CLI and dashboard"]
+    Journal["Journal"]
+    Telemetry["Telemetry and self-metrics"]
+
+    Daemon -->|"runs cycle"| Ooda
+    Daemon -->|"opens clients"| Memory
+    Daemon -->|"loads and commits"| Goals
+    Daemon -->|"registers"| Threads
+    Daemon -->|"ticks"| Overseer
+    Daemon -->|"background"| Journal
+    Daemon -->|"collects"| Telemetry
+    Daemon -->|"serves"| Operator
+    Daemon -->|"self relaunch gates"| SelfImprove
+
+    Ooda -->|"recall and distill"| Memory
+    Ooda -->|"prioritize and persist"| Goals
+    Ooda -->|"dispatch advance goal"| Engineer
+    Ooda -->|"prompted judgment"| Overseer
+    Ooda -->|"run improvement action"| SelfImprove
+    Ooda -->|"score signals"| Gym
+    Ooda -->|"handoff decisions"| Meetings
+    Ooda -->|"metrics"| Telemetry
+
+    Threads -->|"creative ideas and analysis"| Memory
+    Threads -->|"idea to goal"| Goals
+    Threads -->|"health"| Telemetry
+
+    Overseer -->|"reads status"| Telemetry
+    Overseer -->|"observes board"| Goals
+    Overseer -->|"recalls context"| Memory
+    Overseer -->|"launches workstreams"| Engineer
+    Overseer -->|"merge deploy authority"| SelfImprove
+    Overseer -->|"whispers via handoff"| Meetings
+
+    Meetings -->|"persist handoffs"| Memory
+    Meetings -->|"new goals"| Goals
+    Meetings -->|"agent session"| Engineer
+    Signal -->|"channel over backend"| Meetings
+
+    Operator -->|"commands and status"| Daemon
+    Operator -->|"reads live graph"| Memory
+    Operator -->|"edits board"| Goals
+    Operator -->|"chat and UI"| Meetings
+    Operator -->|"overseer tab"| Overseer
+    Operator -->|"metrics APIs"| Telemetry
+
+    Engineer -->|"claims and worktrees"| Goals
+    Engineer -->|"memory IPC"| Memory
+    Engineer -->|"benchmark verification"| Gym
+
+    Gym -->|"scores hypotheses"| SelfImprove
+    SelfImprove -->|"records outcomes"| Memory
+    Journal -->|"reads episodes and PRs"| Memory
+    Journal -->|"shown in dashboard"| Operator

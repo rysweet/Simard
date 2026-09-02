@@ -66,6 +66,12 @@ pub struct PrSnapshot {
     /// human-review gate: a PR carrying
     /// [`crate::creative_ideas::CREATIVE_IDEA_PR_LABEL`] is never auto-merged.
     pub labels: Vec<String>,
+    /// `isDraft` from `gh pr view --json ...,isDraft`. A draft PR can NEVER be
+    /// merged server-side (`gh pr merge` returns "Pull Request is still a
+    /// draft"), so the deterministic rail refuses it. Fail-closed: `None`
+    /// (field absent/unknown) is treated as NOT-mergeable — the draft gate
+    /// admits ONLY `Some(false)`. Mirrors [`OpenPrSummary::is_draft`].
+    pub is_draft: Option<bool>,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -108,6 +114,13 @@ pub struct OpenPrSummary {
     ///
     /// [`SIMARD_ENGINEER_PR_LABEL`]: crate::overseer::config::SIMARD_ENGINEER_PR_LABEL
     pub labels: Vec<String>,
+    /// `isDraft` from `gh pr list --json ...,isDraft`. A draft PR can NEVER be
+    /// merged server-side (`gh pr merge` returns "Pull Request is still a
+    /// draft"), so the autonomous-self-merge sensor (#4097) excludes it from the
+    /// ready-PR candidate set. Fail-closed: `None` (field absent/unknown from the
+    /// listing) is treated as NOT-ready — the sensor admits ONLY `Some(false)`.
+    /// Not read by the dashboard panel.
+    pub is_draft: Option<bool>,
 }
 
 /// One merged-PR summary for the journal's day-scoped "landed changes" table.
@@ -135,6 +148,7 @@ impl OpenPrSummary {
             checks: self.checks.clone(),
             base_ref_name: self.base_ref_name.clone(),
             labels: Vec::new(),
+            is_draft: self.is_draft,
         }
     }
 }
@@ -196,6 +210,38 @@ pub trait PrGhClient {
         _limit: u32,
     ) -> SimardResult<Vec<MergedPrSummary>> {
         Ok(Vec::new())
+    }
+
+    /// Run an arbitrary POSITIONAL `gh` argv (issue #4097 merge-queue hygiene:
+    /// `gh pr comment` / `gh pr close`). The caller builds the argv via the
+    /// audited builders in
+    /// [`crate::overseer::intervention`], which are structurally incapable of
+    /// carrying `--admin` / `--no-verify`. The default fails CLOSED so a fake or
+    /// an unwired client performs no mutation; [`RealPrGhClient`] overrides it to
+    /// shell out to the `gh` binary (argv-only, never shell-interpolated).
+    fn run_gh(&self, _argv: &[String]) -> SimardResult<()> {
+        Err(SimardError::MergeAuthorityGhCommandFailed {
+            reason: "run_gh not wired on this PrGhClient (fail-closed)".to_string(),
+        })
+    }
+
+    /// `gh pr close <pr> --repo <repo> --comment <comment>`.
+    ///
+    /// Added for the overseer's auto-doc-PR reconciliation pass (goal_hygiene):
+    /// it closes stale / superseded auto-generated `"Update documentation with
+    /// …"` drafts so at most one stays open. The `comment` is authored by the
+    /// reconciler (never operator-supplied free text) and explains WHY the PR was
+    /// closed (superseded by the canonical PR / stale CONFLICTING draft).
+    ///
+    /// The default impl is a **no-op** returning `Ok(())` so every existing
+    /// fake / unwired client performs NO mutation without needing a stub;
+    /// [`RealPrGhClient`] overrides it to shell out to `gh pr close` (argv-only,
+    /// never shell-interpolated). A no-op default (rather than the fail-closed
+    /// [`run_gh`](Self::run_gh) posture) is safe here because closing is a
+    /// hygiene convenience, not a correctness gate — a client that cannot close
+    /// simply leaves the duplicates open rather than erroring the cycle.
+    fn close_pr(&self, _repo: &str, _pr_number: u32, _comment: &str) -> SimardResult<()> {
+        Ok(())
     }
 }
 
@@ -330,7 +376,7 @@ impl PrGhClient for RealPrGhClient {
                     "--repo",
                     repo,
                     "--json",
-                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels",
+                    "body,statusCheckRollup,mergeable,reviewDecision,baseRefName,labels,isDraft",
                 ],
             )?;
             parse_pr_view_json(&stdout)
@@ -372,7 +418,7 @@ impl PrGhClient for RealPrGhClient {
                     "--state",
                     "open",
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels,isDraft",
                     "--limit",
                     &limit_s,
                 ],
@@ -401,7 +447,7 @@ impl PrGhClient for RealPrGhClient {
                     "--author",
                     author,
                     "--json",
-                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels",
+                    "number,title,headRefName,baseRefName,mergeable,statusCheckRollup,url,author,labels,isDraft",
                     "--limit",
                     &limit_s,
                 ],
@@ -441,6 +487,31 @@ impl PrGhClient for RealPrGhClient {
             parse_merged_pr_list_json(&stdout)
         })
     }
+
+    /// Shell out to `gh` with a POSITIONAL argv (never shell-interpolated). Used
+    /// for the #4097 merge-queue hygiene mutations (`gh pr comment` / `gh pr
+    /// close`), whose argv is built by the audited
+    /// [`crate::overseer::intervention`] builders that can never contain
+    /// `--admin` / `--no-verify`. Single attempt (a comment/close is a mutation,
+    /// like [`squash_merge`](Self::squash_merge)); fail-visible on a non-zero exit.
+    fn run_gh(&self, argv: &[String]) -> SimardResult<()> {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let label = format!("gh {}", refs.join(" "));
+        run_gh_checked(&label, &refs)?;
+        Ok(())
+    }
+
+    /// Close a PR with an explanatory comment. Single attempt (a close is a
+    /// mutation, like [`squash_merge`](Self::squash_merge)); fail-visible on a
+    /// non-zero exit. Argv is positional / never shell-interpolated.
+    fn close_pr(&self, repo: &str, pr_number: u32, comment: &str) -> SimardResult<()> {
+        let pr = pr_number.to_string();
+        run_gh_checked(
+            &format!("gh pr close {pr} --repo {repo}"),
+            &["pr", "close", &pr, "--repo", repo, "--comment", comment],
+        )?;
+        Ok(())
+    }
 }
 
 /// Parse `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`
@@ -461,6 +532,8 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         base_ref_name: String,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: Option<bool>,
     }
     #[derive(serde::Deserialize)]
     struct RawLabel {
@@ -519,6 +592,7 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
             .map(|l| l.name)
             .filter(|n| !n.is_empty())
             .collect(),
+        is_draft: raw.is_draft,
     })
 }
 
@@ -548,6 +622,8 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
         author: Option<RawAuthor>,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: Option<bool>,
     }
     #[derive(serde::Deserialize)]
     struct RawAuthor {
@@ -612,6 +688,7 @@ pub fn parse_pr_list_json(stdout: &[u8]) -> SimardResult<Vec<OpenPrSummary>> {
                     .map(|l| l.name)
                     .filter(|n| !n.is_empty())
                     .collect(),
+                is_draft: r.is_draft,
             }
         })
         .collect())
@@ -727,6 +804,26 @@ pub fn evaluate_objective_gates(
                 "CI check '{}' has state '{}' (expected SUCCESS/NEUTRAL/SKIPPED)",
                 check.name, check.state
             ));
+        }
+    }
+    // Gate 3: not a draft. A draft PR can never be merged server-side, so the
+    // rail refuses it deterministically. Fail-closed: an unknown draft state
+    // (`None` — `gh` did not report `isDraft`) is treated AS a draft, never
+    // waved through. Only an explicit `Some(false)` passes.
+    match snapshot.is_draft {
+        Some(false) => {}
+        Some(true) => {
+            return Err(
+                "PR is a draft (isDraft=true); a draft can never be merged — mark it ready first"
+                    .to_string(),
+            );
+        }
+        None => {
+            return Err(
+                "PR draft state is unknown (isDraft absent from `gh pr view`); failing closed \
+                 (treated as draft) rather than risk merging a draft"
+                    .to_string(),
+            );
         }
     }
     Ok(())
@@ -893,6 +990,7 @@ mod tests {
             ],
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            is_draft: Some(false),
         }
     }
 
@@ -1807,6 +1905,79 @@ mod tests {
             prs[0].labels,
             vec!["simard-autonomous".to_string()],
             "nameless/empty labels must be dropped, leaving only the real marker"
+        );
+    }
+
+    /// #4339 root-cause guard: the `gh pr list --json ...,isDraft` boundary must
+    /// project `isDraft` onto `OpenPrSummary.is_draft`. A draft row (`true`) and
+    /// a ready row (`false`) must round-trip to `Some(true)` / `Some(false)` so
+    /// the draft-exclusion gate can key on a KNOWN state. This is the exact
+    /// boundary the bug lived at — the field set never fetched `isDraft`.
+    #[test]
+    fn parse_pr_list_json_captures_is_draft() {
+        let stdout = br#"[
+            {
+                "number": 4336,
+                "title": "draft work in progress",
+                "headRefName": "engineer/4336-draft",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4336",
+                "author": { "login": "rysweet" },
+                "isDraft": true,
+                "statusCheckRollup": []
+            },
+            {
+                "number": 4337,
+                "title": "ready for merge",
+                "headRefName": "engineer/4337-ready",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4337",
+                "author": { "login": "rysweet" },
+                "isDraft": false,
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 2);
+        assert_eq!(
+            prs[0].is_draft,
+            Some(true),
+            "a draft row must project isDraft:true onto Some(true)"
+        );
+        assert_eq!(
+            prs[1].is_draft,
+            Some(false),
+            "a ready row must project isDraft:false onto Some(false)"
+        );
+    }
+
+    /// #4339 fail-closed at the parse boundary: a `gh pr list` row missing the
+    /// `isDraft` field must default to `None` (unknown), NOT `Some(false)`. The
+    /// draft gate admits ONLY `Some(false)`, so an unknown draft state is
+    /// excluded — never silently treated as ready. Guards against an accidental
+    /// `#[serde(default)]`-to-`false` regression.
+    #[test]
+    fn parse_pr_list_json_missing_is_draft_defaults_none_fail_closed() {
+        let stdout = br#"[
+            {
+                "number": 4338,
+                "title": "listing without isDraft field",
+                "headRefName": "engineer/4338",
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "url": "https://github.com/rysweet/Simard/pull/4338",
+                "author": { "login": "rysweet" },
+                "statusCheckRollup": []
+            }
+        ]"#;
+        let prs = parse_pr_list_json(stdout).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(
+            prs[0].is_draft, None,
+            "a missing isDraft field must default to None (unknown), never Some(false) — \
+             the gate then excludes it fail-closed"
         );
     }
 

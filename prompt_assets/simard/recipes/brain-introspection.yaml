@@ -18,15 +18,20 @@
 #   stats          — JSON the hook measured this run: live_memories,
 #                    sensory_pruned, consolidated_facts
 #
-# Output: text markers to stdout (one per line), parsed by
-# `parse_brain_introspection_text` in src/brain_introspection.rs:
-#   BRAIN_HEALTH: <line>        (>=1 REQUIRED)
-#   PATTERN: <line>             (0..n)
-#   REGRESSION: <line>          (0..n)
-#   PRUNE_CANDIDATE: <line>     (0..n, <= max_prune)
-#   PRUNE_REQUESTED=<count>     (<= max_prune; defaults to 0)
-#   CONSOLIDATED_FACTS=<count>  (advisory echo only)
-#   ISSUE_URL=<url>
+# Output: the recipe's FINAL ACT step calls the gated
+# `simard cognition record-brain-introspection` tool, which writes a typed,
+# owner-only (0o600), freshness-checked record to `record_path`. The Rust rail
+# reads that record FAIL-CLOSED (R1–R7) — it NEVER scrapes stdout text. See
+# src/brain_introspection_record.rs for the record schema + reader.
+#
+# Context vars (passed via -c):
+#   state_root     — path to ~/.simard (metrics, logs, memory live here)
+#   repo_path      — repository root
+#   record_path    — ABSOLUTE path the ACT step writes the typed record to
+#   max_prune      — HARD cap on value-bearing prune *recommendations* per run
+#   baseline_runs  — rolling window (prior runs) used as the regression baseline
+#   stats          — JSON the hook measured this run: live_memories,
+#                    sensory_pruned, consolidated_facts
 #
 # Design: a single agent step (mirrors disk-health-check.yaml) — the LLM runs
 # bash/gh internally to read metrics/logs, mine patterns, recommend SAFE BOUNDED
@@ -43,6 +48,7 @@ tags: ["simard", "memory", "introspection", "self-examination", "hygiene"]
 context:
   state_root: "~/.simard"
   repo_path: "/home/azureuser/src/Simard/worktrees/main"
+  record_path: ""
   max_prune: "25"
   baseline_runs: "7"
   stats: "{}"
@@ -82,8 +88,8 @@ steps:
         - cycles with 0 of N succeeded actions.
       Compare each to the rolling baseline of the previous `{{baseline_runs}}`
       runs (the `brain_introspection_*` metric series). Surface anomalies and
-      regressions. If there is no prior baseline (first run), emit
-      `BRAIN_HEALTH: no prior baseline`.
+      regressions. If there is no prior baseline (first run), record a single
+      `--brain-health "no prior baseline"` finding in the record step below.
 
       ## Phase 2 — PATTERNS
 
@@ -97,17 +103,18 @@ steps:
       Identify stale, low-value, redundant, or superseded memories (superseded
       facts, low-confidence/low-usage facts past a threshold, duplicate
       procedures, expired prospectives). DO NOT delete anything — this increment
-      is recommendation-only. Emit at most `{{max_prune}}` `PRUNE_CANDIDATE:`
-      lines and set `PRUNE_REQUESTED=` to the count. NEVER recommend pruning
-      provenance-bearing, high-value, or high-usage memories. Respect the cap.
+      is recommendation-only. Pass at most `{{max_prune}}` `--prune-candidate`
+      flags and set `--prune-requested` to the count in the record step below.
+      NEVER recommend pruning provenance-bearing, high-value, or high-usage
+      memories. Respect the cap.
 
       ## Phase 4 — CONSOLIDATE
 
       The hook already ran additive distillation (episodic -> semantic /
       procedural) this cycle; `stats.consolidated_facts` reports how many it
       promoted. Summarize what was consolidated and flag high-value episodes
-      worth promoting to durable facts/procedures (dedup via caller keys). Echo
-      the count as `CONSOLIDATED_FACTS=` (advisory).
+      worth promoting to durable facts/procedures (dedup via caller keys). The
+      count is measured daemon-side — you do not report it in the record.
 
       ## Phase 5 — OUTPUT (GitHub issue + metrics, NO snapshot doc)
 
@@ -127,26 +134,33 @@ steps:
       The issue body must contain: the brain-health summary (with baseline
       deltas), detected patterns, the prune candidates, the consolidation
       summary, and concrete actionable follow-ups (metrics to add, prompts to
-      fix, memories to prune) — as checklist items or spun-out issues. Emit the
-      resulting issue URL as `ISSUE_URL=`.
+      fix, memories to prune) — as checklist items or spun-out issues. Capture
+      the resulting issue URL for the record step below.
 
-      ## Required output markers
+      ## Record your findings (REQUIRED final ACT step)
 
-      Your FINAL output must contain these plain-text markers, each on its own
-      line (printed as plain text, NOT inside code fences). Any other lines are
-      ignored by the Rust shim.
+      Before you finish, record your findings EXACTLY ONCE by running the gated
+      tool below. This is the ONLY channel through which your findings reach the
+      Rust rail — do NOT print plain-text markers, and do NOT skip it. The tool
+      writes a typed, owner-only, freshness-checked record to `record_path`; the
+      rail reads that record fail-closed. Emitting stdout text has no effect.
 
       ```
-      BRAIN_HEALTH: <one finding per line>      # at least one REQUIRED
-      PATTERN: <one pattern per line>           # zero or more
-      REGRESSION: <one regression per line>     # zero or more
-      PRUNE_CANDIDATE: <one candidate per line> # zero or more, <= max_prune
-      PRUNE_REQUESTED=<count, <= max_prune>     # defaults to 0
-      CONSOLIDATED_FACTS=<count>                # advisory echo only
-      ISSUE_URL=<url of the created/updated issue>
+      simard cognition record-brain-introspection \
+        --brain-health "<one finding>" \
+        --pattern "<one detected pattern>" \
+        --regression "<one regression vs baseline>" \
+        --prune-candidate "<one prune recommendation>" \
+        --prune-requested <count, <= max_prune> \
+        --issue-url "<url of the created/updated issue>" \
+        --written-at-epoch <current unix epoch seconds> \
+        --record-path {{record_path}}
       ```
 
-      `BRAIN_HEALTH:` is REQUIRED (at least one non-empty line). `PRUNE_REQUESTED`
-      must be `<= {{max_prune}}`. Never emit a snapshot doc — route everything to
-      the brain-introspection issue and/or metrics.
+      Pass at least one `--brain-health` (REQUIRED). `--pattern`,
+      `--regression`, and `--prune-candidate` are repeatable (zero or more each);
+      emit at most `{{max_prune}}` `--prune-candidate` flags and set
+      `--prune-requested` to that count (`<= {{max_prune}}`, defaults to 0). Pass
+      `--issue-url` once. Never emit a snapshot doc — route everything to the
+      brain-introspection issue and the record above.
     output: "brain_introspection_report"
