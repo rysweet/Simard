@@ -26,13 +26,14 @@ mod prioritize;
 // Re-export all public items so `crate::goal_curation::X` still works.
 pub use operations::CarryoverVerification;
 pub use operations::{
-    BoardPlacement, DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, active_goals_as_records,
-    add_active_goal, add_backlog_item, archive_completed, board_snapshot_hash,
-    clear_goal_assignment, default_seed_goals, load_goal_board, overwrite_memory_cache,
-    persist_board, promote_to_active, read_latest_carryover, record_as_active_goal,
-    resolve_seed_goals, rollup_parent_progress, save_goal_board, save_goal_board_with_removals,
-    seed_board_from_seed_goals, seed_default_board, simard_state_root, update_goal_progress,
-    update_goal_progress_with_evidence, verify_goal_carryover, write_goal_carryover,
+    BoardPlacement, DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, StandingReconciliation,
+    active_goals_as_records, add_active_goal, add_backlog_item, archive_completed,
+    board_snapshot_hash, clear_goal_assignment, default_seed_goals, load_goal_board,
+    overwrite_memory_cache, persist_board, promote_to_active, read_latest_carryover,
+    reconcile_standing_markers, record_as_active_goal, resolve_seed_goals, rollup_parent_progress,
+    save_goal_board, save_goal_board_with_removals, seed_board_from_seed_goals, seed_default_board,
+    simard_state_root, update_goal_progress, update_goal_progress_with_evidence,
+    verify_goal_carryover, write_goal_carryover,
 };
 pub use types::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalEdge,
