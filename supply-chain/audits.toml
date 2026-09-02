@@ -12,3 +12,9 @@ who = "Simard operator (rysweet)"
 criteria = "safe-to-deploy"
 delta = "0.8.3 -> 0.8.4"
 notes = "Reviewed 0.8.3 -> 0.8.4: filters empty certificate-directory paths; no new unsafe code, process execution, network behavior, or dependencies."
+
+[[audits.uuid]]
+who = "Simard operator (rysweet)"
+criteria = "safe-to-deploy"
+delta = "1.23.1 -> 1.23.4"
+notes = "Reviewed 1.23.1 -> 1.23.4: parser diagnostics and empty-input panic fix; no new unsafe code, build scripts, process execution, network behavior, or dependencies."

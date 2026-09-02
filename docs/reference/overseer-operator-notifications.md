@@ -461,7 +461,7 @@ The STARTTLS sender promotes these to direct dependencies, pinned to `Cargo.lock
 `--no-default-features` still building:
 
 - `rustls` `0.23.38` (with the `ring` crypto provider enabled explicitly)
-- `rustls-native-certs` `0.8.3` (OS trust store)
+- `rustls-native-certs` `0.8.4` (OS trust store)
 - `webpki-roots` `1.0.7` (compiled root fallback when the OS store is empty)
 - `base64` `0.22.1` (AUTH LOGIN payload encoding, inside TLS only)
 

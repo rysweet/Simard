@@ -182,7 +182,7 @@ toml = "=1.1.2"
 tokio = { version = "=1.52.1", features = ["rt", "rt-multi-thread", "process", "io-util", "time", "net", "macros", "sync"] }
 axum = { version = "=0.8.9", features = ["ws"] }
 tower-http = { version = "=0.6.8", features = ["cors", "auth"] }
-uuid = { version = "=1.23.1", features = ["v4", "v7"] }
+uuid = { version = "=1.23.4", features = ["v4", "v7"] }
 chrono = "=0.4.44"
 # Issue #2727: the dashboard header renders the deployment/build timestamp in
 # US Pacific time with the date-correct PST/PDT abbreviation. chrono-tz is the
