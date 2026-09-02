@@ -185,3 +185,177 @@ fn persist_step_keeps_most_recent_records_after_cap_exceeded() {
         "SessionSummary survivor timestamps are coherent"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// F1 (issue #4929) — Bounded concurrent capture of engineer child output.
+//
+// PRIMARY FIX. The daemon's runaway swap/RSS was attributed to
+// `run_engineer_subprocess` using `Child::wait_with_output()`, which fully
+// buffers the entire stdout + stderr of an unbounded-runtime `amplihack`
+// engineer in RAM until the child exits. A chatty, long-running agent grows
+// the daemon heap without limit for the life of the cycle.
+//
+// The fix replaces full buffering with a fixed-capacity per-pipe ring that
+// retains only the trailing `SUMMARY_TAIL_BYTES` window. These tests pin the
+// bounded-capture contract.
+//
+// ─── REQUIRED SEAM (implemented in Step 8) ────────────────────────────────
+// The tests below pin the contract of `agent_spawn`'s private, crate-visible
+// bounded-tail capture helper:
+//
+//   pub(crate) fn capture_bounded_tail<R: std::io::Read>(
+//       reader: R,
+//       cap: usize,
+//   ) -> crate::error::SimardResult<(Vec<u8>, usize)>
+//
+// It fully drains `reader` and returns `(tail, dropped_bytes)` where:
+//   * `tail` is the LAST `cap` bytes of the stream (fewer if the stream is
+//     shorter than `cap`),
+//   * `tail.len() <= cap` at all times — the O(1) heap invariant that bounds
+//     capture RAM regardless of how many bytes the child emits, and
+//   * `dropped_bytes == total_bytes_read - tail.len()` — the count discarded
+//     from the front, surfaced (not silently swallowed) so the truncation
+//     banner can report it.
+//
+// A read error must surface as `Err` (no silent swallow / no partial success
+// masquerading as success).
+// ═══════════════════════════════════════════════════════════════════════════
+
+use super::agent_spawn::{
+    AgentKind, SUMMARY_TAIL_BYTES, capture_bounded_tail, run_engineer_subprocess,
+};
+use std::io::Cursor;
+
+/// A stream far larger than the cap keeps only the trailing `cap` bytes; the
+/// heap footprint is O(cap), not O(input). This is the core anti-runaway
+/// invariant: a child that emits gigabytes contributes at most `cap` bytes.
+#[test]
+fn capture_bounded_tail_retains_only_trailing_cap_bytes() {
+    let cap = SUMMARY_TAIL_BYTES;
+    let total = cap * 25 + 777; // deliberately not a multiple of any chunk size
+    let input: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+
+    let (tail, dropped) =
+        capture_bounded_tail(Cursor::new(input.clone()), cap).expect("capture must succeed");
+
+    assert!(
+        tail.len() <= cap,
+        "ring invariant violated: tail.len()={} exceeds cap={cap}",
+        tail.len()
+    );
+    assert_eq!(
+        tail.len(),
+        cap,
+        "with more than `cap` bytes of input, the retained tail must be exactly `cap` bytes"
+    );
+    assert_eq!(
+        &tail[..],
+        &input[total - cap..],
+        "the retained window must be the LAST `cap` bytes of the stream"
+    );
+    assert_eq!(
+        dropped,
+        total - cap,
+        "dropped_bytes must account for every byte discarded from the front"
+    );
+    assert_eq!(
+        dropped + tail.len(),
+        total,
+        "dropped + retained must equal the total bytes read (nothing miscounted)"
+    );
+}
+
+/// A stream shorter than the cap is retained whole with zero drops.
+#[test]
+fn capture_bounded_tail_keeps_short_stream_whole() {
+    let cap = SUMMARY_TAIL_BYTES;
+    let input = b"a short engineer summary that fits well under the cap".to_vec();
+    assert!(input.len() < cap);
+
+    let (tail, dropped) =
+        capture_bounded_tail(Cursor::new(input.clone()), cap).expect("capture must succeed");
+
+    assert_eq!(tail, input, "a sub-cap stream must be retained verbatim");
+    assert_eq!(
+        dropped, 0,
+        "nothing is dropped when the stream fits in `cap`"
+    );
+}
+
+/// An empty stream yields an empty tail and no drops — a total function, no
+/// panic, no silent fallback.
+#[test]
+fn capture_bounded_tail_handles_empty_stream() {
+    let (tail, dropped) =
+        capture_bounded_tail(Cursor::new(Vec::<u8>::new()), SUMMARY_TAIL_BYTES).expect("ok");
+    assert!(tail.is_empty());
+    assert_eq!(dropped, 0);
+}
+
+/// Boundary: exactly `cap` bytes are retained whole with zero drops (off-by-one
+/// guard on the ring cap).
+#[test]
+fn capture_bounded_tail_exact_cap_is_lossless() {
+    let cap = 4096;
+    let input: Vec<u8> = (0..cap).map(|i| (i % 97) as u8).collect();
+    let (tail, dropped) = capture_bounded_tail(Cursor::new(input.clone()), cap).expect("ok");
+    assert_eq!(tail, input);
+    assert_eq!(dropped, 0);
+}
+
+/// End-to-end behaviour-preservation guard: driving the real subprocess path
+/// against an adversarial child that emits far more than `SUMMARY_TAIL_BYTES`
+/// must still return a bounded summary (≤ cap + a small banner margin) carrying
+/// the `[truncated …]` banner — the returned-summary contract is unchanged
+/// while the capture is now O(1) in RAM.
+#[test]
+#[serial(simard_amplihack_bin_env, cognitive_memory)]
+fn run_engineer_subprocess_returns_bounded_summary_for_adversarial_output() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A stub `amplihack` that floods stdout with 200 KiB of output then exits 0.
+    let shim = dir.path().join("amplihack-flood");
+    std::fs::write(
+        &shim,
+        "#!/usr/bin/env bash\nset -uo pipefail\nhead -c 200000 /dev/zero | tr '\\0' 'A'\necho\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&shim, perms).unwrap();
+    }
+
+    // SAFETY: guarded by `#[serial(simard_amplihack_bin_env)]` so no other test
+    // mutates this var concurrently. Restored below.
+    let prior = std::env::var("SIMARD_AMPLIHACK_BIN").ok();
+    unsafe {
+        std::env::set_var("SIMARD_AMPLIHACK_BIN", &shim);
+    }
+
+    // RustyClawd path reads no stdin, so the adversarial child is fully
+    // deterministic (no feeder interaction) — it isolates the capture bound.
+    let result = run_engineer_subprocess("objective", dir.path(), AgentKind::RustyClawd);
+
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("SIMARD_AMPLIHACK_BIN", v),
+            None => std::env::remove_var("SIMARD_AMPLIHACK_BIN"),
+        }
+    }
+
+    let summary = result.expect("adversarial-output child exits 0 → Ok summary");
+    assert!(
+        summary.len() <= SUMMARY_TAIL_BYTES + 512,
+        "returned summary must stay bounded to ~SUMMARY_TAIL_BYTES; got {} bytes",
+        summary.len()
+    );
+    assert!(
+        summary.contains("truncated"),
+        "a summary built from a >cap child must carry the truncation banner; got:\n{summary}"
+    );
+}
+
+use serial_test::serial;

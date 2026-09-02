@@ -1,7 +1,7 @@
 ---
 title: Recipe-brain verdict/decision parsing
 description: Current recipe-backed brain parsing contract; OODA use becomes legacy only after verified typed-route cutover.
-last_updated: 2026-07-25
+last_updated: 2026-07-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -534,6 +534,19 @@ For the design rationale, see
 
 ## Reasoner JSON recovery at the parse chokepoint (#2658 lineage)
 
+> **Retired in #4991.** The two named wrapper functions in this section —
+> `recipe_output::extract_json_payload` and `extract_and_parse_json` — were
+> removed as dead code (they had **zero production callers** after the typed
+> record-contract cutover). The composed JSON-hardening they wrapped is
+> **retained** and still public: `recover_json_view` (which composes
+> `strip_json_comments`, `strip_json_trailing_commas`,
+> `escape_json_string_control_chars`, `escape_json_string_invalid_escapes`,
+> `normalize_python_json_literals`, and `normalize_json_number_specials`),
+> together with `strip_recipe_noise` and `last_balanced_object`. The prose and
+> code below are kept as the historical design rationale for that recovery
+> layer; where it references the two retired wrappers, read it as "the retained
+> primitives, composed directly."
+
 The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI /
 log noise but returns the balanced `{…}` object body **verbatim**. Six common
 real-world LLM JSON defects therefore survive into the extracted payload and fail
@@ -637,10 +650,30 @@ is legitimate string content
 (a URL, a glob, a quoted sentence) is preserved, and a raw newline/tab used as JSON
 whitespace *between* tokens is left untouched.
 
-Sites routed through it in `src/ooda_brain/recipe_brain.rs`:
-`parse_admission_decision`, `parse_resource_admission_decision`,
-`parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
-`extract_decision_envelope` (the decide path), and `extract_orient_envelope`.
+Sites routed through it in `src/ooda_brain/recipe_brain.rs`: the engineer
+**lifecycle** `DecisionEnvelope` path (`extract_decision_envelope`, ~L2187) — the
+last remaining stdout-scraping seam, out of scope for Group D.
+
+!!! note "Converted seams no longer route through the scraper"
+    The decide/orient path ([#4719](https://github.com/rysweet/Simard/issues/4719)
+    Group A), the engineer/resource admission path (Group B), and the
+    creative-ideas semantic-dedup + consolidation path (Group C) have been
+    converted to the typed-record pattern: the recipe **acts via a gated `simard
+    ooda record-*` tool** and RecipeBrain reads a typed, `0o600`,
+    freshness-checked record fail-closed — it no longer scrapes their stdout. The
+    former Group C scrapers `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+    `IdeaDedupEnvelope`, and `IdeaConsolidationEnvelope` are **deleted**; the two
+    seams now read
+    [`IdeaDedupDecisionRecord` / `IdeaConsolidationRecord`](./ooda-record-idea-dedup-consolidation-cli.md)
+    via `read_verified_idea_dedup` / `read_verified_idea_consolidation`. Group D
+    (#4967) converted the **outcome-verify** and **RustyClawd** seams the same way
+    (the former `parse_outcome_decision`, `outcome_decision_from_variant`,
+    `OutcomeEnvelope`, `PerGoalAction::from_recipe_envelope`, and `PerGoalEnvelope`
+    are **deleted**; the seams now read `OutcomeDecisionRecord` /
+    `PerGoalDecisionRecord` via `read_verified_outcome` / `read_verified`). The
+    shared `extract_and_parse_json` family is **retained** only for the engineer
+    **lifecycle** `DecisionEnvelope` path, which remains stdout-scraped and is not
+    part of Group D — so epic #4719 is **not** yet complete.
 
 Leniency never widens beyond these six named defects: an unquoted key, an
 elided array element, a missing value, a lone `/` that is not a comment, a

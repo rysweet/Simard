@@ -24,9 +24,14 @@ use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
+use crate::ooda_brain::ThreadName;
 
 /// Stable telemetry id.
 const ENGINEER_LOG_ANALYSIS_ID: &str = "engineer_log_analysis";
+/// The agentic narration recipe this rail invokes (production only) to surface a
+/// natural-language `reasoning_summary` from a typed record. The deterministic
+/// scan + dedup + issue-fencing gates stay in Rust; the recipe narrates them.
+pub const RECIPE: &str = "engineer-log-triage";
 
 /// Number of times a failure signature must recur within the window before it
 /// is treated as a durable finding (bounds noise; internal — not env-tunable).
@@ -66,6 +71,10 @@ impl Default for EngineerLogAnalysisConfig {
 pub struct EngineerLogAnalysisThread {
     cfg: EngineerLogAnalysisConfig,
     gh: Box<dyn GhClient + Send>,
+    /// Production-only: surface a natural-language `reasoning_summary` via the
+    /// `engineer-log-triage` recipe after the deterministic scan. Off under the
+    /// test constructor so offline unit tests spawn no recipe.
+    narrate: bool,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -82,7 +91,10 @@ impl EngineerLogAnalysisThread {
         if let Some(v) = read_bool_env("SIMARD_ENGINEER_LOG_ANALYSIS_DRY_RUN") {
             cfg.dry_run = v;
         }
-        Self::with_client(cfg, Box::new(RealGhClient::new()))
+        let mut thread = Self::with_client(cfg, Box::new(RealGhClient::new()));
+        // Production surfaces a natural-language reasoning_summary via the recipe.
+        thread.narrate = true;
+        thread
     }
 
     /// Build from an explicit config with an injected [`GhClient`] (test seam —
@@ -92,6 +104,7 @@ impl EngineerLogAnalysisThread {
         Self {
             cfg,
             gh,
+            narrate: false,
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -219,6 +232,26 @@ impl CognitiveThread for EngineerLogAnalysisThread {
             "deduped": deduped,
             "errors": errors,
         });
+
+        // Production-only narration: after the deterministic, bounded, dedup'd
+        // scan (which owns every durable issue-filing effect above), invoke the
+        // recipe to surface a natural-language reasoning_summary from a typed
+        // record. Never runs under the offline test constructor (narrate=false).
+        if success
+            && self.narrate
+            && !dry_run
+            && let Some(narrated) = super::super::recipe_rail::narrate_pure_thread(
+                ctx.repo_root,
+                ctx.state_root,
+                RECIPE,
+                ThreadName::EngineerLogAnalysis,
+                &summary,
+                start,
+            )
+        {
+            return narrated;
+        }
+
         if success {
             ThreadOutcome::ok(summary, start.elapsed()).with_detail(detail)
         } else {

@@ -29,6 +29,8 @@ use std::process::Command;
 
 use crate::recipe_context_file::ContextFile;
 
+use crate::ooda_brain::{ThreadName, read_verified_thread_reasoning};
+
 use super::thread::ThreadOutcome;
 
 /// The master env gate that must be truthy for *any* cognitive thread to run.
@@ -79,14 +81,140 @@ impl InvokeResult {
     /// Map the verdict to a [`ThreadOutcome`]: `Ran` => a successful tick,
     /// `Failed` => a failed tick surfaced LOUDLY with its detail. No third state
     /// can quietly turn a failure into a wrote-nothing success.
+    ///
+    /// NOTE: reflective threads no longer route through this method — they use
+    /// [`run_reflective_thread`], which surfaces the recipe's natural-language
+    /// `reasoning_summary` from a typed record instead of a boolean success
+    /// string. This mapping is retained for the failure-verdict unit tests only.
     pub fn into_outcome(self, recipe_name: &str, duration: std::time::Duration) -> ThreadOutcome {
         match self {
-            InvokeResult::Ran => ThreadOutcome::ok(format!("{recipe_name}: ok"), duration),
+            InvokeResult::Ran => ThreadOutcome::ok(format!("{recipe_name}: ran"), duration),
             InvokeResult::Failed { detail } => {
                 ThreadOutcome::failed(format!("{recipe_name}: {detail}"), duration)
             }
         }
     }
+}
+
+/// The per-thread reasoning-record path: one file per thread under the state
+/// root, pre-truncated each invocation. Pinned by the reference doc
+/// (`docs/reference/simard-cognition-record-thread-reasoning-cli.md`).
+pub fn reasoning_record_path(state_root: &Path, thread: ThreadName) -> PathBuf {
+    state_root
+        .join("cognitive_threads")
+        .join("reasoning")
+        .join(format!("{}.json", thread.label()))
+}
+
+/// The one shared brick every reflective thread's `tick` calls: derive the
+/// per-thread record path, PRE-TRUNCATE any stale artifact (anti-replay),
+/// capture `invoke_start`, pass `-c record_path=<abs>` so the recipe's ACT step
+/// writes there, invoke the recipe, then READ the typed record FAIL-CLOSED and
+/// surface its natural-language `reasoning_summary` into `ThreadOutcome.summary`.
+///
+/// This is what killed the boolean success-string collapse: a recipe that ran
+/// but wrote no valid record is a FAILURE (never a silent success), and the
+/// summary is sourced from the typed record — NEVER scraped from stdout.
+///
+/// `extra_ctx_vars` are the thread's own inputs (`state_root`, fenced memory
+/// payloads, counts); the rail adds `record_path` itself.
+pub fn run_reflective_thread<I: RecipeInvoker + ?Sized>(
+    invoker: &I,
+    recipe_name: &str,
+    thread: ThreadName,
+    state_root: &Path,
+    extra_ctx_vars: Vec<(&str, String)>,
+    start: std::time::Instant,
+) -> ThreadOutcome {
+    // Anti-replay part 1: derive the per-thread path and delete any leftover
+    // record BEFORE spawning, so a prior run's reasoning can never be read as
+    // current. A missing file is fine.
+    let record_path = reasoning_record_path(state_root, thread);
+    let _ = std::fs::remove_file(&record_path);
+
+    // Capture invoke_start AFTER pre-truncate and BEFORE spawn: a record written
+    // this invocation must have `mtime >= invoke_start` (R7).
+    let invoke_start = std::time::SystemTime::now();
+
+    // Pass the ABSOLUTE record path so the recipe's ACT step
+    // (`simard cognition record-thread-reasoning --record-path {{record_path}}`)
+    // writes exactly there.
+    let mut ctx_vars: Vec<(&str, String)> = Vec::with_capacity(extra_ctx_vars.len() + 1);
+    ctx_vars.push(("record_path", record_path.display().to_string()));
+    ctx_vars.extend(extra_ctx_vars);
+
+    let result = invoker.invoke(recipe_name, &ctx_vars);
+    let duration = start.elapsed();
+
+    match result {
+        // The recipe exited 0 — now the ONLY source of truth is the typed record
+        // it wrote via its gated tool call. Read it fail-closed.
+        InvokeResult::Ran => {
+            match read_verified_thread_reasoning(&record_path, thread, invoke_start) {
+                Ok(rec) => ThreadOutcome::ok(rec.reasoning_summary, duration),
+                Err(e) => {
+                    // No `unwrap_or`, no stdout fallback: a recipe that "ran" but
+                    // wrote no valid record is a FAILURE, logged in the canonical
+                    // `FAILED — R{n} <reason>` format so an operator can tell which
+                    // fail-closed check tripped.
+                    let line = format!(
+                        "cognitive-thread: {}: FAILED — R{} {}",
+                        thread.label(),
+                        e.code,
+                        e.detail
+                    );
+                    tracing::warn!(
+                        target: "simard::cognitive_threads",
+                        thread = thread.label(),
+                        recipe = recipe_name,
+                        r_code = e.code,
+                        "{line}"
+                    );
+                    ThreadOutcome::failed(line, duration)
+                }
+            }
+        }
+        // A non-zero recipe run is a LOUD failure, unchanged.
+        InvokeResult::Failed { detail } => ThreadOutcome::failed(
+            format!(
+                "cognitive-thread: {}: FAILED — recipe run failed: {}",
+                thread.label(),
+                bound_diag(&detail)
+            ),
+            duration,
+        ),
+    }
+}
+
+/// Production-only narration for the four recipe-free (pure-Rust) threads —
+/// interoception, maintenance, engineer_log_analysis, creative_ideas. After a
+/// thread's deterministic sensing/gates have already performed EVERY durable
+/// effect, this surfaces a natural-language `reasoning_summary` from a typed
+/// record by invoking the thread's narration recipe through the identical
+/// fail-closed [`run_reflective_thread`] path the reflective threads use. The
+/// `observations` string is fenced before it rides as the `observations` ctx var.
+///
+/// Returns `Some(outcome)` ONLY when narration produced a successful tick (the
+/// caller returns it in place of its deterministic summary); `None` when
+/// narration was skipped-by-failure, so the caller falls back to its own
+/// deterministic outcome. Narration can therefore never DOWNGRADE an
+/// already-successful tick.
+pub fn narrate_pure_thread(
+    repo_root: &Path,
+    state_root: &Path,
+    recipe_name: &str,
+    thread: ThreadName,
+    observations: &str,
+    start: std::time::Instant,
+) -> Option<ThreadOutcome> {
+    let invoker = RecipeRunnerInvoker::new(repo_root.to_path_buf(), state_root.to_path_buf());
+    let ctx_vars: Vec<(&str, String)> = vec![
+        ("state_root", state_root.display().to_string()),
+        ("observations", fence_untrusted(observations)),
+    ];
+    let narrated =
+        run_reflective_thread(&invoker, recipe_name, thread, state_root, ctx_vars, start);
+    narrated.success.then_some(narrated)
 }
 
 /// The memory IPC socket a reflective recipe inherits so a bare `simard memory
@@ -290,8 +418,13 @@ fn looks_high_entropy(run: &str) -> bool {
             '0'..='9' => has_digit = true,
             _ => {}
         }
+        // Both classes seen — the verdict can no longer change, so stop
+        // scanning the rest of a potentially long blob.
+        if has_alpha && has_digit {
+            return true;
+        }
     }
-    has_alpha && has_digit
+    false
 }
 
 /// Validate + normalize an LLM-derived concept key (SR-7). Returns `Some(key)`

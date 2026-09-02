@@ -197,6 +197,12 @@ pub(crate) struct RecordVerdictArgs {
     pub reason: String,
     pub run_token: String,
     pub state_root: Option<PathBuf>,
+    /// Whether the judge marked this hold autonomously fixable (rework loop,
+    /// issue #4911). Only ever true for a `hold`.
+    pub reworkable: bool,
+    /// The plain-English concern the rework agent must address. Present iff
+    /// `reworkable`. `--concern @FILE` reads the text from disk.
+    pub concern: Option<String>,
 }
 
 /// Take a flag's value: inline (`--flag=value`) if present, else the next argv
@@ -224,6 +230,8 @@ pub(crate) fn parse_record_verdict_args(args: Vec<String>) -> Result<RecordVerdi
     let mut reason: Option<String> = None;
     let mut run_token: Option<String> = None;
     let mut state_root: Option<PathBuf> = None;
+    let mut reworkable = false;
+    let mut concern: Option<String> = None;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -240,6 +248,17 @@ pub(crate) fn parse_record_verdict_args(args: Vec<String>) -> Result<RecordVerdi
             "verdict" => verdict = Some(record_flag_value("verdict", inline, &mut iter)?),
             "reason" => reason = Some(record_flag_value("reason", inline, &mut iter)?),
             "run-token" => run_token = Some(record_flag_value("run-token", inline, &mut iter)?),
+            "reworkable" => {
+                // A pure boolean switch: reject an accidental `--reworkable=…`.
+                if inline.is_some() {
+                    return Err("--reworkable is a switch and takes no value".to_string());
+                }
+                reworkable = true;
+            }
+            "concern" => {
+                let raw = record_flag_value("concern", inline, &mut iter)?;
+                concern = Some(resolve_concern_value(&raw)?);
+            }
             "state-root" => {
                 state_root = Some(PathBuf::from(record_flag_value(
                     "state-root",
@@ -282,6 +301,30 @@ pub(crate) fn parse_record_verdict_args(args: Vec<String>) -> Result<RecordVerdi
         return Err("--run-token must be non-empty".to_string());
     }
 
+    // Rework-loop contradiction guards (issue #4911). A reworkable hold is the
+    // ONLY shape that carries a concern; anything else is rejected loudly rather
+    // than writing a contradictory record.
+    if reworkable && verdict != VerdictKind::Hold {
+        return Err(
+            "--reworkable is only valid with `--verdict hold` (a merge cannot be reworked)"
+                .to_string(),
+        );
+    }
+    if concern.is_some() && !reworkable {
+        return Err("--concern requires --reworkable (it is the rework agent's brief)".to_string());
+    }
+    if reworkable {
+        match concern.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => {}
+            _ => {
+                return Err(
+                    "--reworkable requires a non-empty --concern for the rework agent to act on"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
     Ok(RecordVerdictArgs {
         pr,
         repo,
@@ -289,7 +332,27 @@ pub(crate) fn parse_record_verdict_args(args: Vec<String>) -> Result<RecordVerdi
         reason,
         run_token,
         state_root,
+        reworkable,
+        concern,
     })
+}
+
+/// Resolve a `--concern` value: a literal string, or `@FILE` read from disk
+/// (keeping large concerns off argv → no E2BIG). A leading literal `@` can be
+/// escaped as `@@`.
+fn resolve_concern_value(raw: &str) -> Result<String, String> {
+    if let Some(path) = raw.strip_prefix('@') {
+        if let Some(literal) = path.strip_prefix('@') {
+            // `@@…` is an escaped literal that itself starts with `@`.
+            return Ok(format!("@{literal}"));
+        }
+        if path.is_empty() {
+            return Err("--concern @FILE requires a file path after '@'".to_string());
+        }
+        return std::fs::read_to_string(path)
+            .map_err(|e| format!("--concern @{path}: could not read file: {e}"));
+    }
+    Ok(raw.to_string())
 }
 
 /// Run `simard merge record-verdict`, returning the process exit code
@@ -305,13 +368,17 @@ pub(crate) fn run_record_verdict(args: Vec<String>) -> i32 {
     };
 
     let state_root = parsed.state_root.clone().unwrap_or_else(simard_state_root);
-    let record = MergeVerdictRecord::new(
+    let mut record = MergeVerdictRecord::new(
         parsed.pr,
         &parsed.repo,
         parsed.verdict,
         &parsed.reason,
         &parsed.run_token,
     );
+    if parsed.reworkable {
+        record.reworkable = Some(true);
+        record.concern = parsed.concern.clone();
+    }
     match write_record(&state_root, &record) {
         Ok(()) => {
             eprintln!(

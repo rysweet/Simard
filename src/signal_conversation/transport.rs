@@ -58,6 +58,25 @@ pub struct ParsedInbound {
     /// true Note to Self (destined for the account itself) from a sync of a
     /// message to a third party. `None` for a normal `dataMessage`.
     pub sync_destination: Option<String>,
+    /// The Signal group id (`groupInfo.groupId`) this message was sent to, if
+    /// any — parsed from `dataMessage.groupInfo.groupId` or
+    /// `syncMessage.sentMessage.groupInfo.groupId`. Carried through **verbatim**
+    /// as delivered (base64/hex, no re-encoding). `None` for a direct
+    /// (non-group) message — a missing group can never masquerade as a group,
+    /// so the operator-liaison group filter is regression-safe.
+    pub group_id: Option<String>,
+}
+
+/// Extract `groupInfo.groupId` from a `dataMessage` / `sentMessage` object,
+/// returning `None` when the object carries no group (a direct message) or a
+/// `groupInfo` without a string `groupId`. Total — never panics on untrusted
+/// input.
+fn extract_group_id(message: &Value) -> Option<String> {
+    message
+        .get("groupInfo")
+        .and_then(|g| g.get("groupId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Parse one newline-delimited JSON-RPC line from the signal-cli daemon into a
@@ -93,10 +112,8 @@ pub fn parse_incoming(line: &str) -> Option<ParsedInbound> {
         .map(|d| d as u32);
 
     // A normal delivered text message (dedicated-number path — unchanged).
-    if let Some(text) = envelope
-        .get("dataMessage")
-        .and_then(|m| m.get("message"))
-        .and_then(Value::as_str)
+    if let Some(data_message) = envelope.get("dataMessage")
+        && let Some(text) = data_message.get("message").and_then(Value::as_str)
     {
         if text.is_empty() {
             return None;
@@ -107,6 +124,7 @@ pub fn parse_incoming(line: &str) -> Option<ParsedInbound> {
             source_device,
             is_sync_sent: false,
             sync_destination: None,
+            group_id: extract_group_id(data_message),
         });
     }
 
@@ -130,6 +148,7 @@ pub fn parse_incoming(line: &str) -> Option<ParsedInbound> {
             source_device,
             is_sync_sent: true,
             sync_destination,
+            group_id: extract_group_id(sent),
         });
     }
 
@@ -185,6 +204,24 @@ pub fn build_send_request(id: u64, account: &str, recipient: &str, text: &str) -
         "params": {
             "account": account,
             "recipient": [recipient],
+            "message": text,
+        }
+    });
+    req.to_string()
+}
+
+/// Build a newline-delimited JSON-RPC `send` request targeting a Signal **group**
+/// (`params.groupId`), not a single recipient. Used by the Overseer operator-
+/// liaison to reply on the operator group. `recipient` and `groupId` are mutually
+/// exclusive in one request; this variant emits only `groupId`.
+pub fn build_send_request_group(id: u64, account: &str, group_id: &str, text: &str) -> String {
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "send",
+        "params": {
+            "account": account,
+            "groupId": group_id,
             "message": text,
         }
     });

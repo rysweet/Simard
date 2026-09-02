@@ -221,6 +221,22 @@ fn commit_cycle_reasserts_operator_done_gate_pin_over_stripped_in_flight() {
         .expect("goal present after reload");
     assert!(g.wip_refs.iter().any(|r| r.ref_id == "4448"));
     assert!(g.description.contains("Done when:"));
+
+    // Pin-STORE durability (issue #4930, S3): the finish line surviving on the
+    // board is downstream of the durable pin itself surviving. Assert the pin
+    // record is still present and intact after the commit cycle, so the next
+    // cycle keeps re-asserting it — the marker on the goal is a consequence, not
+    // the source of truth.
+    let pins = load_done_gate_pins(root);
+    let pin = pins
+        .get("roster")
+        .expect("done-gate pin must survive the cycle");
+    assert_eq!(pin.issue.as_deref(), Some("4448"));
+    assert_eq!(
+        pin.criteria.as_deref(),
+        Some("roster is identity-owned and deploy-durable"),
+        "the durable pin fields must be intact, not just the goal marker"
+    );
 }
 
 #[test]

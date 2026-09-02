@@ -1,5 +1,6 @@
 # ooda-resource-admission.yaml — Recipe-runner recipe for the OODA RESOURCE
-# admission brain (issue #2706): resource-aware engineer admission.
+# admission brain (issue #2706; Group B typed-record rework, #4906):
+# resource-aware engineer admission.
 #
 # Runs at the spawn/admission decision point, AFTER the overlap-aware gate and
 # BEFORE a NEW engineer's worktree is allocated. It reasons about the HOST
@@ -13,22 +14,29 @@
 #
 # Sibling of ooda-engineer-lifecycle.yaml; resolved beside it by recipe_brain.rs.
 #
-# Context vars (passed via -c, each already sanitized by the Rust shim; any
-# unavailable probe renders as the literal string "unknown"):
-#   goal_id, disk_used_pct, disk_free_gb, disk_total_gb, admission_ceiling_pct,
-#   build_cache_bytes, worktree_count, load_avg, cpu_count, in_flight_engineers,
-#   aimd_current_max
+# Context vars (passed via -c by RecipeBrain::run_resource_admission_recipe; each
+# free-text var is already sanitized by the Rust shim; any unavailable probe
+# renders as the literal string "unknown"):
+#   record_path, simard_bin, goal_id, cycle_number, disk_used_pct, disk_free_gb,
+#   disk_total_gb, admission_ceiling_pct, build_cache_bytes, worktree_count,
+#   load_avg, cpu_count, in_flight_engineers, aimd_current_max
 #
-# Output: {"decision": "<admit|defer|reclaim_first>", "rationale": "<short>"}.
-# The Rust shim (recipe_brain.rs::parse_resource_admission_decision) reads
-# `decision` + `rationale`; there are no load-bearing extra fields.
+# Output: NONE scraped from stdout. The agent RECORDS its verdict by calling the
+# `simard ooda record-resource-admission` tool exactly once (writing a typed
+# ResourceAdmissionDecisionRecord to {{record_path}}). RecipeBrain reads that
+# typed record via `read_verified_resource_admission` — it never parses this
+# agent's prose. The tool validates the closed choice enum and requires a
+# non-empty rationale; an absent, malformed, out-of-enum, or goal/cycle-mismatched
+# record surfaces as an Err, which the resource seam turns into a benign `defer`
+# (this seam fails CLOSED — on a resource gate a broken reasoner must not add disk
+# load).
 #
 # THE RECIPE NEVER CARRIES THE HARD INVARIANT. A deterministic disk-ceiling rail
 # in Rust (disk_pressure::exceeds_admission_ceiling) BLOCKS a spawn whenever
 # disk_used_pct is at or above the ceiling, regardless of what you answer here —
 # the ENOSPC guard. Editing this prompt changes scheduling QUALITY below the
 # ceiling (how eagerly Simard defers or reclaims), never the hard out-of-space
-# safety control. If the output is unparseable the seam FAILS CLOSED to `defer`.
+# safety control.
 
 name: "ooda-resource-admission"
 description: "OODA spawn-admission brain — resource-aware engineer admission (#2706)"
@@ -88,7 +96,7 @@ steps:
 
       ## OPTIONS
 
-      Pick exactly one `decision`:
+      Pick exactly one `choice`:
 
       - `admit` — There is comfortable resource headroom. Disk is well below the
         ceiling with room for another build, the worktree count and cache
@@ -119,38 +127,58 @@ steps:
         `in_flight_engineers` points to `defer` — let the running builds finish.
       - Everything healthy, or the picture mostly `unknown`, → `admit`.
 
-      ## OUTPUT FORMAT
+      ## HOW TO RECORD YOUR DECISION (call the tool — do NOT print anything)
 
-      Respond with a single JSON object (a fenced ```json block is fine):
+      Record your verdict by calling the `simard ooda record-resource-admission`
+      tool EXACTLY ONCE, using your shell/bash tool. The daemon reads the typed
+      record the tool writes; it does NOT read your prose. Anything you print to
+      stdout is ignored.
 
-      ```json
-      {"decision": "<admit|defer|reclaim_first>", "rationale": "<short reason>"}
+      Run (substitute your chosen `<choice>` and a concrete `<rationale>`):
+
+      ```bash
+      "{{simard_bin}}" ooda record-resource-admission \
+        --choice <choice> \
+        --rationale "<short concrete rationale>" \
+        --record-path "{{record_path}}" \
+        --goal-id "{{goal_id}}" \
+        --cycle-number {{cycle_number}}
       ```
 
-      A genuine "there is plenty of headroom, parallelize" answer is a REAL
-      decision: emit `admit` explicitly. If your output is unparseable the daemon
-      does NOT default on your behalf — it records a parse error and FAILS CLOSED
-      (defers, audited), because on a resource gate a broken reasoner must not add
-      disk load. The certain-ENOSPC block at {{admission_ceiling_pct}}% is enforced
-      in Rust, not here.
+      For a LARGE rationale, write it to a file first and pass
+      `--rationale-path <FILE>` instead of the inline flag.
 
-      ## EXAMPLES
+      `<choice>` is exactly one of: `admit`, `defer`, `reclaim_first` — no choice
+      carries any extra field. `--rationale` is MANDATORY and must be non-empty;
+      an unknown `--choice` is rejected by the tool. Call the tool EXACTLY ONCE. If
+      you do not record a valid decision, the daemon does NOT default on your
+      behalf — the resource seam FAILS CLOSED (defers, audited), because on a
+      resource gate a broken reasoner must not add disk load. The certain-ENOSPC
+      block at {{admission_ceiling_pct}}% is enforced in Rust, not here.
+
+      ## EXAMPLES (the command to run, one per situation)
 
       Plenty of headroom — parallelize:
 
-      ```json
-      {"decision": "admit", "rationale": "disk 62% (well below the 90% ceiling), 3 worktrees, load 4.1 over 16 CPUs — comfortable room for another build"}
+      ```bash
+      "{{simard_bin}}" ooda record-resource-admission --choice admit \
+        --rationale "disk 62% (well below the 90% ceiling), 3 worktrees, load 4.1 over 16 CPUs — comfortable room for another build" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
 
       Pressure building, nothing stale to clean — wait a cycle:
 
-      ```json
-      {"decision": "defer", "rationale": "disk 86% and climbing with 5 in-flight builds and 1m load 30 over 16 CPUs; admitting now risks the 90% ceiling — let running builds finish"}
+      ```bash
+      "{{simard_bin}}" ooda record-resource-admission --choice defer \
+        --rationale "disk 86% and climbing with 5 in-flight builds and 1m load 30 over 16 CPUs; admitting now risks the 90% ceiling — let running builds finish" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
 
       Pressure building AND reclaimable — clean first:
 
-      ```json
-      {"decision": "reclaim_first", "rationale": "disk 88% but 41 worktrees and 190 GiB of build cache with only 2 in-flight engineers — most of that is stale; reclaim before admitting"}
+      ```bash
+      "{{simard_bin}}" ooda record-resource-admission --choice reclaim_first \
+        --rationale "disk 88% but 41 worktrees and 190 GiB of build cache with only 2 in-flight engineers — most of that is stale; reclaim before admitting" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
     output: "resource_admission_result"
