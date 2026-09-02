@@ -363,6 +363,7 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Drift-Resilient Self-Deploy Checkout: reference/self-deploy-drift-resilient-checkout.md
     - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
     - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
     - RPC-Health Readiness & Stats Snapshot: reference/rpc-health-stats-snapshot-readiness.md
