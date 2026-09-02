@@ -332,3 +332,98 @@ fn four_stuck_supply_chain_goals_all_leave_the_active_loop_via_the_ladder() {
         }
     }
 }
+
+// ===========================================================================
+// Standing/perpetual exemption contract (issue #4927)
+//
+// The no-progress breaker exempts standing goals via the driver's
+// `!is_perpetual()` filter (see `ooda_loop::no_progress`). That exemption never
+// fired for the live `articulate-repo-hygiene-backlog` goal because it was
+// never tagged perpetual, so it was re-parked every cycle and fed the
+// `UNCLEAR-CRITERIA` issue storm. These tests pin the CONTRACT the exemption
+// keys on: a goal seeded/self-healed from a `standing` seed reads as
+// `is_perpetual()`, while an ordinary seed goal does not and still trips the
+// bounded breaker. (`resolution_for_why` itself is deliberately unchanged — the
+// exemption is applied by the driver BEFORE this ladder is consulted.)
+// ===========================================================================
+
+#[test]
+fn standing_seed_goal_reads_as_perpetual_and_is_breaker_exempt() {
+    use crate::goal_curation::operations::{
+        reconcile_standing_markers, seed_board_from_seed_goals,
+    };
+    use crate::goal_curation::types::GoalBoard;
+
+    let title = "Articulate repo-hygiene backlog";
+    let desc = "Turn observations into prioritized repo-hygiene goals.";
+    let standing = crate::identity::SeedGoal::new(2, title, desc, None).standing();
+
+    // Cold-start path: the seeded goal is perpetual, so the driver's
+    // `!is_perpetual()` breaker filter excludes it — no re-park, no issue.
+    let mut cold = GoalBoard::new();
+    assert_eq!(
+        seed_board_from_seed_goals(&mut cold, std::slice::from_ref(&standing)),
+        1
+    );
+    assert!(
+        cold.active[0].is_perpetual(),
+        "a standing seed must produce a breaker-exempt (perpetual) goal (#4927)"
+    );
+
+    // Warm-board path: an already-persisted, unmarked live goal is self-healed
+    // to perpetual so the exemption starts applying to it.
+    let id = crate::goals::goal_slug(title);
+    let mut live = ActiveGoal::new(id, desc, 2);
+    live.status = GoalProgress::NotStarted;
+    assert!(
+        !live.is_perpetual(),
+        "precondition: the live goal is the un-exempt #4927 defect"
+    );
+    let mut warm = GoalBoard::new();
+    warm.active.push(live);
+    assert_eq!(
+        reconcile_standing_markers(&mut warm, std::slice::from_ref(&standing)).added,
+        1
+    );
+    assert!(
+        warm.active[0].is_perpetual(),
+        "reconcile must self-heal the live goal into the breaker-exempt class (#4927)"
+    );
+}
+
+#[test]
+fn ordinary_seed_goal_is_not_perpetual_and_still_hits_the_breaker() {
+    use crate::goal_curation::operations::seed_board_from_seed_goals;
+    use crate::goal_curation::types::GoalBoard;
+
+    // Regression guard: an ordinary seed goal must stay convergence-required and
+    // the bounded no-progress breaker must still fire for it unchanged.
+    let ordinary =
+        crate::identity::SeedGoal::new(4, "Fix broken features", "audit specs vs impl", None);
+    let mut board = GoalBoard::new();
+    assert_eq!(
+        seed_board_from_seed_goals(&mut board, std::slice::from_ref(&ordinary)),
+        1
+    );
+    let goal = &board.active[0];
+    assert!(
+        !goal.is_perpetual(),
+        "an ordinary seed goal must NOT be breaker-exempt"
+    );
+
+    let id = goal.id.clone();
+    let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
+    let mut tracker = NoProgressTracker::new();
+    let mut last = NoProgressResolution::Continue;
+    for _ in 0..threshold {
+        last = tracker.record_and_resolve(&id, threshold, || StuckGoalDisposition::Unresolved);
+    }
+    assert!(
+        last.is_terminal(),
+        "the breaker must still fire for a non-perpetual goal at the threshold"
+    );
+    assert!(
+        matches!(last, NoProgressResolution::Escalate { .. }),
+        "an unresolved ordinary goal must still escalate, got {last:?}"
+    );
+}
