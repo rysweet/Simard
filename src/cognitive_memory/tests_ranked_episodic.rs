@@ -105,8 +105,234 @@ fn recall_episodes_ranked_recovers_compressed_consolidation_source() {
     );
 }
 
-// ─── recall_episodes_ranked: default back-compat ─────────────────────────────
+// ─── recall_episodes_ranked: word-boundary relevance gate ────────────────────
 
+/// Recall-quality guard: the relevance gate matches at a WORD BOUNDARY, not by
+/// raw substring. A query token that is merely *embedded* in the interior or
+/// suffix of an unrelated content word must NOT gate that episode into the
+/// ranked recall set. Before the fix the gate used
+/// `content.to_lowercase().contains(kw)`, so the token `act` surfaced an episode
+/// whose content only said "reactor" / "contract", floating off-topic episodes
+/// into the OODA cycle's working context and degrading recall precision.
+#[test]
+fn recall_episodes_ranked_gate_ignores_embedded_substring_match() {
+    let mem = test_mem();
+    // Off-topic: the query token `act` is only embedded inside "reactor" and
+    // "contract"; neither is a word-boundary match.
+    mem.store_episode("the reactor signed a contract", "test-src", None)
+        .expect("store off-topic");
+    // On-topic: contains `act` at a word boundary.
+    mem.store_episode("we act on the alert", "test-src", None)
+        .expect("store on-topic");
+
+    let ranked = mem
+        .recall_episodes_ranked("act", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+
+    assert_eq!(
+        ranked.len(),
+        1,
+        "only the word-boundary `act` episode is relevant; the embedded-substring \
+         episode (reactor/contract) must be gated out"
+    );
+    assert_eq!(
+        ranked[0].content, "we act on the alert",
+        "the surviving episode is the word-boundary match"
+    );
+}
+
+/// The complementary half: a genuine keyword still recalls its episode. Guards
+/// against the gate over-tightening into a recall regression — the recalls the
+/// live OODA path depends on must survive.
+#[test]
+fn recall_episodes_ranked_gate_keeps_word_boundary_match() {
+    let mem = test_mem();
+    mem.store_episode("rolled back the deploy after the outage", "test-src", None)
+        .expect("store relevant");
+    mem.store_episode("unrelated note about caching", "test-src", None)
+        .expect("store unrelated");
+
+    let ranked = mem
+        .recall_episodes_ranked("deploy", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+
+    assert_eq!(ranked.len(), 1, "the `deploy` episode is recalled");
+    assert!(
+        ranked[0].content.contains("deploy"),
+        "the recalled episode is the deploy one, not the unrelated note"
+    );
+}
+
+/// Inflectional recall is PRESERVED: a query stem still recalls an episode whose
+/// content uses an inflected form (`deploy` → "deployed"). This is the exact
+/// recall a pure whole-word (equality) gate would have dropped; the
+/// word-boundary (prefix) gate keeps it while still rejecting interior/suffix
+/// embeddings. Regression guard for the live preparation path
+/// (`memory_consolidation::prepare_context`), which recalls with objective stems
+/// against free-text episode content.
+#[test]
+fn recall_episodes_ranked_gate_preserves_inflectional_recall() {
+    let mem = test_mem();
+    mem.store_episode(
+        "deployed the payment service to prod",
+        "engineer-cycle",
+        None,
+    )
+    .expect("store inflected");
+    mem.store_episode("an unrelated caching note", "engineer-cycle", None)
+        .expect("store unrelated");
+
+    let ranked = mem
+        .recall_episodes_ranked("deploy", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+
+    assert_eq!(
+        ranked.len(),
+        1,
+        "the query stem `deploy` must still recall its inflected form \"deployed\""
+    );
+    assert!(
+        ranked[0].content.contains("deployed"),
+        "the recalled episode is the inflected-form one"
+    );
+}
+
+/// Punctuation attached to a query token is folded onto the bare word by the
+/// non-alphanumeric tokenizer, so a query like `"deploy,"` still matches an
+/// episode whose content holds the word `deploy`. The earlier whitespace-split +
+/// substring gate searched for the needle `"deploy,"` (comma included), which no
+/// plain content contains — a silent recall miss.
+#[test]
+fn recall_episodes_ranked_gate_tokenizes_punctuation_in_query() {
+    let mem = test_mem();
+    mem.store_episode("deploy the payment service", "test-src", None)
+        .expect("store relevant");
+
+    let ranked = mem
+        .recall_episodes_ranked("deploy, please", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+
+    assert_eq!(
+        ranked.len(),
+        1,
+        "a punctuation-attached query token folds to its bare word and matches"
+    );
+}
+
+/// The word-boundary gate applies to the compressed-source UNION backfill too,
+/// so a compressed consolidation source is only recovered when it shares a WORD
+/// BOUNDARY with the query — an interior/suffix-embedding compressed episode
+/// must not leak back in through the backfill.
+#[test]
+fn recall_episodes_ranked_backfill_gate_is_word_boundary() {
+    let mem = test_mem();
+    // Two episodes that will be compressed by consolidation. Only e_match holds
+    // the query token `sync` as a whole word; e_embed only embeds it in
+    // "asynchronous".
+    let e_match = mem
+        .store_episode("sync completed on shard one", "test-src", None)
+        .expect("store e_match");
+    let e_embed = mem
+        .store_episode("an asynchronous retry ran", "test-src", None)
+        .expect("store e_embed");
+
+    let consolidated = mem.consolidate_episodes(2).expect("consolidate");
+    assert!(consolidated.is_some(), "two episodes consolidate");
+
+    let recalled = mem
+        .recall_episodes_ranked("sync", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+    let ids: std::collections::HashSet<&str> =
+        recalled.iter().map(|e| e.node_id.as_str()).collect();
+
+    assert!(
+        ids.contains(e_match.as_str()),
+        "the whole-word compressed source is recovered via the UNION backfill"
+    );
+    assert!(
+        !ids.contains(e_embed.as_str()),
+        "the embedded-substring compressed source must NOT leak in through the \
+         backfill"
+    );
+}
+
+/// Recall-quality fix: the gate folds a PLURAL query token onto the SINGULAR
+/// form in episode content, closing the asymmetry a prefix-only word-boundary
+/// gate leaves open. A prefix gate already recalls `test` → "tests" but NOT the
+/// reverse (`"test".starts_with("tests")` is false), so an objective phrased in
+/// the plural (`"stabilize the flaky tests"`) would miss an episode that used
+/// the singular ("wrote a test …"). Mirrors the singular/plural folding
+/// `knowledge_context` applies to pack selection (PR #4241 lineage).
+#[test]
+fn recall_episodes_ranked_gate_folds_plural_query_onto_singular_content() {
+    let mem = test_mem();
+    mem.store_episode(
+        "wrote a test for the payment parser",
+        "engineer-cycle",
+        None,
+    )
+    .expect("store singular-form episode");
+    mem.store_episode("an unrelated caching note", "engineer-cycle", None)
+        .expect("store unrelated");
+
+    let ranked = mem
+        .recall_episodes_ranked("tests", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+
+    assert_eq!(
+        ranked.len(),
+        1,
+        "the plural query `tests` must recall the singular-form episode \"test\""
+    );
+    assert!(
+        ranked[0].content.contains("test for the payment parser"),
+        "the recalled episode is the singular-form one, not the unrelated note"
+    );
+}
+
+/// Recall-precision fix: a natural-language query carrying a sub-threshold
+/// (single-char) clean token — a possessive fragment ("Rust's" tokenizes to
+/// {rust, s, ...}), an initial, or a stray separator — must not let that lone
+/// character prefix-match every episode holding a word that starts with it. The
+/// gate drops such tokens (MIN_CLEAN_NEEDLE_LEN), mirroring the cut
+/// `knowledge_context` applies to objective tokens, so only the genuine
+/// multi-char tokens drive recall.
+#[test]
+fn recall_episodes_ranked_gate_drops_sub_threshold_query_token() {
+    let mem = test_mem();
+    // Off-topic: shares ONLY the stray "s" needle (starts with 's'), nothing else.
+    mem.store_episode("the storage bill spiked overnight", "engineer-cycle", None)
+        .expect("store off-topic episode");
+    // On-topic: genuinely about rust ownership.
+    let on_topic = mem
+        .store_episode(
+            "fixed a rust ownership borrow error",
+            "engineer-cycle",
+            None,
+        )
+        .expect("store on-topic episode");
+
+    let ranked = mem
+        .recall_episodes_ranked("Rust's ownership model", 10, RecallWeightSet::default())
+        .expect("ranked episodic recall");
+    let ids: std::collections::HashSet<&str> = ranked.iter().map(|e| e.node_id.as_str()).collect();
+
+    assert!(
+        ids.contains(on_topic.as_str()),
+        "the genuinely relevant rust-ownership episode is recalled"
+    );
+    assert_eq!(
+        ranked.len(),
+        1,
+        "the lone 's' from \"Rust's\" must not float the storage episode in, got {:?}",
+        ranked
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+// ─── recall_episodes_ranked: default back-compat ─────────────────────────────
 /// Invariant #6 (default back-compat): a backend that does NOT override
 /// `recall_episodes_ranked` falls back to `search_episodes_by_keywords`, with
 /// the `query` split on whitespace into keywords and the `limit` forwarded
@@ -281,6 +507,7 @@ impl CognitiveMemoryOps for EchoKeywordsMock {
             source_label: "mock".into(),
             temporal_index: 0,
             compressed: false,
+            created_at: None,
         }])
     }
 }

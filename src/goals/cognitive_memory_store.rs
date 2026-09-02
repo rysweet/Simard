@@ -3,7 +3,7 @@
 //! See `docs/reference/cognitive-memory-goal-store.md` for the design.
 //!
 //! `bootstrap::assembly` and `meeting_backend` are the production callers:
-//! every per-record write flows through cognitive memory via the bridge
+//! every per-record write flows through cognitive memory via the memory
 //! helpers (`launch_writer_client` / `open_reader_client`). The legacy
 //! on-disk `goal_records.json` and `state/goal_store.json` files are no
 //! longer produced — closing the half-migration gap that PR #1593 /
@@ -44,9 +44,9 @@ const GOAL_PROSPECTIVE_PREFIX: &str = "goal:";
 pub(crate) const GOAL_STORE_LIST_LIMIT: u32 = 256;
 
 /// `GoalStore` implementation backed by cognitive memory through the
-/// bridge helpers (`launch_writer_client` / `open_reader_client`).
+/// memory helpers (`launch_writer_client` / `open_reader_client`).
 ///
-/// Each method opens a fresh bridge for the duration of one call and
+/// Each method opens a fresh memory for the duration of one call and
 /// drops it afterwards. With the tier-0 in-process Arc shortcut
 /// registered by the OODA daemon (issue #1590 follow-up), per-call
 /// acquisition inside the daemon process is a single `RwLock` read plus
@@ -401,7 +401,7 @@ fn resolve_goal_prospectives(
 /// preparation, and ensures exactly one `pending` prospective per active goal.
 ///
 /// Operates on the caller's existing memory handle (the daemon's own writer)
-/// rather than opening a fresh bridge, so it never contends for the store lock.
+/// rather than opening a fresh memory, so it never contends for the store lock.
 ///
 /// Implemented as a two-phase pass for the same reason
 /// [`CognitiveMemoryGoalStore::reconcile_prospectives`] is: the library's
@@ -502,9 +502,9 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
         return;
     }
 
-    // Open a single writer bridge for both reading existing slugs and
-    // writing migrated records.  Using the writer bridge (not the
-    // read-only reader bridge) is deliberate: write-mode opens replay
+    // Open a single writer memory for both reading existing slugs and
+    // writing migrated records.  Using the writer memory (not the
+    // read-only reader memory) is deliberate: write-mode opens replay
     // the WAL, handling the edge case where a prior writer left an
     // un-checkpointed WAL that read-only mode cannot recover.
     let writer = match launch_writer_client(state_root) {
@@ -742,9 +742,9 @@ mod tests {
             .expect("put active goal");
 
         // The prospective trigger condition is the slug with dashes→spaces.
-        // Open a reader bridge and check triggers with the expected phrase.
+        // Open a reader memory and check triggers with the expected phrase.
         let reader =
-            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader memory should open");
         let triggered = reader
             .ops()
             .check_triggers("fix authentication bug")
@@ -780,7 +780,7 @@ mod tests {
 
         // The trigger should no longer fire for the completed goal.
         let reader =
-            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader memory should open");
         let triggered = reader
             .ops()
             .check_triggers("deploy ci pipeline")
@@ -829,7 +829,7 @@ mod tests {
         // After reconciliation: Active goal should still have a trigger,
         // Completed goal should not.
         let reader =
-            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader memory should open");
 
         let active_triggers = reader
             .ops()
@@ -871,7 +871,7 @@ mod tests {
 
         // Manually resolve the prospective to simulate drift.
         {
-            let writer = crate::memory_ipc::launch_writer_client(&root).expect("writer bridge");
+            let writer = crate::memory_ipc::launch_writer_client(&root).expect("writer memory");
             let triggered = writer
                 .ops()
                 .check_triggers("drifted goal")
@@ -900,7 +900,7 @@ mod tests {
             .reconcile_prospectives()
             .expect("reconcile_prospectives");
 
-        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
+        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader memory");
         let triggered = reader
             .ops()
             .check_triggers("drifted goal")
@@ -927,7 +927,7 @@ mod tests {
             .expect("put proposed goal");
 
         {
-            let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
+            let reader = crate::memory_ipc::open_reader_client(&root).expect("reader memory");
             let before = reader.ops().get_statistics().expect("get_statistics");
             assert_eq!(
                 before.prospective_count, 0,
@@ -941,7 +941,7 @@ mod tests {
             .expect("put active goal");
 
         // Open a fresh reader to see the write.
-        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
+        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader memory");
         let after = reader.ops().get_statistics().expect("get_statistics");
         assert!(
             after.prospective_count > 0,

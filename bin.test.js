@@ -107,12 +107,12 @@ test("uses gh release download (not gh api --output)", () => {
     "bin.js should use gh release download"
   );
   assert.ok(
-    !binSource.includes("gh api") && !binSource.includes('"api"'),
-    "bin.js should NOT use gh api"
+    !binSource.includes("--output"),
+    "bin.js should NOT use --output flag for release download"
   );
   assert.ok(
-    !binSource.includes("--output"),
-    "bin.js should NOT use --output flag"
+    binSource.includes('"api", `repos/${GITHUB_REPO}/releases/latest`'),
+    "latestTag may use gh api only to resolve the release tag"
   );
 });
 
@@ -179,7 +179,7 @@ test("verifies binary exists after download", () => {
     "should verify binary exists post-download"
   );
   assert.ok(
-    binSource.includes("binary not found"),
+    binSource.includes("Binary not found"),
     "should report error if binary missing after download"
   );
 });
@@ -209,9 +209,19 @@ test("supports install subcommand", () => {
   );
 });
 
+test("install subcommand delegates to native installer after download", () => {
+  assert.ok(
+    binSource.includes("execFileSync(bin, process.argv.slice(2)") &&
+      binSource.includes("SIMARD_INSTALL_PROMPT_ASSETS_ROOT"),
+    "install should execute the native installer with packaged prompt assets"
+  );
+});
+
 test("auto-downloads when binary missing", () => {
   assert.ok(
-    binSource.includes("!existsSync(bin)") && binSource.includes("download(bin)"),
+    binSource.includes("if (existsSync(bin))")
+      && binSource.includes("} else {")
+      && binSource.includes("download(bin,"),
     "should auto-download when binary is missing"
   );
 });

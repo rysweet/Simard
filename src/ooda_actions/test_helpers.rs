@@ -67,7 +67,7 @@ impl BaseTypeSession for MockSession {
         match &self.response {
             Ok(outcome) => Ok(outcome.clone()),
             Err(msg) => Err(SimardError::RpcTransportError {
-                bridge: "mock-session".to_string(),
+                endpoint: "mock-session".to_string(),
                 reason: msg.clone(),
             }),
         }
@@ -134,7 +134,7 @@ pub(crate) fn mock_knowledge() -> KnowledgeClient {
     )))
 }
 
-pub(crate) fn test_bridges() -> OodaClients {
+pub(crate) fn test_memories() -> OodaClients {
     OodaClients {
         memory: mock_memory(),
         knowledge: mock_knowledge(),
@@ -201,7 +201,7 @@ pub(crate) fn active_goal(id: &str) -> ActiveGoal {
 }
 
 #[allow(dead_code)] // Kept for future integration tests that drive the full dispatch path.
-pub(crate) fn bridges_with_session(session: MockSession) -> OodaClients {
+pub(crate) fn memories_with_session(session: MockSession) -> OodaClients {
     OodaClients {
         memory: mock_memory(),
         knowledge: mock_knowledge(),

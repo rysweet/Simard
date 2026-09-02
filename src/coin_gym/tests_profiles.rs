@@ -21,6 +21,7 @@ fn persisted(run_id: &str) -> PersistedRun {
             pinned: Vec::new(),
             held_out_fresh: Vec::new(),
         },
+        offline: super::target_loader::OfflineScaffold::default(),
     }
 }
 

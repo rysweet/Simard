@@ -681,7 +681,10 @@ coin-gym profiles                                    # list per-model isolated s
 > `improve` command runs the **offline** failure-analyst + overfitting-reviewer
 > gate over a saved run; the live `--holdout fresh` verify/rollback cycle
 > sketched above needs live grading and is Phase 5. See
-> [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md).
+> [Run the LOCAL COIN Gym harness](../howto/run-the-coin-gym-harness.md). The
+> reproducible baseline-vs-team result on the bundled sample target set — the
+> abstention gate lifting precision from 60% to 100% at equal reach — is recorded
+> in [COIN Gym — baseline vs. team measurement](./coin-gym-baseline-vs-team-measurement.md).
 
 ### 3.6 Anti-overfitting: the central design tension
 

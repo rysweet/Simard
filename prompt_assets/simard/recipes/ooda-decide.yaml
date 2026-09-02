@@ -1,20 +1,22 @@
 # ooda-decide.yaml — Recipe-runner recipe for the OODA Decide brain.
 #
-# Replaces the direct LLM call + keyword scanning in
-# RustyClawdDecideBrain (issue #2111). Parsers eliminated in issue #2144.
+# Group A rework (issue #4785): the agent ACTS by calling the gated
+# `simard ooda record-decide` tool, which validates the closed 10-variant
+# action enum + a non-empty reason and atomically writes one typed
+# DecideDecisionRecord to {{record_path}}. RecipeBrain::run_decide_recipe reads
+# that typed record via `read_verified_decide` — it NEVER scrapes this agent's
+# prose. This replaces the former "emit a JSON envelope / first action word →
+# Rust scrapes stdout → Rust acts" pattern (the forbidden emit→parse→act loop).
 #
-# The agent outputs the action keyword as the FIRST WORD of its response.
-# The Rust shim (recipe_brain.rs) extracts the first whitespace-delimited
-# token and matches it case-insensitively to the 10 known action kinds.
+# Context vars (passed via -c by RecipeBrain::run_decide_recipe):
+#   record_path, simard_bin, goal_id, cycle_number, urgency, reason
 #
-# Context vars (passed via -c):
-#   goal_id, urgency, reason, escalation_note
-#
-# `escalation_note` (issue #2432 / #2421) is empty on the base attempt and
-# carries a schema-repair / higher-effort instruction on escalation-ladder
-# retries. When empty it renders to nothing, so base behaviour is unchanged.
-#
-# Output: agent stdout — action keyword as first word, followed by rationale
+# Output: NONE scraped from stdout. The agent RECORDS its verdict by calling the
+# `simard ooda record-decide` tool exactly once. The tool validates the closed
+# choice enum and requires a non-empty reason; an absent, malformed,
+# out-of-enum, or goal/cycle-mismatched record fails CLOSED (the decide caller
+# records the failure and SKIPS the priority) with NO default action — never a
+# fabricated `advance_goal` (#1711, #2580).
 
 name: "ooda-decide"
 description: "OODA Decide brain — routes priorities to action kinds"
@@ -29,8 +31,6 @@ steps:
     type: "agent"
     agent: "default"
     prompt: |
-      {{escalation_note}}
-
       # OODA Brain — Decide Phase: Action-Kind Routing
 
       ## ROLE
@@ -53,7 +53,9 @@ steps:
       engineering guidelines (canonical in `CONTRIBUTING.md`): prove cognition
       gains on a benchmark AND a live, trended self-metric (G1); route
       memory-architecture work upstream to `amplihack-memory-lib` (G2); and prefer
-      agentic extraction over brittle parsing, and recipes/prompts over code (G3).
+      agentic extraction over brittle parsing, and recipes/prompts over code (G3); and
+      record investigation/testing findings as a GitHub issue and/or memory, never a
+      committed point-in-time report doc (G4, `no-point-in-time-docs`).
       This does not change your output contract below.
 
       ## CONTEXT
@@ -228,29 +230,55 @@ steps:
       will refuse new dispatches with a `RpcCallFailed` error. Brains that see
       this error should treat it as expected, not as a real failure.
 
-      ## Instructions
+      ## HOW TO RECORD YOUR DECISION (call the tool — do NOT print JSON)
 
-      **Preferred — emit a structured JSON decision envelope.** Respond with a
-      single JSON object of this exact shape (a fenced ```json block is fine;
-      the daemon strips any surrounding banner/prose before parsing):
+      Record your verdict by calling the `simard ooda record-decide` tool
+      EXACTLY ONCE, using your shell/bash tool. The daemon reads the typed record
+      the tool writes; it does NOT read your prose. Anything you print to stdout
+      is ignored.
 
-      ```json
-      {"decision": "<action_keyword>", "rationale": "<brief reason citing goal_id or reason>"}
+      Run (substitute your chosen `<action>` and a concrete `<reason>`):
+
+      ```bash
+      "{{simard_bin}}" ooda record-decide \
+        --choice <action> \
+        --reason "<short concrete reason citing goal_id or reason>" \
+        --record-path "{{record_path}}" \
+        --goal-id "{{goal_id}}" \
+        --cycle-number {{cycle_number}}
       ```
 
-      where `<action_keyword>` is exactly one of: `advance_goal`,
-      `consolidate_memory`, `run_improvement`, `poll_developer_activity`,
-      `extract_ideas`, `safe_update`, `research_query`, `run_gym_eval`,
-      `build_skill`, `launch_session`.
+      `<action>` is exactly one of: `advance_goal`, `consolidate_memory`,
+      `run_improvement`, `poll_developer_activity`, `extract_ideas`,
+      `safe_update`, `research_query`, `run_gym_eval`, `build_skill`,
+      `launch_session`. `--reason` is MANDATORY and must be non-empty; an unknown
+      `--choice` is rejected by the tool.
 
-      **Accepted fallback** — if you cannot emit JSON, output the action keyword
-      as the very first word of your response (e.g. `advance_goal ...`), followed
-      by a brief rationale. The daemon's fallback scanner reads the first
-      whitespace-delimited token.
+      For a LARGE reason, write it to a file first and pass `--reason-path <FILE>`
+      instead of the inline `--reason` flag (never put large text on the command
+      line).
 
-      Do NOT wrap your answer so it can't be parsed as either form. If your
-      output is unparseable, the daemon does NOT guess a default — it records a
-      `brain_parse_error`, retries you with a schema-repair prompt, and surfaces
-      an explicit error only if the bounded retry still fails (never a silent
-      fabricated decision).
+      Call the tool EXACTLY ONCE. If you do not record a valid decision, the
+      daemon takes NO action on your behalf: it records an explicit cycle failure
+      and fails CLOSED — it does NOT guess a default `advance_goal` (#1711,
+      #2580). A genuine "keep advancing this goal" answer is a real
+      `advance_goal`, recorded explicitly.
+
+      ## EXAMPLES (the command to run, one per situation)
+
+      Reserved synthetic ID routes to its dedicated kind:
+
+      ```bash
+      "{{simard_bin}}" ooda record-decide --choice consolidate_memory \
+        --reason "goal_id __memory__ is the reserved memory-consolidation cycle" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
+      ```
+
+      Ordinary goal slug routes to advance_goal:
+
+      ```bash
+      "{{simard_bin}}" ooda record-decide --choice advance_goal \
+        --reason "standard development goal with a real slug; dispatch its engineer" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
+      ```
     output: "decide_result"

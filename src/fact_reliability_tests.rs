@@ -42,7 +42,7 @@
 
 use crate::fact_reliability::{
     KNOWN_CONCEPTS, RELIABILITY_THRESHOLD, canonical_concept, fact_passes_gate,
-    score_fact_reliability,
+    normalize_source_episode_id, score_fact_reliability,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -135,6 +135,67 @@ fn grounded_short_content_known_concept_scores_point_seven_five() {
     assert!(fact_passes_gate("pr-pattern", "squash fixups", true));
 }
 
+/// Punctuation/symbol-only content carries no more information than an empty
+/// string, so it extends the same HARD gate: score 0.0 and quarantine, even
+/// when grounded and labelled with a known concept (which would otherwise reach
+/// 0.5 + 0.3 + 0.1 = 0.9 under the old raw-token count that treated `"..."` as
+/// three "words"). This is the fact-yield-quality fix: a wall of punctuation
+/// must never be promoted into semantic memory.
+#[test]
+fn punctuation_only_content_is_a_hard_zero_even_when_grounded() {
+    for junk in ["... ... ...", "- - -", "??? !!! ///", "—— —— ——", ". , ; :"] {
+        assert_eq!(
+            score_fact_reliability("bug-pattern", junk, true),
+            0.0,
+            "punctuation/symbol-only content {junk:?} carries no information and is quarantined"
+        );
+        assert!(
+            !fact_passes_gate("bug-pattern", junk, true),
+            "punctuation/symbol-only content {junk:?} must never clear the gate"
+        );
+    }
+}
+
+/// Degenerate repetition of a single word is one *distinct* informative word,
+/// not three, so it earns only the partial short-content weight (0.15), not the
+/// full 0.3. Under the old raw-token count `"the the the"` scored the full
+/// content weight; scoring distinct informative words closes that loophole.
+#[test]
+fn repeated_single_word_earns_only_partial_content_weight() {
+    // grounded + 1 distinct word (0.15) + known concept (0.1) = 0.75, not 0.9.
+    let s = score_fact_reliability("lesson-learned", "the the the the", true);
+    assert!(
+        (s - 0.75).abs() < 1e-9,
+        "repeated single word is one distinct informative word (partial weight), got {s}"
+    );
+    // Case/punctuation variants of the same word still collapse to one distinct
+    // word, so surface churn cannot inflate the count to the full weight.
+    let variants = score_fact_reliability("lesson-learned", "Recall recall, recall. RECALL", true);
+    assert!(
+        (variants - 0.75).abs() < 1e-9,
+        "case/punctuation variants of one word stay one distinct word, got {variants}"
+    );
+}
+
+/// Three genuinely distinct informative words earn the full content weight,
+/// confirming the informative-word count agrees with the raw-token count on
+/// honest content — only degenerate content changes disposition.
+#[test]
+fn three_distinct_informative_words_earn_full_content_weight() {
+    // grounded (0.5) + ≥3 distinct words (0.3) + known concept (0.1) = 0.9.
+    let s = score_fact_reliability("bug-pattern", "retry saturates the socket", true);
+    assert!(
+        (s - 0.9).abs() < 1e-9,
+        "three+ distinct informative words earn the full content weight, got {s}"
+    );
+    // Numbers count as informative words too.
+    let numeric = score_fact_reliability("pr-pattern", "1 2 3", true);
+    assert!(
+        (numeric - 0.9).abs() < 1e-9,
+        "distinct numeric tokens are informative words, got {numeric}"
+    );
+}
+
 /// An off-spec concept loses the 0.1 concept-validity component but a grounded,
 /// well-worded fact still clears the gate (0.5 + 0.3 = 0.8). Concept validity is
 /// a nudge, not a gate.
@@ -212,6 +273,57 @@ fn canonical_concept_rejects_offspec() {
             "off-spec {raw:?} must be dropped"
         );
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// normalize_source_episode_id: the shared grounding/provenance id key both seams
+// use so a whitespace-padded cited id grounds and threads provenance identically
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Surrounding whitespace an LLM might append to a re-emitted id is trimmed, so
+/// the *exact* grounding match still succeeds and the fact is not silently
+/// quarantined as ungrounded (lost fact-yield).
+#[test]
+fn normalize_source_episode_id_trims_surrounding_whitespace() {
+    for raw in [
+        " epi_00001",
+        "epi_00001 ",
+        "  epi_00001  ",
+        "epi_00001\n",
+        "\tepi_00001\r\n",
+    ] {
+        assert_eq!(
+            normalize_source_episode_id(raw),
+            "epi_00001",
+            "surrounding whitespace must be trimmed for {raw:?}"
+        );
+    }
+}
+
+/// A well-formed id (episode node ids are UUID-v7 / ULID and never carry
+/// whitespace) is returned unchanged — the normalization is a no-op for every
+/// real id, so it cannot alter an already-grounding fact's disposition.
+#[test]
+fn normalize_source_episode_id_is_noop_for_clean_id() {
+    for raw in [
+        "epi_00001",
+        "0192f8c1-5a3e-7abc-9def-0123456789ab",
+        "ep-123",
+    ] {
+        assert_eq!(normalize_source_episode_id(raw), raw);
+    }
+}
+
+/// Interior whitespace is deliberately preserved: `"ep 123"` is a genuinely
+/// different / malformed id and must stay ungrounded rather than silently fold
+/// onto `"ep123"` — matching the conservative surface-form policy of
+/// `canonical_concept` / `dedup_content_key`. An all-whitespace id normalizes to
+/// the empty string (which no episode resolves, so it is correctly ungrounded).
+#[test]
+fn normalize_source_episode_id_preserves_interior_and_empties_blank() {
+    assert_eq!(normalize_source_episode_id("ep 123"), "ep 123");
+    assert_eq!(normalize_source_episode_id("   "), "");
+    assert_eq!(normalize_source_episode_id(""), "");
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -321,5 +433,448 @@ fn commit_gated_fact_stores_dedups_and_quarantines() {
     assert!(
         blocked.confidence() < RELIABILITY_THRESHOLD,
         "an ungrounded empty fact scores below the threshold"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// dedup_content_key: whitespace-robust identity for the dedup step. A fact
+// restated with only interior/surrounding whitespace variation is the SAME
+// fact and must not be promoted twice (redundant facts inflate memory and
+// dilute recall precision).
+// ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn dedup_content_key_collapses_interior_and_edge_whitespace() {
+    use crate::fact_reliability::dedup_content_key;
+
+    let canonical = "empty outcome list panics cycle";
+    // Leading/trailing whitespace, a double interior space, a tab, and a
+    // wrapped newline all fold onto the same single-spaced key.
+    assert_eq!(
+        dedup_content_key("  empty outcome list panics cycle  "),
+        canonical
+    );
+    assert_eq!(
+        dedup_content_key("empty  outcome list panics cycle"),
+        canonical
+    );
+    assert_eq!(
+        dedup_content_key("empty\toutcome list panics cycle"),
+        canonical
+    );
+    assert_eq!(
+        dedup_content_key("empty outcome list\npanics cycle"),
+        canonical
+    );
+}
+
+#[test]
+fn dedup_content_key_preserves_case_and_distinct_words() {
+    use crate::fact_reliability::dedup_content_key;
+
+    // Case is significant (identifiers / error strings) → NOT folded.
+    assert_ne!(
+        dedup_content_key("CI fails on flaky test"),
+        dedup_content_key("ci fails on flaky test")
+    );
+    // Genuinely different content keeps a different key.
+    assert_ne!(
+        dedup_content_key("off-by-one in retry loop"),
+        dedup_content_key("empty outcome list panics cycle")
+    );
+    // Empty / whitespace-only content normalizes to the empty key.
+    assert_eq!(dedup_content_key("   \t\n "), "");
+}
+
+/// A grounded, known-concept fact that restates an already-stored fact with ONLY
+/// interior-whitespace variation is recognized as the same fact and quarantined
+/// as a dedup (its score still clears the threshold), so no redundant near-
+/// duplicate is promoted. Before this fix, exact `content.trim()` equality
+/// missed the whitespace variant and stored a second copy.
+#[test]
+fn commit_gated_fact_dedups_whitespace_variant_restatement() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for dedup test", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // (1) Store the canonical fact.
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "empty outcome list panics cycle",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(stored.stored(), "canonical fact must be stored first");
+
+    // (2) Restate it with a double interior space + surrounding whitespace →
+    // dedup quarantine (same lesson), and its score still clears the threshold
+    // so it is distinguishable from a low-reliability block.
+    let variant = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "  empty  outcome list panics cycle ",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !variant.stored(),
+        "a whitespace-only restatement must dedup, not create a redundant fact"
+    );
+    assert!(
+        variant.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // (3) A genuinely different fact under the same concept is still stored.
+    let distinct = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "off-by-one in retry loop drops last item",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(distinct, FactGateDecision::Stored { .. }),
+        "distinct content must still be promoted"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Identity dedup must survive a concept neighborhood larger than the fixed
+// prior-scan window. The distillation vocabulary is a tiny CLOSED set
+// (KNOWN_CONCEPTS), so many genuinely distinct facts share one concept label. A
+// same-concept prior scan of only DEDUP_PRIOR_SCAN_LIMIT results — ranked
+// confidence-descending — can push a real content-duplicate out of the window
+// once enough higher-confidence facts share its concept, letting the duplicate
+// be promoted a second time. Retrieving dedup candidates by the fact's CONTENT
+// as well surfaces the exact restatement regardless of how crowded its concept
+// is, WITHOUT merging across concepts.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A content-duplicate whose concept is crowded past `DEDUP_PRIOR_SCAN_LIMIT` by
+/// higher-confidence same-concept facts must still dedup. Five full-strength
+/// (0.9) bug-pattern facts on disjoint vocabulary saturate a width-5
+/// confidence-descending same-concept scan; a weaker (0.75) two-word victim then
+/// sits at position 6 — outside the concept window. A concept-only prior scan
+/// misses its re-commit and promotes a redundant copy; a content-keyed scan
+/// surfaces it and dedups. Before this fix the re-commit below was STORED.
+#[test]
+fn commit_gated_fact_dedups_duplicate_crowded_out_of_concept_window() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for window dedup", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // Saturate the concept with DEDUP_PRIOR_SCAN_LIMIT (5) full-strength (0.9)
+    // bug-pattern facts, each ≥3 distinct informative words on disjoint
+    // vocabulary (none contains "phantom" or "read"). A confidence-descending
+    // same-concept scan of width 5 is now entirely consumed by these five.
+    let crowd = [
+        "cache invalidation races on restart",
+        "timeout cascades across dependent services",
+        "lock ordering causes a deadlock cycle",
+        "buffer overflow corrupts an adjacent frame",
+        "retry storm saturates the upstream pool",
+    ];
+    for c in crowd {
+        let d = commit_gated_fact(&mem, "bug-pattern", c, true, &source, &tags, &episode_ids)
+            .expect("commit must not error");
+        assert!(d.stored(), "each distinct crowd fact must be stored: {c}");
+    }
+
+    // A weaker (0.75) two-word victim: grounded + known concept but only two
+    // informative words, so it scores strictly below every 0.9 crowd fact and
+    // lands at position 6 in a confidence-descending same-concept scan — OUTSIDE
+    // the width-5 window. Its vocabulary is disjoint from the crowd, so a content
+    // scan returns essentially only itself.
+    let victim = "phantom read";
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        victim,
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        stored.stored(),
+        "victim fact is first-seen and must be stored"
+    );
+
+    // Re-commit the exact victim content. A concept-only prior scan misses it
+    // (crowded out by the five 0.9 facts); the content scan surfaces it → dedup
+    // quarantine, its score still clearing the threshold.
+    let dup = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        victim,
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !dup.stored(),
+        "a content-duplicate crowded out of the concept window must still dedup, not be promoted twice"
+    );
+    assert!(
+        dup.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // Exactly one copy of the victim content exists — the re-commit added none.
+    let victim_hits = mem
+        .search_facts(victim, 50, 0.0)
+        .expect("search_facts")
+        .into_iter()
+        .filter(|f| f.content == victim && f.concept == "bug-pattern")
+        .count();
+    assert_eq!(
+        victim_hits, 1,
+        "the crowded-out duplicate must not create a second copy of the victim fact"
+    );
+}
+
+/// The content-keyed dedup scan must NOT merge across concepts: identical content
+/// under a DIFFERENT concept is a distinct identity and stays stored. This guards
+/// the content scan from introducing a false cross-concept merge — dedup keys on
+/// (canonical concept + content), not content alone.
+#[test]
+fn commit_gated_fact_content_scan_preserves_cross_concept_identity() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for cross-concept", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let episode_ids = [ep.clone()];
+
+    // Store "phantom read" under bug-pattern.
+    let bug = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "phantom read",
+        true,
+        &source,
+        &[String::from("bug-pattern")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(bug.stored(), "first-seen bug-pattern fact must be stored");
+
+    // The SAME content under lesson-learned is a distinct identity: the content
+    // scan surfaces the bug-pattern prior, but the concept guard rejects it, so
+    // this fact is still promoted.
+    let lesson = commit_gated_fact(
+        &mem,
+        "lesson-learned",
+        "phantom read",
+        true,
+        &source,
+        &[String::from("lesson-learned")],
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(lesson, FactGateDecision::Stored { .. }),
+        "same content under a different concept is a distinct identity and must be stored, got {lesson:?}"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Concept canonicalization at the write boundary. A concept that maps into the
+// closed KNOWN_CONCEPTS set is scored, deduped, AND stored under its canonical
+// label, so surface variants an LLM routinely emits ("PR-Pattern", "pr_pattern",
+// "pr-pattern.") — which already SCORE identically — also store/dedup identically
+// instead of fragmenting the concept across variant labels. An off-spec concept
+// is preserved verbatim.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A fact committed under a surface-variant concept label is STORED under the
+/// canonical [`KNOWN_CONCEPTS`] label, not the raw variant. Before this fix the
+/// raw label was persisted, fragmenting one concept across variant spellings.
+#[test]
+fn commit_gated_fact_stores_under_canonical_concept_label() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for canon test", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("pr-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // Commit under a title-cased, underscore-separated variant that
+    // `canonical_concept` folds to "pr-pattern".
+    let stored = commit_gated_fact(
+        &mem,
+        "PR_Pattern",
+        "small focused diffs merge faster",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(stored, FactGateDecision::Stored { .. }),
+        "expected Stored, got {stored:?}"
+    );
+
+    // The persisted fact carries the CANONICAL label, so a recall by the
+    // canonical concept surfaces it under "pr-pattern" — not the raw variant.
+    let hits = mem
+        .search_facts("pr-pattern", 10, 0.0)
+        .expect("search_facts");
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly one fact was committed; it must be recallable under the canonical concept"
+    );
+    assert_eq!(
+        hits[0].concept, "pr-pattern",
+        "a KNOWN_CONCEPTS variant must be stored under its canonical label, not the raw surface form"
+    );
+    assert_eq!(hits[0].content, "small focused diffs merge faster");
+}
+
+/// A restatement under a DIFFERENT surface-variant of the same canonical concept
+/// is recognized as the same identity and deduped — it never escapes the gate by
+/// varying only the concept's spelling. This holds in both label directions.
+#[test]
+fn commit_gated_fact_dedups_across_concept_label_variants() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::commit_gated_fact;
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for variant dedup", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("bug-pattern")];
+    let episode_ids = [ep.clone()];
+
+    // (1) Store under the canonical label.
+    let stored = commit_gated_fact(
+        &mem,
+        "bug-pattern",
+        "off-by-one in retry loop drops last item",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(stored.stored(), "canonical fact must be stored first");
+
+    // (2) Same content, a title-cased variant label → dedup quarantine (same
+    // identity), NOT a second fragmented copy under "Bug-Pattern".
+    let variant = commit_gated_fact(
+        &mem,
+        "Bug-Pattern",
+        "off-by-one in retry loop drops last item",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        !variant.stored(),
+        "a concept-label-only variant restatement must dedup, not fragment the concept"
+    );
+    assert!(
+        variant.confidence() >= RELIABILITY_THRESHOLD,
+        "a dedup quarantine cleared the threshold; only the prior blocks it"
+    );
+
+    // Exactly one fact exists under the canonical concept — the variant did not
+    // create a second node.
+    let hits = mem
+        .search_facts("bug-pattern", 10, 0.0)
+        .expect("search_facts");
+    assert_eq!(
+        hits.len(),
+        1,
+        "cross-variant dedup must leave a single canonical fact, not two"
+    );
+}
+
+/// An off-spec concept (one that does NOT canonicalize into [`KNOWN_CONCEPTS`])
+/// is stored verbatim — canonicalization only folds recognized labels, it never
+/// coerces a genuinely different concept into the closed set.
+#[test]
+fn commit_gated_fact_preserves_off_spec_concept_verbatim() {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use crate::fact_reliability::{FactGateDecision, canonical_concept, commit_gated_fact};
+
+    let mem = LibraryCognitiveMemory::in_memory().expect("in-memory db");
+    let ep = mem
+        .store_episode("episode payload for off-spec", "engineer-cycle", None)
+        .expect("store_episode");
+    let source = format!("distill:{ep}");
+    let tags = [String::from("infra-note")];
+    let episode_ids = [ep.clone()];
+
+    let off_spec = "infra-note";
+    assert!(
+        canonical_concept(off_spec).is_none(),
+        "precondition: the concept is genuinely off-spec"
+    );
+
+    let stored = commit_gated_fact(
+        &mem,
+        off_spec,
+        "the deploy queue drained slowly under load",
+        true,
+        &source,
+        &tags,
+        &episode_ids,
+    )
+    .expect("commit must not error");
+    assert!(
+        matches!(stored, FactGateDecision::Stored { .. }),
+        "expected Stored, got {stored:?}"
+    );
+
+    let hits = mem.search_facts(off_spec, 10, 0.0).expect("search_facts");
+    assert_eq!(
+        hits.len(),
+        1,
+        "exactly one off-spec fact was committed; it must be recallable verbatim"
+    );
+    assert_eq!(
+        hits[0].concept, off_spec,
+        "an off-spec concept must be stored verbatim, never coerced into KNOWN_CONCEPTS"
     );
 }

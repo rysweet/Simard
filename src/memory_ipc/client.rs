@@ -25,18 +25,40 @@ pub struct RemoteCognitiveMemory {
     socket_path: PathBuf,
 }
 
+/// A framed exchange failure tagged with the phase it occurred in, so the
+/// single-reconnect logic (issue #4929) can tell an unapplied pre-delivery
+/// failure (safe to re-send any request) apart from a post-delivery failure
+/// (the request may already be applied — only idempotent requests may re-send).
+enum ExchangeError {
+    /// `write_frame` failed: the request never reached the server intact and was
+    /// therefore never dispatched. Safe to reconnect and re-send any request.
+    PreDelivery(SimardError),
+    /// The request bytes were fully written but reading/parsing the response
+    /// failed. The server may have already applied the request.
+    PostDelivery(SimardError),
+}
+
+impl ExchangeError {
+    /// Unwrap to the underlying [`SimardError`] for surfacing to callers.
+    fn into_inner(self) -> SimardError {
+        match self {
+            Self::PreDelivery(e) | Self::PostDelivery(e) => e,
+        }
+    }
+}
+
 impl RemoteCognitiveMemory {
     /// Connect to the daemon's memory socket. Returns an error if the socket
     /// doesn't exist, the daemon isn't listening, or the handshake fails.
     pub fn connect(socket_path: &Path) -> SimardResult<Self> {
         if !socket_path.exists() {
             return Err(SimardError::RpcSpawnFailed {
-                bridge: "memory-ipc-client".into(),
+                endpoint: "memory-ipc-client".into(),
                 reason: format!("socket {} not present", socket_path.display()),
             });
         }
         let stream = UnixStream::connect(socket_path).map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "memory-ipc-client".into(),
+            endpoint: "memory-ipc-client".into(),
             reason: format!("connect {}: {e}", socket_path.display()),
         })?;
         // Short timeouts so a wedged daemon doesn't hang meeting forever.
@@ -50,7 +72,7 @@ impl RemoteCognitiveMemory {
         match client.call(MemoryRequest::Ping)? {
             MemoryResponse::Pong => Ok(client),
             other => Err(SimardError::RpcSpawnFailed {
-                bridge: "memory-ipc-client".into(),
+                endpoint: "memory-ipc-client".into(),
                 reason: format!("handshake: expected Pong, got {other:?}"),
             }),
         }
@@ -62,27 +84,141 @@ impl RemoteCognitiveMemory {
     }
 
     fn call(&self, req: MemoryRequest) -> SimardResult<MemoryResponse> {
+        // Whether re-applying this request after a *possible* prior application
+        // is safe (issue #4929 review). Reads, `Ping`, effect-idempotent
+        // mutations, and the server-deduped `StoreFactGated` are safe; writes
+        // that mint a fresh row, fire-once triggers, and destructive drains are
+        // NOT — re-sending them could duplicate/corrupt state.
+        let retry_safe = req.is_retry_safe();
         let bytes = serde_json::to_vec(&req).map_err(|e| ipc_err("serialize-request", e))?;
         let mut guard = self
             .stream
             .lock()
             .map_err(|e| ipc_err("lock-poisoned", e))?;
-        write_frame(&mut *guard, &bytes)?;
-        let resp_bytes = read_frame(&mut *guard)?;
-        let resp: MemoryResponse =
-            serde_json::from_slice(&resp_bytes).map_err(|e| ipc_err("parse-response", e))?;
+
+        // At-most-once reconnect on a transport failure (broken pipe, EOF,
+        // reset) — issue #4929. The daemon journal used to fill with `write-len:
+        // Broken pipe` because a severed `UnixStream` poisoned this client
+        // permanently. The retry decision depends on WHERE the failure occurred:
+        //
+        //   * PRE-delivery (`write_frame` failed): the request never reached the
+        //     server intact, so it was NEVER dispatched. Reconnecting and
+        //     re-sending is safe for ANY request kind — this is the original
+        //     `write-len: Broken pipe` recovery path.
+        //
+        //   * POST-delivery (bytes written; response read/parse failed): the
+        //     server MAY have already applied the request. Re-sending a
+        //     non-idempotent write would DUPLICATE it (issue #4929 review), so
+        //     only idempotent requests are re-sent. Non-idempotent requests heal
+        //     the poisoned stream for subsequent calls but surface THIS call's
+        //     error WITHOUT re-sending.
+        //
+        // Either way it is at-most-once: a failure on the retried exchange
+        // surfaces `Err` — no retry loop, no silent fallback.
+        match Self::exchange(&mut guard, &bytes) {
+            Ok(resp) => Ok(resp),
+            Err(ExchangeError::PreDelivery(first_err)) => {
+                tracing::warn!(
+                    endpoint = "memory-ipc",
+                    socket_path = %self.socket_path.display(),
+                    error = %first_err,
+                    "memory-ipc write failed pre-delivery; reconnecting once and retrying"
+                );
+                let fresh = Self::reconnect(&self.socket_path)?;
+                *guard = fresh;
+                Self::exchange(&mut guard, &bytes).map_err(|retry_err| {
+                    let retry_err = retry_err.into_inner();
+                    tracing::error!(
+                        endpoint = "memory-ipc",
+                        socket_path = %self.socket_path.display(),
+                        error = %retry_err,
+                        "memory-ipc reconnect retry also failed; surfacing error"
+                    );
+                    retry_err
+                })
+            }
+            Err(ExchangeError::PostDelivery(first_err)) if retry_safe => {
+                tracing::warn!(
+                    endpoint = "memory-ipc",
+                    socket_path = %self.socket_path.display(),
+                    error = %first_err,
+                    "memory-ipc response failed after delivery; retrying idempotent request after reconnect"
+                );
+                let fresh = Self::reconnect(&self.socket_path)?;
+                *guard = fresh;
+                Self::exchange(&mut guard, &bytes).map_err(|retry_err| {
+                    let retry_err = retry_err.into_inner();
+                    tracing::error!(
+                        endpoint = "memory-ipc",
+                        socket_path = %self.socket_path.display(),
+                        error = %retry_err,
+                        "memory-ipc reconnect retry also failed; surfacing error"
+                    );
+                    retry_err
+                })
+            }
+            Err(ExchangeError::PostDelivery(first_err)) => {
+                // Non-idempotent request whose bytes were already delivered: the
+                // server may have applied it, so we must NOT re-send. Reconnect
+                // to heal the stream for the next call, then surface this error.
+                tracing::warn!(
+                    endpoint = "memory-ipc",
+                    socket_path = %self.socket_path.display(),
+                    error = %first_err,
+                    "memory-ipc response failed after delivering a non-idempotent request; not re-sending to avoid a duplicate write"
+                );
+                if let Err(heal_err) = Self::reconnect(&self.socket_path).map(|fresh| {
+                    *guard = fresh;
+                }) {
+                    tracing::warn!(
+                        endpoint = "memory-ipc",
+                        socket_path = %self.socket_path.display(),
+                        error = %heal_err,
+                        "memory-ipc stream heal after non-idempotent post-delivery failure also failed; next call will reconnect"
+                    );
+                }
+                Err(first_err)
+            }
+        }
+    }
+
+    /// Write one framed request and read one framed response on `stream`. The
+    /// failure is tagged with the phase it occurred in so [`call`](Self::call)
+    /// can decide whether re-sending is safe (issue #4929): a `write_frame`
+    /// failure is pre-delivery (never applied); a response read/parse failure is
+    /// post-delivery (may already be applied).
+    fn exchange(stream: &mut UnixStream, bytes: &[u8]) -> Result<MemoryResponse, ExchangeError> {
+        write_frame(stream, bytes).map_err(ExchangeError::PreDelivery)?;
+        let resp_bytes = read_frame(stream).map_err(ExchangeError::PostDelivery)?;
+        let resp: MemoryResponse = serde_json::from_slice(&resp_bytes)
+            .map_err(|e| ExchangeError::PostDelivery(ipc_err("parse-response", e)))?;
         Ok(resp)
+    }
+
+    /// Open a fresh connection to `socket_path` for the single allowed reconnect
+    /// (no handshake — the caller either re-sends the request directly or, for a
+    /// non-idempotent post-delivery failure, keeps the fresh stream for the next
+    /// call). Timeouts mirror [`connect`](Self::connect) so a wedged daemon
+    /// cannot hang the retry.
+    fn reconnect(socket_path: &Path) -> SimardResult<UnixStream> {
+        let stream = UnixStream::connect(socket_path).map_err(|e| SimardError::RpcSpawnFailed {
+            endpoint: "memory-ipc-client".into(),
+            reason: format!("reconnect {}: {e}", socket_path.display()),
+        })?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+        Ok(stream)
     }
 
     fn unexpected(name: &str, got: MemoryResponse) -> SimardError {
         match got {
             MemoryResponse::Error(msg) => SimardError::RpcCallFailed {
-                bridge: "memory-ipc".into(),
+                endpoint: "memory-ipc".into(),
                 method: name.into(),
                 reason: msg,
             },
             other => SimardError::RpcCallFailed {
-                bridge: "memory-ipc".into(),
+                endpoint: "memory-ipc".into(),
                 method: name.into(),
                 reason: format!("unexpected response variant: {other:?}"),
             },
@@ -274,6 +410,30 @@ impl CognitiveMemoryOps for RemoteCognitiveMemory {
         })? {
             MemoryResponse::Facts(v) => Ok(v),
             other => Err(Self::unexpected("search_facts", other)),
+        }
+    }
+
+    fn recall_facts_ranked(
+        &self,
+        query: &str,
+        limit: u32,
+        min_confidence: f64,
+        weights: crate::cognitive_memory::RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        // Additive socket forward (issue #2329, mirroring #2627): forward the
+        // library's six-signal ranked recall over the wire instead of inheriting
+        // the trait default, which would degrade to gated `search_facts` and
+        // silently strip phase-weighted ranking + `recall_precision_at_k` on the
+        // production daemon path. The server dispatches this to
+        // `LibraryCognitiveMemory::recall_facts_ranked`.
+        match self.call(MemoryRequest::RecallFactsRanked {
+            query: query.into(),
+            limit,
+            min_confidence,
+            weights,
+        })? {
+            MemoryResponse::Facts(v) => Ok(v),
+            other => Err(Self::unexpected("recall_facts_ranked", other)),
         }
     }
 

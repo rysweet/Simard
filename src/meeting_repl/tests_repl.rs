@@ -1,5 +1,5 @@
 use super::repl::*;
-use super::test_support::{FailingThenOkMockAgent, MockAgentSession, mock_bridge};
+use super::test_support::{FailingThenOkMockAgent, MockAgentSession, mock_memory};
 use crate::meeting_facilitator::MeetingSessionStatus;
 use crate::test_support::HermeticState;
 use serial_test::serial;
@@ -8,7 +8,7 @@ use serial_test::serial;
 #[serial(cognitive_memory)]
 fn repl_sends_message_and_closes() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("I understand the concern.");
     let input = b"Let's discuss testing\n/close\n";
     let mut reader = &input[..];
@@ -16,7 +16,7 @@ fn repl_sends_message_and_closes() {
 
     let session = run_meeting_repl(
         "Sprint planning",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "You are Simard.",
         &mut reader,
@@ -36,7 +36,7 @@ fn repl_sends_message_and_closes() {
 #[serial(cognitive_memory)]
 fn repl_shows_help() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -44,7 +44,7 @@ fn repl_shows_help() {
 
     run_meeting_repl(
         "Help test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -67,7 +67,7 @@ fn repl_shows_help() {
 #[serial(cognitive_memory)]
 fn repl_shows_status() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("noted");
     let input = b"First message\n/status\n/close\n";
     let mut reader = &input[..];
@@ -75,7 +75,7 @@ fn repl_shows_status() {
 
     run_meeting_repl(
         "Status test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -94,7 +94,7 @@ fn repl_shows_status() {
 #[serial(cognitive_memory)]
 fn repl_eof_closes() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"just one line\n";
     let mut reader = &input[..];
@@ -102,7 +102,7 @@ fn repl_eof_closes() {
 
     let session = run_meeting_repl(
         "EOF test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -117,12 +117,12 @@ fn repl_eof_closes() {
 #[serial(cognitive_memory)]
 fn repl_no_agent_returns_error() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let input = b"some note\n/close\n";
     let mut reader = &input[..];
     let mut output = Vec::new();
 
-    let result = run_meeting_repl("No-agent test", &bridge, None, "", &mut reader, &mut output);
+    let result = run_meeting_repl("No-agent test", &memory, None, "", &mut reader, &mut output);
 
     assert!(
         result.is_err(),
@@ -134,7 +134,7 @@ fn repl_no_agent_returns_error() {
 #[serial(cognitive_memory)]
 fn repl_theme_command_records_theme() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("noted");
     let input = b"/theme performance\n/close\n";
     let mut reader = &input[..];
@@ -142,7 +142,7 @@ fn repl_theme_command_records_theme() {
 
     run_meeting_repl(
         "Theme test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -161,7 +161,7 @@ fn repl_theme_command_records_theme() {
 #[serial(cognitive_memory)]
 fn repl_recap_shows_session_info() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/theme scalability\n/recap\n/close\n";
     let mut reader = &input[..];
@@ -169,7 +169,7 @@ fn repl_recap_shows_session_info() {
 
     run_meeting_repl(
         "Recap test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -192,7 +192,7 @@ fn repl_recap_shows_session_info() {
 #[serial(cognitive_memory)]
 fn repl_preview_shows_handoff_preview() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/preview\n/close\n";
     let mut reader = &input[..];
@@ -200,7 +200,7 @@ fn repl_preview_shows_handoff_preview() {
 
     run_meeting_repl(
         "Preview test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -223,7 +223,7 @@ fn repl_live_output_uses_colored_prompt_and_assistant_label() {
     // SAFETY: serial_test guards against parallel access to env vars.
     unsafe { std::env::remove_var("NO_COLOR") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("Acknowledged.");
     let input = b"Quick check\n/close\n";
     let mut reader = &input[..];
@@ -231,7 +231,7 @@ fn repl_live_output_uses_colored_prompt_and_assistant_label() {
 
     run_meeting_repl(
         "Live label test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -269,7 +269,7 @@ fn repl_no_color_env_strips_prompt_and_label_escapes() {
     // SAFETY: serial_test guards against parallel access to env vars.
     unsafe { std::env::set_var("NO_COLOR", "1") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("Plain reply.");
     let input = b"Plain please\n/close\n";
     let mut reader = &input[..];
@@ -277,7 +277,7 @@ fn repl_no_color_env_strips_prompt_and_label_escapes() {
 
     run_meeting_repl(
         "NO_COLOR test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -315,7 +315,7 @@ fn repl_no_color_env_strips_prompt_and_label_escapes() {
 #[serial(cognitive_memory)]
 fn repl_help_includes_theme_recap_preview() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -323,7 +323,7 @@ fn repl_help_includes_theme_recap_preview() {
 
     run_meeting_repl(
         "Help extended test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -354,7 +354,7 @@ fn repl_close_prints_one_line_headline_summary() {
     // SAFETY: serial_test guards against parallel env mutations.
     unsafe { std::env::set_var("NO_COLOR", "1") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("noted");
     // Two conversational turns, then close. MockAgent emits no action items
     // so the count should render as "0 action items".
@@ -364,7 +364,7 @@ fn repl_close_prints_one_line_headline_summary() {
 
     run_meeting_repl(
         "Release planning",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -407,7 +407,7 @@ fn repl_close_prints_one_line_headline_summary() {
 #[serial(cognitive_memory)]
 fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     // Use a benign canned response so any history entries don't accidentally
     // trip the heuristic extractors.
     let agent = MockAgentSession::new("ok");
@@ -417,7 +417,7 @@ fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
 
     run_meeting_repl(
         "Empty state test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -459,7 +459,7 @@ fn repl_state_empty_renders_all_section_headings_with_none_placeholders() {
 #[serial(cognitive_memory)]
 fn repl_state_populated_renders_extracted_decisions_action_items_open_questions() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     // Agent response embeds explicit signals the extractors recognize:
     //   - "Decision:" → extract_decisions
     //   - "TODO:"     → extract_action_items
@@ -475,7 +475,7 @@ fn repl_state_populated_renders_extracted_decisions_action_items_open_questions(
 
     run_meeting_repl(
         "Populated state test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -520,7 +520,7 @@ fn repl_state_populated_renders_extracted_decisions_action_items_open_questions(
 #[serial(cognitive_memory)]
 fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_actions() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new(
         "Decision: Use Rust. TODO: Write the migration script. OPEN: What is the rollback strategy here?",
     );
@@ -530,7 +530,7 @@ fn repl_state_renders_sections_in_canonical_order_decisions_then_questions_then_
 
     run_meeting_repl(
         "Order test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -588,7 +588,7 @@ fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
     // any ANSI in the LLM content must still be stripped.
     unsafe { std::env::remove_var("NO_COLOR") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     // Embed a clear-screen escape inside the canned agent reply. After
     // sanitization the literal ESC byte must NOT appear inside any extracted
     // bullet shown by /state.
@@ -600,7 +600,7 @@ fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
 
     run_meeting_repl(
         "Sanitize test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -637,7 +637,7 @@ fn repl_state_strips_ansi_escapes_from_llm_sourced_content_before_rendering() {
 #[serial(cognitive_memory)]
 fn repl_help_mentions_state_command() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -645,7 +645,7 @@ fn repl_help_mentions_state_command() {
 
     run_meeting_repl(
         "Help mentions /state",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -666,7 +666,7 @@ fn repl_help_mentions_state_command() {
 #[serial(cognitive_memory)]
 fn repl_help_mentions_inline_recording_commands() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -674,7 +674,7 @@ fn repl_help_mentions_inline_recording_commands() {
 
     run_meeting_repl(
         "Help mentions inline commands",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -697,7 +697,7 @@ fn repl_help_mentions_inline_recording_commands() {
 #[serial(cognitive_memory)]
 fn repl_help_is_grouped_into_sections() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -705,7 +705,7 @@ fn repl_help_is_grouped_into_sections() {
 
     run_meeting_repl(
         "Grouped help test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -730,7 +730,7 @@ fn repl_grouped_help_colorizes_section_titles() {
     // SAFETY: serial_test guards against parallel access to env vars.
     unsafe { std::env::remove_var("NO_COLOR") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -738,7 +738,7 @@ fn repl_grouped_help_colorizes_section_titles() {
 
     run_meeting_repl(
         "Grouped help color test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -762,7 +762,7 @@ fn repl_grouped_help_honors_no_color() {
     // SAFETY: serial_test guards against parallel access to env vars.
     unsafe { std::env::set_var("NO_COLOR", "1") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/help\n/close\n";
     let mut reader = &input[..];
@@ -770,7 +770,7 @@ fn repl_grouped_help_honors_no_color() {
 
     run_meeting_repl(
         "Grouped help NO_COLOR test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -795,7 +795,7 @@ fn repl_grouped_help_honors_no_color() {
 #[serial(cognitive_memory)]
 fn repl_unknown_command_suggests_closest() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     // Distinctive sentinel so we can prove the typo was NOT forwarded to the LLM.
     let agent = MockAgentSession::new("AGENT_REPLY_SENTINEL");
     let input = b"/colse\n/close\n";
@@ -804,7 +804,7 @@ fn repl_unknown_command_suggests_closest() {
 
     run_meeting_repl(
         "Unknown command suggestion",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -827,7 +827,7 @@ fn repl_unknown_command_suggests_closest() {
 #[serial(cognitive_memory)]
 fn repl_unknown_command_without_match_lists_commands() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/zzzzzzzz\n/close\n";
     let mut reader = &input[..];
@@ -835,7 +835,7 @@ fn repl_unknown_command_without_match_lists_commands() {
 
     run_meeting_repl(
         "Unknown command no match",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -859,7 +859,7 @@ fn repl_unknown_command_without_match_lists_commands() {
 #[serial(cognitive_memory)]
 fn repl_file_path_is_not_treated_as_unknown_command() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("noted the path");
     // A filesystem path starts with '/' but must remain conversation.
     let input = b"/home/user/notes.md\n/close\n";
@@ -868,7 +868,7 @@ fn repl_file_path_is_not_treated_as_unknown_command() {
 
     run_meeting_repl(
         "File path conversation",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -891,7 +891,7 @@ fn repl_file_path_is_not_treated_as_unknown_command() {
 #[serial(cognitive_memory)]
 fn repl_decision_command_records_and_confirms() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/decision Adopt TDD for new modules\n/close\n";
     let mut reader = &input[..];
@@ -899,7 +899,7 @@ fn repl_decision_command_records_and_confirms() {
 
     run_meeting_repl(
         "Decision recording test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -922,7 +922,7 @@ fn repl_decision_command_records_and_confirms() {
 #[serial(cognitive_memory)]
 fn repl_action_command_records_and_confirms() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/action Bob will write tests by friday\n/close\n";
     let mut reader = &input[..];
@@ -930,7 +930,7 @@ fn repl_action_command_records_and_confirms() {
 
     run_meeting_repl(
         "Action recording test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -953,7 +953,7 @@ fn repl_action_command_records_and_confirms() {
 #[serial(cognitive_memory)]
 fn repl_question_command_records_and_confirms() {
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/question What is our SLO target?\n/close\n";
     let mut reader = &input[..];
@@ -961,7 +961,7 @@ fn repl_question_command_records_and_confirms() {
 
     run_meeting_repl(
         "Question recording test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -990,7 +990,7 @@ fn repl_decision_emits_capture_tally() {
     // the operator sees what the meeting has captured so far without running
     // `/state`. The `[meeting] captured:` prefix is a stable greppable marker.
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/decision Adopt TDD for new modules\n/close\n";
     let mut reader = &input[..];
@@ -998,7 +998,7 @@ fn repl_decision_emits_capture_tally() {
 
     run_meeting_repl(
         "Tally test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -1033,7 +1033,7 @@ fn repl_capture_tally_counts_each_category_and_pluralizes() {
     // correct singular/plural forms. Two decisions => "2 decisions"; one of
     // each remaining category => singular.
     let _state = HermeticState::new();
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/decision A\n/decision B\n/question Who owns rollout?\n/action Carol ships CI\n/risk API may slip\n/disagree Prefer Python\n/close\n";
     let mut reader = &input[..];
@@ -1041,7 +1041,7 @@ fn repl_capture_tally_counts_each_category_and_pluralizes() {
 
     run_meeting_repl(
         "Tally counts test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -1067,7 +1067,7 @@ fn repl_capture_tally_is_plain_text_for_grep() {
     let _state = HermeticState::new();
     // Ensure color is *not* globally suppressed for this assertion.
     unsafe { std::env::remove_var("NO_COLOR") };
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/risk Dependency may slip\n/close\n";
     let mut reader = &input[..];
@@ -1075,7 +1075,7 @@ fn repl_capture_tally_is_plain_text_for_grep() {
 
     run_meeting_repl(
         "Tally plain test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -1101,7 +1101,7 @@ fn repl_state_shows_explicit_items_immediately() {
     // /decision, /action, /question add items that don't enter the
     // conversation history; /state must still surface them so the operator
     // sees the running list.
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let agent = MockAgentSession::new("ok");
     let input = b"/decision Use Rust for CLI\n/action Carol will set up CI by next sprint\n/question Who owns rollout?\n/state\n/close\n";
     let mut reader = &input[..];
@@ -1109,7 +1109,7 @@ fn repl_state_shows_explicit_items_immediately() {
 
     run_meeting_repl(
         "Inline state test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,
@@ -1150,7 +1150,7 @@ fn renders_structured_banner_on_agent_error() {
     // SAFETY: serial_test guards against parallel env mutations.
     unsafe { std::env::set_var("NO_COLOR", "1") };
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     // First call fails, second call succeeds, then /close.
     let agent = FailingThenOkMockAgent::new(1, "recovered");
     let input = b"this will fail\nthis will succeed\n/close\n";
@@ -1159,7 +1159,7 @@ fn renders_structured_banner_on_agent_error() {
 
     run_meeting_repl(
         "Error banner test",
-        &bridge,
+        &memory,
         Some(Box::new(agent)),
         "",
         &mut reader,

@@ -32,6 +32,15 @@ printf '%s\n' "$OUTPUT" | grep -F "Verification steps: " >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Action status: success" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Changed files after action: <none>" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "Verification status: verified" >/dev/null
+# End-to-end guard for the operator-surface gap trace. The shipped probe binary
+# is a thin delegator to `dispatch_operator_probe`, which exposes the
+# repo-grounded `engineer-loop-run` command. The gap summary must report that
+# delegated surface and must never regress to the stale "does not yet expose a
+# terminal engineer loop" false gap that string-scanning the wrapper alone
+# produced before the detector learned to follow the dispatch delegation.
+printf '%s\n' "$OUTPUT" | grep -F "Gap summary: " >/dev/null
+printf '%s\n' "$OUTPUT" | grep -F "operator probe delegates to a dispatcher that exposes the repo-grounded engineer-loop-run surface" >/dev/null
+! printf '%s\n' "$OUTPUT" | grep -F "does not yet expose a terminal engineer loop" >/dev/null
 ! printf '%s\n' "$OUTPUT" | grep -F "Azlin" >/dev/null
 
 EDIT_REPO="$(mktemp -d /tmp/simard-engineer-loop-edit-fixture.XXXXXX)"

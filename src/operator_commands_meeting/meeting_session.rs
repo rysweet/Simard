@@ -20,12 +20,12 @@ fn load_meeting_system_prompt() -> String {
 /// Delegates to [`memory_ipc::launch_writer_client`] so the daemon-IPC →
 /// native-write → read-only ladder lives in one place (issue #1590,
 /// spec recommendation C / A2).
-fn launch_real_meeting_bridge() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
+fn launch_real_meeting_client() -> Result<Box<dyn CognitiveMemoryOps>, Box<dyn std::error::Error>> {
     let state_root = memory_ipc::default_state_root();
-    let bridge = memory_ipc::launch_writer_client(&state_root)?;
+    let memory = memory_ipc::launch_writer_client(&state_root)?;
     // Move the boxed ops out of the WriterClient wrapper so existing call
     // sites that hold `Box<dyn CognitiveMemoryOps>` keep working unchanged.
-    Ok(bridge.into_box())
+    Ok(memory.into_box())
 }
 
 /// Open an agent session for the meeting REPL using `SessionBuilder`.
@@ -58,14 +58,14 @@ fn open_meeting_agent_session() -> Option<Box<dyn crate::base_types::BaseTypeSes
 
 /// Entry point for the `simard meeting` CLI command.
 pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let bridge = launch_real_meeting_bridge()?;
-    tracing::info!("Cognitive memory bridge active");
+    let memory = launch_real_meeting_client()?;
+    tracing::info!("Cognitive memory memory active");
 
-    print_greeting_banner(Some(&*bridge));
+    print_greeting_banner(Some(&*memory));
 
     let agent_session = open_meeting_agent_session();
     let base_prompt = load_meeting_system_prompt();
-    let live_context = build_live_meeting_context(&*bridge)?;
+    let live_context = build_live_meeting_context(&*memory)?;
     let meeting_system_prompt = format!("{base_prompt}\n\n{live_context}");
 
     if agent_session.is_some() {
@@ -81,7 +81,7 @@ pub fn run_meeting_repl_command(topic: &str) -> Result<(), Box<dyn std::error::E
 
     let _session = run_meeting_repl(
         topic,
-        &*bridge,
+        &*memory,
         agent_session,
         &meeting_system_prompt,
         &mut reader,
@@ -97,19 +97,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_meeting_system_prompt_does_not_panic() {
-        let _prompt = load_meeting_system_prompt();
-    }
-
-    #[test]
-    fn load_meeting_system_prompt_returns_string() {
-        let prompt = load_meeting_system_prompt();
-        let _ = prompt.len();
-    }
-
-    #[test]
-    fn open_meeting_agent_session_returns_none_without_api_key() {
-        let _result = open_meeting_agent_session();
+    fn load_meeting_system_prompt_reads_the_prompt_asset_with_missing_file_fallback() {
+        // The loader must resolve `simard/meeting_system.md` under the prompt
+        // root and fall back to an empty string when the asset is absent —
+        // exactly what a direct read with `unwrap_or_default()` produces.
+        let expected = std::fs::read_to_string(prompt_root().join("simard/meeting_system.md"))
+            .unwrap_or_default();
+        assert_eq!(load_meeting_system_prompt(), expected);
     }
 
     /// Calling `open_meeting_agent_session()` in a headless CI
@@ -139,11 +133,5 @@ mod tests {
         );
 
         let _ = handle.join();
-    }
-
-    #[test]
-    fn run_meeting_repl_command_errors_cleanly_without_agent() {
-        let prompt = load_meeting_system_prompt();
-        let _ = prompt.len();
     }
 }

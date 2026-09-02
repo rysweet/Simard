@@ -1,7 +1,8 @@
 //! Tests for [`super::tab_meta`] and the cross-check between
 //! `TAB_METADATA` and the rendered `INDEX_HTML`. These tests are the
-//! Rust half of the Tab-Identity Contract (#1993 / #1994 / #1995); the
-//! other half is `tests/e2e-dashboard/smoke_python/test_tab_clarity.py`.
+//! Rust cover for the Tab-Identity Contract (#1993 / #1994 / #1995); the
+//! former Python `smoke_python` half was removed when Simard became a
+//! pure-Rust daemon (#3181), so this Rust suite carries the contract.
 
 #![cfg(test)]
 
@@ -1238,5 +1239,56 @@ fn rendered_html_goals_render_label_chips_and_tag_filter() {
         !INDEX_HTML.contains("'<option value=\"'+esc(t)+'\"'"),
         "the tag-filter <option> value must not use plain esc(t) in the \
          attribute context (attribute-injection risk)"
+    );
+}
+
+// ===========================================================================
+// Issue #4178 — Workboard 'Blocked' column: blocked != failed + surface WHY.
+//
+// BUG: the Workboard kanban card (`wbGoalCard`) colored a lifecycle-BLOCKED
+// goal's progress bar with `var(--red)` (#f85149) — the SAME activity-failure
+// red that issue #20 deliberately reserved for failures — so a blocked goal on
+// the Workboard read as *failed*. The card also never surfaced WHY a goal was
+// blocked (the reason is carried in the additive `block_reason` field and, for
+// back-compat, jammed into the legacy `status` Display string).
+//
+// FIX: the blocked bar uses amber `var(--yellow)` (#d29922), matching the
+// Goals-tab GOAL_STATUS_COLORS decision, and the card renders
+// `Blocked — <reason>` from `g.block_reason` (falling back to the legacy
+// prefix-stripped `status`). The behavioral half is
+// tests/gadugi/dashboard-workboard-blocked-reason.sh.
+
+#[test]
+fn rendered_html_workboard_blocked_bar_is_amber_not_failure_red() {
+    // The blocked branch of the workboard card's bar color must NOT use the
+    // activity-failure red — that is the exact confusion issue #20 forbade.
+    assert!(
+        !INDEX_HTML.contains("g.status.startsWith('blocked')?'var(--red)'"),
+        "the Workboard blocked progress bar must not reuse the activity-failure \
+         red var(--red); a blocked goal must be visually distinct from a failed one"
+    );
+    // The blocked bar must use amber var(--yellow) (== #d29922), consistent with
+    // the Goals-tab lifecycle badge, keyed off the isBlocked classifier.
+    assert!(
+        INDEX_HTML.contains("isBlocked?'var(--yellow)'"),
+        "the Workboard blocked progress bar must use amber var(--yellow) so \
+         blocked != failed across the whole dashboard"
+    );
+}
+
+#[test]
+fn rendered_html_workboard_card_surfaces_block_reason() {
+    // The card must render WHY a goal is blocked, preferring the additive clean
+    // `block_reason` field over re-parsing the legacy Display string.
+    assert!(
+        INDEX_HTML.contains("g.block_reason"),
+        "the Workboard card must surface a blocked goal's reason from the additive \
+         g.block_reason field"
+    );
+    // The reason must be labeled and escaped (escape-last: esc() the raw reason).
+    assert!(
+        INDEX_HTML.contains("<strong>Blocked — </strong>${esc(reason)}"),
+        "the Workboard blocked card must render an escaped 'Blocked — <reason>' row \
+         so the operator can see WHY a goal is blocked"
     );
 }

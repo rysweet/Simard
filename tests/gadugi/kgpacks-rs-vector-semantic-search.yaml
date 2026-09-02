@@ -1,0 +1,56 @@
+name: "kgpacks-rs vector semantic search parity (KGP-Q9)"
+description: "Outside-in coverage for kgpacks-rs parity criterion KGP-Q9: Simard's native Rust knowledge client (the agent-kgpacks port) must answer knowledge.query by embedding-cosine vector retrieval over the pack's stored embeddings (the original's retrieval method) instead of only a keyword LIKE scan. Proven by retrieving a semantically-near article that shares no literal keyword with the question (which a keyword scan misses), with keyword-only packs falling back unchanged. See Specs/agent-kgpacks-rs-parity.md."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "native knowledge client retrieves by embedding cosine (vector semantic search)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/kgpacks-rs-vector-semantic-search.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "kgpacks-rs"
+    - "knowledge"
+    - "parity"
+    - "vector"
+    - "semantic-search"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

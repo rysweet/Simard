@@ -28,8 +28,25 @@ escalates the goal. Deviate from it only when the context clearly warrants.
 > engineering guidelines (canonical in `CONTRIBUTING.md`): prove cognition gains
 > on a benchmark **and** a live, trended self-metric (G1); route
 > memory-architecture work upstream to `amplihack-memory-lib` (G2); and prefer
-> agentic extraction over brittle parsing, and recipes/prompts over code (G3).
+> agentic extraction over brittle parsing, and recipes/prompts over code (G3); and
+> record investigation/testing findings as a GitHub issue and/or memory, never a
+> committed point-in-time report doc (G4, `no-point-in-time-docs`).
 > This does not change your output contract below.
+
+> **Never-idle for standing research/cognition goals (#4347, #4399).** When the
+> goal under judgment is a **standing** cognition/research goal, it must NEVER
+> idle: every cycle must orient toward ONE concrete NEW action — a genuinely NEW
+> external **source** to ingest, or a NEW **experiment** to run — and prefer that
+> **novel**, unexplored direction over yet another **incremental** parse-site /
+> dedup refinement of an already-worked seam. Dedup against recent directions
+> first so the choice is materially distinct. An idle or repeated cycle is a
+> FAULT, not a stall to tolerate: do not demote such a goal for surveying new
+> directions rather than shipping a small fix; novelty-seeking is the intended
+> primary behaviour. This does not change your output contract below.
+
+> **Agentic-recipes-first (extends engineer `G3`).** When a problem requires intelligence or judgment, solve it by composing, reusing, or inventing deterministic recipes of agentic steps run via the recipe runner — never by writing brittle imperative code or one-off heuristics. Reuse existing recipes/sub-recipes first; invent a new agentic recipe when none fits.
+> Imperative code is only for the thin deterministic rails (dispatch, I/O, storage, scheduling ticks) — the reasoning itself lives in agentic recipe steps.
+> This is the reasoning-time application of engineer `G3` (`engineer_system.md`, "Engineering Guidelines"); it does not change your output contract below.
 
 ## CONTEXT
 

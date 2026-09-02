@@ -8,7 +8,7 @@
 //! definitive resolution.
 //!
 //! The breaker lives entirely in `src/goal_curation/` (per the incident's
-//! coordination constraint — `ooda_brain`/reasoner/bridge files are owned by
+//! coordination constraint — `ooda_brain`/reasoner/memory files are owned by
 //! the naming-cleanup rename) and reuses the Fix-2 done-gate to make the
 //! "verify concretely" step real rather than perpetual prose.
 

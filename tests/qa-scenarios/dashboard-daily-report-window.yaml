@@ -1,0 +1,37 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# The installed `gadugi-test` / `@gadugi/agentic-test` binary validates and runs
+# scenarios through `ScenarioLoader` (canonical format), which requires a `name`,
+# a `steps` array, and a non-empty `agents` array. A single `cli` agent runs the
+# hermetic regression script; the agent's command runner treats a non-zero exit
+# code as a step failure, so the script's own `exit 1` on a regression makes this
+# a real pass/fail gate (not a cosmetic assertion).
+name: simard-dashboard-daily-report-window
+description: >-
+  Dashboard Overview daily report counts PRs merged / bugs fixed WITHIN the
+  24-hour window, instead of the pre-fix constant capped at 5 (the collectors
+  ran `gh ... --limit 5` with no time filter, pinning both metrics at 5.0).
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+    - metrics
+  priority: high
+steps:
+  - name: Run the dashboard daily-report window regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-daily-report-window.sh
+    timeout: 300000

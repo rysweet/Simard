@@ -1,0 +1,124 @@
+# Parser-free agentic terminal workflow for one goal-session cycle.
+
+name: "goal-session-actor"
+description: "Choose and durably record one typed goal-session terminal"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "ooda", "act", "typed-capabilities"]
+
+context: {}
+
+steps:
+  - id: "goal-session-actor"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are Simard's final goal-session actor. Read the semantic context files
+      below. Interpret their meaning directly. Do not emit or parse a marker,
+      JSON verdict, or command contract from another agent.
+
+      task context path = {{task_path}}
+      reason context path = {{reason_path}}
+      observe context path = {{observe_output_path}}
+      orient context path = {{orient_output_path}}
+      decide context path = {{decide_output_path}}
+
+      Invoke exactly one terminal capability with your bash tool. Use one of:
+
+      "{{simard_binary}}" ooda terminal spawn-engineer \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-spawn" \
+        --task-path "{{task_path}}" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      "{{simard_binary}}" ooda terminal no-action \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-no-action" \
+        --reason-path "{{reason_path}}" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      "{{simard_binary}}" ooda terminal blocked \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-blocked" \
+        --reason-path "{{reason_path}}" \
+        --blocker "Describe the blocking dependency or operator decision" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      "{{simard_binary}}" ooda terminal completed \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}" \
+        --goal-id "{{goal_id}}" \
+        --auth-token-path "{{auth_token_path}}" \
+        --admission-path "{{admission_path}}" \
+        --request-id "{{cycle_id}}-completed" \
+        --summary-path "{{reason_path}}" \
+        --criterion-id "goal-session-complete" \
+        --evidence-path "<path to a JSON file you write>" \
+        --raw-semantic-path "{{decide_output_path}}"
+
+      Only choose `completed` when the goal is genuinely finished and you can
+      prove it with typed evidence. Before invoking it, write a JSON array of
+      typed evidence with your file tool and pass that file to --evidence-path.
+      Each element is one of these machine-checkable shapes (do not invent other
+      keys), for example:
+
+        [{"kind":"commit","repository":{"owner":"rysweet","name":"Simard"},
+          "sha":"<40-hex merged commit>"}]
+
+      Other allowed shapes: {"kind":"check_run","repository":{...},
+      "check_id":<u64>,"conclusion":"success"};
+      {"kind":"issue","repository":{...},"number":<u64>};
+      {"kind":"engineer_run","session_id":"...","claim_key":"..."}.
+      A completion with no evidence is rejected by the capability, so if you
+      cannot prove completion, choose `no-action` or `blocked` instead.
+
+      The capability call is the outcome. Your prose is diagnostic only. If the
+      capability fails, stop; do not invoke another terminal.
+
+  - id: "goal-session-terminal-verifier"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      Verify that the prior semantic actor recorded a durable terminal by running:
+
+      "{{simard_binary}}" ooda terminal status \
+        --ledger-path "{{ledger_path}}" \
+        --policy-path "{{policy_path}}" \
+        --session-id "{{session_id}}" \
+        --cycle-id "{{cycle_id}}"
+
+      If it prints "present", stop successfully. If it prints "missing", read
+      the task, reason, Observe, Orient, and Decide context files below and make
+      the semantic decision yourself:
+
+      task context path = {{task_path}}
+      reason context path = {{reason_path}}
+      observe context path = {{observe_output_path}}
+      orient context path = {{orient_output_path}}
+      decide context path = {{decide_output_path}}
+
+      Then read the trusted workflow asset at {{recipe_path}} and invoke exactly
+      one of the four `simard ooda terminal` commands shown in its first actor
+      step, using the same scoped arguments and context paths. Do not emit or
+      parse a marker, JSON verdict, or prose contract. The durable terminal is
+      the only business outcome.

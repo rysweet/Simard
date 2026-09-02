@@ -307,17 +307,7 @@ fn corrupt_db_removed_when_older_than_threshold() {
         .unwrap()
         .set_times(times)
         .unwrap();
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    if let Some(h) = old_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    }
+    run_corrupt_cleanup_with_home(tmp.path());
     assert!(!old.exists(), "old corrupt DB should be removed");
     assert!(young.exists(), "young corrupt DB should survive");
     assert!(unrelated.exists(), "non-corrupt DB must never be touched");
@@ -374,17 +364,7 @@ fn corrupt_db_keep_bounds_quarantine_count() {
         paths.push(p);
     }
 
-    let old_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let mut report = CleanupReport::default();
-    remove_old_corrupt_dbs(&mut report);
-    if let Some(h) = old_home {
-        unsafe {
-            std::env::set_var("HOME", h);
-        }
-    }
+    run_corrupt_cleanup_with_home(tmp.path());
 
     let remaining = paths.iter().filter(|p| p.exists()).count();
     assert_eq!(
@@ -702,20 +682,30 @@ fn backdate(path: &std::path::Path, days: u64) {
 }
 
 /// Run `remove_old_corrupt_dbs` with `HOME` pointed at `home`, restoring the
-/// previous value afterward. Serialized by the caller's
-/// `#[serial(cognitive_memory)]` attribute so the process-wide `HOME` mutation
+/// previous environment afterward. Serialized by the caller's
+/// `#[serial(cognitive_memory)]` attribute so the process-wide env mutation
 /// cannot race other tests that read the cognitive-memory store.
+///
+/// `remove_old_corrupt_dbs` resolves its target via
+/// [`crate::state_root::simard_state_root`], which honors `SIMARD_STATE_ROOT`
+/// **before** falling back to `$HOME/.simard`. Other tests in the binary set
+/// `SIMARD_STATE_ROOT` and some leak it (never restore it), so this helper must
+/// unset it for the duration of the call — otherwise cleanup scans the leaked
+/// path instead of `home/.simard` and reclaims nothing. Both env vars are
+/// restored to their prior values before returning.
 fn run_corrupt_cleanup_with_home(home: &std::path::Path) -> CleanupReport {
     let old_home = std::env::var_os("HOME");
+    let old_state_root = std::env::var_os(crate::state_root::STATE_ROOT_ENV);
+    // SAFETY: serialized via the caller's #[serial(cognitive_memory)]; both
+    // vars are restored below before any assertion can unwind.
     unsafe {
         std::env::set_var("HOME", home);
+        std::env::remove_var(crate::state_root::STATE_ROOT_ENV);
     }
     let mut report = CleanupReport::default();
     remove_old_corrupt_dbs(&mut report);
-    match old_home {
-        Some(h) => unsafe { std::env::set_var("HOME", h) },
-        None => unsafe { std::env::remove_var("HOME") },
-    }
+    restore_env("HOME", old_home);
+    restore_env(crate::state_root::STATE_ROOT_ENV, old_state_root);
     report
 }
 
@@ -924,4 +914,96 @@ fn corrupt_db_keeps_young_library_quarantine() {
 
     assert!(young.exists(), "young library quarantine should survive");
     assert_eq!(report.bytes_freed, 0);
+}
+
+/// Root Cause B (issue #4469): the live cognitive store and its quarantines live
+/// under `<state_root>/state/` (e.g. `~/.simard/state/cognitive`), NOT top-level
+/// `~/.simard`. Before this fix `remove_old_corrupt_dbs` only scanned the
+/// top-level dir, so corrupt quarantines accumulated unbounded under `state/`
+/// (62 artifacts on the live host). Cleanup must now also reclaim the `state/`
+/// subdir with the SAME age + keep-last-N + largest-asset bounds, applied
+/// independently per directory, while never touching the live store.
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn corrupt_db_reclaims_state_subdir_quarantines_bounded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = tmp.path().join(".simard").join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    // Aged quarantines under state/ — must be reclaimed (the accumulation bug).
+    let aged = [
+        "cognitive.corrupt-1700000000",
+        "cognitive.wal.corrupt-1700000000",
+    ];
+    for q in &aged {
+        let p = state.join(q);
+        std::fs::write(&p, b"aged-corrupt").unwrap();
+        backdate(&p, CORRUPT_DB_MAX_AGE_DAYS + 1);
+    }
+
+    // A burst of young trivial quarantines exceeding keep-last-N: only the
+    // newest CORRUPT_DB_KEEP survive (count cap applied to the state/ listing).
+    let burst = CORRUPT_DB_KEEP + 3;
+    let mut young = Vec::with_capacity(burst);
+    for i in 0..burst {
+        let p = state.join(format!("cognitive.wal.corrupt-young-{i:04}"));
+        std::fs::write(&p, b"tiny").unwrap();
+        let mtime =
+            std::time::SystemTime::now() - std::time::Duration::from_secs((i as u64 + 1) * 60);
+        let times = std::fs::FileTimes::new().set_modified(mtime);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        young.push(p);
+    }
+
+    // The largest *substantial* quarantine is the recovery asset — protected from
+    // BOTH caps even though aged and buried behind newer quarantines.
+    let asset = state.join("cognitive.corrupt-asset");
+    std::fs::write(
+        &asset,
+        vec![0u8; (CORRUPT_DB_PROTECT_MIN_BYTES + 512) as usize],
+    )
+    .unwrap();
+    backdate(&asset, CORRUPT_DB_MAX_AGE_DAYS + 5);
+
+    // The LIVE store under state/ must never be touched (no `.corrupt-` infix).
+    let live = state.join("cognitive");
+    let live_wal = state.join("cognitive.wal");
+    std::fs::write(&live, b"live-store").unwrap();
+    std::fs::write(&live_wal, b"wal").unwrap();
+
+    let report = run_corrupt_cleanup_with_home(tmp.path());
+
+    // Aged state/ quarantines reclaimed.
+    for q in &aged {
+        assert!(
+            !state.join(q).exists(),
+            "aged state/ quarantine should be reclaimed: {q}"
+        );
+    }
+    // keep-last-N bounds the young burst (asset does not consume a keep slot).
+    let young_remaining = young.iter().filter(|p| p.exists()).count();
+    assert_eq!(
+        young_remaining, CORRUPT_DB_KEEP,
+        "young state/ quarantines must be bounded to keep-last-N"
+    );
+    // Recovery asset preserved despite age and rank.
+    assert!(
+        asset.exists(),
+        "largest substantial recovery asset under state/ must be preserved"
+    );
+    // Live store untouched.
+    assert!(
+        live.exists() && live_wal.exists(),
+        "live cognitive store under state/ must never be removed"
+    );
+    assert!(report.errors.is_empty(), "no errors expected: {report:?}");
+    assert!(
+        report.bytes_freed > 0,
+        "some bytes should have been reclaimed from state/"
+    );
 }

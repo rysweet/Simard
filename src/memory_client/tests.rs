@@ -1,7 +1,7 @@
 use super::*;
 use crate::rpc_transport::InMemoryRpcTransport;
 
-fn mock_bridge() -> CognitiveMemoryClient {
+fn mock_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-memory", |method, params| match method {
         "memory.store_fact" => Ok(json!({"id": "sem_test123"})),
         "memory.search_facts" => Ok(json!({
@@ -59,21 +59,21 @@ fn mock_bridge() -> CognitiveMemoryClient {
 }
 
 #[test]
-fn store_and_search_fact_via_bridge() {
-    let bridge = mock_bridge();
-    let id = bridge
+fn store_and_search_fact_via_memory() {
+    let memory = mock_memory();
+    let id = memory
         .store_fact("rust", "systems language", 0.9, &[], "")
         .unwrap();
     assert_eq!(id, "sem_test123");
-    let facts = bridge.search_facts("rust", 10, 0.0).unwrap();
+    let facts = memory.search_facts("rust", 10, 0.0).unwrap();
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].concept, "rust");
 }
 
 #[test]
 fn get_statistics_returns_typed_result() {
-    let bridge = mock_bridge();
-    let stats = bridge.get_statistics().unwrap();
+    let memory = mock_memory();
+    let stats = memory.get_statistics().unwrap();
     assert_eq!(stats.sensory_count, 1);
     assert_eq!(stats.total(), 21);
 }
@@ -82,27 +82,27 @@ fn get_statistics_returns_typed_result() {
 
 #[test]
 fn record_sensory_returns_node_id() {
-    let bridge = mock_bridge();
-    let id = bridge.record_sensory("visual", "raw pixels", 60).unwrap();
+    let memory = mock_memory();
+    let id = memory.record_sensory("visual", "raw pixels", 60).unwrap();
     assert_eq!(id, "sen_test");
 }
 
 #[test]
 fn prune_expired_sensory_returns_count() {
-    let bridge = mock_bridge();
-    let count = bridge.prune_expired_sensory().unwrap();
+    let memory = mock_memory();
+    let count = memory.prune_expired_sensory().unwrap();
     assert_eq!(count, 0);
 }
 
 #[test]
 fn push_and_get_working_round_trip() {
-    let bridge = mock_bridge();
-    let id = bridge
+    let memory = mock_memory();
+    let id = memory
         .push_working("goal", "finish task", "task-1", 0.95)
         .unwrap();
     assert_eq!(id, "wrk_test");
 
-    let slots = bridge.get_working("task-1").unwrap();
+    let slots = memory.get_working("task-1").unwrap();
     assert_eq!(slots.len(), 1);
     assert_eq!(slots[0].slot_type, "goal");
     assert_eq!(slots[0].task_id, "task-1");
@@ -110,15 +110,15 @@ fn push_and_get_working_round_trip() {
 
 #[test]
 fn clear_working_returns_count() {
-    let bridge = mock_bridge();
-    let count = bridge.clear_working("task-1").unwrap();
+    let memory = mock_memory();
+    let count = memory.clear_working("task-1").unwrap();
     assert_eq!(count, 1);
 }
 
 #[test]
 fn store_episode_returns_node_id() {
-    let bridge = mock_bridge();
-    let id = bridge
+    let memory = mock_memory();
+    let id = memory
         .store_episode("something happened", "test-source", None)
         .unwrap();
     assert_eq!(id, "epi_test");
@@ -126,9 +126,9 @@ fn store_episode_returns_node_id() {
 
 #[test]
 fn store_episode_with_metadata() {
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let meta = json!({"key": "value"});
-    let id = bridge
+    let id = memory
         .store_episode("event", "source", Some(&meta))
         .unwrap();
     assert_eq!(id, "epi_test");
@@ -136,15 +136,15 @@ fn store_episode_with_metadata() {
 
 #[test]
 fn consolidate_episodes_returns_none_when_insufficient() {
-    let bridge = mock_bridge();
-    let result = bridge.consolidate_episodes(10).unwrap();
+    let memory = mock_memory();
+    let result = memory.consolidate_episodes(10).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
 fn store_procedure_returns_node_id() {
-    let bridge = mock_bridge();
-    let id = bridge
+    let memory = mock_memory();
+    let id = memory
         .store_procedure(
             "build",
             &["compile".into(), "test".into()],
@@ -156,8 +156,8 @@ fn store_procedure_returns_node_id() {
 
 #[test]
 fn recall_procedure_returns_list() {
-    let bridge = mock_bridge();
-    let procs = bridge.recall_procedure("build", 5).unwrap();
+    let memory = mock_memory();
+    let procs = memory.recall_procedure("build", 5).unwrap();
     assert_eq!(procs.len(), 1);
     assert_eq!(procs[0].name, "build");
     assert_eq!(procs[0].steps, vec!["compile", "test"]);
@@ -165,8 +165,8 @@ fn recall_procedure_returns_list() {
 
 #[test]
 fn store_prospective_returns_node_id() {
-    let bridge = mock_bridge();
-    let id = bridge
+    let memory = mock_memory();
+    let id = memory
         .store_prospective("remind me", "when idle", "do thing", 5)
         .unwrap();
     assert_eq!(id, "pro_test");
@@ -174,15 +174,15 @@ fn store_prospective_returns_node_id() {
 
 #[test]
 fn check_triggers_returns_empty_vec() {
-    let bridge = mock_bridge();
-    let triggered = bridge.check_triggers("some content").unwrap();
+    let memory = mock_memory();
+    let triggered = memory.check_triggers("some content").unwrap();
     assert!(triggered.is_empty());
 }
 
 // --- Error propagation tests ---
 
-fn error_bridge() -> CognitiveMemoryClient {
-    let transport = InMemoryRpcTransport::new("error-bridge", |method, _params| {
+fn error_memory() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("error-memory", |method, _params| {
         Err(crate::rpc::RpcErrorPayload {
             code: crate::rpc::RPC_ERROR_INTERNAL,
             message: format!("server error on {method}"),
@@ -192,52 +192,52 @@ fn error_bridge() -> CognitiveMemoryClient {
 }
 
 #[test]
-fn store_fact_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.store_fact("c", "content", 0.5, &[], "src");
+fn store_fact_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.store_fact("c", "content", 0.5, &[], "src");
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("server error"), "got: {msg}");
 }
 
 #[test]
-fn search_facts_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.search_facts("q", 10, 0.0);
+fn search_facts_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.search_facts("q", 10, 0.0);
     assert!(result.is_err());
 }
 
 #[test]
-fn record_sensory_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.record_sensory("audio", "data", 30);
+fn record_sensory_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.record_sensory("audio", "data", 30);
     assert!(result.is_err());
 }
 
 #[test]
-fn get_working_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.get_working("task-1");
+fn get_working_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.get_working("task-1");
     assert!(result.is_err());
 }
 
 #[test]
-fn get_statistics_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.get_statistics();
+fn get_statistics_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.get_statistics();
     assert!(result.is_err());
 }
 
 #[test]
-fn consolidate_episodes_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.consolidate_episodes(5);
+fn consolidate_episodes_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.consolidate_episodes(5);
     assert!(result.is_err());
 }
 
 #[test]
-fn recall_procedure_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.recall_procedure("build", 5);
+fn recall_procedure_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.recall_procedure("build", 5);
     assert!(result.is_err());
 }

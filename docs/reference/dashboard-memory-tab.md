@@ -124,11 +124,11 @@ statistics.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `available` | `bool` | `true` whenever the reader was reachable — **including when the store is empty** (an empty store returns the six hubs, no item nodes, `available:true`) and **including partial degradation** (reader reachable but one type could not enumerate — that type falls back to hub-only and `available` stays `true`; see [Partial degradation](#partial-degradation-reachable-but-a-type-cant-enumerate)). |
+| `available` | `bool` | `true` whenever the reader was reachable — **including when the store is empty** (an empty store returns the six hubs, no item nodes, `available:true`). `false` only on the reader-unavailable failure path, where `error` is present and `nodes`/`edges` are empty (see [Fail-loud data-load contract](./dashboard-memory-graph-fail-loud.md)). |
 | `nodes[]` | array | One object per node. Fields consumed by the renderer: `id` (unique), `type` (one of the six type literals above), `label` (short display text), `content` (detail/tooltip text, UTF-8-safe truncated). |
 | `edges[]` | array | `{ source, target }` node-id pairs. Every item node has exactly one edge to its type hub; there are **no dangling edges** (every endpoint id exists in `nodes`). |
 | `stats` | object | Live per-type counts mirroring `CognitiveMemoryOps::get_statistics()`: `working, semantic, episodic, procedural, prospective, sensory`. |
-| `note` | `string` (optional) | Present only on the degraded path when the reader could not be opened. It is **path-free** (no filesystem paths) and human-readable; `available` is `false` and `nodes`/`edges` are empty. |
+| `error` | `string` (optional) | Present **only on a data-load failure** (reader unreachable, a per-type read error, or a stats-vs-nodes discrepancy). It is **path-free** (no filesystem paths, no backtrace) and human-readable; its presence is what puts the client into the visible error-overlay state. See [Fail-loud data-load contract](./dashboard-memory-graph-fail-loud.md). |
 
 ### Example
 
@@ -238,32 +238,37 @@ Two constants keep the payload bounded without dropping live fidelity:
 | `GRAPH_MAX_PER_TYPE` | `200` | Maximum item nodes emitted per enumerable type. |
 | `GRAPH_NODE_CONTENT_MAX` | `2048` | Maximum `content` length in bytes; longer content is truncated by `truncate_graph_content`, which cuts on a UTF-8 char boundary (never mid-codepoint). |
 
-### Degraded path
+### Fail-loud data-load path
 
-If `open_reader_client` fails (reader unreachable), the handler returns
-`available:false`, empty `nodes`/`edges`, the `stats` it could obtain (zeros if
-none), and a short, **path-free** `note`. This is a real fallback, not a
-placeholder for the normal path: when the reader is reachable the endpoint
-always returns live data, even if the store happens to be empty.
+The graph **fails LOUD** — it never silently renders a blank canvas on a
+data-load error. If `open_reader_client` fails (reader unreachable), the handler
+returns a sanitized, **path-free** `error`, empty `nodes`/`edges`,
+`available:false`, and zeroed `stats`. Two further failure classes also set
+`error`: a per-type statistics/enumeration read returning `Err` (surfaced, not
+dropped via `unwrap_or_default()` / `if let Ok`), and a stats-vs-nodes
+discrepancy (an enumerable type reports a non-zero count but produced zero item
+nodes). Whenever `error` is present the client shows a visible error overlay.
 
-### Partial degradation (reachable but a type can't enumerate)
+A **genuinely empty store** is distinct and is **not** an error: it returns the
+six hubs, no item nodes, `available:true`, and no `error`, and the client shows
+a neutral "empty" message. When the reader is reachable and the store has
+content, the endpoint always returns live nodes/edges.
 
-The degraded path above is for a reader that cannot be opened at all. A
-distinct, softer case is a reader that **is** reachable but cannot enumerate one
-specific type — for example a version-skewed daemon that predates the
-`ListAllEpisodes` / `ListAllProspective` IPC arms, or a per-type read error. In
-that case the builder does **not** fail the whole request: the affected type
-falls back to **hub-only** (its magnitude still shown from `stats`), the other
-types still enumerate, and `available` stays `true`. This keeps the graph
-resilient to a mismatched daemon while never fabricating item nodes it could not
-read. It is a defence-in-depth backstop — with the IPC arms in place (above) the
-normal daemon topology enumerates all four long-term types fully.
+The discrepancy guard is scoped strictly to the four enumerable long-term types
+(facts, episodes, procedures, prospective); working memory and the sensory
+buffer are transient and legitimately hub-only, so they are exempt and never
+trigger a false-positive error.
+
+See [Memory graph fail-loud data-load contract](./dashboard-memory-graph-fail-loud.md)
+for the full contract, the front-end `#mem-graph-error` / `mgError` overlay, and
+the tests.
 
 ### No stray diagnostics
 
 The read path emits **no** `println!` / `eprintln!` — errors are surfaced
-through the `note` field and normal `Result` handling, keeping production
-output clean.
+through the `error` field (see [Fail-loud data-load contract](./dashboard-memory-graph-fail-loud.md))
+and normal `Result` handling, with full detail only via `tracing::warn!`,
+keeping production output clean.
 
 ## Registration and wiring
 
@@ -352,9 +357,10 @@ pre-existing tooltip guard:
 - **Additive IPC protocol.** The two new memory-IPC request variants
   (`ListAllEpisodes`, `ListAllProspective`) are appended to `MemoryRequest` and
   reuse the existing `MemoryResponse::Episodes` / `Prospectives` variants; no
-  existing variant or its wire encoding changes, and a reader still degrades
-  gracefully (hub-only for that type) against a daemon that predates them — see
-  [Partial degradation](#partial-degradation-reachable-but-a-type-cant-enumerate).
+  existing variant or its wire encoding changes, and a stats-vs-nodes
+  discrepancy against a daemon that predates them **fails loud** rather than
+  silently degrading — see
+  [Fail-loud data-load contract](./dashboard-memory-graph-fail-loud.md).
 - **Live data only.** The graph renders real nodes/edges read from the live
   cognitive store; there is no stale snapshot or placeholder on the normal path.
 - **No new `println!` / `eprintln!`** in the production read path.
@@ -365,6 +371,7 @@ pre-existing tooltip guard:
 ## Related
 
 - [Dashboard](../dashboard.md) — full tab catalogue and the Tab Identity Contract.
+- [Memory graph fail-loud data-load contract](./dashboard-memory-graph-fail-loud.md) — how the graph surfaces data-load errors instead of a silent blank canvas.
 - [Memory architecture](../memory.md) — the cognitive memory model behind the graph.
 - [Background tab prefetch and refresh](./dashboard-background-tab-prefetch.md) — how the Memory tab is pre-warmed and refreshed.
 - [Cognitive-memory client helpers](./cognitive-memory-client-helpers.md) — `open_reader_client` and the read path.

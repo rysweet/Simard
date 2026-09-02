@@ -117,9 +117,8 @@ pub enum StewardshipOutcome {
 
 `FiledNew` is returned when no existing open issue carried the signature;
 exactly one `gh issue create` was performed. `MatchedExisting` is returned
-when an open issue with the signature was found; no creation occurred.
-
-In both cases, `enqueue_stewardship_issue` was called with the issue handle.
+when an open issue with the signature was found; no creation occurred. Neither
+outcome mutates the goal board.
 
 ## Routing
 
@@ -184,11 +183,29 @@ pub trait GhClient {
 The only subprocess surface in the stewardship module. Two implementations
 are shipped:
 
+> **Reused by the Overseer gap-scan (#4717).** The same `GhClient` trait,
+> `RealGhClient`, and eventually-consistent-search-resilient dedup logic back
+> the Overseer's durable workstream-gap open-issue check. It injects a
+> `GhClient` via `Overseer::with_gap_issue_client(..)` and keys the search on
+> `GapItem::dedup_key()` = `workstream-gap:<signature>`, matching the same
+> `stewardship-signature:<key> in:body` body marker documented here. See the
+> [gap-scan durable dedup reference](./overseer-gap-scan-durable-dedup.md).
+
 ### `RealGhClient`
 
 `std::process::Command`-based.
 
-  - **search**: `gh issue list -R <repo> --state open --search "stewardship-signature:<hex> in:body" --json number,url,title,body`
+  - **search**: dedup is resilient to GitHub's **eventually-consistent** issue
+    search index. It first runs the fast full-text search
+    `gh issue list -R <repo> --state open --search "stewardship-signature:<hex> in:body" --json number,url,title,body`;
+    if that already surfaces the signed issue it is used as-is (one `gh` call).
+    Otherwise a just-filed tracking issue may exist but not be indexed yet, so
+    the (possibly empty) search hits are unioned with a **strongly-consistent**
+    scan of the newest open issues
+    (`gh issue list -R <repo> --state open --limit <N> --json …`, no `--search`).
+    Without this fallback, two sweeps inside the multi-minute indexing window
+    each see an empty search and file a duplicate, breaking the "one issue per
+    distinct failure" guarantee.
   - **create**: `gh issue create -R <repo> --title <…> --body-file -`, with the
     body piped on stdin so argv-length and shell-quoting are not concerns.
 
@@ -222,32 +239,11 @@ Test consumers import it from the public surface:
 use simard::stewardship::FakeGhClient;
 ```
 
-## `goal_curation` Helper
+## Goal-board isolation
 
-```rust
-// src/goal_curation/operations.rs
-pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
-
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()>;
-```
-
-Constructs a `BacklogItem`:
-
-| Field         | Value                                                                  |
-|---------------|------------------------------------------------------------------------|
-| `id`          | `stewardship-<repo_with_/_replaced_by_underscore>-<issue_number>`      |
-| `description` | `"Investigate stewardship-filed failure <url> (sig <signature>)"`      |
-| `source`      | `"stewardship:<repo>#<issue_number>"`                                  |
-| `score`       | `DEFAULT_STEWARD_SCORE` (`0.6`)                                        |
-| `url`         | `Some(url.into())`                                                     |
-
-…and calls the existing `add_backlog_item`, which deduplicates by `id`.
+`process_orchestrator_run` has no `GoalBoard` argument. This boundary prevents
+an issue created by stewardship from becoming a new backlog item and triggering
+the same issue pipeline recursively.
 Repeated `MatchedExisting` outcomes therefore do not grow the backlog.
 
 ## Error Variants

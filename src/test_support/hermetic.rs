@@ -32,13 +32,13 @@ use crate::state_root::STATE_ROOT_ENV;
 ///     // SIMARD_STATE_ROOT == state.state_root()
 ///     // SIMARD_MEMORY_SOCKET is unset → socket_path_for(state_root)
 ///     //   resolves to <state_root>/memory.sock
-///     let bridge = launch_writer_client(state.state_root()).expect("bridge");
-///     save_goal_board(&board, bridge.ops()).expect("save");
+///     let memory = launch_writer_client(state.state_root()).expect("memory");
+///     save_goal_board(&board, memory.ops()).expect("save");
 /// }
 /// ```
 pub struct HermeticState {
     // Field order matters: env-var bindings are restored on Drop BEFORE
-    // the TempDir is reaped, so callers that hold a writer bridge still
+    // the TempDir is reaped, so callers that hold a writer memory still
     // see SIMARD_STATE_ROOT == temp path while their writer drains.
     _state_root_guard: EnvBinding,
     _socket_guard: EnvBinding,

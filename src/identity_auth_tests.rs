@@ -132,7 +132,7 @@ fn copilot_auth_accepts_all_copilot_operations() {
         "copilot-chat",
         "copilot-completions",
         "copilot-submit",
-        "bridge-call",
+        "memory-call",
     ];
     for op in ops {
         validate_identity_for_operation(AuthIdentity::CopilotAuth, op)
@@ -167,7 +167,7 @@ fn commit_auth_rejects_all_copilot_operations() {
         "copilot-chat",
         "copilot-completions",
         "copilot-submit",
-        "bridge-call",
+        "memory-call",
     ];
     for op in ops {
         let err = validate_identity_for_operation(AuthIdentity::CommitAuth, op).unwrap_err();
@@ -188,7 +188,7 @@ fn identity_for_operation_all_copilot_ops() {
         "copilot-chat",
         "copilot-completions",
         "copilot-submit",
-        "bridge-call",
+        "memory-call",
     ];
     for op in ops {
         assert_eq!(

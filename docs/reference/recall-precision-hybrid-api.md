@@ -1,7 +1,7 @@
 ---
 title: Recall-precision hybrid measurement API reference
 description: The authoritative API for the G1 hybrid measurement surface wired for recall precision@k — the upstream amplihack-memory measurement primitive, the Simard adapter, the fixed-corpus benchmark and its ScoreRecord, the shared gym_history path, the `simard gym recall-precision` command, and the read-only GET /api/cognition/recall-precision correlation endpoint with its schema, validation, auth, and error contract.
-last_updated: 2026-07-06
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -68,7 +68,9 @@ with its 9 pure-math tests as the parity gate):
   lowercased, punctuation-only tokens dropped) is a substring of the item's
   lowercased `concept` **or** `content`. Deliberately broader than the ranker's
   exact-token score — the query is its own relevance oracle, so no external
-  ground-truth labels are needed.
+  ground-truth labels are needed. This substring judgment is **definition #3** of
+  three; it deliberately differs from the served word-boundary gate — see
+  [Relationship to the served word-boundary gate and the ranker](#relationship-to-the-served-word-boundary-gate-and-the-ranker).
 - Returns `None` for a wildcard/empty query (`*`, `""`, whitespace) or an empty
   result set, so callers **skip** emitting a meaningless sample rather than
   dragging the mean toward zero.
@@ -325,6 +327,58 @@ The handler **degrades, never panics or leaks**:
 - Corrupt `metrics.jsonl` lines and unreadable score rows are **skipped**, not
   fatal (no `.unwrap()` on external data).
 
+## Relationship to the served word-boundary gate and the ranker
+
+> **Interpretation caveat (issue [#4378](https://github.com/rysweet/Simard/issues/4378)).**
+> `recall_precision_at_k` scores the **ungated ranker** with the **substring**
+> relevance proxy — a definition that is *deliberately different* from the
+> relevance gate a user is actually served. Read the metric as "of the ranker's
+> top-`k`, the fraction relevant **under the substring proxy**", NOT as "the
+> fraction of served facts that were relevant".
+
+Three definitions of "is this fact relevant to the query?" coexist across the
+cognition recall/measurement stack. They are individually deliberate but give
+different answers for the same `(query, fact)` pair, so the metric can diverge
+from both the ranker it measures and the gate that serves users:
+
+| # | Layer | Where | Relevance definition | Gated? |
+|---|---|---|---|---|
+| 1 | **Served recall gate** | `LibraryCognitiveMemory::search_facts` (`fact_shares_query_relevance` / `needle_matches_word`) | **Word boundary** — a clean query token must prefix a whole word (plus conservative singular/plural folds). An interior/suffix hit (`act` in "re*act*or") is **not** relevant. | Yes |
+| 2 | **Ranked recall** | `LibraryCognitiveMemory::recall_facts_ranked` | **Ungated keyword-Jaccard-dominated** weighted score over **every** live fact. | No |
+| 3 | **Precision metric** | `metrics::precision_at_k` → `amplihack_memory::measurement` | **Substring** — a query token is a case-insensitive substring of `concept`/`content`. | n/a (oracle) |
+
+The `recall_precision_at_k` self-metric is computed with definition **#3** over
+the candidate set produced by **#2**, while the production recall path a user hits
+is gated by **#1**. So a fact the word-boundary gate (#1) would exclude — because
+the query token only appears in the interior of an unrelated word — can still
+count as relevant under the substring proxy (#3), letting the metric read **higher
+than served precision**.
+
+### Why the divergence is intentional (not a bug to "fix" here)
+
+- **Guideline G2** hosts the measurement primitive upstream in
+  `amplihack-memory-lib` so the benchmark and live rails share one implementation
+  (see [the primitive section](#the-measurement-primitive-upstream-g2)).
+  Re-pointing #3 at #1's word-boundary definition would **fork** that upstream
+  math into Simard, which G2 forbids.
+- The **#2 ranker must stay ungated**: `precision_at_k < 1.0` is a meaningful
+  ranking-quality signal *only* because the measured set includes lower-relevance
+  facts the ranker floated into the top-`k`. Gating #2 would collapse
+  `tests_ranked_recall`'s `recall_precision_isolates_text_relevance` /
+  `recall_precision_at_k_baseline` measurement infrastructure.
+
+Converging the three definitions is a **relevance-definition change**, which
+`USER_PREFERENCES` routes to `CONSENSUS_WORKFLOW`; it is intentionally **out of
+scope** for this reference and is not done implicitly. What *is* pinned here:
+
+- The divergence and the agreement case are executable invariants in
+  `src/cognitive_memory/tests_relevance_definition_divergence.rs`, so the three
+  definitions cannot silently drift further apart and any future convergence is a
+  deliberate, test-visible edit.
+- The code sites cross-reference each other and this section
+  (`metrics::precision_at_k`, `fact_shares_query_relevance`), so the "individually
+  deliberate but collectively invisible" trap the divergence created is closed.
+
 ## Configuration
 
 | Variable | Effect | Default |
@@ -351,5 +405,6 @@ thresholds, and corpus are all compile-time constants.
 - [Concept: hybrid cognition measurement](../concepts/hybrid-cognition-measurement.md)
 - [How to measure recall precision on both rails](../howto/measure-recall-precision-hybrid.md)
 - [Telemetry metrics reference](./telemetry-metrics.md) — the live `metrics.jsonl` plumbing.
+- [Tokenized fact recall in preparation](./cognitive-memory-fact-recall.md) — the served **word-boundary** recall gate (definition #1 above).
 - [How to self-maintain dependency pins](../howto/self-maintain-dependency-pins.md)
   — the G2 lockstep pin-bump for the upstream primitive.

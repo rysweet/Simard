@@ -72,7 +72,10 @@ mod discovery;
 mod precommit;
 use claim::{claim_is_live, format_engineer_claim, read_engineer_claim_full};
 pub use claim::{is_pid_alive_public, read_pid_starttime_public};
-pub use discovery::{LiveEngineerWorktree, live_claimed_engineers};
+pub(crate) use discovery::goal_id_from_worktree_dir;
+pub use discovery::{
+    LiveEngineerWorktree, live_claimed_engineers, live_claimed_engineers_in_worktrees,
+};
 
 /// Maximum length of a `goal_id` accepted by [`EngineerWorktree::allocate`].
 ///
@@ -394,25 +397,26 @@ impl EngineerWorktree {
             );
         }
 
-        // 6. Best-effort `pre-commit install` so engineer commits run the
-        //    same fmt/clippy/test fences locally that CI runs. Several merged
-        //    and pending PRs (#1641, #1581, #1607, #1608, #1629, #1558, #1499)
-        //    failed CI on the `pre-commit` job because the engineer never ran
-        //    the hooks locally before pushing. Fail-loud-but-non-fatal: log at
-        //    WARN and continue; CI is still the source of truth.
+        // 6. Best-effort native git-hook enrollment so engineer commits run
+        //    the same fmt/clippy/test fences locally that CI runs. Several
+        //    merged and pending PRs (#1641, #1581, #1607, #1608, #1629, #1558,
+        //    #1499) failed CI on the `pre-commit` job because the engineer never
+        //    ran the hooks locally before pushing. Wires `core.hooksPath` to the
+        //    committed Python-free `hooks/` directory (#3181). Fail-loud-but-
+        //    non-fatal: log at WARN and continue; CI is still the source of truth.
         match precommit::install_hooks(&dir) {
             Ok(true) => {
                 tracing::info!(
                     target: "simard::engineer_worktree",
                     worktree = %dir.display(),
-                    "pre-commit hooks installed in engineer worktree",
+                    "native git hooks enrolled in engineer worktree (core.hooksPath -> hooks)",
                 );
             }
             Ok(false) => {
                 tracing::debug!(
                     target: "simard::engineer_worktree",
                     worktree = %dir.display(),
-                    "pre-commit install skipped (no .pre-commit-config.yaml or no pre-commit binary)",
+                    "native git-hook enrollment skipped (committed hooks/ directory absent)",
                 );
             }
             Err(e) => {
@@ -420,7 +424,7 @@ impl EngineerWorktree {
                     target: "simard::engineer_worktree",
                     error = %e,
                     worktree = %dir.display(),
-                    "pre-commit install failed; engineer commits will not be locally gated by pre-commit hooks (CI still gates the merge)",
+                    "native git-hook enrollment failed; engineer commits will not be locally gated (CI still gates the merge)",
                 );
             }
         }
@@ -485,7 +489,8 @@ impl Drop for EngineerWorktree {
     }
 }
 mod cleanup;
-use cleanup::{assert_under_root, cleanup_inner, create_worktrees_root, unique_suffix};
+pub(crate) use cleanup::assert_under_root;
+use cleanup::{cleanup_inner, create_worktrees_root, unique_suffix};
 mod sweep;
 pub use sweep::{
     RemovalReason, sweep_orphaned_worktrees, sweep_orphaned_worktrees_inner, validate_goal_id,

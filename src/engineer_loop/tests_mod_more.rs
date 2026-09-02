@@ -133,6 +133,92 @@ fn architecture_gap_summary_with_probe_no_match() {
 }
 
 #[test]
+fn architecture_gap_summary_delegating_probe_follows_dispatcher_engineer_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("src/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        bin_dir.join("simard_operator_probe.rs"),
+        "fn main() { simard::dispatch_operator_probe(std::env::args().skip(1)) }",
+    )
+    .unwrap();
+    let dispatch_dir = dir.path().join("src/operator_commands");
+    std::fs::create_dir_all(&dispatch_dir).unwrap();
+    std::fs::write(
+        dispatch_dir.join("dispatch.rs"),
+        r#"match cmd { "terminal-run" => {}, "engineer-loop-run" => {} }"#,
+    )
+    .unwrap();
+    let result = super::architecture_gap_summary(dir.path()).unwrap();
+    assert!(
+        result.contains(
+            "delegates to a dispatcher that exposes the repo-grounded engineer-loop-run surface"
+        ),
+        "expected delegated engineer-loop-run detection, got: {result}"
+    );
+    assert!(!result.contains("does not yet expose"));
+}
+
+#[test]
+fn architecture_gap_summary_delegating_probe_follows_dispatcher_terminal_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("src/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        bin_dir.join("simard_operator_probe.rs"),
+        "fn main() { simard::dispatch_operator_probe(std::env::args().skip(1)) }",
+    )
+    .unwrap();
+    let dispatch_dir = dir.path().join("src/operator_commands");
+    std::fs::create_dir_all(&dispatch_dir).unwrap();
+    std::fs::write(
+        dispatch_dir.join("dispatch.rs"),
+        r#"match cmd { "terminal-run" => {} }"#,
+    )
+    .unwrap();
+    let result = super::architecture_gap_summary(dir.path()).unwrap();
+    assert!(
+        result.contains("exposes terminal-run but not a repo-grounded engineer-loop-run"),
+        "expected delegated terminal-only detection, got: {result}"
+    );
+}
+
+#[test]
+fn architecture_gap_summary_delegating_probe_without_dispatch_file_reports_unwired() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("src/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(
+        bin_dir.join("simard_operator_probe.rs"),
+        "fn main() { simard::dispatch_operator_probe(std::env::args().skip(1)) }",
+    )
+    .unwrap();
+    let result = super::architecture_gap_summary(dir.path()).unwrap();
+    assert!(
+        result.contains("delegates to a dispatcher but the engineer-loop-run surface is not wired"),
+        "expected unwired dispatcher message, got: {result}"
+    );
+}
+
+#[test]
+fn architecture_gap_summary_on_real_repo_reports_engineer_loop_exposed() {
+    // Regression guard: the shipped operator-probe binary delegates to
+    // `dispatch_operator_probe`, which wires `engineer-loop-run`. The gap trace
+    // must follow that delegation and report the surface as exposed rather than
+    // falsely claiming it "does not yet expose" a terminal engineer loop.
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let result = super::architecture_gap_summary(repo_root).unwrap();
+    assert!(
+        result.contains("engineer-loop-run surface"),
+        "expected exposed engineer-loop-run surface, got: {result}"
+    );
+    assert!(
+        !result.contains("does not yet expose"),
+        "gap trace must not claim the engineer loop is unexposed, got: {result}"
+    );
+}
+
+#[test]
 fn architecture_gap_summary_with_runtime_contracts_docs() {
     let dir = tempfile::tempdir().unwrap();
     let docs_dir = dir.path().join("docs/reference");

@@ -1,0 +1,8 @@
+digraph DataFlowMemory { rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  goals -> probe -> prep;
+  prep -> facts -> ops; prep -> goal_records -> ops; prep -> triggers -> ops; prep -> procedures -> ops; prep -> episodes -> ops;
+  ops -> remote -> server -> store;
+  prep -> summary -> ops; prep -> context -> prompt;
+  outcomes -> exec; exec -> sensory -> ops; exec -> working -> ops; outcomes -> proc_store -> ops; outcomes -> reflection; reflection -> episode_store -> ops; reflection -> fact_store -> ops; store -> maintenance;
+  goals [label="active goals"]; probe [label="build_objective_probe"]; prep [label="prepare-context"]; facts [label="ranked fact recall"]; goal_records [label="goal-store record search"]; triggers [label="prospective triggers"]; procedures [label="tokenized procedure recall"]; episodes [label="ranked episodic recall"]; ops [label="CognitiveMemoryOps"]; remote [label="RemoteCognitiveMemory"]; server [label="memory_ipc server"]; store [label="lbug store\nstate_root/cognitive", fillcolor="#fff6df"]; summary [label="push working summary"]; context [label="PreparedContext"]; prompt [label="OODA prompt"]; outcomes [label="Act outcomes"]; exec [label="execution_memory_operations"]; sensory [label="record_sensory"]; working [label="push_working output"]; proc_store [label="store_procedure"]; reflection [label="reflection_memory_operations"]; episode_store [label="store_episode"]; fact_store [label="store_fact"]; maintenance [label="consolidate/prune"];
+}

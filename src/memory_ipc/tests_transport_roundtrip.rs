@@ -302,6 +302,83 @@ fn fact_store_search_and_statistics_over_socket() {
 }
 
 #[test]
+fn recall_facts_ranked_forwards_ranked_recall_over_socket() {
+    // Regression: on the production daemon path OODA memory is a
+    // `RemoteCognitiveMemory` socket client. Before this fix the client had no
+    // `recall_facts_ranked` override, so it silently fell back to the trait
+    // default → `search_facts` RPC → the server's word-boundary-GATED keyword
+    // search. That discarded the flagship six-signal, phase-weighted ranked
+    // recall (#2329) AND its `recall_precision_at_k` metric on the primary
+    // production path — a hollow success invisible to callers.
+    //
+    // The behavioural distinguisher: `search_facts` GATES out a fact that does
+    // not share a query word, whereas library `recall_facts_ranked` RANKS all
+    // candidate facts (ungated) and returns them up to `limit`. So a fact that
+    // does NOT match the query word must be:
+    //   * ABSENT from `search_facts` (proven by the query-filter test above), and
+    //   * PRESENT in `recall_facts_ranked` — which can only happen if the client
+    //     forwarded the call to the server's library ranked recall rather than
+    //     degrading to gated `search_facts`.
+    use crate::cognitive_memory::RecallWeightSet;
+
+    let fx = in_memory_fixture();
+
+    // A query-matching fact and a query-NON-matching fact (no "gravity" word).
+    fx.client
+        .store_fact(
+            "gravity",
+            "objects fall at nine point eight",
+            0.9,
+            &[],
+            "src-a",
+        )
+        .expect("store query-matching fact over socket");
+    fx.client
+        .store_fact("gardening", "water tomatoes weekly", 0.9, &[], "src-b")
+        .expect("store query-non-matching fact over socket");
+
+    // Contrast: gated search_facts excludes the non-matching 'gardening' fact.
+    let searched = fx
+        .client
+        .search_facts("gravity", 10, 0.0)
+        .expect("search_facts over socket");
+    assert!(
+        !searched.iter().any(|f| f.concept == "gardening"),
+        "search_facts must GATE OUT the query-non-matching 'gardening' fact \
+         (this is the behaviour the buggy ranked-recall fallback inherited)"
+    );
+
+    // Ranked recall over the socket, with deliberately NON-default weights so
+    // the `RecallWeightSet` payload's real field values (not just its Default)
+    // must serialize/deserialize across the wire. `recall_facts_ranked` ranks
+    // ALL candidate facts, so the 'gardening' fact — gated out of search_facts —
+    // must appear here. If the client had degraded to gated search_facts it
+    // would be absent and this assertion would fail.
+    let weights = RecallWeightSet {
+        text_relevance: 0.2,
+        confidence: 0.9,
+        importance: 0.1,
+        recency: 0.7,
+        usage: 0.3,
+        graph: 0.5,
+    };
+    let ranked = fx
+        .client
+        .recall_facts_ranked("gravity", 10, 0.0, weights)
+        .expect("recall_facts_ranked over socket");
+    assert!(
+        ranked.iter().any(|f| f.concept == "gravity"),
+        "ranked recall must include the query-matching fact"
+    );
+    assert!(
+        ranked.iter().any(|f| f.concept == "gardening"),
+        "ranked recall over the socket must FORWARD to the library's six-signal \
+         ranked recall (which returns the query-non-matching 'gardening' fact) \
+         rather than degrade to gated search_facts — see #2329 / #2627 lineage"
+    );
+}
+
+#[test]
 fn procedure_store_and_recall_over_socket() {
     let fx = in_memory_fixture();
 
@@ -510,8 +587,8 @@ fn connect_returns_spawn_error_when_socket_absent() {
         Err(e) => e,
     };
     match err {
-        SimardError::RpcSpawnFailed { bridge, reason } => {
-            assert_eq!(bridge, "memory-ipc-client");
+        SimardError::RpcSpawnFailed { endpoint, reason } => {
+            assert_eq!(endpoint, "memory-ipc-client");
             assert!(
                 reason.contains("not present"),
                 "error must explain the socket is absent; got: {reason}"
@@ -530,7 +607,7 @@ struct AlwaysErrBackend;
 impl AlwaysErrBackend {
     fn boom(op: &str) -> SimardError {
         SimardError::RpcCallFailed {
-            bridge: "test-backend".into(),
+            endpoint: "test-backend".into(),
             method: op.into(),
             reason: "synthetic backend failure".into(),
         }
@@ -577,6 +654,19 @@ impl CognitiveMemoryOps for AlwaysErrBackend {
     fn search_facts(&self, _q: &str, _l: u32, _m: f64) -> SimardResult<Vec<CognitiveFact>> {
         Err(Self::boom("search_facts"))
     }
+    fn recall_facts_ranked(
+        &self,
+        _q: &str,
+        _l: u32,
+        _m: f64,
+        _w: crate::cognitive_memory::RecallWeightSet,
+    ) -> SimardResult<Vec<CognitiveFact>> {
+        // Overridden (not the trait default, which would delegate to
+        // `search_facts`) so the error-encoding test pins the NEW
+        // `RecallFactsRanked` server dispatch arm and client decode arm — a
+        // default delegation would mis-attribute the failure to `search_facts`.
+        Err(Self::boom("recall_facts_ranked"))
+    }
     fn store_procedure(&self, _n: &str, _s: &[String], _p: &[String]) -> SimardResult<String> {
         Err(Self::boom("store_procedure"))
     }
@@ -617,11 +707,11 @@ fn assert_backend_err<T: std::fmt::Debug>(result: SimardResult<T>, method: &str)
             "{method}: expected a backend error, but got Ok({v:?}) — a failing IPC op must never silently succeed"
         ),
         Err(SimardError::RpcCallFailed {
-            bridge,
+            endpoint,
             method: got,
             reason,
         }) => {
-            assert_eq!(bridge, "memory-ipc", "{method}: bridge label");
+            assert_eq!(endpoint, "memory-ipc", "{method}: endpoint label");
             assert_eq!(
                 got, method,
                 "the failure must be attributed to the method the client called"
@@ -655,6 +745,15 @@ fn every_op_encodes_backend_errors_as_rpc_call_failed() {
     assert_backend_err(c.consolidate_episodes(2), "consolidate_episodes");
     assert_backend_err(c.store_fact("c", "v", 1.0, &[], "s"), "store_fact");
     assert_backend_err(c.search_facts("q", 1, 0.0), "search_facts");
+    assert_backend_err(
+        c.recall_facts_ranked(
+            "q",
+            1,
+            0.0,
+            crate::cognitive_memory::RecallWeightSet::default(),
+        ),
+        "recall_facts_ranked",
+    );
     assert_backend_err(c.store_procedure("n", &[], &[]), "store_procedure");
     assert_backend_err(c.recall_procedure("q", 1), "recall_procedure");
     assert_backend_err(c.store_prospective("d", "t", "a", 0), "store_prospective");
@@ -797,7 +896,7 @@ fn malformed_request_frame_does_not_kill_the_server() {
 // ---------------------------------------------------------------------------
 // SharedMemory adapter: forwards the whole CognitiveMemoryOps surface to the
 // wrapped store. A missing forward is a silent-empty-read hazard (issue #2320 /
-// #2331) — the daemon (tier-0) and every tier-2 bridge read through this.
+// #2331) — the daemon (tier-0) and every tier-2 client read through this.
 // ---------------------------------------------------------------------------
 
 #[test]

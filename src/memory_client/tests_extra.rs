@@ -1,7 +1,7 @@
 use super::*;
 use crate::rpc_transport::InMemoryRpcTransport;
 
-fn mock_bridge() -> CognitiveMemoryClient {
+fn mock_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-memory", |method, params| match method {
         "memory.store_fact" => Ok(json!({"id": "sem_test123"})),
         "memory.search_facts" => Ok(json!({
@@ -60,8 +60,8 @@ fn mock_bridge() -> CognitiveMemoryClient {
 
 // --- Error propagation tests ---
 
-fn error_bridge() -> CognitiveMemoryClient {
-    let transport = InMemoryRpcTransport::new("error-bridge", |method, _params| {
+fn error_memory() -> CognitiveMemoryClient {
+    let transport = InMemoryRpcTransport::new("error-memory", |method, _params| {
         Err(crate::rpc::RpcErrorPayload {
             code: crate::rpc::RPC_ERROR_INTERNAL,
             message: format!("server error on {method}"),
@@ -71,31 +71,31 @@ fn error_bridge() -> CognitiveMemoryClient {
 }
 
 #[test]
-fn check_triggers_propagates_bridge_error() {
-    let bridge = error_bridge();
-    let result = bridge.check_triggers("content");
+fn check_triggers_propagates_memory_error() {
+    let memory = error_memory();
+    let result = memory.check_triggers("content");
     assert!(result.is_err());
 }
 
 // --- Health check tests ---
 
 #[test]
-fn health_check_on_healthy_bridge() {
-    let transport = InMemoryRpcTransport::new("healthy-bridge", |method, _params| match method {
-        "bridge.health" => Ok(json!({"server_name": "healthy-bridge", "healthy": true})),
+fn health_check_on_healthy_memory() {
+    let transport = InMemoryRpcTransport::new("healthy-memory", |method, _params| match method {
+        "bridge.health" => Ok(json!({"server_name": "healthy-memory", "healthy": true})),
         _ => Ok(json!({})),
     });
     let health = transport.health().unwrap();
     assert!(health.healthy);
-    assert_eq!(health.server_name, "healthy-bridge");
+    assert_eq!(health.server_name, "healthy-memory");
 }
 
 #[test]
-fn health_check_on_unhealthy_bridge() {
+fn health_check_on_unhealthy_memory() {
     let transport = InMemoryRpcTransport::new("unhealthy", |_method, _params| {
         Err(crate::rpc::RpcErrorPayload {
             code: crate::rpc::RPC_ERROR_INTERNAL,
-            message: "bridge is down".to_string(),
+            message: "memory is down".to_string(),
         })
     });
     let result = transport.health();
@@ -120,8 +120,8 @@ fn circuit_breaker_passes_through_on_success() {
             cooldown: Duration::from_secs(30),
         },
     );
-    let bridge = CognitiveMemoryClient::new(Box::new(cb));
-    let id = bridge.store_fact("test", "data", 0.8, &[], "").unwrap();
+    let memory = CognitiveMemoryClient::new(Box::new(cb));
+    let id = memory.store_fact("test", "data", 0.8, &[], "").unwrap();
     assert_eq!(id, "cb_fact_1");
 }
 
@@ -158,8 +158,8 @@ fn circuit_breaker_opens_after_repeated_transport_failures() {
     assert_eq!(cb.circuit_state(), CircuitState::Open);
 
     // Subsequent call is rejected immediately.
-    let bridge = CognitiveMemoryClient::new(Box::new(cb));
-    let result = bridge.store_fact("test", "data", 0.5, &[], "");
+    let memory = CognitiveMemoryClient::new(Box::new(cb));
+    let result = memory.store_fact("test", "data", 0.5, &[], "");
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("circuit is open"), "got: {msg}");
@@ -205,10 +205,10 @@ fn circuit_breaker_recovers_after_cooldown() {
     });
     assert_eq!(cb.circuit_state(), CircuitState::Open);
 
-    // Wait for cooldown, then call through the bridge wrapper.
+    // Wait for cooldown, then call through the memory wrapper.
     std::thread::sleep(Duration::from_millis(10));
-    let bridge = CognitiveMemoryClient::new(Box::new(cb));
-    let id = bridge.store_fact("test", "data", 0.5, &[], "").unwrap();
+    let memory = CognitiveMemoryClient::new(Box::new(cb));
+    let id = memory.store_fact("test", "data", 0.5, &[], "").unwrap();
     assert_eq!(id, "recovered_fact");
 }
 
@@ -220,8 +220,8 @@ fn empty_facts_response() {
         "memory.search_facts" => Ok(json!({"facts": []})),
         _ => Ok(json!({})),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let facts = bridge.search_facts("nothing", 10, 0.0).unwrap();
+    let memory = CognitiveMemoryClient::new(Box::new(transport));
+    let facts = memory.search_facts("nothing", 10, 0.0).unwrap();
     assert!(facts.is_empty());
 }
 
@@ -231,8 +231,8 @@ fn empty_working_slots_response() {
         "memory.get_working" => Ok(json!({"slots": []})),
         _ => Ok(json!({})),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let slots = bridge.get_working("no-task").unwrap();
+    let memory = CognitiveMemoryClient::new(Box::new(transport));
+    let slots = memory.get_working("no-task").unwrap();
     assert!(slots.is_empty());
 }
 
@@ -241,8 +241,8 @@ fn malformed_json_response_returns_error() {
     let transport = InMemoryRpcTransport::new("malformed", |_method, _params| {
         Ok(json!({"unexpected_field": true}))
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let result = bridge.store_fact("c", "content", 0.5, &[], "src");
+    let memory = CognitiveMemoryClient::new(Box::new(transport));
+    let result = memory.store_fact("c", "content", 0.5, &[], "src");
     assert!(
         result.is_err(),
         "missing 'id' field should cause deserialization error"
@@ -251,9 +251,9 @@ fn malformed_json_response_returns_error() {
 
 #[test]
 fn unknown_method_returns_error() {
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     // Directly test the call path with an unknown method.
-    let result: SimardResult<serde_json::Value> = bridge.call("memory.nonexistent", json!({}));
+    let result: SimardResult<serde_json::Value> = memory.call("memory.nonexistent", json!({}));
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("unknown method"), "got: {msg}");
@@ -265,15 +265,15 @@ fn consolidate_episodes_with_present_id() {
         "memory.consolidate_episodes" => Ok(json!({"id": "consolidated_123"})),
         _ => Ok(json!({})),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let result = bridge.consolidate_episodes(5).unwrap();
+    let memory = CognitiveMemoryClient::new(Box::new(transport));
+    let result = memory.consolidate_episodes(5).unwrap();
     assert_eq!(result, Some("consolidated_123".to_string()));
 }
 
 #[test]
 fn store_fact_with_tags() {
-    let bridge = mock_bridge();
-    let id = bridge
+    let memory = mock_memory();
+    let id = memory
         .store_fact(
             "rust",
             "fast language",
@@ -295,16 +295,16 @@ fn search_facts_respects_params() {
         }
         _ => Ok(json!({})),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let facts = bridge.search_facts("query", 5, 0.7).unwrap();
+    let memory = CognitiveMemoryClient::new(Box::new(transport));
+    let facts = memory.search_facts("query", 5, 0.7).unwrap();
     assert!(facts.is_empty());
 }
 
 #[test]
-fn cognitive_memory_ops_trait_delegates_to_bridge() {
-    let bridge = mock_bridge();
+fn cognitive_memory_ops_trait_delegates_to_memory() {
+    let memory = mock_memory();
     // Call through the trait interface.
-    let ops: &dyn CognitiveMemoryOps = &bridge;
+    let ops: &dyn CognitiveMemoryOps = &memory;
     let id = ops
         .store_fact("concept", "content", 0.8, &[], "src")
         .unwrap();

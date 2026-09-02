@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# Native pre-commit git hook (Python-free) — issue #3181.
+#
+# Wired via `git config core.hooksPath hooks` (run `scripts/install-precommit.sh`
+# once, or `git config core.hooksPath hooks`). This replaces the Python
+# `pre-commit` framework: it calls `cargo` directly so Simard's local commit
+# gate has no Python runtime dependency. Mirrors the fast commit-stage checks
+# the CI `verify` workflow runs (fmt + release clippy + Rust-only gate).
+#
+# Budget: < 30s incremental on a dev host.
+#
+# Follows the [simard] operator-diagnostic logging convention.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "[simard] pre-commit: Rust-only gate (no new .py/.js/.ts outside allow-list)" >&2
+scripts/check-rust-only-gate.sh --staged
+
+echo "[simard] pre-commit: cargo fmt --all -- --check" >&2
+cargo fmt --all -- --check
+
+echo "[simard] pre-commit: cargo clippy --release --no-deps -- -D warnings" >&2
+# Release clippy through the lbug native-static-lib link-path wrapper (issue
+# #2426). The wrapper is a no-op for warm local checks.
+scripts/clippy-precommit-release.sh
+
+echo "[simard] pre-commit: all commit-stage gates passed" >&2

@@ -4,12 +4,12 @@ description: >
   The ooda-resource-admission.yaml recipe and its prompt schema — the single
   source of truth for the resource-aware admission reasoning. Context variables
   (disk %, free/total, build-cache/worktree sizes, load average, in-flight
-  builds, AIMD figures, the hard ceiling), the JSON decision envelope
-  ({admit, defer, reclaim_first}), the "reason below the ceiling; the Rust rail
-  owns the ceiling" contract, few-shot examples anchored on the 91%-disk / 40+
-  worktree incident, hot-reload resolution order, the fail-closed NO-FALLBACK
-  parsing contract, versioning, and tests.
-last_updated: 2026-07-07
+  builds, AIMD figures, the hard ceiling), the record-tool call (simard ooda
+  record-resource-admission with {admit, defer, reclaim_first}), the "reason
+  below the ceiling; the Rust rail owns the ceiling" contract, few-shot examples
+  anchored on the 91%-disk / 40+ worktree incident, hot-reload resolution order,
+  the fail-closed missing-record contract, versioning, and tests.
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -17,6 +17,7 @@ status: implemented
 related:
   - ../concepts/resource-aware-engineer-admission.md
   - ./resource-admission-api.md
+  - ./ooda-record-admission-cli.md
   - ./ooda-engineer-admission-recipe.md
   - ./recipe-brain-api.md
   - ./recipe-context-var-sanitization.md
@@ -59,9 +60,11 @@ brain runs as a **recipe step** via `recipe-runner-rs`, mirroring
 ```yaml
 name: "ooda-resource-admission"
 description: "OODA spawn-admission brain — resource-aware engineer admission (#2706)"
-version: "1.0.0"
+version: "2.0.0"
 author: "Simard"
 tags: ["simard", "ooda", "act", "resource-admission", "scheduling"]
+# Output: NONE scraped from stdout. The agent RECORDS its verdict by calling
+# `simard ooda record-resource-admission`; RecipeBrain reads the typed record.
 
 context: {}
 
@@ -71,19 +74,20 @@ steps:
     agent: "default"
     prompt: |
       # ... full prompt below ...
-    output: "resource_admission_result"
 ```
 
 ## Context variables
 
-The Rust shim passes each variable via `-c`, already sanitized through the
-[context-var sanitization boundary](recipe-context-var-sanitization.md). They are
-the rendered form of [`ResourceAdmissionCtx`](resource-admission-api.md#resourceadmissionctx);
-any unavailable probe renders as `unknown`.
+The Rust shim passes each variable via `-c`. The rendered form of
+[`ResourceAdmissionCtx`](resource-admission-api.md#resourceadmissionctx) is the
+untrusted, model-facing input and is sanitized through the
+[context-var sanitization boundary](recipe-context-var-sanitization.md); any
+unavailable probe renders as `unknown`. The tool-plumbing vars are
+daemon-controlled identity/path values.
 
 | Variable | Meaning |
 | --- | --- |
-| `goal_id` | Candidate goal the engineer would pursue (untrusted; data only). |
+| `goal_id` | Candidate goal the engineer would pursue (`ctx.goal_id`; also the record's re-verified identity — untrusted as prompt text, authoritative as the record key). |
 | `disk_used_pct` | Used-percent of the engineer-worktree filesystem, or `unknown`. |
 | `disk_free_gb` / `disk_total_gb` | Free / total space on that filesystem, GiB. |
 | `build_cache_bytes` | Aggregate worktree + shared cargo-target footprint. |
@@ -93,27 +97,37 @@ any unavailable probe renders as `unknown`.
 | `in_flight_engineers` | Live engineer claims right now (in-flight builds). |
 | `aimd_current_max` | Current AIMD concurrency cap, or `unknown`. |
 | `admission_ceiling_pct` | The deterministic hard ceiling the brain reasons **below**. |
+| `record_path` | Absolute path (per-cycle temp dir + `resource_admission.json`) the tool writes the typed record to and `read_verified_resource_admission` reads. |
+| `simard_bin` | Absolute `current_exe()` path the tool call invokes. |
+| `cycle_number` | `REASONER_RECORD_CYCLE = 0` sentinel — embedded in the record, re-verified on read (R7). |
 
-## Output: the JSON decision envelope
+## Output: the typed record tool
 
-The agent step returns a single JSON object (a fenced ```json block is fine; the
-shim strips any surrounding banner/prose before parsing):
+The agent step **calls the [`simard ooda record-resource-admission`](ooda-record-admission-cli.md)
+tool** exactly once — it does not print JSON (stdout is ignored):
 
-```json
-{"decision": "<admit|defer|reclaim_first>", "rationale": "<short reason>"}
+```bash
+"{{simard_bin}}" ooda record-resource-admission \
+  --choice <admit|defer|reclaim_first> \
+  --rationale "<short reason citing the resource figures>" \
+  --record-path "{{record_path}}" \
+  --goal-id "{{goal_id}}" \
+  --cycle-number "{{cycle_number}}"
 ```
 
 - `admit` — the host has headroom; spawn now.
 - `defer` — resources are tight; skip this cycle and retry next round.
 - `reclaim_first` — free reclaimable space first, then retry next round.
 
-The shim maps `decision` to
-[`ResourceAdmissionDecision`](resource-admission-api.md#resourceadmissiondecision).
-There are no load-bearing extra fields — `rationale` is recorded for
-observability. If the output is **unparseable**, the shim returns `Err` and the
-seam **fails closed to `defer`** (it does **not** default to `admit` on the
-brain's behalf), because on a resource-safety gate a broken reasoner must not add
-disk load. The one certain-`ENOSPC` block is enforced in Rust, not here.
+The tool validates `--choice` + `--rationale` through the shared
+`ResourceAdmissionDecision::from_choice_fields` chokepoint and writes a typed
+[`ResourceAdmissionDecisionRecord`](resource-admission-api.md#resourceadmissiondecision).
+All three variants carry **only** a `rationale` (recorded for observability);
+there are no variant-owned extra fields. If the tool is never called or the
+record is invalid, `read_verified_resource_admission` returns `Err` and the seam
+**fails closed to `defer`** (it does **not** default to `admit` on the brain's
+behalf), because on a resource-safety gate a broken reasoner must not add disk
+load. The one certain-`ENOSPC` block is enforced in Rust, not here.
 
 ## The prompt
 
@@ -194,37 +208,49 @@ Pick exactly one `decision`:
 
 ## OUTPUT FORMAT
 
-Respond with a single JSON object (a fenced ```json block is fine):
+RECORD your verdict by calling the tool EXACTLY ONCE (do not print JSON — stdout
+is ignored):
 
-```json
-{"decision": "<admit|defer|reclaim_first>", "rationale": "<short reason>"}
+```bash
+"{{simard_bin}}" ooda record-resource-admission \
+  --choice <admit|defer|reclaim_first> \
+  --rationale "<short reason citing the resource figures>" \
+  --record-path "{{record_path}}" \
+  --goal-id "{{goal_id}}" \
+  --cycle-number "{{cycle_number}}"
 ```
 
 A genuine "there is plenty of headroom, parallelize" answer is a REAL decision:
-emit `admit` explicitly. If your output is unparseable the daemon does NOT
-default on your behalf — it records a parse error and FAILS CLOSED (defers,
-audited), because on a resource gate a broken reasoner must not add disk load.
-The certain-ENOSPC block at {{admission_ceiling_pct}}% is enforced in Rust, not
-here.
+call with `--choice admit` explicitly. If you never call the tool the daemon does
+NOT default on your behalf — the record is absent, the read is an `Err`, and the
+daemon FAILS CLOSED (defers, audited), because on a resource gate a broken
+reasoner must not add disk load. The certain-ENOSPC block at
+{{admission_ceiling_pct}}% is enforced in Rust, not here.
 
 ## EXAMPLES
 
 Plenty of headroom — parallelize:
 
-```json
-{"decision": "admit", "rationale": "disk 62% (well below the 90% ceiling), 3 worktrees, load 4.1 over 16 CPUs — comfortable room for another build"}
+```bash
+"{{simard_bin}}" ooda record-resource-admission --choice admit \
+  --rationale "disk 62% (well below the 90% ceiling), 3 worktrees, load 4.1 over 16 CPUs — comfortable room for another build" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number "{{cycle_number}}"
 ```
 
 Pressure building, nothing stale to clean — wait a cycle:
 
-```json
-{"decision": "defer", "rationale": "disk 86% and climbing with 5 in-flight builds and 1m load 30 over 16 CPUs; admitting now risks the 90% ceiling — let running builds finish"}
+```bash
+"{{simard_bin}}" ooda record-resource-admission --choice defer \
+  --rationale "disk 86% and climbing with 5 in-flight builds and 1m load 30 over 16 CPUs; admitting now risks the 90% ceiling — let running builds finish" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number "{{cycle_number}}"
 ```
 
 Pressure building AND reclaimable — clean first:
 
-```json
-{"decision": "reclaim_first", "rationale": "disk 88% but 41 worktrees and 190 GiB of build cache with only 2 in-flight engineers — most of that is stale; reclaim before admitting"}
+```bash
+"{{simard_bin}}" ooda record-resource-admission --choice reclaim_first \
+  --rationale "disk 88% but 41 worktrees and 190 GiB of build cache with only 2 in-flight engineers — most of that is stale; reclaim before admitting" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number "{{cycle_number}}"
 ```
 ````
 
@@ -246,26 +272,32 @@ closed to `defer` (audited) — see the
 
 The recipe carries a semantic `version`. Bump it when the prompt's decision
 contract changes (new option, changed field semantics). Prompt-wording tweaks
-that keep the same three decisions and the same JSON envelope do not require a
-version bump, but noting the change in the commit message keeps the audit trail
-clean.
+that keep the same three decisions and the same `record-resource-admission` tool
+call do not require a version bump, but noting the change in the commit message
+keeps the audit trail clean.
 
 ## Tests
 
 The recipe's *reasoning quality* is not unit-tested — that lives in the prompt.
 What is tested hermetically (see the
-[API test matrix](resource-admission-api.md#test-matrix)) is the shim's parsing
-contract and the seam:
+[API test matrix](resource-admission-api.md#test-matrix) and the
+[record-admission CLI regression tests](ooda-record-admission-cli.md#regression-tests))
+is the record round-trip, the reader, and the seam:
 
-- `parse_resource_admission_decision` accepts the fenced-JSON envelope, accepts a
-  bare first-word token, and returns `Err` on anything else (NO-FALLBACK).
+- Each `ResourceAdmissionDecision` written by `record-resource-admission` reads
+  back through `read_verified_resource_admission` bit-for-bit; an
+  absent/malformed/mismatched record (R1–R7) returns `Err` (NO-FALLBACK).
 - An `Err` from the recipe path yields a fail-closed `defer` at the seam.
 - The deterministic ceiling rail overrides an `admit` regardless of the recipe.
+- A recipe-asset content test asserts the YAML **calls `simard ooda
+  record-resource-admission`**, documents `Output: NONE scraped from stdout`, and
+  carries no JSON output envelope (`tests/typed_ooda_recipe_assets.rs`).
 
 ## See also
 
 - [Resource-aware engineer admission (concept)](../concepts/resource-aware-engineer-admission.md)
 - [Resource-admission API reference](resource-admission-api.md)
+- [`simard ooda record-resource-admission` (typed admission tool)](ooda-record-admission-cli.md) — the tool this recipe calls and the fail-closed record reader.
 - [OODA engineer-admission recipe (overlap-aware sibling)](ooda-engineer-admission-recipe.md)
 - [Recipe context-var sanitization](recipe-context-var-sanitization.md) — the untrusted-input boundary every context var crosses.
 - [How to edit the OODA brain prompt](../howto/edit-the-ooda-brain-prompt.md) — the hot-reload workflow.

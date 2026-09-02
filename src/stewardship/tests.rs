@@ -1,8 +1,6 @@
 //! TDD tests for the stewardship loop (issue #1167).
 //!
-//! These tests are written **before** the implementation. They define the
-//! contract for `src/stewardship/` and the `enqueue_stewardship_issue`
-//! helper in `src/goal_curation/operations.rs`.
+//! These tests define the contract for `src/stewardship/`.
 //!
 //! Test plan (mirrors design spec §7):
 //! - Routing matrix: amplihack / simard / ambiguous / overlap-precedence
@@ -16,7 +14,6 @@
 use std::sync::Mutex;
 
 use crate::error::SimardError;
-use crate::goal_curation::GoalBoard;
 use crate::stewardship::dedup::{failure_signature, find_existing, normalize};
 use crate::stewardship::routing::route_failure;
 use crate::stewardship::{
@@ -257,12 +254,36 @@ fn find_existing_ignores_when_signature_absent() {
     assert!(find_existing(&issues, "deadbeefdeadbeef").is_none());
 }
 
+/// Regression (#4962): the fast dedup search now passes the *bare* 16-hex
+/// signature (`"{sig} in:body"`), so GitHub full-text search may surface issues
+/// that merely mention the hex (e.g. inside a commit range or code block)
+/// WITHOUT carrying the durable `stewardship-signature: <sig>` marker. That
+/// makes `find_existing` the sole load-bearing guard against a false-positive
+/// match — a false positive would silently suppress filing a real tracking
+/// issue. Pin that the exact-marker filter rejects a bare-signature mention.
+#[test]
+fn find_existing_rejects_bare_signature_mention_without_marker() {
+    let sig = "abcdef0123456789";
+    let issues = vec![GhIssue {
+        number: 9,
+        url: "u".into(),
+        // Body mentions the bare hex (as the broadened search could surface)
+        // but lacks the `stewardship-signature: <sig>` marker.
+        title: "unrelated".into(),
+        body: "see commit range abcdef0123456789..deadbeef for details".into(),
+    }];
+    assert!(
+        find_existing(&issues, sig).is_none(),
+        "a bare-signature mention without the `stewardship-signature:` marker \
+         must NOT dedup-match, or a real failure would go unrecorded"
+    );
+}
+
 // ─────────────────────────── End-to-end tests ───────────────────────────
 
 #[test]
 fn process_run_files_new_when_no_match() {
     let gh = FakeGhClient::new();
-    let mut board = GoalBoard::new();
     let run = sample_run();
     let sig = failure_signature(&run.failure_kind, &run.error_text);
 
@@ -277,7 +298,7 @@ fn process_run_files_new_when_no_match() {
         }),
     );
 
-    let outcome = process_orchestrator_run(&run, &gh, &mut board).unwrap();
+    let outcome = process_orchestrator_run(&run, &gh).unwrap();
     match outcome {
         StewardshipOutcome::FiledNew {
             repo,
@@ -295,13 +316,100 @@ fn process_run_files_new_when_no_match() {
 
     assert_eq!(gh.search_call_count(), 1);
     assert_eq!(gh.create_call_count(), 1);
-    assert_eq!(
-        board.backlog.len(),
-        1,
-        "backlog should hold 1 stewardship item"
+}
+
+#[test]
+fn process_run_sanitizes_every_outbound_issue_field_but_deduplicates_raw_input() {
+    let gh = FakeGhClient::new();
+    let mut run = sample_run();
+    let github_token = format!("{}{}", "ghp_", "EXAMPLE_FAKE_TOKEN_do_not_use_00");
+    let credential = format!(
+        "{}{}",
+        "github_pat_", "EXAMPLE_FAKE_CREDENTIAL_do_not_use_00"
     );
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_Simard-42");
-    assert_eq!(item.source, "stewardship:rysweet/Simard#42");
-    assert!(item.description.contains("42") || item.description.contains(&sig));
+    let bearer_token = "EXAMPLE.bearer-token.do-not-use-000000";
+    let authorization_header = "Authorization";
+    let jwt = format!(
+        "{}.{}.{}",
+        "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJleGFtcGxlIn0", "signatureDoNotUse000"
+    );
+    let password = "example-password-do-not-use";
+    let key_secret = "example-api-key-do-not-use";
+    let cloud_secret = "example-cloud-secret-do-not-use";
+    let cloud_access_key = "AKIAEXAMPLE000000000";
+    let google_api_key = format!("AIza{}", "0".repeat(35));
+    let pem_begin = format!("-----BEGIN {} PRIVATE KEY-----", "OPENSSH");
+    let pem_end = format!("-----END {} PRIVATE KEY-----", "OPENSSH");
+    let pem_body = "EXAMPLEfakeKEYbodyDoNotUse000000000000";
+    run.failure_kind = format!("PanicInStep-{github_token}");
+    run.source_module =
+        format!("simard::engineer_loop DB_PASSWORD={password} source remains readable");
+    run.run_id = format!("run-abc123 Authorization: Bearer {bearer_token}");
+    run.failed_step = format!("step-7-tdd jwt={jwt}");
+    run.recipe_name = format!("smart-orchestrator-{credential}");
+    run.error_text = format!(
+        "deployment failed while publishing release\n\
+         Authorization: Bearer {github_token}\n\
+         github-token={github_token}\n\
+         {authorization_header}: Bearer {bearer_token}\n\
+         credential={credential}\n\
+         DB_PASSWORD={password}\n\
+         API_KEY={key_secret}\n\
+         AWS_SECRET_ACCESS_KEY={cloud_secret}\n\
+         cloud access id {cloud_access_key}\n\
+         google api key {google_api_key}\n\
+         request jwt {jwt}\n\
+         PRIVATE_KEY={pem_begin}\n{pem_body}\n{pem_end}\n\
+         retry exhausted after 3 attempts"
+    );
+    let raw_signature = failure_signature(&run.failure_kind, &run.error_text);
+
+    let outcome = process_orchestrator_run(&run, &gh).unwrap();
+
+    assert_eq!(
+        outcome,
+        StewardshipOutcome::FiledNew {
+            repo: "rysweet/Simard".to_string(),
+            issue_number: 999,
+            url: "https://github.com/rysweet/Simard/issues/999".to_string(),
+            signature: raw_signature.clone(),
+        }
+    );
+    assert_eq!(
+        gh.search_calls.lock().unwrap().as_slice(),
+        &[("rysweet/Simard".to_string(), raw_signature.clone())],
+        "deduplication must continue using the raw failure data"
+    );
+
+    let calls = gh.create_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let repo = &calls[0].0;
+    let title = &calls[0].1;
+    let body = &calls[0].2;
+    assert_eq!(repo, "rysweet/Simard");
+    assert_eq!(title, "[stewardship] Orchestrator failure");
+    let diagnostic = format!("{outcome:?} repo={repo:?} title={title:?} body={body:?}");
+    for secret in [
+        github_token.as_str(),
+        credential.as_str(),
+        bearer_token,
+        jwt.as_str(),
+        password,
+        key_secret,
+        cloud_secret,
+        cloud_access_key,
+        google_api_key.as_str(),
+        pem_body,
+        pem_begin.as_str(),
+    ] {
+        assert!(!title.contains(secret), "issue title/argv leaked {secret}");
+        assert!(!body.contains(secret), "issue body leaked {secret}");
+        assert!(!diagnostic.contains(secret), "diagnostics leaked {secret}");
+    }
+    assert!(body.contains("deployment failed while publishing release"));
+    assert!(body.contains("retry exhausted after 3 attempts"));
+    assert!(body.contains("source-module: simard::engineer_loop"));
+    assert!(body.contains("failed-step: step-7-tdd"));
+    assert!(body.contains(&format!("stewardship-signature: {raw_signature}")));
+    assert!(body.matches("[redacted secret]").count() >= 10);
 }

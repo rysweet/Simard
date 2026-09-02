@@ -50,6 +50,8 @@ Simard does **not** expose:
 | improvement-curation state readback | `simard improvement-curation read ...` | `simard_operator_probe improvement-curation-read ...` |
 | review artifact persistence and readback | `simard review ...` | `simard_operator_probe review-run ...` and `review-read ...` |
 | benchmark scenarios and suites | `simard gym ...` | `simard-gym ...` |
+| LOCAL COIN Gym harness done-gate | `coin-gym verify` | `simard_operator_probe coin-gym-verify` |
+| handoff export/restore roundtrip probe | none | `simard_operator_probe handoff-roundtrip ...` |
 
 ## Canonical CLI surface
 
@@ -152,6 +154,8 @@ The bounded engineer loop is intentionally narrow:
 - it persists concise evidence and memory under the selected state root
 - it surfaces active goals and up to the three most recent carried meeting records from the same state root
 - it may surface a separate terminal continuity summary when the same state root already contains a valid terminal-scoped handoff
+
+During the inspect phase the loop records an architecture gap trace. Because the shipped `simard_operator_probe` binary is a thin wrapper that delegates to `dispatch_operator_probe`, the gap trace follows that delegation into the authoritative routing table at `src/operator_commands/dispatch.rs` rather than string-scanning the wrapper alone. When the dispatcher wires the `engineer-loop-run` subcommand, the trace reports that the operator probe exposes the repo-grounded engineer-loop-run surface; it falls back to describing a terminal-only or unwired surface only when the dispatcher genuinely lacks the engineer loop.
 
 The bounded engineer loop supports two honest action shapes:
 
@@ -461,6 +465,38 @@ The gym also supports persisted run-to-run comparison for a single scenario:
 - if one side of the comparison comes from an older artifact that lacks either field, compare renders that value and its delta as `unmeasured` instead of inventing `0`
 - comparison artifacts are written under `target/simard-gym/comparisons/<scenario-id>/`
 
+### LOCAL COIN Gym harness
+
+Canonical entrypoint: `coin-gym verify`
+
+Compatibility surface: `simard_operator_probe coin-gym-verify`
+
+The LOCAL COIN Gym harness (`src/coin_gym/`) benchmarks the COIN
+code-reasoning-by-reachability shape locally, scoring a single-model **baseline**
+against a multi-agent **team** with a skwaq-style failure-analysis plus
+overfitting-reviewer gate. `coin-gym verify` is its machine-checkable
+**done-gate**: it exercises every harness component — target loader, baseline
+runner, team runner, scorer, leaderboard comparator, the self-improvement loop,
+and the `coin evaluate`/`coin verify` contract wiring — offline against the
+built-in sample snapshot and exits non-zero if any LOCAL acceptance criterion
+fails.
+
+`simard_operator_probe coin-gym-verify` re-exposes that exact done-gate through
+the operator-probe dispatcher, so the repo-grounded LOCAL COIN harness is
+reachable from the same surface as the other repo-grounded engineer surfaces
+(`engineer-loop-run`, `terminal-run`, …) rather than only from the standalone
+`coin-gym` binary. The probe takes no arguments, is hermetic and offline
+(self-improvement tactic memory is isolated under a throwaway temp directory so
+it never touches a user's real profiles), and prints one `PASS`/`FAIL` row per
+criterion followed by the aggregate result.
+
+> [!IMPORTANT]
+> This is a **LOCAL-only** gate. Live VM grading (`coin evaluate`/`coin verify`,
+> Phase 3, issue #2823) is externally gated on a provisioned Docker host and is
+> intentionally out of this gate's scope. The probe never reaches the network
+> and never posts results anywhere. See
+> [How to run the COIN Gym harness](../howto/run-the-coin-gym-harness.md).
+
 ### Bootstrap contract
 
 Canonical entrypoint: `simard bootstrap run <identity> <base-type> <topology> <objective> [state-root]`
@@ -473,6 +509,22 @@ The operator-facing bootstrap contract is now explicit:
 - identity, base type, and topology mismatches fail explicitly
 - there is no public zero-argument bootstrap path
 - state-root validation runs before durable artifacts are read or written
+
+### Handoff roundtrip probe
+
+Compatibility surface: `simard_operator_probe handoff-roundtrip <identity> <base-type> <topology> <objective>`
+
+This probe has no canonical `simard` subcommand; it ships only through the
+`simard_operator_probe` compatibility binary. It exercises the durable-handoff
+contract as a single roundtrip: run a local session, export the latest durable
+handoff snapshot, restore a runtime from that snapshot, and report the restored
+identity, base type, topology, runtime node, exported memory/evidence record
+counts, and restored session phase.
+
+- identity, base type, and topology are required positionally
+- a missing durable handoff snapshot fails explicitly rather than fabricating a
+  restored runtime
+- the probe writes under the resolved `handoff-roundtrip` state root
 
 ## Durable carryover contract
 

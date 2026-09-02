@@ -1,0 +1,32 @@
+name: simard-coin-gym-verify-done-gate
+app_type: cli
+description: |
+  Guards the LOCAL COIN Gym goal's measurable done-criteria
+  (build-a-local-coin-benchmark-harness-and-a-self-improvement-loop, issue
+  #2713). The goal previously stalled with why=UNCLEAR-CRITERIA because its
+  done-criteria lived only as prose the OODA done-gate could not check. This
+  scenario pins the criterion as an executable, tracked check: `coin-gym verify`
+  must run the LOCAL offline harness acceptance self-check and exit 0 with all
+  criteria passing. This is the same gate enforced in CI
+  (.github/workflows/verify.yml) and documented under "Done-criteria for the
+  LOCAL goal" in docs/howto/run-the-coin-gym-harness.md.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner only gates on
+  `run`-step exit codes and reads command text from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when `coin-gym verify` itself exits zero AND its output reports
+  "7/7 criteria passed".
+metadata:
+  tags:
+    - cli
+    - coin-gym
+    - done-gate
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'OUT=$(cargo run --quiet --bin coin-gym -- verify 2>&1); RC=$?; echo \"$OUT\"; test $RC -eq 0 && echo \"$OUT\" | grep -qE \"7/7 criteria passed\"'"
+    timeout: 600000

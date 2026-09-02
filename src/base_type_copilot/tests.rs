@@ -541,16 +541,36 @@ fn meeting_adapter(id: &str, meeting_binary: &str) -> CopilotSdkAdapter {
         .with_meeting_binary_override(meeting_binary)
 }
 
+/// Classifies the two transient, whole-suite-parallelism spawn/wait races that
+/// the multithreaded test harness — not production — can inject while exec'ing a
+/// freshly-written fake `copilot` binary alongside thousands of other
+/// subprocess-spawning unit tests:
+///
+/// * `ETXTBSY` ("Text file busy") — another parallel test thread `fork()`ed
+///   while this test's just-written fake binary was momentarily open for
+///   writing, so the exec transiently fails.
+/// * `ECHILD` ("No child processes", os error 10) — another parallel test's
+///   subprocess handling reaped this turn's child before its own
+///   `wait_with_output`, so the specific-pid wait fails spuriously even though
+///   the fake ran to completion.
+///
+/// Both are pure artifacts of running the entire unit-test suite inside a single
+/// process; production meeting turns exec the long-lived external `copilot`
+/// binary in a process that never SIG_IGNs `SIGCHLD` nor broad-reaps children,
+/// so neither race can occur in the field. Any *other* error is a real
+/// regression and is never retried, so genuine defects are still surfaced loudly.
+#[cfg(unix)]
+fn is_transient_meeting_spawn_race(reason: &str) -> bool {
+    reason.contains("Text file busy") || reason.contains("No child processes")
+}
+
 /// Open a meeting session against the fake `copilot` at `binary` and run one
 /// turn with `objective`, returning the outcome.
 ///
-/// Retries ONLY the transient `ETXTBSY` ("Text file busy") spawn race that can
-/// occur when another parallel test thread `fork()`s while this test's
-/// just-written fake binary is momentarily open for writing — a pure artifact
-/// of exec'ing a freshly-created file inside the multithreaded test harness,
-/// not a product defect (production meeting turns exec the long-lived, external
-/// `copilot` binary). Any other error fails the test immediately, so real
-/// regressions are never masked.
+/// Retries ONLY the transient, harness-only spawn/wait races classified by
+/// [`is_transient_meeting_spawn_race`] (`ETXTBSY` on exec, `ECHILD` on wait).
+/// Any other error fails the test immediately, so real regressions are never
+/// masked.
 #[cfg(unix)]
 fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOutcome {
     let mut last_reason = String::new();
@@ -563,7 +583,7 @@ fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOut
         match session.run_turn(BaseTypeTurnInput::objective_only(objective)) {
             Ok(outcome) => return outcome,
             Err(SimardError::AdapterInvocationFailed { reason, .. })
-                if reason.contains("Text file busy") =>
+                if is_transient_meeting_spawn_race(&reason) =>
             {
                 last_reason = reason;
                 std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
@@ -571,7 +591,7 @@ fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOut
             Err(other) => panic!("meeting turn failed unexpectedly: {other:?}"),
         }
     }
-    panic!("meeting turn kept hitting a transient ETXTBSY race: {last_reason}");
+    panic!("meeting turn kept hitting a transient spawn/wait race: {last_reason}");
 }
 
 // ---------------------------------------------------------------------------
@@ -873,6 +893,134 @@ fn meeting_turn_evidence_shows_direct_copilot_command() {
 }
 
 // ---------------------------------------------------------------------------
+// Cost accounting: meeting prompt tokens reflect the FULL enriched prompt
+// streamed on stdin, not the bare objective (issue #4164).
+// ---------------------------------------------------------------------------
+
+/// Run one hermetic meeting turn under a caller-supplied session id so the
+/// recorded cost ledger entry can be isolated from any concurrently-running
+/// meeting test that shares the default `make_request` session id. Mirrors the
+/// transient-`ETXTBSY` retry contract of [`run_fake_meeting_turn`].
+#[cfg(unix)]
+fn run_fake_meeting_turn_with_session(
+    id: &str,
+    binary: &str,
+    session_id: &str,
+    objective: &str,
+) -> BaseTypeOutcome {
+    let mut last_reason = String::new();
+    for attempt in 0..8 {
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::parse(session_id).unwrap(),
+            mode: OperatingMode::Meeting,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::new("test-node"),
+            mailbox_address: RuntimeAddress::new("test://addr"),
+        };
+        let adapter = meeting_adapter(id, binary);
+        let mut session = adapter.open_session(request).unwrap();
+        session.open().unwrap();
+        match session.run_turn(BaseTypeTurnInput::objective_only(objective)) {
+            Ok(outcome) => return outcome,
+            Err(SimardError::AdapterInvocationFailed { reason, .. })
+                if reason.contains("Text file busy") =>
+            {
+                last_reason = reason;
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(other) => panic!("meeting turn failed unexpectedly: {other:?}"),
+        }
+    }
+    panic!("meeting turn kept hitting a transient ETXTBSY race: {last_reason}");
+}
+
+/// Regression for issue #4164: a meeting turn must record the size of the FULL
+/// enriched prompt it streams to copilot on stdin — the preamble + identity
+/// context + objective wrapped in the `## Objective` / `## Instructions`
+/// scaffold — as its prompt-token cost, NOT the bare `input.objective`.
+///
+/// Before the fix, `run_meeting_turn` recorded `input.objective.len()`, so the
+/// dashboard Cost tab (`GET /api/costs`) undercounted meeting prompt tokens and
+/// showed an impossible `prompt_tokens ≪ completion_tokens` ratio, understating
+/// spend. The rendered prompt is strictly larger than the bare objective (the
+/// scaffold alone adds well over one token), so the recorded prompt tokens must
+/// exceed the bare objective's token count. This assertion FAILS on the buggy
+/// code (recorded == bare) and PASSES on the fix (recorded > bare).
+///
+/// HOME is redirected to a per-test temp dir so the cost ledger
+/// (`$HOME/.simard/costs/ledger.jsonl`) is isolated; the entry is matched by a
+/// unique session id so a concurrent meeting test sharing the process-global
+/// temp HOME cannot substitute its own entry. Mutating HOME requires the
+/// `cognitive_memory` serial key (see
+/// docs/testing/cognitive-memory-serial-isolation.md).
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective() {
+    let home = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: serialised via #[serial(cognitive_memory)] — no concurrent env
+    // mutation can tear this write (see the EnvBinding invariant in
+    // test_support::hermetic).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let session_id = "session-00000000-0000-0000-0000-000000004164";
+        let objective = "Meeting objective body for the #4164 cost-accounting regression.";
+        let (_dir, bin) = fake_copilot("FAKE-COPILOT-OK: meeting reply");
+        run_fake_meeting_turn_with_session(
+            "copilot-meeting-cost-4164",
+            &bin,
+            session_id,
+            objective,
+        );
+
+        let ledger = home
+            .path()
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl");
+        let contents = std::fs::read_to_string(&ledger)
+            .expect("meeting turn must write a cost ledger entry under the temp HOME");
+        let entry = contents
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|e| {
+                e.get("session_id").and_then(|v| v.as_str()) == Some(session_id)
+                    && e.get("model").and_then(|v| v.as_str()) == Some("copilot-meeting")
+            })
+            .expect("a copilot-meeting cost entry for this session must be recorded");
+
+        let recorded_prompt_tokens = entry
+            .get("prompt_tokens_est")
+            .and_then(|v| v.as_u64())
+            .expect("prompt_tokens_est must be a number");
+        let bare_objective_tokens = crate::cost_tracking::estimate_tokens(objective.len());
+
+        assert!(
+            recorded_prompt_tokens > bare_objective_tokens,
+            "meeting prompt cost must reflect the full enriched prompt streamed on \
+             stdin (issue #4164), not the bare objective: \
+             recorded={recorded_prompt_tokens} bare_objective_tokens={bare_objective_tokens}"
+        );
+    });
+
+    // SAFETY: restore HOME before propagating any panic (same serial key).
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Error handling for meeting-mode subprocess
 // ---------------------------------------------------------------------------
 
@@ -955,15 +1103,15 @@ fn build_copilot_terminal_objective_with_working_dir() {
 // Memory + knowledge enrichment wiring (issue #1664)
 // ===========================================================================
 //
-// Before this fix `CopilotSdkAdapter::open_session` hardcoded both bridges to
+// Before this fix `CopilotSdkAdapter::open_session` hardcoded both readers to
 // `None`, so every production turn ran `prepare_turn_context(objective, None,
 // None)` and the memory-facts / known-procedures / domain-knowledge prompt
-// blocks were never reached. These tests prove (1) that supplied bridges are
-// actually consumed, (2) that the absence of bridges still produces a valid
-// objective-only prompt, and (3) that a supplied bridge whose query fails
+// blocks were never reached. These tests prove (1) that supplied readers are
+// actually consumed, (2) that the absence of readers still produces a valid
+// objective-only prompt, and (3) that a supplied reader whose query fails
 // surfaces the error rather than silently degrading. The production
-// `launch_enrichment_bridges` helper now lives in `base_type_turn` (shared with
-// the RustyClawd adapter, issue #2383); its real-bridge / degradation tests
+// `launch_enrichment_clients` helper now lives in `base_type_turn` (shared with
+// the RustyClawd adapter, issue #2383); its real-reader / degradation tests
 // live there alongside it, and `open_session_with_native_enrichment_*` below
 // still guards the Copilot factory seam.
 
@@ -975,7 +1123,7 @@ use crate::rpc::RpcErrorPayload;
 use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 
-/// Mock cognitive-memory bridge returning a single semantic fact for any
+/// Mock cognitive-memory reader returning a single semantic fact for any
 /// `search_facts` query and no procedures.
 fn enrichment_memory() -> Box<dyn CognitiveMemoryOps> {
     Box::new(CognitiveMemoryClient::new(Box::new(
@@ -999,8 +1147,8 @@ fn enrichment_memory() -> Box<dyn CognitiveMemoryOps> {
     )))
 }
 
-/// Mock cognitive-memory bridge whose calls always error — used to verify a
-/// supplied bridge's query failure surfaces (no silent swallow) per the
+/// Mock cognitive-memory reader whose calls always error — used to verify a
+/// supplied reader's query failure surfaces (no silent swallow) per the
 /// `prepare_turn_context` contract.
 fn failing_memory() -> Box<dyn CognitiveMemoryOps> {
     Box::new(CognitiveMemoryClient::new(Box::new(
@@ -1013,7 +1161,7 @@ fn failing_memory() -> Box<dyn CognitiveMemoryOps> {
     )))
 }
 
-/// Mock knowledge bridge with one pack that matches a "rust" objective and a
+/// Mock knowledge reader with one pack that matches a "rust" objective and a
 /// canned non-empty query answer.
 fn enrichment_knowledge() -> KnowledgeClient {
     KnowledgeClient::new(Box::new(InMemoryRpcTransport::new(
@@ -1038,17 +1186,17 @@ fn enrichment_knowledge() -> KnowledgeClient {
     )))
 }
 
-/// With both bridges supplied, the enriched prompt must include the memory
-/// facts and domain knowledge sections — proving the bridges are consumed.
+/// With both readers supplied, the enriched prompt must include the memory
+/// facts and domain knowledge sections — proving the readers are consumed.
 #[test]
 fn enrichment_injects_memory_facts_and_knowledge_into_prompt() {
     let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer))
-        .with_test_bridges(Some(enrichment_memory()), Some(enrichment_knowledge()));
+        .with_test_readers(Some(enrichment_memory()), Some(enrichment_knowledge()));
     let input = BaseTypeTurnInput::objective_only("implement rust ownership feature");
 
     let prompt_file = session
         .build_meeting_prompt(&input)
-        .expect("prompt build must succeed with enrichment bridges");
+        .expect("prompt build must succeed with enrichment readers");
     let prompt = std::fs::read_to_string(prompt_file.path()).expect("read prompt file");
 
     assert!(
@@ -1075,7 +1223,7 @@ fn enrichment_injects_memory_facts_and_knowledge_into_prompt() {
 #[test]
 fn enrichment_reaches_pty_prompt_file() {
     let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer))
-        .with_test_bridges(Some(enrichment_memory()), Some(enrichment_knowledge()));
+        .with_test_readers(Some(enrichment_memory()), Some(enrichment_knowledge()));
     let input = BaseTypeTurnInput::objective_only("implement rust ownership feature");
 
     let (objective, prompt_file) = session
@@ -1092,7 +1240,7 @@ fn enrichment_reaches_pty_prompt_file() {
     assert!(prompt.contains("## Domain Knowledge"), "got: {prompt}");
 }
 
-/// With no bridges, the prompt is objective-only — the clean degraded path
+/// With no readers, the prompt is objective-only — the clean degraded path
 /// that must never break turn dispatch.
 #[test]
 fn no_enrichment_produces_objective_only_prompt() {
@@ -1101,41 +1249,41 @@ fn no_enrichment_produces_objective_only_prompt() {
 
     let prompt_file = session
         .build_meeting_prompt(&input)
-        .expect("prompt build must succeed without bridges");
+        .expect("prompt build must succeed without readers");
     let prompt = std::fs::read_to_string(prompt_file.path()).expect("read prompt file");
 
     assert!(prompt.contains("plain objective without enrichment"));
     assert!(
         !prompt.contains("## Relevant Memory Facts"),
-        "no memory section without a memory bridge: {prompt}"
+        "no memory section without a memory reader: {prompt}"
     );
     assert!(
         !prompt.contains("## Domain Knowledge"),
-        "no knowledge section without a knowledge bridge: {prompt}"
+        "no knowledge section without a knowledge reader: {prompt}"
     );
 }
 
-/// A supplied bridge whose query fails must surface the error (the
+/// A supplied reader whose query fails must surface the error (the
 /// `prepare_turn_context` no-silent-degradation contract), not panic.
 #[test]
 fn enrichment_query_failure_propagates_not_panics() {
     let session = CopilotSdkSession::new_for_test(make_request(OperatingMode::Engineer))
-        .with_test_bridges(Some(failing_memory()), None);
+        .with_test_readers(Some(failing_memory()), None);
     let input = BaseTypeTurnInput::objective_only("objective triggering failing memory");
 
     let result = session.build_meeting_prompt(&input);
     assert!(
         result.is_err(),
-        "a supplied bridge whose query fails must surface an error, not silently degrade"
+        "a supplied reader whose query fails must surface an error, not silently degrade"
     );
 }
 
-/// `open_session` (via `build_session`) must wire both bridges when the
+/// `open_session` (via `build_session`) must wire both readers when the
 /// adapter has enrichment configured — the direct regression guard for the
 /// hardcoded-`None` defect of issue #1664 at the factory seam.
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn open_session_with_native_enrichment_populates_bridges() {
+fn open_session_with_native_enrichment_populates_readers() {
     use tempfile::TempDir;
     let tmp = TempDir::new().unwrap();
     let state_root = tmp.path().join("state");
@@ -1150,18 +1298,18 @@ fn open_session_with_native_enrichment_populates_bridges() {
 
     assert!(
         session.enrichment.memory.is_some(),
-        "open_session must wire the memory bridge when enrichment is Native"
+        "open_session must wire the memory reader when enrichment is Native"
     );
     assert!(
         session.enrichment.knowledge.is_some(),
-        "open_session must wire the knowledge bridge when enrichment is Native"
+        "open_session must wire the knowledge reader when enrichment is Native"
     );
 }
 
-/// The default adapter (no `with_enrichment`) must leave both bridges `None`
+/// The default adapter (no `with_enrichment`) must leave both readers `None`
 /// so unit tests and lightweight callers incur no filesystem side effects.
 #[test]
-fn open_session_without_enrichment_leaves_bridges_none() {
+fn open_session_without_enrichment_leaves_readers_none() {
     let adapter = CopilotSdkAdapter::registered("copilot-no-enrich").unwrap();
     let session = adapter
         .build_session(make_request(OperatingMode::Engineer))
@@ -1169,10 +1317,10 @@ fn open_session_without_enrichment_leaves_bridges_none() {
 
     assert!(
         session.enrichment.memory.is_none(),
-        "default adapter must not wire a memory bridge"
+        "default adapter must not wire a memory reader"
     );
     assert!(
         session.enrichment.knowledge.is_none(),
-        "default adapter must not wire a knowledge bridge"
+        "default adapter must not wire a knowledge reader"
     );
 }

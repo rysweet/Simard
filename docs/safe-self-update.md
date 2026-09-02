@@ -13,9 +13,20 @@ and react. It is *not* fine for an autonomous OODA daemon: a bad upgrade
 that fails to start, or starts but immediately stops making progress,
 leaves the operator with a host whose Simard daemon is silently broken.
 
+`simard install` provides the host-level staging, prompt-asset, systemd
+activation, and rollback transaction. Until `simard update` delegates into that
+installer transaction, this page describes the existing safe wrapper around the
+legacy self-update rail.
+
 `simard safe-update` adds the missing safety rails:
 
-1. **Drain** in-flight engineer dispatches before swapping.
+1. **Drain** in-flight engineer dispatches before swapping. The drain
+   **never kills a producing engineer** and **never aborts the update on a
+   wall-clock timeout**: it sets `draining.flag` (so no *new* engineers start)
+   and, on the self-deploy path, checkpoints and requeues each in-flight
+   engineer's goal back onto the board so a restarted binary re-picks it up.
+   The download-based rail keeps only a best-effort grace window and then
+   proceeds regardless of how many engineers remain.
 2. **Snapshot** the currently-running binary (sha256 + version + path)
    and copy it to `~/.simard/bin/simard.bak.<utc-iso8601>` so rollback
    has something to restore.
@@ -51,6 +62,34 @@ flowchart LR
     OK --> Done([engineer dispatch resumes])
 ```
 
+## Drain doctrine (never kill, never abort on timeout)
+
+Simard almost always has long-running engineers in flight. A drain that waited
+for quiescence and then **failed** the deploy meant deploys essentially never
+succeeded while busy, so she stayed many commits behind her own merged code and
+any goal needing its merged code deployed got stuck on "merged but not
+deployed".
+
+The redesigned drain removes that failure mode entirely:
+
+- It **stops dispatching new engineers** (`draining.flag`).
+- It **gracefully checkpoints and requeues** each in-flight engineer's goal back
+  onto the board by releasing the worktree claim sentinel
+  (`.simard-engineer-claim`). The engineer's own `SessionCheckpoint` and the
+  goal record already persist, so the goal is simply made re-pickable.
+- It **never kills a producing engineer**: rename-based atomic swap is safe
+  against a running executable, so an engineer may finish its PR on the old
+  inode while the restarted binary re-picks-up any goal that did not finish.
+  The orphan-reaper therefore **spares every live engineer** and cleans up only
+  genuinely stale entries.
+- It **never aborts the deploy on a wall-clock timeout**. `drain_timeout_seconds`
+  is now only a best-effort grace window on the download-based rail.
+
+There is deliberately **no control heuristic** left in the drain (no "wait N
+seconds then decide"): the redesigned behavior is unconditional and
+deterministic — requeue all, kill none, fail never — which is safer and more
+predictable than any timeout heuristic or per-engineer judgment call.
+
 ## Configuration
 
 `UpdateConfig` (defaults):
@@ -59,7 +98,7 @@ flowchart LR
 | -------------------------------- | ------- | -------------------------------------------------------------------- |
 | `min_commits_since_build`        | `3`     | Triggering rule (1) — see "Brain triggering doctrine" below.         |
 | `min_minutes_since_last_attempt` | `30`    | Triggering rule (4) cooldown.                                        |
-| `drain_timeout_seconds`          | `300`   | Phase 1 budget. On timeout the flag stays set; operator investigates.|
+| `drain_timeout_seconds`          | `300`   | Phase 1 best-effort grace window. Never fails or kills — see "Drain doctrine".|
 | `pretest_timeout_seconds`        | `300`   | Phase 3 budget. Combined stdout/stderr captured to `last-pretest.log`.|
 | `validate_timeout_cycles`        | `5`     | Number of clean OODA cycles required for `validated`.                |
 | `validate_timeout_seconds`       | `600`   | Wall-clock budget for phase 5 before `validate_timeout`.             |
@@ -135,7 +174,7 @@ rather than firing `simard rollback` directly.
 
 | Symptom                                            | Likely cause                                             | Operator action                                          |
 | -------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
-| `DrainTimeout` and `draining.flag` still present   | Engineer subprocess is wedged.                           | Inspect `~/.simard/engineer-worktrees/`, kill stragglers, then `rm draining.flag` to reopen the dispatch gate. |
+| `DrainTimeout` (legacy; no longer produced) | Historically meant an engineer subprocess outlived the drain budget. The redesigned drain never fails on a timeout — it checkpoints and requeues in-flight engineers. | None — deploys proceed while busy. This row is retained only for older logs. |
 | `PretestSelfTestFailed` or `PretestTimeout`        | Candidate binary is broken or self-test hung.            | Inspect `state_dir/last-pretest.log`. Install path is unchanged. |
 | `phase=exec_handover` for a long time              | New binary started but is stuck — heartbeat stale.       | `simard rollback-watchdog --once` or `simard rollback`. |
 | `phase=rolled_back`                                | Rollback succeeded.                                      | Look at `reason` for the trigger. Investigate.           |

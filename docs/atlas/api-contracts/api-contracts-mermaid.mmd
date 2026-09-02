@@ -1,0 +1,83 @@
+flowchart TD
+  subgraph Dashboard["Dashboard HTTP and WebSocket"]
+    DR["build_router()<br/>Axum Router"]
+    DA["require_auth middleware<br/>/login + /api/login bypass"]
+    DS["system routes<br/>status/issues/metrics/costs/budget"]
+    DG["goal routes<br/>goals/workboard/current-work"]
+    DM["memory routes<br/>memory/cognition/enrichment"]
+    DT["runtime routes<br/>logs/processes/activity/traces/OODA/overseer"]
+    DP["PR routes<br/>prs/merge-judge/merge-readiness"]
+    DJ["journal routes"]
+    DC["creative ideas routes"]
+    DF["feedback routes"]
+    DW["WebSocket routes<br/>chat/agent-log/tmux-attach"]
+    DR --> DA
+    DA --> DS
+    DA --> DG
+    DA --> DM
+    DA --> DT
+    DA --> DP
+    DA --> DJ
+    DA --> DC
+    DA --> DF
+    DA --> DW
+  end
+
+  subgraph CLI["Operator CLI"]
+    CD["dispatch_operator_cli()"]
+    CE["engineer"]
+    CM["meeting"]
+    CG["goal / curation"]
+    CO["ooda"]
+    CS["dashboard / signal / memory / status / spawn / merge-pr"]
+    CX["maintenance<br/>worktree-gc/disk-reclaim/update/self-test/self-health/ci-health/self-deploy/safe-update"]
+    CD --> CE
+    CD --> CM
+    CD --> CG
+    CD --> CO
+    CD --> CS
+    CD --> CX
+  end
+
+  subgraph Signal["Signal conversation"]
+    ST["JsonRpcTransport<br/>TCP JSON-RPC lines"]
+    SG["allowlist + risk gate"]
+    SL["lifecycle<br/>/help /new /reset /close"]
+    SLow["low-risk<br/>status pause approve"]
+    SH["high-risk<br/>deploy merge #NNNN"]
+    SC["ordinary text conversation"]
+    ST --> SG
+    SG --> SL
+    SG --> SLow
+    SG --> SH
+    SG --> SC
+  end
+
+  subgraph Memory["Memory IPC"]
+    MC["RemoteCognitiveMemory::call"]
+    MR["MemoryRequest<br/>serde tag op"]
+    MS["server::dispatch"]
+    MP["MemoryResponse<br/>serde tag ok/value"]
+    MG["guards<br/>0600 socket + MAX_FRAME + gated writes"]
+    MC --> MR --> MS --> MP
+    MS --> MG
+  end
+
+  subgraph Meeting["Meeting REPL"]
+    REPL["run_meeting_repl()"]
+    RC["control<br/>/help /close /done /status /export /recap /preview /state"]
+    RCap["capture<br/>/decision /action /question /risk /disagree /theme /owner /goal"]
+    RT["template<br/>/template [name]"]
+    RN["natural conversation"]
+    REPL --> RC
+    REPL --> RCap
+    REPL --> RT
+    REPL --> RN
+  end
+
+  CS -->|dashboard serve| DR
+  CS -->|signal run| ST
+  CS -->|memory stats/dump/remember| MC
+  CM -->|meeting repl| REPL
+  CO -->|state + typed terminals| MC
+  SC -->|meeting backend turn| RN

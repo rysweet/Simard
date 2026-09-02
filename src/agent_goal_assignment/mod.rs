@@ -1,4 +1,4 @@
-//! Goal assignment and progress tracking via the cognitive memory bridge.
+//! Goal assignment and progress tracking via the cognitive memory memory.
 //!
 //! Supervisors assign goals to subordinates by writing semantic facts into
 //! the hive (shared cognitive memory). Subordinates read their assigned

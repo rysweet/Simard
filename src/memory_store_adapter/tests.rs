@@ -64,10 +64,10 @@ fn count_for_session() {
 }
 
 #[test]
-fn descriptor_identifies_cognitive_bridge() {
+fn descriptor_identifies_cognitive_client() {
     let store = test_store();
     let desc = store.descriptor();
-    assert!(desc.identity.contains("cognitive-bridge"));
+    assert!(desc.identity.contains("cognitive-memory"));
 }
 
 #[test]
@@ -97,8 +97,8 @@ fn hydration_loads_records_from_local_store() {
             message: format!("unknown method: {method}"),
         }),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let store = CognitiveClientMemoryStore::new(bridge, &path).unwrap();
+    let client = CognitiveMemoryClient::new(Box::new(transport));
+    let store = CognitiveClientMemoryStore::new(client, &path).unwrap();
 
     // Step 3: verify hydration — records visible without any put().
     let decisions = store.list(MemoryScope::Decision).unwrap();
@@ -130,8 +130,8 @@ fn hydration_with_empty_local_store_starts_empty() {
                 message: format!("unknown method: {method}"),
             }),
         });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let store = CognitiveClientMemoryStore::new(bridge, &path).unwrap();
+    let client = CognitiveMemoryClient::new(Box::new(transport));
+    let store = CognitiveClientMemoryStore::new(client, &path).unwrap();
 
     // No records should exist — hydration from empty local store is a no-op.
     for scope in [
@@ -174,8 +174,8 @@ fn hydration_plus_new_put_merge_correctly() {
             message: format!("unknown method: {method}"),
         }),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let store = CognitiveClientMemoryStore::new(bridge, &path).unwrap();
+    let client = CognitiveMemoryClient::new(Box::new(transport));
+    let store = CognitiveClientMemoryStore::new(client, &path).unwrap();
 
     // Add a new record via put.
     store
@@ -214,8 +214,8 @@ fn list_for_session_includes_hydrated_records() {
             message: format!("unknown method: {method}"),
         }),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
-    let store = CognitiveClientMemoryStore::new(bridge, &path).unwrap();
+    let client = CognitiveMemoryClient::new(Box::new(transport));
+    let store = CognitiveClientMemoryStore::new(client, &path).unwrap();
 
     let session = SessionId::from_uuid(Uuid::nil());
     let records = store.list_for_session(&session).unwrap();
@@ -229,8 +229,8 @@ fn list_for_session_includes_hydrated_records() {
 }
 
 #[test]
-fn local_read_hits_without_bridge() {
-    // When local index has records, list() returns them without calling bridge.
+fn local_read_hits_without_client() {
+    // When local index has records, list() returns them without calling client.
     let store = test_store();
     store
         .put(make_record("local-hit", MemoryScope::Decision))
@@ -244,7 +244,7 @@ fn local_read_hits_without_bridge() {
 #[test]
 fn write_through_updates_local_cache() {
     // After put(), the record should be immediately visible via list()
-    // without needing a bridge call.
+    // without needing a client call.
     let store = test_store();
 
     assert!(store.list(MemoryScope::Benchmark).unwrap().is_empty());

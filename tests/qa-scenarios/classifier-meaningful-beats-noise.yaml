@@ -1,0 +1,62 @@
+name: classifier-meaningful-beats-noise
+app_type: cli
+description: |
+  Outside-in proof that the episode-ingestion classifier (issue #2327) retains a
+  MEANINGFUL episodic signal even when the same episode also carries a
+  known-noise bookkeeping phrase — closing a distillation fact-yield loss on the
+  standing cognition-improvement goal.
+
+  The classifier evaluates rules in strict priority order. Previously the
+  known-noise drop rule ran BEFORE the meaningful-content rule, so a genuinely
+  durable episode whose free text also mentioned a bookkeeping phrase was
+  dropped and never reached distillation:
+    - a handoff log ending "... flushing working memory to episodes";
+    - a goal promotion line that also said "session ... completed and persisted";
+    - a user decision recorded alongside "continue_skipping (no decision keyword)";
+    - a merged-PR completion that also mentioned "flushing working memory".
+  Each is a durable signal (Handoff / GoalPromotion / UserDecision /
+  ActionCompleted, importance 0.7-0.85) silently lost to the drop rule, degrading
+  fact-yield and the facts the reasoner later recalls.
+
+  The fix evaluates the meaningful-content rule BEFORE the drop rule — mirroring
+  the failure override, which already beats the drop rule — so a durable signal
+  is stored while a PURE-noise episode (no meaningful signal) still drops.
+
+  This scenario drives the hermetic, in-process classifier unit tests that pin
+  the corrected precedence and prove the rescue never re-admits pure noise. No
+  network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The classifier decision function's full contract, including the new
+  # meaningful-beats-noise precedence tests and the pure-noise-still-drops guard.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::classifier"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader consolidation suite proves the reordering did not regress the
+  # intake/distillation path that consumes the classifier's decisions.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

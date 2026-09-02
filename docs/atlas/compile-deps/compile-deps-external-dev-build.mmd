@@ -1,0 +1,16 @@
+flowchart LR
+    simard["simard"] --> build_deps["build-dependencies"]
+    simard --> dev_deps["dev-dependencies"]
+    simard --> features["features"]
+    build_deps --> chrono_build["chrono =0.4.44 build timestamp"]
+    dev_deps --> assert_cmd["assert_cmd =2.2.1"]
+    dev_deps --> proptest["proptest =1.11.0"]
+    dev_deps --> serial_test["serial_test =3.4.0"]
+    dev_deps --> syn["syn =2.0.117 full visit"]
+    dev_deps --> proc_macro2["proc-macro2 =1.0.106 span-locations"]
+    features --> default_feature["default signal dashboard_audit"]
+    features --> slow_tests["slow-tests opt in"]
+    features --> dashboard_audit["dashboard-audit headless_chrome regex url"]
+    features --> signal["signal default enabled"]
+    default_feature --> signal
+    default_feature --> dashboard_audit

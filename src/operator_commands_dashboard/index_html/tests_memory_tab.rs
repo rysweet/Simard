@@ -68,8 +68,8 @@ fn memory_tab_registered_in_metadata() {
         "the memory tab's page-h1 must be \"Memory\", got {:?}",
         meta.h1
     );
-    assert!(
-        !meta.slug.contains("bridge"),
+    assert_eq!(
+        meta.slug, "memory",
         "the memory tab slug must use accurate, non-legacy vocabulary (binding constraint)"
     );
 }
@@ -197,5 +197,227 @@ fn memory_deeplink_alias_to_resources_removed() {
         !html.contains(r#""memory":"resources""#),
         "the retired-slug alias \"memory\":\"resources\" must be removed once \
          Memory is a canonical tab (#2627)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fail-LOUD front-end contract (issue #2627): the graph must never silently
+// blank. A data-load failure is surfaced as a VISIBLE on-canvas error overlay
+// (`#mem-graph-error`, driven by the `mgError` state and painted by `mgRender`),
+// and a genuinely-empty store shows a neutral "empty" message — not a blank
+// canvas. See docs/reference/dashboard-memory-graph-fail-loud.md.
+//
+// TDD note (Step 7 / red): these FAIL against the current renderer — there is no
+// `#mem-graph-error` overlay and no `mgError`; `fetchMemoryGraph` writes errors
+// to the low-visibility `#mem-graph-stats` line (`Error: …` / `Load failed`) and
+// `return`s, leaving the canvas untouched (the silent blank). They pass once the
+// overlay + `mgError` render path replace those stats-line writes.
+// ---------------------------------------------------------------------------
+
+/// Return the body of a JS `function <name>(...)` from the rendered HTML: from
+/// the declaration up to the next top-level `function ` declaration. Sufficient
+/// for the flat helpers in the Memory-graph script. Panics if the function is
+/// absent so a missing/renamed function fails loudly.
+fn js_function<'h>(html: &'h str, name: &str) -> &'h str {
+    let marker = format!("function {name}(");
+    let start = html.find(&marker).unwrap_or_else(|| {
+        panic!("expected a JS `{marker}...` declaration in the rendered dashboard")
+    });
+    let rest = &html[start + marker.len()..];
+    let end = rest.find("function ").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// The Memory panel must own a dedicated, visible error-overlay element so a
+/// data-load failure is announced on the canvas, not swallowed into a tiny stats
+/// line. `role="alert"` makes it announce to assistive tech.
+#[test]
+fn memory_panel_has_visible_error_overlay_element() {
+    let html: &str = &INDEX_HTML;
+    let panel = tab_panel(html, "memory");
+    assert!(
+        panel.contains(r#"id="mem-graph-error""#),
+        "the Memory panel must render a dedicated #mem-graph-error overlay so a \
+         data-load failure is visible on the canvas (never a silent blank)"
+    );
+    assert!(
+        panel.contains(r#"role="alert""#),
+        "the #mem-graph-error overlay must carry role=\"alert\" so the failure is \
+         announced to assistive tech"
+    );
+}
+
+/// The renderer must track a single `mgError` state: `fetchMemoryGraph` sets it
+/// (on `d.error`, a fetch throw, or a client-side discrepancy) and the single
+/// paint path `mgRender` honours it by showing the `#mem-graph-error` overlay.
+#[test]
+fn memory_graph_fetch_and_render_wire_the_mg_error_overlay() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains("mgError"),
+        "the Memory-graph script must track an `mgError` state string driving the \
+         error overlay"
+    );
+
+    let fetch_body = js_function(html, "fetchMemoryGraph");
+    assert!(
+        fetch_body.contains("mgError"),
+        "fetchMemoryGraph must set/clear `mgError` (fail-loud on d.error / fetch \
+         throw / discrepancy), not just write the low-visibility stats line; body: {fetch_body}"
+    );
+
+    let render_body = js_function(html, "mgRender");
+    assert!(
+        render_body.contains("mgError"),
+        "mgRender (the single paint path) must honour `mgError`; body: {render_body}"
+    );
+    assert!(
+        render_body.contains("mem-graph-error"),
+        "mgRender must show the #mem-graph-error overlay when `mgError` is set so a \
+         partial/failed load is never presented as a blank canvas; body: {render_body}"
+    );
+}
+
+/// The retired silent branches must be gone: the pre-fix `fetchMemoryGraph` wrote
+/// `Error: …` / `Load failed` to the low-visibility `#mem-graph-stats` line and
+/// `return`ed, leaving the canvas a silent blank. There must be a SINGLE error
+/// surface (the overlay), so those stats-line error writes are removed.
+#[test]
+fn memory_graph_error_is_not_hidden_in_the_stats_line() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        !html.contains("Error: '+d.error"),
+        "the silent stats-line error branch (`#mem-graph-stats` = 'Error: '+d.error) \
+         must be replaced by the visible #mem-graph-error overlay (single error surface)"
+    );
+    assert!(
+        !html.contains("'Load failed'"),
+        "the silent stats-line 'Load failed' catch branch must be replaced by the \
+         visible #mem-graph-error overlay (never a silent blank)"
+    );
+}
+
+/// A genuinely-empty store is a distinct, non-error state: the renderer shows a
+/// neutral "empty" message (not the error overlay, not a blank canvas).
+#[test]
+fn memory_graph_has_neutral_empty_state_message() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains("Memory graph is empty"),
+        "the renderer must show a neutral \"Memory graph is empty\" message for a \
+         genuinely-empty store (distinct from the error overlay)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Recent-memories last-hour consistency: the headline count
+// (`#mem-recent-count` = `last_hour_count`) and the panel copy must never
+// contradict each other. On the library backend per-item listing is
+// unavailable (`available:false`, `items:[]`) yet `last_hour_count` can be
+// positive; the empty-items copy must therefore branch on `last_hour_count`,
+// not only on the aggregate `total`. Otherwise the panel shows e.g.
+// "313 items remembered in the last hour" beside "No new memories in the last
+// hour" — a self-contradiction that misreports live memory health.
+// ---------------------------------------------------------------------------
+
+/// The recent-memories empty-state must read the last-hour count and, when it is
+/// positive, must NOT emit the "No new memories in the last hour" copy — that
+/// would contradict the headline `#mem-recent-count` number.
+#[test]
+fn recent_memories_empty_state_branches_on_last_hour_count() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "fetchRecentMemories");
+    assert!(
+        body.contains("d.last_hour_count||0"),
+        "fetchRecentMemories must derive the last-hour count for its empty-state \
+         branch so a positive last-hour count is never rendered as \"No new \
+         memories in the last hour\" (which contradicts the #mem-recent-count \
+         headline); body: {body}"
+    );
+    assert!(
+        body.contains("recorded in the last hour"),
+        "when the last-hour count is positive but per-item detail is unavailable, \
+         the panel must state that memories WERE recorded in the last hour, \
+         consistent with the headline count; body: {body}"
+    );
+    // The truthful zero-window copy must still exist for last_hour_count == 0.
+    assert!(
+        body.contains("No new memories in the last hour"),
+        "the zero-last-hour branch must still say \"No new memories in the last \
+         hour\" when nothing was recorded this hour; body: {body}"
+    );
+    assert!(
+        body.contains("No memories stored yet"),
+        "the empty-store branch must still fall back to \"No memories stored yet\" \
+         when total is zero (#2358); body: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4318: honest last-hour WINDOW caption. The #mem-recent-count headline is net
+// long-term growth since the baseline snapshot; that window is ~1h in steady
+// state but can be MUCH wider when memory-history snapshots are sparse. The
+// caption must therefore reflect the true window (`last_hour_window_secs`)
+// instead of hardcoding "in the last hour".
+// ---------------------------------------------------------------------------
+
+/// The caption under the big number must be an addressable element the renderer
+/// can rewrite, not a hardcoded "in the last hour" literal.
+#[test]
+fn recent_memories_caption_is_addressable_for_honest_window() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains(r#"id="mem-recent-window""#),
+        "the last-hour caption must live in an addressable #mem-recent-window \
+         element so the renderer can label the TRUE covered window (#4318), not \
+         a hardcoded 'in the last hour' literal"
+    );
+}
+
+/// `formatWindowCaption` must implement the honest-window rule: keep "in the
+/// last hour" only near 1h (±15 min) or when the window is unknown, and
+/// otherwise render the real span in hours.
+#[test]
+fn format_window_caption_labels_the_true_window() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "formatWindowCaption");
+    assert!(
+        body.contains("in the last hour"),
+        "formatWindowCaption must keep the plain 'in the last hour' copy for the \
+         ~1h / unknown case; body: {body}"
+    );
+    assert!(
+        body.contains("900"),
+        "formatWindowCaption must apply a ±15 min (900s) tolerance around one \
+         hour before it claims 'in the last hour'; body: {body}"
+    );
+    assert!(
+        body.contains("3600"),
+        "formatWindowCaption must compare against the one-hour (3600s) edge; \
+         body: {body}"
+    );
+    assert!(
+        body.contains("/3600"),
+        "formatWindowCaption must render a wider window as hours (windowSecs/3600); \
+         body: {body}"
+    );
+}
+
+/// `fetchRecentMemories` must actually WIRE the true window into the caption
+/// element, feeding `last_hour_window_secs` through `formatWindowCaption`.
+#[test]
+fn fetch_recent_memories_wires_the_true_window_caption() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "fetchRecentMemories");
+    assert!(
+        body.contains("formatWindowCaption(d.last_hour_window_secs)"),
+        "fetchRecentMemories must label the caption from the live \
+         last_hour_window_secs so a 2.6h delta is never shown as 'in the last \
+         hour' (#4318); body: {body}"
+    );
+    assert!(
+        body.contains("mem-recent-window"),
+        "fetchRecentMemories must update the #mem-recent-window caption element; \
+         body: {body}"
     );
 }

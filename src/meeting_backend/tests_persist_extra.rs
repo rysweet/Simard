@@ -90,7 +90,7 @@ fn extract_themes_skips_system_messages() {
 // ── write_handoff completeness test ─────────────────────────────
 
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn write_handoff_includes_structured_data() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -160,7 +160,7 @@ fn write_handoff_includes_structured_data() {
 }
 
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn write_handoff_empty_data_uses_defaults() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -245,7 +245,7 @@ fn populated_decisions() -> Vec<MeetingDecision> {
 /// basename and a `.json` extension, in the same directory as the markdown
 /// report. Markdown remains the canonical artifact; JSON is a side-effect.
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn markdown_handoff_writes_json_sibling_with_same_basename() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -300,7 +300,7 @@ fn markdown_handoff_writes_json_sibling_with_same_basename() {
 /// - open_questions (Vec<String>)
 /// - transcript_ref (String)
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn json_sibling_round_trips_all_fields_via_serde_json() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -408,7 +408,7 @@ fn json_sibling_round_trips_all_fields_via_serde_json() {
 /// `null`. Consumers (dashboards, downstream tools) iterate over these
 /// arrays and would crash on `null`.
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn json_sibling_with_empty_extraction_serializes_empty_arrays_not_null() {
     let dir = tempfile::tempdir().unwrap();
     unsafe {
@@ -474,7 +474,7 @@ fn json_sibling_with_empty_extraction_serializes_empty_arrays_not_null() {
 /// readable by other users on the same host.
 #[cfg(unix)]
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn json_sibling_has_owner_only_permissions_on_unix() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -591,16 +591,18 @@ fn json_handoff_action_item_none_fields_serialize_as_explicit_null() {
 /// NOT touch `$HOME/.simard/meetings/`. This is the outside-in assertion
 /// the #1906 audit reproduction specifies.
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn write_auto_save_lands_under_simard_state_root() {
     use std::path::PathBuf;
 
     // Belt-and-braces: clear both narrow overrides before setting STATE_ROOT.
-    // SAFETY: serialized via `#[serial(meeting_persist, cognitive_memory)]` —
-    // `meeting_persist` excludes the other env-mutating tests in this file and
-    // `cognitive_memory` excludes every test that reads/writes SIMARD_STATE_ROOT
-    // (the goal-board handlers, subagent registry, …) so none runs concurrently
-    // (issue #2316).
+    // SAFETY: serialized via `#[serial(simard_meetings_dir_env, cognitive_memory)]` —
+    // `simard_meetings_dir_env` excludes EVERY test that reads or mutates the
+    // process-global meetings-dir env vars (SIMARD_MEETINGS_DIR / SIMARD_MEETINGS_ROOT
+    // / SIMARD_STATE_ROOT) across persist/mod.rs, persist/markdown.rs, tests_persist.rs
+    // and this file, and `cognitive_memory` excludes every test that reads/writes
+    // SIMARD_STATE_ROOT (the goal-board handlers, subagent registry, …) so none runs
+    // concurrently (issues #2316, #4520).
     unsafe {
         std::env::remove_var("SIMARD_MEETINGS_DIR");
         std::env::remove_var("SIMARD_STATE_ROOT");
@@ -664,7 +666,7 @@ fn write_auto_save_lands_under_simard_state_root() {
 /// SIMARD_STATE_ROOT when both are set. Preserves the existing operator/test
 /// contract that lets callers redirect only the meeting artifact dir.
 #[test]
-#[serial(meeting_persist, cognitive_memory)]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn meetings_dir_narrow_override_wins_over_state_root() {
     let narrow = tempfile::tempdir().expect("narrow tempdir");
     let state = tempfile::tempdir().expect("state tempdir");

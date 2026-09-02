@@ -36,7 +36,7 @@ pub trait MemoryStore: Send + Sync {
         self.list(scope)
     }
 
-    /// Retry any pending bridge writes that failed during normal operation.
+    /// Retry any pending memory writes that failed during normal operation.
     /// Returns the number of records successfully synced.
     /// Default: no-op (only `CognitiveClientMemoryStore` has pending writes).
     fn flush_pending(&self) -> usize {

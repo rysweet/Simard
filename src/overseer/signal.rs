@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::overseer::capabilities::ObservedState;
+use crate::overseer::capabilities::{IssueReadiness, ObservedState, PrDisposition};
 use crate::overseer::diagnosis::FailureCause;
 
 /// A raw, low-level indicator derived from one Observe pass (StatusSnapshot +
@@ -90,6 +90,48 @@ pub enum Signal {
         exit_code: Option<i32>,
         evidence: String,
     },
+    /// The agentic merge-queue reasoner judged an open PR STALE (#4097) — no
+    /// activity for a long window. From an [`ObservedState::reasoned_prs`] entry
+    /// with [`PrDisposition::Stale`](crate::overseer::capabilities::PrDisposition).
+    /// Drives a gated `FlagStalePr` comment (never a merge or close). A REASONING
+    /// proposal, never an authorization.
+    StalePrDetected { repo: String, pr: u32 },
+    /// The agentic merge-queue reasoner judged an open PR a DUPLICATE of another
+    /// (#4097), carrying the ORIGINAL PR number. From an
+    /// [`ObservedState::reasoned_prs`] entry with
+    /// [`PrDisposition::Duplicate`](crate::overseer::capabilities::PrDisposition).
+    /// Drives a gated `CloseDuplicatePr` that closes the dup referencing the
+    /// original (never `--admin`/`--no-verify`).
+    DuplicatePrDetected {
+        repo: String,
+        pr: u32,
+        duplicate_of: u32,
+    },
+    /// The agentic reasoner triaged an open ISSUE as READY (actionable now) with
+    /// no active workstream (#4097). From an [`ObservedState::triaged_issues`]
+    /// entry with [`IssueReadiness::Ready`](crate::overseer::capabilities::IssueReadiness).
+    /// Carries the plain-English next action so Decide can propose a workstream.
+    /// A `Blocked`/`NeedsInfo` issue is NOT actionable-now and emits nothing.
+    IssueNeedsWorkstream {
+        repo: String,
+        issue: u32,
+        next_action: String,
+    },
+    /// The running daemon binary is behind merged `origin/main` — the
+    /// authoritative "running daemon is stale" signal (issue #2590). Derived at
+    /// the Observe/sensor stage from
+    /// [`crate::self_deploy::ReconcileDetector::detect`] (production
+    /// `GitDeploySource`) whenever `DeployDrift.needs_deploy` holds. Carries the
+    /// merged-head `target_commit` a guarded self-deploy should converge on and
+    /// the `behind_commits` count. Fail-safe: a git/source error reports "no
+    /// drift", so this signal is simply absent rather than spuriously raised.
+    /// Routed to [`ProblemKind::DeployDrift`]; Decide emits a guarded
+    /// `Intervention::Deploy { commit: target_commit }` (the go/no-go SAFETY
+    /// judgment stays in the guarded executor + the high-risk AutonomyGate).
+    DeployDriftDetected {
+        target_commit: String,
+        behind_commits: usize,
+    },
 }
 
 /// Which backlog source a [`GapItem`] came from — so the renderer can label the
@@ -134,8 +176,38 @@ pub struct GapItem {
     pub why_it_matters: String,
     /// Stable per-gap dedup signature (`goal:<id>` / `issue:<repo>#<n>` /
     /// `anomaly:<slug>`). Identical inputs yield identical signatures so a
-    /// recurring gap is deduped to at most one notification + issue per signature.
+    /// recurring gap is deduped to at most one notification per signature.
     pub signature: String,
+}
+
+impl GapItem {
+    /// The stable, shell-safe dedup marker key used for durable GitHub-side
+    /// gap-filing dedup (issue #4717): `workstream-gap:<signature>`. It is
+    /// embedded on its own `stewardship-signature:` line in a filed issue's body
+    /// and fed to `gh issue list --search`, so it MUST be deterministic and a
+    /// restricted, shell-safe slug even if a gap's `signature` somehow carried
+    /// metacharacters (defense in depth over the detector's slug guarantee).
+    /// Identical inputs always yield an identical key so the same gap resolves to
+    /// the same open-issue query across process restarts.
+    pub fn dedup_key(&self) -> String {
+        format!(
+            "workstream-gap:{}",
+            sanitize_signature_slug(&self.signature)
+        )
+    }
+}
+
+/// Keep only characters that are safe in a shell argument and a single-line
+/// issue-body marker: ASCII alphanumerics plus the stable slug punctuation the
+/// trusted signatures already use (`:`, `-`, `_`, `.`, `/`, `#`). Every
+/// whitespace, shell/expansion metacharacter, quote, brace, and control byte is
+/// dropped, so the resulting key can never break an argv or spill onto a second
+/// line.
+fn sanitize_signature_slug(signature: &str) -> String {
+    signature
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '/' | '#'))
+        .collect()
 }
 
 /// Coarse relative importance. `Ord` sorts ascending so `Critical` comes first,
@@ -169,12 +241,16 @@ pub enum ProblemKind {
     DriftCorrection,
     /// Important backlog work is uncovered — a high-priority goal, high-signal
     /// issue, or live anomaly with no active workstream. The recurring gap-scan's
-    /// problem family; driven by the deduped notify + file-issue act path.
+    /// problem family; driven by the deduped notification act path.
     WorkstreamCoverage,
     /// A diagnosed decision-cycle / engineer / terminal-shell step failure
     /// (issue #2640, PART 2). Routed to a CORRECTIVE workstream that diagnoses
     /// the WHY and applies the remedy — never a silent log.
     StepFailure,
+    /// The running daemon is behind merged `origin/main` and must self-deploy
+    /// (issue #2590). Decide emits a guarded `Intervention::Deploy` to the merged
+    /// head; the deploy gate + high-risk AutonomyGate own the go/no-go decision.
+    DeployDrift,
 }
 
 /// How likely a single candidate cause is, relative to the others in the same
@@ -490,6 +566,57 @@ pub fn signals_from(state: &ObservedState) -> Vec<Signal> {
         });
     }
 
+    // Autonomous self-deploy drift (issue #2590): the running binary is behind
+    // merged main. The effectful, fail-safe git probe already ran in the observe
+    // rail (which leaves `deploy_drift = None` on any error / current daemon), so
+    // this lift is pure — no drift observed ⇒ no signal ⇒ no deploy.
+    if let Some(drift) = &state.deploy_drift {
+        out.push(Signal::DeployDriftDetected {
+            target_commit: drift.target_commit.clone(),
+            behind_commits: drift.behind_commits,
+        });
+    }
+
+    // Agentic merge-queue reasoning (#4097): the reviewer's per-PR PROPOSALS.
+    // CRITICAL invariant — a `ReadyForMerge` REASONING never itself authorizes a
+    // merge: it emits NO `PrReadyToMerge` here. Merge authorization comes ONLY
+    // from the re-narrowed `ready_prs` projection above. Only the non-merge
+    // dispositions (`Stale`/`Duplicate`) turn into their own gated interventions.
+    for rp in &state.reasoned_prs {
+        match rp.disposition {
+            PrDisposition::Stale => out.push(Signal::StalePrDetected {
+                repo: rp.repo.clone(),
+                pr: rp.pr,
+            }),
+            PrDisposition::Duplicate => {
+                // Parse already guarantees `duplicate_of` is `Some` for a coherent
+                // `Duplicate`; guard anyway so a stray one is dropped, not merged
+                // with a fabricated original.
+                if let Some(original) = rp.duplicate_of {
+                    out.push(Signal::DuplicatePrDetected {
+                        repo: rp.repo.clone(),
+                        pr: rp.pr,
+                        duplicate_of: original,
+                    });
+                }
+            }
+            PrDisposition::ReadyForMerge | PrDisposition::NeedsWork => {}
+        }
+    }
+
+    // Agentic issue triage (#4097): a Ready (actionable-now) issue surfaces a
+    // workstream proposal. A Blocked/NeedsInfo issue is deliberately silent — it
+    // is not actionable this pass and must not spawn a workstream.
+    for issue in &state.triaged_issues {
+        if issue.readiness == IssueReadiness::Ready {
+            out.push(Signal::IssueNeedsWorkstream {
+                repo: issue.repo.clone(),
+                issue: issue.issue,
+                next_action: issue.next_action.clone(),
+            });
+        }
+    }
+
     out
 }
 
@@ -671,6 +798,26 @@ impl Signal {
                     cause.as_str()
                 )
             }
+            Signal::StalePrDetected { repo, pr } => {
+                format!("PR {repo}#{pr} judged stale (no recent activity)")
+            }
+            Signal::DuplicatePrDetected {
+                repo,
+                pr,
+                duplicate_of,
+            } => format!("PR {repo}#{pr} judged a duplicate of #{duplicate_of}"),
+            Signal::IssueNeedsWorkstream {
+                repo,
+                issue,
+                next_action,
+            } => format!("issue {repo}#{issue} ready with no workstream — next: {next_action}"),
+            Signal::DeployDriftDetected {
+                target_commit,
+                behind_commits,
+            } => format!(
+                "running binary {behind_commits} commit(s) behind merged main \
+                 (deploy target {target_commit})"
+            ),
         };
         sanitize_detail(&raw)
     }

@@ -52,6 +52,7 @@ mod tests_work_guard;
 pub use liveness::{LiveProcessProbe, ProcfsLiveProcessProbe};
 pub use parse::{WorktreeEntry, parse_worktree_list};
 pub use policy::{GcCandidate, PruneReason, evaluate_candidate};
+pub(crate) use runner::worktree_has_uncommitted_or_unpushed_work;
 pub use runner::{GcReport, GhClient, GhClientShell, run_gc};
 
 /// Default idle threshold for the IdleTooLong rule.

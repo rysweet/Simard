@@ -1,0 +1,88 @@
+name: cognitive-memory-open-lock-contention-no-wipe
+app_type: cli
+description: |
+  Verify that a transient cross-process lock conflict on the lbug-backed
+  cognitive store is NEVER mis-classified as catalog corruption and allowed to
+  wipe memory. The upstream `amplihack-memory-lib` `open_persistent` path treats
+  any failed strict open of the main DB as corruption — it quarantines the store
+  to `cognitive.corrupt-<ts>` and rebuilds it EMPTY (`recovered_records=0`).
+  Because lbug takes a POSIX/PID lock, a SECOND process opening a store a first
+  process already holds trips that branch and destroys all memory (57 such
+  quarantines observed on the daemon main store).
+
+  The fix serializes opens at Simard's `LibraryCognitiveMemory::open` seam
+  (`cognitive_memory::open_guard`): an advisory `flock` on a sidecar
+  `<state_root>/cognitive.open.lock`, acquired with bounded exponential backoff.
+  A contended open FAILS LOUD instead of proceeding into the library's
+  destructive rebuild; same-process opens share the lock (re-entrant, matching
+  lbug's per-PID semantics). This scenario drives the hermetic tempdir unit
+  tests that prove the invariant (no destructive action against the live host).
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # End-to-end no-wipe proof: a store held open by another (simulated) process
+  # makes a second open fail loud, produces NO cognitive.corrupt-* quarantine,
+  # and the winner's persisted record survives once contention clears.
+  # First invocation may compile the test binary; subsequent filters reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_library_parity::lock_contention_no_wipe::concurrent_open_of_same_path_never_wipes_records"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Fail-loud guard: a store already held by another open-file-description makes
+  # CognitiveOpenGuard::acquire return a PersistentStoreIo error within the
+  # bounded budget rather than proceeding.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::open_guard::tests::contended_by_foreign_holder_fails_loud_within_budget"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Same-process re-entrancy: two live handles to one path in one process must
+  # both succeed (daemon writer + same-process reader view), never deadlock.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::open_guard::tests::same_process_reentrant_acquire_does_not_block"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Cold-open race: many same-process threads racing a fresh open all succeed by
+  # sharing the one flock (the registry check + flock attempt is atomic), so no
+  # loser spins to a false fail-loud.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::open_guard::tests::concurrent_cold_open_race_all_succeed_same_process"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -1,7 +1,7 @@
-//! Launch and manage bridge transports for live Simard operations.
+//! Launch and manage client transports for live Simard operations.
 //!
-//! This module provides functions to create bridge transport instances for the
-//! knowledge and gym bridges using [`NativeRpcTransport`] for in-process
+//! This module provides functions to create client transport instances for the
+//! knowledge and gym clients using [`NativeRpcTransport`] for in-process
 //! Rust execution.
 //!
 //! Cognitive memory is handled by the library-backed
@@ -32,16 +32,16 @@ fn wrap_native(transport: NativeRpcTransport) -> Box<dyn RpcTransport> {
     ))
 }
 
-/// Check bridge health and return it if healthy, or None with a log message.
+/// Check client health and return it if healthy, or None with a log message.
 fn check_health(name: &str, transport: &dyn RpcTransport) -> bool {
     match transport.health() {
         Ok(h) if h.healthy => true,
         Ok(_) => {
-            eprintln!("[simard] {name} bridge reports unhealthy");
+            eprintln!("[simard] {name} client reports unhealthy");
             false
         }
         Err(e) => {
-            eprintln!("[simard] {name} bridge health check failed: {e}");
+            eprintln!("[simard] {name} client health check failed: {e}");
             false
         }
     }
@@ -57,32 +57,32 @@ fn resolve_packs_dir() -> PathBuf {
         .join(".wikigr/packs")
 }
 
-/// Launch all bridges, returning None for any that fail (honest degradation).
+/// Launch all clients, returning None for any that fail (honest degradation).
 ///
-/// Cognitive memory is now native — only knowledge and gym bridges are launched.
+/// Cognitive memory is now native — only knowledge and gym clients are launched.
 /// Both use the native Rust transport exclusively.
-pub fn launch_all_bridges(
+pub fn launch_all_clients(
     _agent_name: &str,
     _state_root: &std::path::Path,
 ) -> (Option<KnowledgeClient>, Option<GymClient>) {
     let knowledge = match launch_knowledge_client_native() {
         Ok(b) => {
-            eprintln!("[simard] knowledge bridge: using native Rust transport");
+            eprintln!("[simard] knowledge client: using native Rust transport");
             Some(b)
         }
         Err(e) => {
-            eprintln!("[simard] knowledge bridge launch FAILED — domain knowledge disabled: {e}");
+            eprintln!("[simard] knowledge client launch FAILED — domain knowledge disabled: {e}");
             None
         }
     };
 
     let gym = match launch_gym_client_native() {
         Ok(b) => {
-            eprintln!("[simard] gym bridge: using native Rust transport");
+            eprintln!("[simard] gym client: using native Rust transport");
             Some(b)
         }
         Err(e) => {
-            eprintln!("[simard] gym bridge launch FAILED — benchmarks disabled: {e}");
+            eprintln!("[simard] gym client launch FAILED — benchmarks disabled: {e}");
             None
         }
     };
@@ -90,7 +90,7 @@ pub fn launch_all_bridges(
     (knowledge, gym)
 }
 
-/// Launch a knowledge bridge using the native Rust transport.
+/// Launch a knowledge client using the native Rust transport.
 pub fn launch_knowledge_client_native() -> SimardResult<KnowledgeClient> {
     let packs_dir = resolve_packs_dir();
     let mut transport = NativeRpcTransport::new("simard-knowledge");
@@ -98,22 +98,22 @@ pub fn launch_knowledge_client_native() -> SimardResult<KnowledgeClient> {
     let wrapped = wrap_native(transport);
     if !check_health("knowledge-native", wrapped.as_ref()) {
         return Err(crate::error::SimardError::RpcSpawnFailed {
-            bridge: "knowledge-native".to_string(),
-            reason: "native bridge unhealthy after init".to_string(),
+            endpoint: "knowledge-native".to_string(),
+            reason: "native client unhealthy after init".to_string(),
         });
     }
     Ok(KnowledgeClient::new(wrapped))
 }
 
-/// Launch a gym bridge using the native Rust transport.
+/// Launch a gym client using the native Rust transport.
 pub fn launch_gym_client_native() -> SimardResult<GymClient> {
     let mut transport = NativeRpcTransport::new("simard-gym-eval");
     crate::gym_runner_client::register_gym_handlers(&mut transport);
     let wrapped = wrap_native(transport);
     if !check_health("gym-native", wrapped.as_ref()) {
         return Err(crate::error::SimardError::RpcSpawnFailed {
-            bridge: "gym-native".to_string(),
-            reason: "native bridge unhealthy after init".to_string(),
+            endpoint: "gym-native".to_string(),
+            reason: "native client unhealthy after init".to_string(),
         });
     }
     Ok(GymClient::new(wrapped))
@@ -142,7 +142,7 @@ mod tests {
         let result = launch_knowledge_client_native();
         assert!(
             result.is_ok(),
-            "native knowledge bridge should launch: {:?}",
+            "native knowledge client should launch: {:?}",
             result.err()
         );
     }
@@ -152,7 +152,7 @@ mod tests {
         let result = launch_gym_client_native();
         assert!(
             result.is_ok(),
-            "native gym bridge should launch: {:?}",
+            "native gym client should launch: {:?}",
             result.err()
         );
     }

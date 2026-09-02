@@ -1,0 +1,142 @@
+# disk-reclaim.yaml — Agentic disk-reclamation ANALYSIS step (issue #2704).
+#
+# Invoked by src/disk_reclaim/recipe.rs via recipe-runner-rs. This recipe is
+# ANALYSIS-ONLY: the agent inspects live host state, reasons about what is safely
+# reclaimable largest-first, and EMITS a candidate proposal as text markers —
+# then STOPS. It NEVER deletes anything.
+#
+# The deletion is performed by the deterministic Rust executor
+# (src/disk_reclaim/executor.rs), which re-validates every candidate through the
+# non-bypassable guard (src/disk_reclaim/guard.rs) immediately before removal.
+# "Agent proposes, Rust disposes." An LLM reasoning error cannot delete a
+# protected path because the agent never holds the delete primitive.
+#
+# Context vars (passed via -c):
+#   state_root  — path to ~/.simard (engineer worktrees, backups, cargo dirs)
+#   repo_path   — the daemon repo root (Simard)
+#
+# Output: text markers to stdout (parsed by candidate.rs::parse_candidates):
+#   DISK_USED_PCT=<0-100>                 (required)
+#   CANDIDATES_JSON=<json array>          (required)
+#   CANDIDATES_SCHEMA=1                    (optional, forward-compat)
+
+name: "disk-reclaim"
+description: "Agentic disk-reclamation analysis — proposes reclaimable candidates, never deletes"
+version: "1.0.0"
+author: "Simard"
+tags: ["simard", "disk", "reclaim", "maintenance", "ops"]
+
+context:
+  state_root: "~/.simard"
+  repo_path: "/home/azureuser/src/Simard"
+
+steps:
+  - id: "propose-reclaim-candidates"
+    type: "agent"
+    agent: "default"
+    prompt: |
+      You are the disk-reclamation ANALYSIS agent for Simard. You INSPECT live
+      host state, REASON about what is safely reclaimable to relieve disk
+      pressure, and EMIT a candidate proposal. **You never delete anything** —
+      a deterministic Rust executor performs the reclamation behind hard safety
+      rails after re-validating every path you propose. Your job is proposal
+      only.
+
+      You have read-only shell tools (`df`, `git` read subcommands, `gh`, `du`,
+      `cat`, `ls`). **Do NOT run any destructive command** (`rm`, `rmdir`,
+      `git worktree remove`, `truncate`, `find -delete`, redirection that
+      truncates). Deleting anything yourself is a contract violation — the
+      executor is the only component permitted to remove paths. Just inspect and
+      emit markers.
+
+      ## Procedure
+
+      1. **Measure disk usage.** Capture the home-partition usage and free bytes:
+         ```
+         df -B1 --output=pcent,avail "$HOME" | tail -1
+         ```
+         Parse the percentage (strip `%`). This is `DISK_USED_PCT`.
+
+      2. **Enumerate worktrees across ALL managed repos.** For each of:
+         - `/home/azureuser/src/Simard`
+         - `/home/azureuser/src/amplihack-rs`
+         - `/home/azureuser/src/amplihack-memory-lib`
+         run `git -C <repo> worktree list --porcelain`. Also enumerate Simard's
+         own engineer worktrees under `{{state_root}}/engineer-worktrees/` (these
+         may be tracked worktrees of Simard, or orphaned de-registered dirs whose
+         `.git` gitdir link is dangling).
+
+      3. **Classify PR state.** For each candidate worktree's branch, determine
+         whether its PR is MERGED or CLOSED and the worktree is idle:
+         ```
+         gh pr list --head <branch> --state all --json number,state,mergedAt
+         gh pr view <branch> --json number,state,mergedAt   # if needed
+         ```
+         Only a **positively confirmed** merged or closed PR qualifies a tracked
+         worktree. "merge-base is an ancestor of main" is NOT sufficient and must
+         NOT be used — it misfires on fresh worktrees.
+
+      4. **Check the live-process table.** A worktree/path referenced by any
+         running process must NOT be proposed. Inspect `/proc/<pid>/cwd`:
+         ```
+         for p in /proc/[0-9]*/cwd; do readlink "$p" 2>/dev/null; done | sort -u
+         ```
+         Skip any candidate whose path is at/under a live cwd.
+
+      5. **Find stale build caches.** Locate `target/` directories that are
+         obviously stale (belong to a worktree you are already proposing, or the
+         shared cargo caches `{{state_root}}/cargo-target/` and
+         `{{state_root}}/shared-target/`). Measure sizes with
+         `du -sb <path>`.
+
+      6. **Reason largest-first.** Sort your proposed candidates by measured size
+         descending. Propose the biggest safe wins first. Propose enough to get
+         under the target, but when uncertain about a path, DO NOT propose it —
+         the executor's human-review list is for things you were unsure about;
+         leaving a path off the proposal is always safe.
+
+      ## What is reclaimable (propose ONLY these)
+
+      - **tracked_worktree** — a git-tracked worktree whose PR is confirmed
+        MERGED or CLOSED, is idle, has no live process, and has no uncommitted /
+        unpushed work. The executor runs `git worktree remove --force`.
+      - **orphan_dir** — an orphaned, de-registered leftover worktree directory
+        (present on disk under `engineer-worktrees/` or `<repo>/worktrees/` but
+        NOT in `git worktree list`, gitdir link dangling). The executor runs
+        `rm -rf`.
+      - **stale_build_cache** — a stale `target/` / shared cargo cache. The
+        executor runs `rm -rf`.
+
+      ## What you must NEVER propose
+
+      - `/home/azureuser/src/Simard/worktrees/main` or any daemon
+        `WorkingDirectory` (deleting it crash-loops the daemon).
+      - Any path referenced by a live PID.
+      - A worktree with uncommitted or unpushed work not already in a
+        merged/closed PR.
+      - An active recipe or Simard-engineer worktree (running tmux/process).
+
+      Even if you accidentally propose one of these, the Rust guard will refuse
+      it — but do not propose them.
+
+      ## Required output format
+
+      Emit these markers as plain text (NOT inside code fences), each on its own
+      line. All other lines are ignored.
+
+      ```
+      DISK_USED_PCT=<integer 0-100>
+      CANDIDATES_SCHEMA=1
+      CANDIDATES_JSON=[{"path":"<abs path>","kind":"tracked_worktree|orphan_dir|stale_build_cache","parent_repo":"<abs repo path>","reason":"<short reason>","est_bytes":<int>}, ...]
+      ```
+
+      - `DISK_USED_PCT` is **required** — the current home-partition percentage.
+      - `CANDIDATES_JSON` is **required** — a JSON array (possibly empty `[]` when
+        nothing is safely reclaimable). Each element MUST have `path` and `kind`;
+        `parent_repo`, `reason`, and `est_bytes` are optional and advisory (the
+        executor re-derives and re-measures them). Do NOT invent extra fields.
+      - The array must be a single line so the marker parser reads it whole.
+
+      If disk usage is already under the target and nothing needs reclaiming,
+      emit `DISK_USED_PCT=<pct>` and `CANDIDATES_JSON=[]` and stop.
+    output: "reclaim_candidates"

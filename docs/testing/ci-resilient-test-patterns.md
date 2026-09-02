@@ -10,6 +10,7 @@ doc_type: reference
 related:
   - ./hermetic-tests.md
   - ./cognitive-memory-serial-isolation.md
+  - ./checkout-independent-workdir-tests.md
   - ./COVERAGE_BASELINE.md
   - ../reference/meeting-backend-api.md
   - ../operations/meeting-handoffs.md
@@ -245,6 +246,14 @@ thread-safe.
 
 Use `HermeticState` for cognitive-memory tests. Use `#[serial]` for
 any other test that calls `std::env::set_var` / `std::env::remove_var`.
+
+For tests that must resolve a repository root from the process **current
+working directory** (e.g. the `resolve_agent_workdir` tests that drive
+`git rev-parse --show-toplevel`), see
+[checkout-independent-workdir-tests.md](./checkout-independent-workdir-tests.md),
+which extends this pattern with a discoverable-root precondition
+(skip-on-absence) and explains why redirecting the shared process cwd via
+`set_current_dir` is forbidden.
 
 ### How to verify
 

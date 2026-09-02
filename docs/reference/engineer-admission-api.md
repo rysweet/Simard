@@ -8,7 +8,7 @@ description: >
   brain-error rail), the overlap module, the LiveEngineerWorktree.worktree_path
   addition, the reasoning recipe, the sanitization boundary, the observability
   record and metric, and the SIMARD_ENGINEER_ADMISSION kill-switch.
-last_updated: 2026-07-07
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -16,6 +16,7 @@ status: implemented
 related:
   - ../concepts/dependency-overlap-aware-scheduling.md
   - ./ooda-engineer-admission-recipe.md
+  - ./ooda-record-admission-cli.md
   - ./concurrent-engineer-dispatch.md
   - ./outcome-verification-api.md
   - ./recipe-context-var-sanitization.md
@@ -165,21 +166,28 @@ pub enum EngineerAdmissionDecision {
 ```
 
 The serde tag/rename convention (`choice`, snake_case) matches
-`EngineerLifecycleDecision` and `GoalOutcomeDecision`. As with those, the recipe
-does **not** emit the `choice`-tagged form directly — it emits a flat
-`{"decision": "<snake_case_variant>", "rationale": "…", …}` envelope which a
-dedicated mapper (`admission_decision_from_variant`, analogous to
-`lifecycle_decision_from_variant` in `recipe_brain.rs`) translates into the
-`choice`-tagged Rust enum.
+`EngineerLifecycleDecision` and `GoalOutcomeDecision`. The recipe does **not**
+emit this enum as scraped prose. As of the Group B record-tool conversion
+([#4719](https://github.com/rysweet/Simard/issues/4719)) the recipe **calls the
+[`simard ooda record-admission`](ooda-record-admission-cli.md) tool**, which
+validates `--choice` plus its variant-owned fields through the **shared
+`EngineerAdmissionDecision::from_choice_fields` chokepoint** and writes a typed
+[`AdmissionDecisionRecord`](ooda-record-admission-cli.md#admissiondecisionrecord)
+(`schema = simard.ooda.admission.v1`). `RecipeBrain::decide_engineer_admission`
+reads that record with
+[`read_verified_admission`](ooda-record-admission-cli.md#read_verified_admission-the-fail-open-at-the-act-site-reader) —
+it never scrapes the agent's stdout.
 
-> **`Defer` and `SerializeAfter` carry load-bearing extra fields.** The shared
-> `DecisionEnvelope` shim reads only `decision` + `rationale`; every extra
-> struct-variant field defaults to empty (the same constraint documented for
-> `GoalOutcomeDecision::replan_hint`). Because `blocked_by`, `after_goal_id`, and
-> `overlap_files` are load-bearing, the admission parser **must** read them
-> explicitly (extend the envelope with `#[serde(default)]` fields or add an
-> `AdmissionEnvelope`). If it follows the base shim unchanged, `blocked_by` is
-> always empty and the `serialize_after` rebase hint never carries a target.
+> **`Defer` and `SerializeAfter` carry variant-owned fields.** The
+> `from_choice_fields` chokepoint enforces a
+> [field-ownership matrix](ooda-record-admission-cli.md#field-ownership-matrix):
+> `defer` owns `blocked_by` / `retry_after_secs`; `serialize_after` owns
+> `after_goal_id` / `overlap_files`; supplying a non-owned field is a hard
+> rejection. Because both the CLI writer and `read_verified_admission` call the
+> **same** chokepoint, the load-bearing `blocked_by` / `after_goal_id` /
+> `overlap_files` fields can never be silently dropped or smuggled onto the wrong
+> variant — the writer/reader drift the legacy `DecisionEnvelope` shim was prone
+> to is eliminated structurally.
 
 ## `OodaBrain::decide_engineer_admission`
 
@@ -209,7 +217,7 @@ pub trait OodaBrain: Send + Sync {
 
 | Impl | Behavior |
 | --- | --- |
-| `RecipeBrain` | Loads `ooda-engineer-admission.yaml` (adapter tag `recipe-engineer-admission-brain`), renders the ctx, runs the recipe, parses the decision envelope, records a judgment. On any error → `engineer_admission_fallback(ctx)` returning `Admit`. |
+| `RecipeBrain` | Runs `ooda-engineer-admission.yaml` (adapter tag `recipe-engineer-admission-brain`) via `run_admission_recipe`, which passes `-c record_path/simard_bin/goal_id/cycle_number`; the recipe calls the [`record-admission`](ooda-record-admission-cli.md) tool, and the brain reads the typed record with `read_verified_admission`. On any error (record absent/invalid, R1–R7) → `engineer_admission_fallback(ctx)` returning `Admit`. |
 | `DeterministicLifecycleBrain` (floor) | Inherits the defaulted method (`Admit`) — never blocks a spawn. |
 | `RustyClawdBrain<S>` | Not migrated — inherits the defaulted method (`Admit`). |
 | Test doubles (`StubAdmissionBrain`) | Return the injected decision (or `Err`) for hermetic tests. |
@@ -344,14 +352,15 @@ gauge and the existing `discovery` tests compile unchanged.
 ## The reasoning recipe
 
 `prompt_assets/simard/recipes/ooda-engineer-admission.yaml` follows the
-[`ooda-engineer-lifecycle.yaml`](ooda-engineer-lifecycle-recipe.md) shape: role →
-overlap-context vars → snake_case `choice` options → JSON envelope → few-shot
+[record-tool shape of `ooda-per-goal-cycle.yaml`](ooda-per-goal-cycle-recipe.md):
+role → overlap-context vars → snake_case `choice` options → a **call to the
+[`simard ooda record-admission`](ooda-record-admission-cli.md) tool** → few-shot
 examples. It is installed to the hot-reload path
 `~/.simard/prompt_assets/simard/recipes/…` for production; tests use a
 `home_override` tempdir. The full schema is documented in the
 [recipe reference](ooda-engineer-admission-recipe.md).
 
-Context vars (passed via `-c`, each rendered through
+Context vars (passed via `-c`; the overlap-context vars are each rendered through
 [`sanitize_context_var`](#sanitization-boundary)):
 
 | Var | Meaning |
@@ -360,19 +369,30 @@ Context vars (passed via `-c`, each rendered through
 | `candidate_predicted_scope` | Rendered list of predicted target paths. |
 | `live_engineers` | Rendered per-engineer block: `goal_id`, `changed_files`, `overlap_with_candidate`, `depended_on`. |
 | `repo_root` | Resolved target repo. |
+| `record_path` | Absolute path (per-cycle temp dir) the tool writes the typed record to. |
+| `simard_bin` | Absolute `current_exe()` path used to invoke the tool. |
+| `goal_id`, `cycle_number` | Identity fields (`ctx.candidate.id`, `REASONER_RECORD_CYCLE = 0`) the tool embeds and the reader re-verifies. |
 
-Output envelope (a fenced ```json block is fine; the shim strips banners):
+Instead of emitting a scraped JSON envelope, the recipe's agent step **calls the
+tool** with the chosen verdict:
 
-```json
-{"decision": "defer", "blocked_by": ["fix-goals-status-render"], "rationale": "live engineer already rewriting src/operator_commands_ooda/goals_status.rs, the file this goal must edit"}
+```bash
+"$simard_bin" ooda record-admission \
+  --choice defer \
+  --blocked-by fix-goals-status-render \
+  --rationale "live engineer already rewriting src/operator_commands_ooda/goals_status.rs, the file this goal must edit" \
+  --record-path "$record_path" --goal-id "$goal_id" --cycle-number "$cycle_number"
 ```
 
-where `decision` is exactly one of `admit`, `defer`, `serialize_after`. The
+where `--choice` is exactly one of `admit`, `defer`, `serialize_after`. The
 recipe's few-shot set **includes the goals_status.rs and Adapter-rename cases** so
 the reasoning is anchored on the exact collisions this gate exists to catch. A
-genuine "these are independent, parallelize" answer is a real decision — emit
-`admit` explicitly; an unparseable output is a `brain_parse_error` that the
-daemon fails **open** on (Rail 2), audited.
+genuine "these are independent, parallelize" answer is a real decision — call the
+tool with `--choice admit` explicitly. The recipe header documents
+`Output: NONE scraped from stdout`; a stray JSON print has zero effect. If the
+tool is never called (or exits non-zero) **no record is written**, and
+`read_verified_admission` returns R1 `Err`, which the daemon fails **open** on
+(Rail 2), audited.
 
 > **The recipe never carries the hard invariant.** The recipe is hot-reloadable
 > and user-writable. The load-bearing certain-collision control (the `is_subset`
@@ -429,18 +449,20 @@ absent-tolerant so tests never shell out.
 | T3 | Seam: stub `SerializeAfter` | Spawn proceeds; the engineer `task` carries the rebase-after hint. |
 | T4 | Hard rail (same goal) | Existing `find_live_engineer_for_goal` branch blocks regardless — reached before the gate (retained, unchanged). |
 | T5 | Hard rail (exact-path) | Different-goal live engineer whose `changed_files` cover the candidate's scope ⇒ deterministic `Defer` **regardless of the stub's choice** (even stub `Admit`). |
-| T6 | Fail-open (brain `Err`) | Visible `Admit` (loud `tracing::warn` + fallback judgment) — never a silent block; no `Err` propagated as a stall. |
+| T6 | Fail-open (brain `Err`, e.g. record absent/invalid) | Visible `Admit` (loud `tracing::warn` + fallback judgment) — never a silent block; no `Err` propagated as a stall. Preserved verbatim across the record-tool conversion (only the `Err` trigger changed). |
 | T7 | Empty scope | Unknown candidate scope ⇒ exact-path rail inert ⇒ brain decides (stub honored). |
 | T8 | Observability | `push_brain_judgment` records `EngineerAdmission`; `engineer_admission_decision` metric carries the overlap reasoning. |
 | T9 | Overlap unit (`overlap.rs`) | Two fake worktrees with known diffs → correct `changed_files`; erroring/empty git → empty set (fail-open). |
 | T10 | Kill-switch | `SIMARD_ENGINEER_ADMISSION=off` ⇒ gate skipped, every candidate admitted; no judgment/metric emitted. |
 | T-sec1 | Injection/newline/ANSI in `candidate_goal_title` or a path | Neutralized by `sanitize_context_var`. |
 | T-sec2 | Prompt says `admit` but candidate scope ⊆ a live engineer | Rail 1 blocks the spawn (prompt cannot override the hard rail). |
+| T-rec | Record round-trip + fail-closed read | Each variant of `AdmissionDecisionRecord` round-trips through `record-admission`; the R1–R7 matrix for `read_verified_admission` (see [the CLI reference](ooda-record-admission-cli.md#regression-tests)) each yields `Err` → the T6 fail-open `Admit`. |
 
 ## See also
 
 - [Dependency/overlap-aware engineer scheduling (concept)](../concepts/dependency-overlap-aware-scheduling.md)
 - [OODA engineer-admission recipe & prompt schema](ooda-engineer-admission-recipe.md)
+- [`simard ooda record-admission` (typed admission tool)](ooda-record-admission-cli.md) — the tool the recipe calls and the fail-closed record reader
 - [How to diagnose a deferred engineer spawn](../howto/diagnose-a-deferred-engineer-spawn.md)
 - [Engineer-admission kill-switch](../operations/engineer-admission-kill-switch.md)
 - [Concurrent engineer dispatch](concurrent-engineer-dispatch.md) — the per-round dispatcher whose spawn path this gate guards.

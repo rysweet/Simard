@@ -1,0 +1,141 @@
+name: reasoner-number-special-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  JSON envelope carrying a NON-FINITE NUMBER (a bare `NaN`, `Infinity`, or
+  `-Infinity` value token outside a string) instead of silently discarding the
+  model's whole structured decision — a reasoner-reliability axis of the
+  standing cognition-improvement goal (extends the trailing-comma #2658,
+  unescaped-control-character #4424, invalid-backslash-escape #4434,
+  JavaScript-comment #4458, and Python-bare-literal #4630 recoveries).
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM.
+  Python's `json.dumps` emits bare `NaN`, `Infinity`, and `-Infinity` BY DEFAULT
+  (`allow_nan=True`) for IEEE float specials, so a model pretty-printing a Python
+  computation — an overflowed score, a `0/0` confidence, a diagnostic metric it
+  appended — routinely reproduces them (`"score": NaN`, `"bound": -Infinity`).
+  `serde_json` is spec-strict: the JSON grammar has no non-finite number
+  production, so the bare token survives into the extracted payload and fails a
+  strict parse (`expected value`). Before this change every reasoner site parsed
+  strictly (`extract_json_payload(text)?` -> `serde_json::from_str(..).ok()?`), so
+  one non-finite token dropped the entire decision and the phase fell back to its
+  deterministic default — a PARSE-FAILURE default, not a real model decision.
+
+  Recovery is composed by `recover_json_view`, which FIRST strips any `//`/`/*`
+  comment outside a string literal, THEN doubles any invalid backslash escape
+  inside a string literal, THEN escapes any unescaped control byte inside a string
+  literal, THEN strips trailing commas, THEN normalises any Python/JS bare literal
+  (`True`/`False`/`None`) OUTSIDE a string literal, THEN normalises any non-finite
+  number (`NaN`/`Infinity`/`-Infinity` -> `null`) OUTSIDE a string literal. The
+  number view runs LAST, after comments are already stripped, so its own
+  `in_string` scan is aligned with the real string boundaries: a `NaN`/`Infinity`
+  word inside a string value (a quoted rationale) is content and is preserved
+  untouched. `null` is the canonical JSON rendering of these IEEE specials —
+  exactly what ECMAScript `JSON.stringify` serialises them to, and the only JSON a
+  value `serde_json` itself refuses to serialise as a number can become — so the
+  rest of the decision parses (the non-finite field, commonly an ignored
+  diagnostic or an optional metric, reads as null) instead of being discarded.
+  Only a token OUTSIDE a string is rewritten, and only when the maximal identifier
+  run (`[A-Za-z0-9_]+`) equals `NaN`/`Infinity` EXACTLY (or a `-` immediately
+  precedes the whole word `Infinity`) — a longer word (`NaNValue`, `Infinityx`,
+  `xNaN`) or a `-` that begins an ordinary negative number is left verbatim. On a
+  finite-number payload the view borrows unchanged, so the pre-existing five-view
+  recovery and its ordering are preserved exactly. All reasoner sites route through
+  the one shared chokepoint `recipe_output::extract_and_parse_json`, which retries
+  the strict parse on the recovered view — but ONLY when a view actually rewrote
+  the payload (the `Cow::Owned` arm). Each sub-view is a provable no-op
+  (`Cow::Borrowed`) on valid JSON — valid JSON has no bare `NaN`/`Infinity` token
+  and never a `-` followed by `Infinity` — so any OTHER malformed shape (unquoted
+  key, elided element, missing value), and a non-finite value in a REQUIRED
+  non-optional numeric field, still returns `None`: leniency never widens beyond
+  the six named defects and a genuine parse error is never masked.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+  `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the `normalize_json_number_specials` view: borrows valid JSON unchanged
+      (including finite negatives/exponents and a `NaN`/`Infinity` word INSIDE a
+      string); rewrites bare `NaN`/`Infinity`/`-Infinity` to `null`; leaves a
+      longer identifier run (`NaNValue`, `Infinityx`, `-Infinityx`) untouched;
+      preserves a `-` that begins an ordinary negative number/exponent; handles
+      tight array/object delimiters (`[NaN,Infinity,-Infinity]`, `{"k":-Infinity}`);
+      respects an escaped quote before the token; preserves multibyte UTF-8;
+    - the composed `recover_json_view`: recovers a non-finite number alone, keeps
+      the word inside a string a borrow, composes it with the trailing-comma and
+      Python-literal views, and composes all six defects together;
+    - the shared `extract_and_parse_json` helper end-to-end: recovers a non-finite
+      envelope to the correct typed decision (in an optional field, through
+      banner + ANSI + log noise, and composed with all five other defects), while a
+      `NaN`/`Infinity` inside a string is preserved as content and a non-finite
+      value alongside an unquoted key still returns `None`.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Recovery views: non-finite-number normalisation (borrow on valid incl. finite
+  # negatives/exponents and a `NaN`/`Infinity` inside a string; rewrite bare
+  # NaN/Infinity/-Infinity to null; leave longer words untouched; preserve finite
+  # negatives; tight delimiters; escaped-quote and multibyte preserved) and the
+  # composed recover_json_view (recovers a number special alone; keeps a string
+  # word a borrow; composes with trailing comma and Python literal; all six defects).
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output::extract::tests::normalize_number_specials recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Shared chokepoint end-to-end: a non-finite-number envelope now parses to the
+  # correct typed decision (in an optional field, through banner+ANSI+log noise,
+  # and composed with the other five defects); a `NaN`/`Infinity` inside a string
+  # is preserved as content; a non-finite value with an unquoted key still returns
+  # None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict/trailing-comma/
+  # control-char/invalid-escape/comment/python-literal behaviour is unregressed by
+  # appending the non-finite-number view after the existing recovery steps.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

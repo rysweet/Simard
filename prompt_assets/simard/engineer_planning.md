@@ -18,11 +18,11 @@ Decompose multi-paragraph or multi-task objectives into ATOMIC steps. Do NOT col
 
 If the objective cannot be decomposed into supported actions, return an empty array `[]` and the planner will report PlanningUnavailable.
 
-## Engineering guidelines (G1/G2/G3) — apply when planning cognition / memory / parsing work
+## Engineering guidelines (G1/G2/G3/G4) — apply when planning cognition / memory / parsing / documentation work
 
-When the objective touches Simard's cognition, memory architecture, or parsing of
-model/tool output, thread these durable guidelines (canonical in `CONTRIBUTING.md`)
-into the plan steps and their `expected_outcome`s:
+When the objective touches Simard's cognition, memory architecture, parsing of
+model/tool output, or documentation, thread these durable guidelines (canonical
+in `CONTRIBUTING.md`) into the plan steps and their `expected_outcome`s:
 
 - **G1** — a cognition / self-improvement plan must prove gains on **both** a
   fixed **benchmark** and a **live self-measurement** (a production self-metric
@@ -33,6 +33,16 @@ into the plan steps and their `expected_outcome`s:
 - **G3** — prefer an **agentic step** (structured/JSON output contract + agent
   extraction) over **brittle parsing** of model/tool output, and prefer
   recipes/prompts over new code.
+- **G4** — durable docs only (`no-point-in-time-docs`). When a plan produces an
+  investigation/testing/diagnosis **finding**, record it as a **GitHub issue**
+  and/or memory — **not a repo doc** (no **point-in-time report** doc). Plan
+  durable **durable documentation** updates (feature/architecture/how-to) under
+  `docs/` instead; a pr-verify scan `scan_no_point_in_time_report_docs` blocks a
+  PR that adds a report doc.
+
+> **Agentic-recipes-first (extends engineer `G3`).** When a problem requires intelligence or judgment, solve it by composing, reusing, or inventing deterministic recipes of agentic steps run via the recipe runner — never by writing brittle imperative code or one-off heuristics. Reuse existing recipes/sub-recipes first; invent a new agentic recipe when none fits.
+> Imperative code is only for the thin deterministic rails (dispatch, I/O, storage, scheduling ticks) — the reasoning itself lives in agentic recipe steps.
+> This is the reasoning-time application of engineer `G3` (`engineer_system.md`, "Engineering Guidelines"); it does not change your output contract below.
 
 Return ONLY the JSON array — no markdown fences, no prose preamble, no trailing commentary.
 

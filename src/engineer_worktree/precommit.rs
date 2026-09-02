@@ -1,50 +1,50 @@
-//! Best-effort `pre-commit install` for fresh engineer worktrees.
+//! Best-effort native git-hook enrollment for fresh engineer worktrees.
 //!
-//! When a per-engineer worktree is allocated, install the repo's pre-commit
-//! hooks into it so the engineer's local commits are gated by the same
-//! formatting, lint, and test fences that CI runs (#1641, #1581, #1607,
-//! #1608, #1629, #1558, #1499 and several other PRs all failed CI on the
-//! `pre-commit` job because the engineer never ran the hooks locally before
-//! pushing).
+//! When a per-engineer worktree is allocated, wire `core.hooksPath` to the
+//! repo's committed `hooks/` directory so the engineer's local commits are
+//! gated by the same formatting, lint, and test fences that CI runs (#1641,
+//! #1581, #1607, #1608, #1629, #1558, #1499 and several other PRs all failed
+//! CI because the engineer never ran the hooks locally before pushing).
 //!
-//! **Non-fatal**: a missing `pre-commit` binary, an absent `.pre-commit-config.yaml`,
-//! or a non-zero exit from `pre-commit install` are all logged at WARN and
-//! the worktree allocation still succeeds. The hooks are a productivity
-//! improvement, not a correctness requirement — engineers can still produce
-//! valid commits without them, and CI will catch anything they miss.
+//! This replaces the former Python `pre-commit` framework install (#3181):
+//! Simard is a pure-Rust daemon, so the committed `hooks/pre-commit` and
+//! `hooks/pre-push` shell out to `cargo` directly and there is no Python
+//! runtime dependency. A single `core.hooksPath` setting installs both stages
+//! (git dispatches by hook filename); the relative `hooks` path resolves to
+//! each worktree's own committed hooks at hook-run time.
+//!
+//! **Non-fatal**: an absent `hooks/` directory or a non-zero `git config`
+//! exit are logged at WARN and the worktree allocation still succeeds. The
+//! hooks are a productivity improvement, not a correctness requirement —
+//! engineers can still produce valid commits without them, and CI will catch
+//! anything they miss.
 //!
 //! **Security**: follows the same `env_clear()` + selective re-injection
 //! pattern as [`crate::engineer_worktree::sweep::git_capture`] so a hostile
-//! environment cannot hijack the subprocess via `LD_PRELOAD`,
-//! `PRE_COMMIT_HOME`, or similar.
+//! environment cannot hijack the subprocess via `LD_PRELOAD` or similar.
 
 use std::path::Path;
 use std::process::Command;
 
-/// Install pre-commit hooks into a freshly-allocated worktree.
+/// Wire the committed native git hooks into a freshly-allocated worktree by
+/// pointing `core.hooksPath` at the repo's `hooks/` directory.
 ///
-/// Returns `Ok(true)` if hooks were installed, `Ok(false)` if the operation
-/// was skipped (no config, no binary), and `Err(reason)` only if the
-/// subprocess could not be spawned at all. Callers in production treat all
-/// outcomes as best-effort and never propagate the error.
+/// Returns `Ok(true)` if the hooks path was configured, `Ok(false)` if the
+/// operation was skipped (the committed `hooks/` directory is absent), and
+/// `Err(reason)` only if the `git config` subprocess could not be spawned or
+/// exited non-zero. Callers in production treat all outcomes as best-effort
+/// and never propagate the error.
 pub fn install_hooks(worktree: &Path) -> Result<bool, String> {
-    // Skip if the repo doesn't use pre-commit.
-    let cfg = worktree.join(".pre-commit-config.yaml");
-    if !cfg.exists() {
+    // Skip if the committed native hooks aren't present in this checkout.
+    let hooks_dir = worktree.join("hooks");
+    if !hooks_dir.join("pre-commit").is_file() || !hooks_dir.join("pre-push").is_file() {
         return Ok(false);
     }
 
-    // Skip if the pre-commit binary isn't on PATH. We don't want to fail
-    // worktree allocation just because a developer hasn't `pip install`'d
-    // pre-commit in this environment.
-    if !pre_commit_on_path() {
-        return Ok(false);
-    }
-
-    let mut cmd = Command::new("pre-commit");
-    cmd.arg("install")
-        .arg("--install-hooks")
-        .current_dir(worktree)
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(worktree)
+        .args(["config", "core.hooksPath", "hooks"])
         .env_clear();
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
@@ -55,11 +55,11 @@ pub fn install_hooks(worktree: &Path) -> Result<bool, String> {
 
     let output = cmd
         .output()
-        .map_err(|e| format!("spawn pre-commit install: {e}"))?;
+        .map_err(|e| format!("spawn git config core.hooksPath: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
-            "pre-commit install exited with {} in {}: {}",
+            "git config core.hooksPath exited with {} in {}: {}",
             output.status,
             worktree.display(),
             String::from_utf8_lossy(&output.stderr).trim()
@@ -68,93 +68,26 @@ pub fn install_hooks(worktree: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Return `true` if `pre-commit` is resolvable on `PATH`.
-fn pre_commit_on_path() -> bool {
-    let path = match std::env::var_os("PATH") {
-        Some(p) => p,
-        None => return false,
-    };
-    for dir in std::env::split_paths(&path) {
-        for candidate in ["pre-commit", "pre-commit.exe"] {
-            let p = dir.join(candidate);
-            if p.is_file() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
 
     #[test]
-    fn install_hooks_skips_when_config_missing() {
+    fn install_hooks_skips_when_hooks_dir_missing() {
         let dir = tempfile::tempdir().unwrap();
         let result = install_hooks(dir.path()).unwrap();
         assert!(
             !result,
-            "expected skip (Ok(false)) when .pre-commit-config.yaml is absent"
+            "expected skip (Ok(false)) when the committed hooks/ directory is absent"
         );
     }
 
-    #[serial_test::serial(cognitive_memory)]
     #[test]
-    fn install_hooks_skips_silently_when_binary_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create a config so we go past the first early return.
-        fs::write(dir.path().join(".pre-commit-config.yaml"), "repos: []\n").unwrap();
-
-        // Save and clear PATH so the binary lookup fails.
-        let saved_path = std::env::var_os("PATH");
-        // SAFETY: tests run sequentially in this module's scope; restored below.
-        unsafe {
-            std::env::set_var("PATH", "/nonexistent-dir-for-precommit-test");
-        }
-
-        let result = install_hooks(dir.path());
-
-        // Restore PATH before any assertions so a panic doesn't leak the change.
-        if let Some(p) = saved_path {
-            unsafe {
-                std::env::set_var("PATH", p);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
-        }
-
-        assert!(
-            !result.unwrap(),
-            "expected skip (Ok(false)) when pre-commit binary is not on PATH"
-        );
-    }
-
-    // Serialized on `cognitive_memory`: this test reads the process-global
-    // `HOME` (both here via `install_hooks` and inside the spawned
-    // `pre-commit` subprocess, whose `#!/usr/bin/python3` shebang resolves
-    // `pre_commit` from `$HOME/.local/lib/...`). Concurrent env-mutating tests
-    // temporarily reassign `HOME` to a temp dir; without this key our read can
-    // land mid-window, pointing the subprocess at a HOME with no `pre_commit`
-    // module and failing `pre-commit install`. All env writers carry the same
-    // key, so sharing it guarantees mutual exclusion.
-    #[serial_test::serial(cognitive_memory)]
-    #[test]
-    fn install_hooks_succeeds_in_real_git_repo_with_real_pre_commit() {
-        // Skip when the test environment has no pre-commit binary — the
-        // production callsite treats that as Ok(false) too.
-        if !pre_commit_on_path() {
-            eprintln!("skipping: pre-commit not on PATH");
-            return;
-        }
-
+    fn install_hooks_wires_core_hookspath_in_real_git_repo() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Initialize a real git repo so pre-commit has somewhere to install
-        // the hook script.
+        // Initialize a real git repo so `git config` has somewhere to write.
         let git = Command::new("git")
             .args(["init", "-q", "-b", "main"])
             .current_dir(dir.path())
@@ -162,17 +95,32 @@ mod tests {
             .unwrap();
         assert!(git.success(), "git init failed");
 
-        // Minimal valid config — empty repos list is accepted by pre-commit.
-        fs::write(dir.path().join(".pre-commit-config.yaml"), "repos: []\n").unwrap();
+        // Materialize the committed hooks so the presence check passes.
+        let hooks = dir.path().join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(hooks.join("pre-commit"), "#!/usr/bin/env bash\ncargo fmt\n").unwrap();
+        fs::write(hooks.join("pre-push"), "#!/usr/bin/env bash\ncargo test\n").unwrap();
 
         let result = install_hooks(dir.path()).unwrap();
-        assert!(result, "expected install_hooks to install (Ok(true))");
-
-        // Verify the hook script actually appeared.
-        let hook = dir.path().join(".git").join("hooks").join("pre-commit");
         assert!(
-            hook.exists(),
-            "expected .git/hooks/pre-commit to exist after install_hooks"
+            result,
+            "expected install_hooks to wire core.hooksPath (Ok(true))"
+        );
+
+        // Verify git now points at the committed hooks directory.
+        let out = Command::new("git")
+            .args(["config", "--get", "core.hooksPath"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git config --get core.hooksPath failed"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "hooks",
+            "core.hooksPath should be wired to the committed hooks/ directory"
         );
     }
 }

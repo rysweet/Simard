@@ -68,6 +68,20 @@ impl IdentityManifest {
             });
         }
 
+        // Write-authority posture composes like memory_policy: all components
+        // must agree on `posture`, so a read-only component cannot be diluted by
+        // composing it with a `full` one (#3125 / #3067, defense in depth).
+        let authority = components[0].authority.clone();
+        if components
+            .iter()
+            .any(|component| component.authority.posture != authority.posture)
+        {
+            return Err(SimardError::InvalidIdentityComposition {
+                identity: name.clone(),
+                reason: "component identities must agree on write-authority posture".to_string(),
+            });
+        }
+
         IdentityManifest::new(
             name,
             version,
@@ -78,6 +92,7 @@ impl IdentityManifest {
             memory_policy,
             contract,
         )?
+        .with_authority(authority)
         .with_components(component_names)
     }
 }

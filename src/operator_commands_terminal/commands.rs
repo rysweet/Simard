@@ -132,8 +132,22 @@ mod tests {
     }
 
     #[test]
-    fn terminal_recipe_list_does_not_panic() {
-        let _ = run_terminal_recipe_list_probe();
+    fn terminal_recipe_list_probe_succeeds_and_lists_named_recipes() {
+        // Previously this only checked "does not panic" while discarding the
+        // Result — a probe can return Err without panicking. Assert the probe
+        // actually succeeds and that the backing descriptor list is well-formed
+        // (non-empty, every recipe carries a name).
+        run_terminal_recipe_list_probe().expect("recipe list probe should succeed");
+        let descriptors = crate::operator_commands::list_terminal_recipe_descriptors()
+            .expect("descriptors should load");
+        assert!(
+            !descriptors.is_empty(),
+            "expected at least one terminal recipe descriptor"
+        );
+        assert!(
+            descriptors.iter().all(|d| !d.name.is_empty()),
+            "every terminal recipe descriptor must have a name"
+        );
     }
 
     #[test]

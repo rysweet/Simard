@@ -8,6 +8,7 @@ status: reference
 related:
   - ../concepts/operational-autonomy-model.md
   - ./pr-finalization-pipeline.md
+  - ./merge-record-verdict-cli.md
   - ./simard-cli.md
   - ../concepts/stewardship-mode.md
   - ../howto/edit-the-engineer-system-prompt.md

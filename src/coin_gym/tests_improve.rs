@@ -12,6 +12,7 @@ fn target(id: &str, project: &str, harness: &str, file: &str) -> Target {
         harness: harness.to_string(),
         file: file.to_string(),
         line: 100,
+        line_end: None,
         family: TargetFamily::Frontier,
     }
 }

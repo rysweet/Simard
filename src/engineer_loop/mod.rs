@@ -32,6 +32,8 @@ mod tests_checkpoint;
 mod tests_claim_sentinel;
 #[cfg(test)]
 mod tests_meeting_decisions;
+#[cfg(test)]
+mod tests_resume;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -98,6 +100,16 @@ pub(crate) const CLEARED_GIT_ENV_VARS: &[&str] = &[
     "GIT_PREFIX",
 ];
 
+/// Decide whether a loaded checkpoint should be resumed for `objective`.
+///
+/// A checkpoint is resumable only when it belongs to the same objective (the
+/// goal being advanced) AND sits at a mid-session phase boundary that was
+/// written before the session completed. The objective match prevents a stale
+/// checkpoint left behind by a different goal from contaminating this run.
+pub(crate) fn should_resume(checkpoint: &SessionCheckpoint, objective: &str) -> bool {
+    checkpoint.objective == objective && checkpoint.is_resumable()
+}
+
 pub fn run_local_engineer_loop(
     workspace_root: impl AsRef<Path>,
     objective: &str,
@@ -108,46 +120,120 @@ pub fn run_local_engineer_loop(
     let state_root = state_root.into();
     let mut phase_traces = Vec::new();
 
-    // Create a SessionRecord to track the session through the spec's
-    // SessionPhase state machine (issue #2100). The session starts at Intake
-    // and advances through Preparation → Planning → Execution → Reflection →
-    // Persistence → Complete, mirroring RuntimeKernel::execute_session.
+    // Resume-on-startup (session checkpoint + resume). If a valid checkpoint for
+    // THIS objective already exists under the state root, a prior engineer
+    // process was interrupted mid-session (crash, restart, or deploy
+    // binary-swap). Resume that same session instead of restarting from scratch
+    // so no in-progress work is thrown away. Resume is idempotent: every phase
+    // whose result was already recorded is reused rather than re-run, which is
+    // what stops a completed agent session from being spawned a second time (no
+    // double-PR, no duplicate work). A checkpoint whose objective does not match
+    // belongs to a different goal and is ignored — this run's own Intake
+    // checkpoint overwrites it. Resume complements the deploy-drain goal-requeue:
+    // requeue keeps the GOAL safe, this keeps the in-progress SESSION safe.
+    let resume: Option<SessionCheckpoint> =
+        SessionCheckpoint::load(&state_root).filter(|c| should_resume(c, objective));
+    let resumed_at_or_after = |phase: SessionPhase| -> bool {
+        resume.as_ref().is_some_and(|c| c.completed_phase >= phase)
+    };
+
+    // Restore (resume) or create (fresh) the SessionRecord that tracks the
+    // session through the spec's SessionPhase state machine (issue #2100). On
+    // resume we keep the ORIGINAL session identity so the resumed run is the
+    // same session, not a new one.
     let session_ids = UuidSessionIdGenerator;
-    let mut session = SessionRecord::new(
-        crate::identity::OperatingMode::Engineer,
-        objective.to_string(),
-        BaseTypeId::new(ENGINEER_BASE_TYPE),
-        &session_ids,
-    );
+    let mut session = match &resume {
+        Some(cp) => cp.session_record.clone(),
+        None => SessionRecord::new(
+            crate::identity::OperatingMode::Engineer,
+            objective.to_string(),
+            BaseTypeId::new(ENGINEER_BASE_TYPE),
+            &session_ids,
+        ),
+    };
     let session_id_str = session.id.to_string();
 
-    // --- SessionPhase::Intake ---
-    // Normalize the request, detect mode, and identify workspace context.
+    // On resume, hydrate the phase traces the interrupted process recorded and
+    // prepend an auditable `resume` marker naming the phase we picked up from.
+    if let Some(cp) = &resume {
+        phase_traces.push(PhaseTrace {
+            name: "resume".to_string(),
+            duration: std::time::Duration::ZERO,
+            outcome: PhaseOutcome::Skipped(format!(
+                "resumed session {} from completed phase {}",
+                cp.session_id, cp.completed_phase
+            )),
+        });
+        phase_traces.extend(cp.phase_traces.clone());
+    }
 
-    let phase_start = Instant::now();
-    let inspection = inspect_workspace(workspace_root.as_ref(), &state_root);
-    let inspection = match &inspection {
-        Ok(_) => {
+    let analyzed = analyze_objective(objective);
+
+    // --- SessionPhase::Intake ---
+    // Normalize the request, detect mode, and identify workspace context. A
+    // checkpoint is always written at or after Intake, so on resume we reuse the
+    // recorded inspection and deliberately skip the pre-mutation dirty-worktree
+    // guard: the agent being resumed may have legitimately dirtied the tree.
+    let inspection = if let Some(inspection) = resume
+        .as_ref()
+        .filter(|_| resumed_at_or_after(SessionPhase::Intake))
+        .and_then(|c| c.inspection.clone())
+    {
+        inspection
+    } else {
+        let phase_start = Instant::now();
+        let inspection = inspect_workspace(workspace_root.as_ref(), &state_root);
+        let inspection = match &inspection {
+            Ok(_) => {
+                phase_traces.push(PhaseTrace {
+                    name: "inspect".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Success,
+                });
+                inspection?
+            }
+            Err(e) => {
+                phase_traces.push(PhaseTrace {
+                    name: "inspect".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Failed(e.to_string()),
+                });
+                let err = inspection.unwrap_err();
+                let _ = session.advance(SessionPhase::Failed);
+                persist_error_reflection(
+                    &state_root,
+                    &SessionErrorReflection {
+                        objective: objective.to_string(),
+                        failed_phase: "inspect".to_string(),
+                        error_message: err.to_string(),
+                        phase_traces: phase_traces.clone(),
+                        session_id: Some(session_id_str.clone()),
+                    },
+                );
+                return Err(err);
+            }
+        };
+
+        // Pre-mutation guard (issue #2082): if the objective implies a mutating
+        // action and the working tree has uncommitted changes, abort before
+        // spawning the agent. Per spec line 256 the mutating path requires a
+        // clean repo.
+        if analyzed.is_mutating() && inspection.worktree_dirty {
+            let phase_name = "pre-mutation-guard";
             phase_traces.push(PhaseTrace {
-                name: "inspect".to_string(),
+                name: phase_name.to_string(),
                 duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Success,
+                outcome: PhaseOutcome::Failed("dirty worktree".to_string()),
             });
-            inspection?
-        }
-        Err(e) => {
-            phase_traces.push(PhaseTrace {
-                name: "inspect".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
-            let err = inspection.unwrap_err();
+            let err = SimardError::DirtyWorktree {
+                changed_files: inspection.changed_files.clone(),
+            };
             let _ = session.advance(SessionPhase::Failed);
             persist_error_reflection(
                 &state_root,
                 &SessionErrorReflection {
                     objective: objective.to_string(),
-                    failed_phase: "inspect".to_string(),
+                    failed_phase: phase_name.to_string(),
                     error_message: err.to_string(),
                     phase_traces: phase_traces.clone(),
                     session_id: Some(session_id_str.clone()),
@@ -155,158 +241,152 @@ pub fn run_local_engineer_loop(
             );
             return Err(err);
         }
-    };
 
-    // Pre-mutation guard (issue #2082): if the objective implies a mutating
-    // action and the working tree has uncommitted changes, abort before
-    // spawning the agent. Per spec line 256 the mutating path requires a
-    // clean repo.
-    let analyzed = analyze_objective(objective);
-    if analyzed.is_mutating() && inspection.worktree_dirty {
-        let phase_name = "pre-mutation-guard";
-        phase_traces.push(PhaseTrace {
-            name: phase_name.to_string(),
-            duration: phase_start.elapsed(),
-            outcome: PhaseOutcome::Failed("dirty worktree".to_string()),
-        });
-        let err = SimardError::DirtyWorktree {
-            changed_files: inspection.changed_files.clone(),
+        // Checkpoint after Intake (issue #2095): persist session state so a
+        // resuming engineer can skip workspace inspection.
+        let checkpoint = SessionCheckpoint {
+            session_id: session_id_str.clone(),
+            objective: objective.to_string(),
+            completed_phase: SessionPhase::Intake,
+            inspection: Some(inspection.clone()),
+            terminal_handoff_context: None,
+            execution_plan: None,
+            action: None,
+            verification: None,
+            session_summary: None,
+            phase_traces: phase_traces.clone(),
+            session_record: session.clone(),
         };
-        let _ = session.advance(SessionPhase::Failed);
-        persist_error_reflection(
-            &state_root,
-            &SessionErrorReflection {
-                objective: objective.to_string(),
-                failed_phase: phase_name.to_string(),
-                error_message: err.to_string(),
-                phase_traces: phase_traces.clone(),
-                session_id: Some(session_id_str.clone()),
-            },
-        );
-        return Err(err);
-    }
+        if let Err(e) = checkpoint.save(&state_root) {
+            tracing::warn!(error = %e, "engineer loop: failed to save intake checkpoint");
+        }
 
-    // Checkpoint after Intake (issue #2095): persist session state so a
-    // retry can skip workspace inspection if the session fails later.
-    let checkpoint = SessionCheckpoint {
-        session_id: session_id_str.clone(),
-        objective: objective.to_string(),
-        completed_phase: SessionPhase::Intake,
-        inspection: Some(inspection.clone()),
-        terminal_bridge_context: None,
-        execution_plan: None,
-        action: None,
-        verification: None,
-        session_summary: None,
-        phase_traces: phase_traces.clone(),
-        session_record: session.clone(),
+        inspection
     };
-    if let Err(e) = checkpoint.save(&state_root) {
-        tracing::warn!(error = %e, "engineer loop: failed to save intake checkpoint");
-    }
 
     // --- SessionPhase::Preparation ---
     // Gather current state, constraints, and existing memory relevant to the task.
-    session.advance(SessionPhase::Preparation)?;
+    // On resume past Preparation, reuse the memory context the interrupted
+    // process already loaded instead of re-running the carryover verification.
+    let terminal_handoff_context = if resumed_at_or_after(SessionPhase::Preparation) {
+        resume
+            .as_ref()
+            .and_then(|c| c.terminal_handoff_context.clone())
+    } else {
+        session.advance(SessionPhase::Preparation)?;
 
-    let phase_start = Instant::now();
-    let terminal_bridge_context = EngineerHandoffContext::load_from_state_root(
-        &state_root,
-        SHARED_EXPLICIT_STATE_ROOT_SOURCE,
-    );
-    match &terminal_bridge_context {
-        Ok(_) => {
-            phase_traces.push(PhaseTrace {
-                name: "load-bridge-context".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Success,
-            });
+        let phase_start = Instant::now();
+        let terminal_handoff_context = EngineerHandoffContext::load_from_state_root(
+            &state_root,
+            SHARED_EXPLICIT_STATE_ROOT_SOURCE,
+        );
+        match &terminal_handoff_context {
+            Ok(_) => {
+                phase_traces.push(PhaseTrace {
+                    name: "load-handoff-context".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Success,
+                });
+            }
+            Err(e) => {
+                phase_traces.push(PhaseTrace {
+                    name: "load-handoff-context".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Failed(e.to_string()),
+                });
+            }
         }
-        Err(e) => {
-            phase_traces.push(PhaseTrace {
-                name: "load-bridge-context".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
-        }
-    }
-    let terminal_bridge_context = match terminal_bridge_context {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            let _ = session.advance(SessionPhase::Failed);
-            persist_error_reflection(
-                &state_root,
-                &SessionErrorReflection {
-                    objective: objective.to_string(),
-                    failed_phase: "load-bridge-context".to_string(),
-                    error_message: e.to_string(),
-                    phase_traces: phase_traces.clone(),
-                    session_id: Some(session_id_str.clone()),
-                },
-            );
-            return Err(e);
-        }
-    };
+        let terminal_handoff_context = match terminal_handoff_context {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                let _ = session.advance(SessionPhase::Failed);
+                persist_error_reflection(
+                    &state_root,
+                    &SessionErrorReflection {
+                        objective: objective.to_string(),
+                        failed_phase: "load-handoff-context".to_string(),
+                        error_message: e.to_string(),
+                        phase_traces: phase_traces.clone(),
+                        session_id: Some(session_id_str.clone()),
+                    },
+                );
+                return Err(e);
+            }
+        };
 
-    // Goal carryover verification (issue #2092, spec line 665).
-    //
-    // If a meeting wrote a carryover record to cognitive memory, verify
-    // that the engineer session's goal board matches. A drift means
-    // goals curated in the meeting may have silently vanished.
-    let phase_start = Instant::now();
-    match crate::memory_ipc::launch_writer_client(&state_root) {
-        Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
-            Ok(board) => match crate::goal_curation::verify_goal_carryover(&board, bridge.ops()) {
-                Ok(crate::goal_curation::CarryoverVerification::Drifted {
-                    meeting_id,
-                    missing_goal_ids,
-                    ..
-                }) => {
-                    let msg = format!(
-                        "goal carryover drift detected (meeting {meeting_id}): \
+        // Goal carryover verification (issue #2092, spec line 665).
+        //
+        // If a meeting wrote a carryover record to cognitive memory, verify
+        // that the engineer session's goal board matches. A drift means
+        // goals curated in the meeting may have silently vanished.
+        let phase_start = Instant::now();
+        match crate::memory_ipc::launch_writer_client(&state_root) {
+            Ok(memory) => match crate::goal_curation::load_goal_board(memory.ops()) {
+                Ok(board) => {
+                    match crate::goal_curation::verify_goal_carryover(&board, memory.ops()) {
+                        Ok(crate::goal_curation::CarryoverVerification::Drifted {
+                            meeting_id,
+                            missing_goal_ids,
+                            ..
+                        }) => {
+                            let msg = format!(
+                                "goal carryover drift detected (meeting {meeting_id}): \
                                  goals missing from board: {missing_goal_ids:?}. \
                                  Meeting goals may have been lost due to state-root divergence."
-                    );
-                    tracing::warn!(
-                        meeting_id = %meeting_id,
-                        missing = ?missing_goal_ids,
-                        "engineer loop: {msg}"
-                    );
-                    phase_traces.push(PhaseTrace {
-                        name: "goal-carryover-verify".to_string(),
-                        duration: phase_start.elapsed(),
-                        outcome: PhaseOutcome::Failed(msg),
-                    });
-                }
-                Ok(crate::goal_curation::CarryoverVerification::Verified {
-                    meeting_id,
-                    active_goal_count,
-                }) => {
-                    tracing::info!(
-                        meeting_id = %meeting_id,
-                        active_goals = active_goal_count,
-                        "engineer loop: goal carryover verified"
-                    );
-                    phase_traces.push(PhaseTrace {
-                        name: "goal-carryover-verify".to_string(),
-                        duration: phase_start.elapsed(),
-                        outcome: PhaseOutcome::Success,
-                    });
-                }
-                Ok(crate::goal_curation::CarryoverVerification::NoRecord) => {
-                    tracing::debug!(
-                        "engineer loop: no goal carryover record found (first run or no meetings)"
-                    );
-                    phase_traces.push(PhaseTrace {
-                        name: "goal-carryover-verify".to_string(),
-                        duration: phase_start.elapsed(),
-                        outcome: PhaseOutcome::Success,
-                    });
+                            );
+                            tracing::warn!(
+                                meeting_id = %meeting_id,
+                                missing = ?missing_goal_ids,
+                                "engineer loop: {msg}"
+                            );
+                            phase_traces.push(PhaseTrace {
+                                name: "goal-carryover-verify".to_string(),
+                                duration: phase_start.elapsed(),
+                                outcome: PhaseOutcome::Failed(msg),
+                            });
+                        }
+                        Ok(crate::goal_curation::CarryoverVerification::Verified {
+                            meeting_id,
+                            active_goal_count,
+                        }) => {
+                            tracing::info!(
+                                meeting_id = %meeting_id,
+                                active_goals = active_goal_count,
+                                "engineer loop: goal carryover verified"
+                            );
+                            phase_traces.push(PhaseTrace {
+                                name: "goal-carryover-verify".to_string(),
+                                duration: phase_start.elapsed(),
+                                outcome: PhaseOutcome::Success,
+                            });
+                        }
+                        Ok(crate::goal_curation::CarryoverVerification::NoRecord) => {
+                            tracing::debug!(
+                                "engineer loop: no goal carryover record found (first run or no meetings)"
+                            );
+                            phase_traces.push(PhaseTrace {
+                                name: "goal-carryover-verify".to_string(),
+                                duration: phase_start.elapsed(),
+                                outcome: PhaseOutcome::Success,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "engineer loop: goal carryover verification failed"
+                            );
+                            phase_traces.push(PhaseTrace {
+                                name: "goal-carryover-verify".to_string(),
+                                duration: phase_start.elapsed(),
+                                outcome: PhaseOutcome::Failed(e.to_string()),
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         error = %e,
-                        "engineer loop: goal carryover verification failed"
+                        "engineer loop: could not load goal board for carryover check"
                     );
                     phase_traces.push(PhaseTrace {
                         name: "goal-carryover-verify".to_string(),
@@ -318,7 +398,7 @@ pub fn run_local_engineer_loop(
             Err(e) => {
                 tracing::debug!(
                     error = %e,
-                    "engineer loop: could not load goal board for carryover check"
+                    "engineer loop: could not launch memory for carryover check"
                 );
                 phase_traces.push(PhaseTrace {
                     name: "goal-carryover-verify".to_string(),
@@ -326,161 +406,187 @@ pub fn run_local_engineer_loop(
                     outcome: PhaseOutcome::Failed(e.to_string()),
                 });
             }
-        },
-        Err(e) => {
-            tracing::debug!(
-                error = %e,
-                "engineer loop: could not launch bridge for carryover check"
-            );
-            phase_traces.push(PhaseTrace {
-                name: "goal-carryover-verify".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
         }
-    }
 
-    // Checkpoint after Preparation (issue #2095).
-    let checkpoint = SessionCheckpoint {
-        session_id: session_id_str.clone(),
-        objective: objective.to_string(),
-        completed_phase: SessionPhase::Preparation,
-        inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
-        execution_plan: None,
-        action: None,
-        verification: None,
-        session_summary: None,
-        phase_traces: phase_traces.clone(),
-        session_record: session.clone(),
+        // Checkpoint after Preparation (issue #2095).
+        let checkpoint = SessionCheckpoint {
+            session_id: session_id_str.clone(),
+            objective: objective.to_string(),
+            completed_phase: SessionPhase::Preparation,
+            inspection: Some(inspection.clone()),
+            terminal_handoff_context: terminal_handoff_context.clone(),
+            execution_plan: None,
+            action: None,
+            verification: None,
+            session_summary: None,
+            phase_traces: phase_traces.clone(),
+            session_record: session.clone(),
+        };
+        if let Err(e) = checkpoint.save(&state_root) {
+            tracing::warn!(error = %e, "engineer loop: failed to save preparation checkpoint");
+        }
+
+        terminal_handoff_context
     };
-    if let Err(e) = checkpoint.save(&state_root) {
-        tracing::warn!(error = %e, "engineer loop: failed to save preparation checkpoint");
-    }
 
     // --- SessionPhase::Planning ---
     // Produce a bounded plan sized to the task (spec step 3).
-    session.advance(SessionPhase::Planning)?;
+    // On resume past Planning, reuse the recorded execution plan; the agent
+    // prompt is a pure function of (objective, inspection) so it is rebuilt
+    // without side effects when the Execution phase still needs to run.
+    let (agent_prompt, execution_plan) = if resumed_at_or_after(SessionPhase::Planning) {
+        let plan = resume
+            .as_ref()
+            .and_then(|c| c.execution_plan.clone())
+            .unwrap_or_else(|| form_execution_plan(objective, &analyzed, &inspection));
+        (
+            agent_spawn::build_agent_prompt(objective, &inspection),
+            plan,
+        )
+    } else {
+        session.advance(SessionPhase::Planning)?;
 
-    let phase_start = Instant::now();
-    let agent_prompt = agent_spawn::build_agent_prompt(objective, &inspection);
-    phase_traces.push(PhaseTrace {
-        name: "agent-prompt-build".to_string(),
-        duration: phase_start.elapsed(),
-        outcome: PhaseOutcome::Success,
-    });
+        let phase_start = Instant::now();
+        let agent_prompt = agent_spawn::build_agent_prompt(objective, &inspection);
+        phase_traces.push(PhaseTrace {
+            name: "agent-prompt-build".to_string(),
+            duration: phase_start.elapsed(),
+            outcome: PhaseOutcome::Success,
+        });
 
-    // Form an auditable execution plan as a distinct orchestration primitive.
-    let phase_start = Instant::now();
-    let execution_plan = form_execution_plan(objective, &analyzed, &inspection);
-    phase_traces.push(PhaseTrace {
-        name: "plan".to_string(),
-        duration: phase_start.elapsed(),
-        outcome: PhaseOutcome::Success,
-    });
+        // Form an auditable execution plan as a distinct orchestration primitive.
+        let phase_start = Instant::now();
+        let execution_plan = form_execution_plan(objective, &analyzed, &inspection);
+        phase_traces.push(PhaseTrace {
+            name: "plan".to_string(),
+            duration: phase_start.elapsed(),
+            outcome: PhaseOutcome::Success,
+        });
 
-    // Checkpoint after Planning (issue #2095).
-    let checkpoint = SessionCheckpoint {
-        session_id: session_id_str.clone(),
-        objective: objective.to_string(),
-        completed_phase: SessionPhase::Planning,
-        inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
-        execution_plan: Some(execution_plan.clone()),
-        action: None,
-        verification: None,
-        session_summary: None,
-        phase_traces: phase_traces.clone(),
-        session_record: session.clone(),
+        // Checkpoint after Planning (issue #2095).
+        let checkpoint = SessionCheckpoint {
+            session_id: session_id_str.clone(),
+            objective: objective.to_string(),
+            completed_phase: SessionPhase::Planning,
+            inspection: Some(inspection.clone()),
+            terminal_handoff_context: terminal_handoff_context.clone(),
+            execution_plan: Some(execution_plan.clone()),
+            action: None,
+            verification: None,
+            session_summary: None,
+            phase_traces: phase_traces.clone(),
+            session_record: session.clone(),
+        };
+        if let Err(e) = checkpoint.save(&state_root) {
+            tracing::warn!(error = %e, "engineer loop: failed to save planning checkpoint");
+        }
+
+        (agent_prompt, execution_plan)
     };
-    if let Err(e) = checkpoint.save(&state_root) {
-        tracing::warn!(error = %e, "engineer loop: failed to save planning checkpoint");
-    }
 
     // --- SessionPhase::Execution ---
     // Perform shell actions, file changes, and tool calls while recording evidence.
-    session.advance(SessionPhase::Execution)?;
+    // On resume, reuse the recorded agent result instead of spawning the agent
+    // again. This is the core idempotency guarantee: a completed agent session
+    // is never re-run, so resume cannot open a duplicate PR or redo expensive,
+    // non-idempotent work.
+    let (action, verification) = if let Some((action, verification)) = resume
+        .as_ref()
+        .and_then(SessionCheckpoint::resumable_execution)
+    {
+        (action, verification)
+    } else {
+        // `session.phase` is `Planning` on a fresh run or a resume that stopped
+        // at the Planning checkpoint; only advance when we have not already
+        // entered Execution (guards a corrupt Execution checkpoint lacking a
+        // recorded action).
+        if session.phase != SessionPhase::Execution {
+            session.advance(SessionPhase::Execution)?;
+        }
 
-    // Phase: agent-spawn — start background thread that runs the
-    // `amplihack RustyClawd --auto` subprocess. Spawning is infallible
-    // here because subprocess errors surface during agent-wait.
-    let phase_start = Instant::now();
-    let rx = agent_spawn::start_agent_session(agent_prompt, inspection.repo_root.clone());
-    phase_traces.push(PhaseTrace {
-        name: "agent-spawn".to_string(),
-        duration: phase_start.elapsed(),
-        outcome: PhaseOutcome::Success,
-    });
+        // Phase: agent-spawn — start background thread that runs the
+        // `amplihack RustyClawd --auto` subprocess. Spawning is infallible
+        // here because subprocess errors surface during agent-wait.
+        let phase_start = Instant::now();
+        let rx = agent_spawn::start_agent_session(agent_prompt, inspection.repo_root.clone());
+        phase_traces.push(PhaseTrace {
+            name: "agent-spawn".to_string(),
+            duration: phase_start.elapsed(),
+            outcome: PhaseOutcome::Success,
+        });
 
-    // Phase: agent-wait — block until agent session completes
-    let phase_start = Instant::now();
-    let outcome_summary = agent_spawn::await_agent_session(rx);
-    let action = match outcome_summary {
-        Ok(summary) => {
-            phase_traces.push(PhaseTrace {
-                name: "agent-wait".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Success,
-            });
-            ExecutedEngineerAction {
-                selected: SelectedEngineerAction {
-                    label: "agent-session".to_string(),
-                    rationale: format!("Spawned autonomous agent session for: {objective}"),
-                    argv: vec![],
-                    plan_summary: objective.to_string(),
-                    verification_steps: vec![],
-                    expected_changed_files: vec![],
-                    kind: EngineerActionKind::AgentSession {
-                        outcome_summary: summary.clone(),
+        // Phase: agent-wait — block until agent session completes
+        let phase_start = Instant::now();
+        let outcome_summary = agent_spawn::await_agent_session(rx);
+        let action = match outcome_summary {
+            Ok(summary) => {
+                phase_traces.push(PhaseTrace {
+                    name: "agent-wait".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Success,
+                });
+                ExecutedEngineerAction {
+                    selected: SelectedEngineerAction {
+                        label: "agent-session".to_string(),
+                        rationale: format!("Spawned autonomous agent session for: {objective}"),
+                        argv: vec![],
+                        plan_summary: objective.to_string(),
+                        verification_steps: vec![],
+                        expected_changed_files: vec![],
+                        kind: EngineerActionKind::AgentSession {
+                            outcome_summary: summary.clone(),
+                        },
                     },
-                },
-                exit_code: 0,
-                stdout: summary,
-                stderr: String::new(),
-                changed_files: vec![],
+                    exit_code: 0,
+                    stdout: summary,
+                    stderr: String::new(),
+                    changed_files: vec![],
+                }
             }
-        }
-        Err(e) => {
-            phase_traces.push(PhaseTrace {
-                name: "agent-wait".to_string(),
-                duration: phase_start.elapsed(),
-                outcome: PhaseOutcome::Failed(e.to_string()),
-            });
-            let _ = session.advance(SessionPhase::Failed);
-            persist_error_reflection(
-                &state_root,
-                &SessionErrorReflection {
-                    objective: objective.to_string(),
-                    failed_phase: "agent-wait".to_string(),
-                    error_message: e.to_string(),
-                    phase_traces: phase_traces.clone(),
-                    session_id: Some(session_id_str.clone()),
-                },
-            );
-            return Err(e);
-        }
-    };
+            Err(e) => {
+                phase_traces.push(PhaseTrace {
+                    name: "agent-wait".to_string(),
+                    duration: phase_start.elapsed(),
+                    outcome: PhaseOutcome::Failed(e.to_string()),
+                });
+                let _ = session.advance(SessionPhase::Failed);
+                persist_error_reflection(
+                    &state_root,
+                    &SessionErrorReflection {
+                        objective: objective.to_string(),
+                        failed_phase: "agent-wait".to_string(),
+                        error_message: e.to_string(),
+                        phase_traces: phase_traces.clone(),
+                        session_id: Some(session_id_str.clone()),
+                    },
+                );
+                return Err(e);
+            }
+        };
 
-    let verification = verify_agent_spawn_artifacts(&inspection, objective);
+        let verification = verify_agent_spawn_artifacts(&inspection, objective);
 
-    // Checkpoint after Execution (issue #2095): the most critical checkpoint
-    // since agent work is expensive and non-idempotent.
-    let checkpoint = SessionCheckpoint {
-        session_id: session_id_str.clone(),
-        objective: objective.to_string(),
-        completed_phase: SessionPhase::Execution,
-        inspection: Some(inspection.clone()),
-        terminal_bridge_context: terminal_bridge_context.clone(),
-        execution_plan: Some(execution_plan.clone()),
-        action: Some(action.clone()),
-        verification: Some(verification.clone()),
-        session_summary: None,
-        phase_traces: phase_traces.clone(),
-        session_record: session.clone(),
+        // Checkpoint after Execution (issue #2095): the most critical checkpoint
+        // since agent work is expensive and non-idempotent.
+        let checkpoint = SessionCheckpoint {
+            session_id: session_id_str.clone(),
+            objective: objective.to_string(),
+            completed_phase: SessionPhase::Execution,
+            inspection: Some(inspection.clone()),
+            terminal_handoff_context: terminal_handoff_context.clone(),
+            execution_plan: Some(execution_plan.clone()),
+            action: Some(action.clone()),
+            verification: Some(verification.clone()),
+            session_summary: None,
+            phase_traces: phase_traces.clone(),
+            session_record: session.clone(),
+        };
+        if let Err(e) = checkpoint.save(&state_root) {
+            tracing::warn!(error = %e, "engineer loop: failed to save execution checkpoint");
+        }
+
+        (action, verification)
     };
-    if let Err(e) = checkpoint.save(&state_root) {
-        tracing::warn!(error = %e, "engineer loop: failed to save execution checkpoint");
-    }
 
     // --- SessionPhase::Reflection ---
     // Compare results against the objective and capture what succeeded/failed.
@@ -545,7 +651,7 @@ pub fn run_local_engineer_loop(
         &inspection,
         &action,
         &verification,
-        terminal_bridge_context.as_ref(),
+        terminal_handoff_context.as_ref(),
     );
     match &persist_result {
         Ok(()) => {
@@ -591,7 +697,7 @@ pub fn run_local_engineer_loop(
         action,
         verification,
         summary: Some(session_summary),
-        terminal_bridge_context,
+        terminal_handoff_context,
         elapsed_duration: loop_start.elapsed(),
         phase_traces,
         session_record: Some(session),

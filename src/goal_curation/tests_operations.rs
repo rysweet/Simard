@@ -78,6 +78,37 @@ fn promote_to_active_not_found() {
 }
 
 #[test]
+fn promote_to_active_is_fail_closed_and_leaves_backlog_untouched() {
+    // Issue #4930 (B2): `promote_to_active` must run the SAME admission gate as
+    // the direct-add path, not just `validate_priority`. A backlog item whose
+    // record would produce an invalid active goal (here: an empty description,
+    // as a corrupt persisted board could carry) must be rejected — and because
+    // validation runs BEFORE the board is mutated, the item stays in the backlog
+    // rather than being silently dropped.
+    let mut board = GoalBoard::new();
+    board.backlog.push(BacklogItem {
+        id: "b-invalid".to_string(),
+        description: String::new(),
+        source: "test".to_string(),
+        score: 0.0,
+    });
+    let err = promote_to_active(&mut board, "b-invalid", 1, None);
+    assert!(
+        err.is_err(),
+        "an item that would yield an invalid active goal must be rejected on promotion"
+    );
+    assert_eq!(
+        board.backlog.len(),
+        1,
+        "a rejected promotion must leave the backlog item in place (no silent loss)"
+    );
+    assert!(
+        board.active.is_empty(),
+        "a rejected promotion must not insert into the active board"
+    );
+}
+
+#[test]
 fn update_goal_progress_and_archive_completed() {
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
@@ -114,70 +145,6 @@ fn seed_default_board_skips_non_empty() {
     assert_eq!(board.active.len(), 1);
 }
 
-// ── enqueue_stewardship_issue (issue #1167) ─────────────────────────
-
-#[test]
-fn enqueue_stewardship_issue_adds_backlog_row() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "abcdef0123456789",
-    )
-    .unwrap();
-    assert_eq!(board.backlog.len(), 1);
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_Simard-42");
-    assert_eq!(item.source, "stewardship:rysweet/Simard#42");
-    assert!(item.description.contains("abcdef0123456789"));
-    assert!(
-        item.description
-            .contains("https://github.com/rysweet/Simard/issues/42")
-    );
-    assert!(item.score > 0.0 && item.score <= 1.0);
-}
-
-#[test]
-fn enqueue_stewardship_issue_is_idempotent_on_same_issue() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "sig",
-    )
-    .unwrap();
-    // Second call with same (repo, issue#) → no-op (returns Ok, backlog unchanged).
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "sig",
-    )
-    .unwrap();
-    assert_eq!(board.backlog.len(), 1, "must not duplicate stewardship row");
-}
-
-#[test]
-fn enqueue_stewardship_issue_amplihack_repo() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/amplihack",
-        7,
-        "https://github.com/rysweet/amplihack/issues/7",
-        "deadbeef",
-    )
-    .unwrap();
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_amplihack-7");
-    assert_eq!(item.source, "stewardship:rysweet/amplihack#7");
-}
-
 // ── load_goal_board / save_goal_board: memory-only contract (issue #1590) ──
 
 /// Serialize access to SIMARD_STATE_ROOT across parallel test threads.
@@ -185,14 +152,14 @@ fn enqueue_stewardship_issue_amplihack_repo() {
 static ENV_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-/// Record of a `memory.store_fact` call captured by the in-memory bridge.
+/// Record of a `memory.store_fact` call captured by the in-memory memory.
 #[derive(Clone, Debug)]
 struct StoredFactCall {
     concept: String,
     content: String,
 }
 
-/// Shared mutable state captured by the in-memory bridge handler closure.
+/// Shared mutable state captured by the in-memory memory handler closure.
 #[derive(Default)]
 struct RpcRecording {
     stored_facts: std::sync::Mutex<Vec<StoredFactCall>>,
@@ -208,9 +175,9 @@ impl RpcRecording {
     }
 }
 
-/// Build a recording bridge whose `memory.search_facts` returns no facts and
+/// Build a recording memory whose `memory.search_facts` returns no facts and
 /// whose `memory.store_fact` records every call into the supplied recording.
-fn recording_bridge_empty(
+fn recording_memory_empty(
     recording: std::sync::Arc<RpcRecording>,
 ) -> crate::memory_client::CognitiveMemoryClient {
     use crate::memory_client::CognitiveMemoryClient;
@@ -247,9 +214,9 @@ fn recording_bridge_empty(
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Build a recording bridge whose `memory.search_facts` returns the given
+/// Build a recording memory whose `memory.search_facts` returns the given
 /// snapshot fact and whose `memory.store_fact` records every call.
-fn recording_bridge_with_snapshot(
+fn recording_memory_with_snapshot(
     snapshot_json: &str,
     recording: std::sync::Arc<RpcRecording>,
 ) -> crate::memory_client::CognitiveMemoryClient {
@@ -297,15 +264,15 @@ fn recording_bridge_with_snapshot(
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Build a bridge whose `memory.search_facts` always returns an error
+/// Build a memory whose `memory.search_facts` always returns an error
 /// (simulates the cognitive-memory subprocess being unavailable).
-fn bridge_search_fails() -> crate::memory_client::CognitiveMemoryClient {
+fn memory_search_fails() -> crate::memory_client::CognitiveMemoryClient {
     use crate::memory_client::CognitiveMemoryClient;
     use crate::rpc_transport::InMemoryRpcTransport;
     let transport = InMemoryRpcTransport::new("test-search-fails", |method, _params| {
         Err(crate::rpc::RpcErrorPayload {
             code: -32000,
-            message: format!("simulated bridge failure for method: {method}"),
+            message: format!("simulated memory failure for method: {method}"),
         })
     });
     CognitiveMemoryClient::new(Box::new(transport))
@@ -364,9 +331,9 @@ fn load_goal_board_reads_from_cognitive_memory() {
     });
     let snapshot_json = serde_json::to_string(&mem_board).unwrap();
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_with_snapshot(&snapshot_json, recording.clone());
+    let memory = recording_memory_with_snapshot(&snapshot_json, recording.clone());
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert_eq!(board.active.len(), 1);
     assert_eq!(board.active[0].id, "memory-only-goal");
@@ -381,9 +348,9 @@ fn load_goal_board_reads_from_cognitive_memory() {
 fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
     let root = tmp_state_root("mem-empty");
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(board.active.is_empty());
     assert!(board.backlog.is_empty());
@@ -394,9 +361,9 @@ fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
 #[serial_test::serial(cognitive_memory)]
 fn load_goal_board_returns_empty_when_search_facts_errors() {
     let root = tmp_state_root("mem-err");
-    let bridge = bridge_search_fails();
+    let memory = memory_search_fails();
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(board.active.is_empty());
     assert!(board.backlog.is_empty());
@@ -425,8 +392,8 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
-    let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let memory = recording_memory_empty(recording.clone());
+    let _ = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(
         !path.exists(),
@@ -445,9 +412,9 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
 fn load_goal_board_migration_is_noop_when_no_legacy_file() {
     let root = tmp_state_root("migrate-noop");
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
 
-    let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let _ = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(
         recording.calls().is_empty(),
@@ -463,8 +430,8 @@ fn load_goal_board_migration_handles_corrupt_legacy_file_without_panic() {
     std::fs::write(&path, b"NOT VALID JSON").unwrap();
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let memory = recording_memory_empty(recording.clone());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(board.active.is_empty(), "must return empty board");
     assert!(
@@ -504,10 +471,10 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
     with_state_root(&root, || {
-        super::load_goal_board(&bridge).unwrap();
-        super::load_goal_board(&bridge).unwrap();
+        super::load_goal_board(&memory).unwrap();
+        super::load_goal_board(&memory).unwrap();
     });
 
     assert!(!path.exists());
@@ -539,8 +506,8 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
     });
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
-    with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
+    let memory = recording_memory_empty(recording.clone());
+    with_state_root(&root, || super::save_goal_board(&board, &memory).unwrap());
 
     assert!(
         !root.join("goal_records.json").exists(),
@@ -576,9 +543,9 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
     });
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
     let err = with_state_root(&root, || {
-        super::save_goal_board(&board, &bridge).unwrap_err()
+        super::save_goal_board(&board, &memory).unwrap_err()
     });
 
     assert!(
@@ -615,9 +582,9 @@ fn save_goal_board_accepts_a_well_formed_board() {
         last_progress_update_at: None,
     });
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
 
-    with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
+    with_state_root(&root, || super::save_goal_board(&board, &memory).unwrap());
 
     assert_eq!(recording.calls().len(), 1);
 }
@@ -730,7 +697,7 @@ fn clear_goal_assignment_returns_err_for_missing_goal() {
 // other's goals (root cause of #1915). They reference three new symbols:
 //
 //   - `merge_boards(persisted, in_flight) -> GoalBoard`     (pure helper)
-//   - `read_latest_snapshot(bridge) -> Option<GoalBoard>`   (read helper)
+//   - `read_latest_snapshot(memory) -> Option<GoalBoard>`   (read helper)
 //   - revised `save_goal_board(...)` that performs
 //        guard(in_flight) -> read_latest_snapshot -> merge -> store_fact
 //
@@ -770,16 +737,16 @@ fn backlog_with(id: &str, description: &str, source: &str, score: f64) -> Backlo
     }
 }
 
-/// Stateful in-memory bridge that simulates the LadybugDB append-only fact
+/// Stateful in-memory memory that simulates the LadybugDB append-only fact
 /// store. Every `store_fact` appends to a shared `Vec<CognitiveFact>` with a
 /// monotonically-increasing `node_id` (so `max_by(node_id)` always picks
 /// the most recent snapshot — matching production uuid-v7 semantics).
 /// Every `search_facts` returns the current shared vec.
 ///
-/// Returns the bridge and a handle to the shared facts vec so tests can
+/// Returns the memory and a handle to the shared facts vec so tests can
 /// assert on stored counts/content.
 #[allow(clippy::type_complexity)]
-fn stateful_bridge() -> (
+fn stateful_memory() -> (
     crate::memory_client::CognitiveMemoryClient,
     std::sync::Arc<std::sync::Mutex<Vec<crate::memory_cognitive::CognitiveFact>>>,
 ) {
@@ -858,7 +825,7 @@ fn stateful_bridge() -> (
 /// Client whose `memory.search_facts` always errors but whose
 /// `memory.store_fact` succeeds and is recorded. Used to verify the
 /// read-failure fallback path in `save_goal_board`.
-fn bridge_search_fails_store_works(
+fn memory_search_fails_store_works(
     recording: std::sync::Arc<RpcRecording>,
 ) -> crate::memory_client::CognitiveMemoryClient {
     use crate::memory_client::CognitiveMemoryClient;
@@ -1220,11 +1187,11 @@ fn merge_boards_is_deterministic_across_runs() {
 
 // ── read_latest_snapshot: extracted helper ──────────────────────────────
 
-/// `read_latest_snapshot` returns `None` when the bridge has no snapshot.
+/// `read_latest_snapshot` returns `None` when the memory has no snapshot.
 #[test]
 fn read_latest_snapshot_returns_none_when_empty() {
-    let (bridge, _facts) = stateful_bridge();
-    let result = read_latest_snapshot(&bridge);
+    let (memory, _facts) = stateful_memory();
+    let result = read_latest_snapshot(&memory);
     assert!(
         result.is_none(),
         "expected None for empty store, got {result:?}"
@@ -1236,7 +1203,7 @@ fn read_latest_snapshot_returns_none_when_empty() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("read-latest-multi");
 
     let first = GoalBoard {
@@ -1259,12 +1226,12 @@ fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
     // (merge of empty + first, then merge of first + second). Either way
     // there are ≥2 facts and the latest one must be returned.
     with_state_root(&root, || {
-        super::save_goal_board(&first, &bridge).unwrap();
-        super::save_goal_board(&second, &bridge).unwrap();
+        super::save_goal_board(&first, &memory).unwrap();
+        super::save_goal_board(&second, &memory).unwrap();
     });
 
     let latest =
-        read_latest_snapshot(&bridge).expect("must return Some when at least one snapshot exists");
+        read_latest_snapshot(&memory).expect("must return Some when at least one snapshot exists");
     let ids: Vec<&str> = latest.active.iter().map(|g| g.id.as_str()).collect();
     assert!(
         ids.contains(&"second-saved-goal"),
@@ -1272,13 +1239,13 @@ fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
     );
 }
 
-/// `read_latest_snapshot` returns `None` (not Err / panic) when the bridge
+/// `read_latest_snapshot` returns `None` (not Err / panic) when the memory
 /// errors on search_facts. The caller (save_goal_board) uses this to fall
 /// back to writing the in-flight board unchanged.
 #[test]
-fn read_latest_snapshot_returns_none_on_bridge_search_error() {
-    let bridge = bridge_search_fails();
-    let result = read_latest_snapshot(&bridge);
+fn read_latest_snapshot_returns_none_on_memory_search_error() {
+    let memory = memory_search_fails();
+    let result = read_latest_snapshot(&memory);
     assert!(
         result.is_none(),
         "search_facts error must surface as None, got {result:?}"
@@ -1293,7 +1260,7 @@ fn read_latest_snapshot_returns_none_on_bridge_search_error() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("save-seq-merge");
 
     let writer_a_board = GoalBoard {
@@ -1316,9 +1283,9 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
     };
 
     with_state_root(&root, || {
-        super::save_goal_board(&writer_a_board, &bridge).unwrap();
-        super::save_goal_board(&writer_b_board, &bridge).unwrap();
-        let loaded = super::load_goal_board(&bridge).unwrap();
+        super::save_goal_board(&writer_a_board, &memory).unwrap();
+        super::save_goal_board(&writer_b_board, &memory).unwrap();
+        let loaded = super::load_goal_board(&memory).unwrap();
         let ids: Vec<&str> = loaded.active.iter().map(|g| g.id.as_str()).collect();
         assert!(
             ids.contains(&"alpha-writer-aaaa"),
@@ -1337,7 +1304,7 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_collision_persists_in_flight_fields() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("save-collision");
 
     let first = GoalBoard {
@@ -1362,9 +1329,9 @@ fn save_goal_board_collision_persists_in_flight_fields() {
     };
 
     with_state_root(&root, || {
-        super::save_goal_board(&first, &bridge).unwrap();
-        super::save_goal_board(&second, &bridge).unwrap();
-        let loaded = super::load_goal_board(&bridge).unwrap();
+        super::save_goal_board(&first, &memory).unwrap();
+        super::save_goal_board(&second, &memory).unwrap();
+        let loaded = super::load_goal_board(&memory).unwrap();
         assert_eq!(loaded.active.len(), 1);
         let g = &loaded.active[0];
         assert_eq!(g.description, "Updated desc");
@@ -1385,7 +1352,7 @@ fn save_goal_board_collision_persists_in_flight_fields() {
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     let recording = RpcRecording::shared();
-    let bridge = bridge_search_fails_store_works(recording.clone());
+    let memory = memory_search_fails_store_works(recording.clone());
     let root = tmp_state_root("save-readfail");
 
     let board = GoalBoard {
@@ -1399,7 +1366,7 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     };
 
     with_state_root(&root, || {
-        super::save_goal_board(&board, &bridge)
+        super::save_goal_board(&board, &memory)
             .expect("read-failure must not propagate from save_goal_board");
     });
 
@@ -1422,7 +1389,7 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("save-capacity");
 
     with_state_root(&root, || {
@@ -1437,9 +1404,9 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
                 )],
                 backlog: vec![],
             };
-            super::save_goal_board(&board, &bridge).unwrap();
+            super::save_goal_board(&board, &memory).unwrap();
         }
-        let loaded = super::load_goal_board(&bridge).unwrap();
+        let loaded = super::load_goal_board(&memory).unwrap();
         assert_eq!(
             loaded.active.len(),
             MAX_ACTIVE_GOALS,
@@ -1471,7 +1438,7 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
 
 /// Issue #1915 concurrency regression: two threads simultaneously
 /// `save_goal_board` with disjoint single-goal boards against a shared
-/// stateful bridge. After both joins, `load_goal_board` MUST return a
+/// stateful memory. After both joins, `load_goal_board` MUST return a
 /// board containing both goals. Repeated for 50 iterations with a Barrier
 /// to maximise contention on the read-modify-write window.
 #[test]
@@ -1503,14 +1470,14 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
     let _restore = EnvRestore;
 
     for iter in 0..50u32 {
-        let (bridge, _facts) = stateful_bridge();
-        let bridge: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(bridge);
+        let (memory, _facts) = stateful_memory();
+        let memory: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(memory);
         let barrier = Arc::new(Barrier::new(2));
 
         let alpha_id = format!("alpha-concur-{iter:04}");
         let beta_id = format!("beta-concur-{iter:04}");
 
-        let bridge_a = bridge.clone();
+        let memory_a = memory.clone();
         let barrier_a = barrier.clone();
         let alpha_id_thread = alpha_id.clone();
         let h_a = thread::spawn(move || {
@@ -1524,10 +1491,10 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
                 )],
                 backlog: vec![],
             };
-            super::save_goal_board(&board, bridge_a.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_a.as_ref()).unwrap();
         });
 
-        let bridge_b = bridge.clone();
+        let memory_b = memory.clone();
         let barrier_b = barrier.clone();
         let beta_id_thread = beta_id.clone();
         let h_b = thread::spawn(move || {
@@ -1541,7 +1508,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
                 )],
                 backlog: vec![],
             };
-            super::save_goal_board(&board, bridge_b.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_b.as_ref()).unwrap();
         });
 
         h_a.join().expect("alpha thread must not panic");
@@ -1550,7 +1517,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
         // ENV_MUTEX is held for the whole test → calling with_state_root
         // here would deadlock. SIMARD_STATE_ROOT is already pinned, so
         // load_goal_board sees the correct value directly.
-        let loaded = super::load_goal_board(bridge.as_ref()).unwrap();
+        let loaded = super::load_goal_board(memory.as_ref()).unwrap();
         let ids: Vec<String> = loaded.active.iter().map(|g| g.id.clone()).collect();
         assert!(
             ids.iter().any(|id| id == &alpha_id),
@@ -1593,8 +1560,8 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
     let _restore = EnvRestore;
 
     for iter in 0..25u32 {
-        let (bridge, _facts) = stateful_bridge();
-        let bridge: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(bridge);
+        let (memory, _facts) = stateful_memory();
+        let memory: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(memory);
         let barrier = Arc::new(Barrier::new(2));
 
         // Seed a guard-clean active goal so board_integrity_suspect passes
@@ -1609,7 +1576,7 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
         let alpha_bk_id = format!("alpha-bk-{iter:04}");
         let beta_bk_id = format!("beta-bk-{iter:04}");
 
-        let bridge_a = bridge.clone();
+        let memory_a = memory.clone();
         let barrier_a = barrier.clone();
         let alpha_bk_id_t = alpha_bk_id.clone();
         let seed_a = seed_goal.clone();
@@ -1619,10 +1586,10 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
                 active: vec![seed_a],
                 backlog: vec![backlog_with(&alpha_bk_id_t, "alpha-bk", "a", 0.3)],
             };
-            super::save_goal_board(&board, bridge_a.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_a.as_ref()).unwrap();
         });
 
-        let bridge_b = bridge.clone();
+        let memory_b = memory.clone();
         let barrier_b = barrier.clone();
         let beta_bk_id_t = beta_bk_id.clone();
         let seed_b = seed_goal.clone();
@@ -1632,14 +1599,14 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
                 active: vec![seed_b],
                 backlog: vec![backlog_with(&beta_bk_id_t, "beta-bk", "b", 0.4)],
             };
-            super::save_goal_board(&board, bridge_b.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_b.as_ref()).unwrap();
         });
 
         h_a.join().unwrap();
         h_b.join().unwrap();
 
         // ENV_MUTEX is held → must not call with_state_root (would deadlock).
-        let loaded = super::load_goal_board(bridge.as_ref()).unwrap();
+        let loaded = super::load_goal_board(memory.as_ref()).unwrap();
         let bk_ids: Vec<String> = loaded.backlog.iter().map(|b| b.id.clone()).collect();
         assert!(
             bk_ids.iter().any(|id| id == &alpha_bk_id),

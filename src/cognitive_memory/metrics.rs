@@ -84,6 +84,32 @@ pub const RECALL_PRECISION_SITE: &str = "recall_facts_ranked";
 /// (empty / wildcard `*`) or the result set is empty, so callers skip emitting a
 /// meaningless sample rather than dragging the mean toward zero. `k` is clamped
 /// to the number of returned facts.
+///
+/// # Relevance oracle caveat (issue #4378)
+///
+/// This metric's relevance judgment (the substring proxy above) is
+/// **deliberately DIFFERENT** from the relevance definition that gates the recall
+/// path a user is actually served. Three definitions coexist across the cognition
+/// stack, by design:
+///
+///   1. **Served recall gate — word-boundary.**
+///      [`LibraryCognitiveMemory::search_facts`](crate::cognitive_memory::LibraryCognitiveMemory)
+///      gates a clean query token at a WORD BOUNDARY (`fact_shares_query_relevance`
+///      / `needle_matches_word`), so an interior hit (`act` in "re*act*or") is
+///      NOT relevant.
+///   2. **Ranked recall — ungated** ([`recall_facts_ranked`](crate::cognitive_memory::CognitiveMemoryOps::recall_facts_ranked)):
+///      scores every live fact with NO keyword gate, so `precision_at_k < 1.0` is
+///      a meaningful ranking-quality signal (gating it would destroy that infra).
+///   3. **This metric — substring proxy** (upstream, kept unforked per G2).
+///
+/// The `recall_precision_at_k` self-metric therefore scores the ungated ranker
+/// (#2) with the substring oracle (#3), which can count as relevant a fact the
+/// served word-boundary gate (#1) would exclude — so the metric can read higher
+/// than served precision. This is intentional (the divergence is pinned by
+/// `cognitive_memory::tests_relevance_definition_divergence`; convergence is a
+/// relevance-definition change routed to CONSENSUS_WORKFLOW). See
+/// `docs/reference/recall-precision-hybrid-api.md` §"Relationship to the served
+/// word-boundary gate and the ranker" for the full rationale and interpretation.
 pub fn precision_at_k(query: &str, facts: &[CognitiveFact], k: usize) -> Option<f64> {
     // The only Simard-side glue is the CognitiveFact -> (concept, content)
     // mapping; it carries no scoring logic.
@@ -168,6 +194,80 @@ pub fn flush_recall_precision_metric() {
             target: "simard::memory",
             error = %e,
             "failed to record recall_precision_at_k metric (recall unaffected)",
+        );
+    }
+}
+
+// ─────────────────────── graph-memory grounding coverage ────────────────────
+//
+// A graph-memory *health* signal: the fraction of semantic facts that are
+// connected into the provenance graph (carry at least one `DERIVES_FROM` edge
+// back to the episode they were distilled from). Provenance grounding is what
+// turns the flat fact store into a traversable graph (see
+// `docs/reference/cognitive-memory-provenance.md`) AND is the dominant term in
+// the per-fact reliability gate (`crate::fact_reliability`), so coverage
+// dropping means facts are entering semantic memory ungrounded — a weakening of
+// graph memory that was previously visible only as raw OpenTelemetry edge-count
+// gauges (`simard.memory.edges`), never as a durable, comparable, regressable
+// `metrics.jsonl` series. Emitting the *ratio* here (not just the raw counts)
+// makes a grounding regression raise the same gym-history signal every other
+// self-metric does.
+
+/// Durable self-metric name for graph-memory grounding coverage, emitted to
+/// `metrics.jsonl` once per OODA cycle by [`record_provenance_coverage_metric`].
+pub const FACT_PROVENANCE_COVERAGE_METRIC: &str = "fact_provenance_coverage";
+
+/// Fraction of semantic facts that carry provenance (`facts_with_provenance /
+/// facts_total`), in `[0.0, 1.0]`.
+///
+/// Returns `None` (undefined, **not** `0.0`) when there are no facts, so a store
+/// with an empty semantic layer contributes no misleading `0.0` sample — the
+/// same "skip rather than drag the series to zero" convention
+/// [`precision_at_k`] uses for an undefined recall. `facts_with_provenance` is
+/// clamped to `facts_total` defensively so a backend that over-counts can never
+/// yield a ratio above `1.0`.
+pub fn provenance_coverage(facts_with_provenance: u64, facts_total: u64) -> Option<f64> {
+    if facts_total == 0 {
+        return None;
+    }
+    let grounded = facts_with_provenance.min(facts_total);
+    Some(grounded as f64 / facts_total as f64)
+}
+
+/// Emit ONE durable [`FACT_PROVENANCE_COVERAGE_METRIC`] sample (the grounding
+/// ratio over the current `graph_stats()` snapshot) to `metrics.jsonl`.
+///
+/// Called once per OODA cycle by the daemon metric sweep from the same block
+/// that already reads `graph_stats()` for the OpenTelemetry edge gauges, so it
+/// adds no extra store read. A snapshot-shaped metric (store state, not a
+/// per-cycle accumulator): the denominator is every semantic node the store
+/// reports (live + archived/superseded revisions, matching `GraphStats`), so
+/// the series tracks grounding across the whole semantic layer.
+///
+/// No-op when the store holds no facts (undefined coverage — see
+/// [`provenance_coverage`]), so the series carries signal only. Best-effort: a
+/// metrics-write failure is logged, never propagated. Skipped under
+/// `cfg!(test)` so unit tests never append to the operator's real
+/// `~/.simard/metrics/metrics.jsonl`.
+pub fn record_provenance_coverage_metric(facts_with_provenance: u64, facts_total: u64) {
+    let Some(coverage) = provenance_coverage(facts_with_provenance, facts_total) else {
+        return;
+    };
+    if cfg!(test) {
+        return;
+    }
+    let context = serde_json::json!({
+        "facts_total": facts_total,
+        "facts_with_provenance": facts_with_provenance,
+    })
+    .to_string();
+    if let Err(e) =
+        crate::self_metrics::record_metric(FACT_PROVENANCE_COVERAGE_METRIC, coverage, &context)
+    {
+        tracing::warn!(
+            target: "simard::memory",
+            error = %e,
+            "failed to record fact_provenance_coverage metric (memory unaffected)",
         );
     }
 }
@@ -280,5 +380,39 @@ mod tests {
         // Drained → empty on the next read.
         assert_eq!(recall_precision_mean(site), None);
         assert_eq!(drain_recall_precision(site), None);
+    }
+
+    // ── graph-memory grounding coverage: pure math ──────────────────────────
+
+    #[test]
+    fn provenance_coverage_is_the_grounded_fraction() {
+        assert_eq!(provenance_coverage(3, 4), Some(0.75));
+        assert_eq!(provenance_coverage(0, 4), Some(0.0));
+        assert_eq!(provenance_coverage(4, 4), Some(1.0));
+    }
+
+    #[test]
+    fn provenance_coverage_is_none_for_an_empty_store() {
+        // No facts → undefined coverage (skip, do NOT emit a misleading 0.0),
+        // matching the precision@k "None rather than drag the series to zero"
+        // convention. A grounded count with a zero denominator is still None.
+        assert_eq!(provenance_coverage(0, 0), None);
+        assert_eq!(provenance_coverage(5, 0), None);
+    }
+
+    #[test]
+    fn provenance_coverage_clamps_overcount_to_one() {
+        // A backend that reports more grounded facts than total must never
+        // yield a ratio above 1.0.
+        assert_eq!(provenance_coverage(7, 4), Some(1.0));
+    }
+
+    #[test]
+    fn record_provenance_coverage_metric_is_a_no_op_under_test() {
+        // Guards the operator's real metrics.jsonl: the emitter is cfg!(test)-
+        // skipped, and an empty store is a no-op regardless. Neither call may
+        // panic or touch global state.
+        record_provenance_coverage_metric(3, 4);
+        record_provenance_coverage_metric(0, 0);
     }
 }

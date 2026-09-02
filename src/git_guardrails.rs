@@ -39,6 +39,15 @@ fn protected_roots() -> Vec<String> {
 /// Returns `Err` with a descriptive message if the proposed git command would
 /// violate guardrails. Returns `Ok(())` if the command is safe to execute.
 pub fn check_git_safety(workspace: &Path, args: &[&str]) -> Result<(), String> {
+    // Observe-only floor (issue #1, Crocutus): a read-only identity sets
+    // `SIMARD_OBSERVE_ONLY=1`; under it, EVERY mutating git verb (push, commit,
+    // branch, tag, merge, rebase, reset, checkout -b, am, apply, update-ref, …)
+    // is refused here at the shared write seam. This runs BEFORE the
+    // `guardrails_enabled()` gate on purpose: the observe-only guarantee must
+    // hold even if `SIMARD_GIT_GUARDRAILS` is disabled — fail closed. It is a
+    // no-op for the engineer identity (env unset).
+    crate::read_only_guard::guard_observe_only_git(args)?;
+
     if !guardrails_enabled() {
         return Ok(());
     }
@@ -108,6 +117,8 @@ mod tests {
         unsafe {
             std::env::remove_var("SIMARD_GIT_GUARDRAILS");
             std::env::remove_var("SIMARD_GIT_PROTECTED_REPOS");
+            // Ensure the observe-only floor does not leak between tests.
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
         }
     }
 
@@ -482,5 +493,84 @@ mod tests {
         reset_env();
         let result = check_git_safety(&PathBuf::from("/tmp/repo"), &[]);
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // ── Observe-only floor (issue #1, Crocutus) ─────────────────────────────
+    // With SIMARD_OBSERVE_ONLY set, the shared git write seam refuses every
+    // mutating verb — even ordinary push/commit that the engineer identity is
+    // allowed to run — and even when SIMARD_GIT_GUARDRAILS is disabled.
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn observe_only_blocks_ordinary_push_and_commit() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1") };
+        for args in [
+            vec!["push", "origin", "feature-branch"],
+            vec!["commit", "-m", "hygiene fix"],
+            vec!["checkout", "-b", "hygiene"],
+            vec!["tag", "v1.0"],
+            vec!["merge", "feature"],
+        ] {
+            let result = check_git_safety(&PathBuf::from("/tmp/clone"), &args);
+            assert!(
+                result.is_err(),
+                "observe-only must refuse the write `git {}`",
+                args.join(" ")
+            );
+            assert!(result.unwrap_err().contains("GUARDRAIL BLOCKED"));
+        }
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn observe_only_still_allows_reads() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe { std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1") };
+        for args in [
+            vec!["fetch", "--all", "--prune"],
+            vec!["log", "--oneline", "-20"],
+            vec!["status"],
+            vec!["branch", "-a"],
+            vec!["for-each-ref", "refs/remotes"],
+        ] {
+            assert!(
+                check_git_safety(&PathBuf::from("/tmp/clone"), &args).is_ok(),
+                "observe-only must permit the read `git {}`",
+                args.join(" ")
+            );
+        }
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn observe_only_floor_holds_even_when_git_guardrails_disabled() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        unsafe {
+            std::env::set_var("SIMARD_GIT_GUARDRAILS", "disabled");
+            std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1");
+        }
+        // Even with the destructive-op guardrails switched off, the observe-only
+        // floor must fail closed on a push (defense in depth).
+        assert!(
+            check_git_safety(&PathBuf::from("/tmp/clone"), &["push", "origin", "main"]).is_err()
+        );
+        reset_env();
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn engineer_identity_unaffected_by_floor_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_env();
+        // Env unset ⇒ the observe-only floor is a no-op; ordinary push allowed.
+        assert!(
+            check_git_safety(&PathBuf::from("/tmp/repo"), &["push", "origin", "feature"]).is_ok()
+        );
     }
 }

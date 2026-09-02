@@ -4,8 +4,8 @@
 //! Data sources:
 //!   1. `~/.simard/cycle_reports/cycle_*.json` — `brain_judgments[]` entries
 //!      where `fallback == true` or `parse_failure != null`.
-//!   2. `~/.simard/metrics/metrics.jsonl` — `brain_parse_failure` metric
-//!      entries for a quick summary count.
+//!   2. `~/.simard/metrics/metrics.jsonl` — `brain_parse_error` /
+//!      `brain_parse_failure` metric entries for a quick summary count.
 //!
 //! The endpoint returns a flat list of recent brain failures in reverse
 //! chronological order, each entry rendered with:
@@ -310,15 +310,28 @@ fn recent_parse_failures_from_metrics(path: &std::path::Path, since: DateTime<Ut
         .count() as u64
 }
 
-/// Count `brain_parse_failure` metric entries in `metrics.jsonl`.
+/// Count lifetime brain parse failures in `metrics.jsonl`, keyed on the parsed
+/// `metric_name` field against [`BRAIN_PARSE_METRIC_NAMES`]. This is the
+/// time-unbounded companion to [`recent_parse_failures_from_metrics`]: both
+/// read the SAME metric-name set so the lifetime total and the recent window
+/// stay consistent across the `brain_parse_failure` → `brain_parse_error`
+/// metric-name transition (#4187).
+///
+/// Keying on the structured `metric_name` (rather than a raw substring match on
+/// the whole JSON line) fixes two defects: it no longer drops genuine
+/// `brain_parse_error` entries the substring `"brain_parse_failure"` never
+/// matched, and it no longer counts an unrelated metric whose `context` field
+/// merely mentions the string.
 fn count_brain_parse_failure_metrics(path: &std::path::Path) -> u64 {
+    use crate::self_metrics::MetricEntry;
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return 0,
     };
     content
         .lines()
-        .filter(|line| line.contains("brain_parse_failure"))
+        .filter_map(|line| serde_json::from_str::<MetricEntry>(line).ok())
+        .filter(|e| BRAIN_PARSE_METRIC_NAMES.contains(&e.metric_name.as_str()))
         .count() as u64
 }
 
@@ -408,14 +421,49 @@ mod tests {
         let path = dir.path().join("metrics.jsonl");
         std::fs::write(
             &path,
-            r#"{"name":"ooda_cycle","value":1}
-{"name":"brain_parse_failure","value":1}
-{"name":"brain_parse_failure","value":1}
-{"name":"other_metric","value":42}
+            r#"{"timestamp":"2026-05-19T05:23:26Z","metric_name":"ooda_cycle","value":1.0,"context":""}
+{"timestamp":"2026-05-19T05:24:26Z","metric_name":"brain_parse_failure","value":1.0,"context":""}
+{"timestamp":"2026-05-19T05:25:26Z","metric_name":"brain_parse_failure","value":1.0,"context":""}
+{"timestamp":"2026-05-19T05:26:26Z","metric_name":"other_metric","value":42.0,"context":""}
 "#,
         )
         .unwrap();
         assert_eq!(count_brain_parse_failure_metrics(&path), 2);
+    }
+
+    /// #4187: the lifetime count must also include the post-transition
+    /// `brain_parse_error` metric name, mirroring the recent-window path, so the
+    /// lifetime total never silently reads 0 while the recent window shows real
+    /// failures.
+    #[test]
+    fn count_brain_parse_failure_metrics_counts_both_metric_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metrics.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":"2026-05-19T05:24:26Z","metric_name":"brain_parse_failure","value":1.0,"context":""}
+{"timestamp":"2026-05-19T05:25:26Z","metric_name":"brain_parse_error","value":1.0,"context":""}
+{"timestamp":"2026-05-19T05:26:26Z","metric_name":"brain_parse_error","value":1.0,"context":""}
+"#,
+        )
+        .unwrap();
+        assert_eq!(count_brain_parse_failure_metrics(&path), 3);
+    }
+
+    /// #4187: keying on the structured `metric_name` must NOT count an unrelated
+    /// metric whose `context` merely mentions the parse-failure string.
+    #[test]
+    fn count_brain_parse_failure_metrics_ignores_context_false_positive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metrics.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":"2026-05-19T05:24:26Z","metric_name":"unrelated_metric","value":1.0,"context":"observed brain_parse_failure downstream"}
+{"timestamp":"2026-05-19T05:25:26Z","metric_name":"brain_parse_failure","value":1.0,"context":""}
+"#,
+        )
+        .unwrap();
+        assert_eq!(count_brain_parse_failure_metrics(&path), 1);
     }
 
     #[test]

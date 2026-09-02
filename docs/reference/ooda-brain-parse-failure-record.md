@@ -1,17 +1,26 @@
 ---
-title: OODA Brain Parse-Failure Record
-description: Normative schema and visibility contract for decide/orient brain JSON-parse failures (#1890). Companion to the engineer-lifecycle protocol (#1711) and the broader fail-open audit (#1245).
-last_updated: 2026-05-19
+title: OODA brain parse-failure record
+description: Current decide/orient parse-failure visibility contract; becomes legacy only after verified typed-route cutover.
+last_updated: 2026-07-13
 review_schedule: as-needed
 owner: simard
+doc_type: reference
+status: implemented
 ---
 
-# Reference: OODA Brain Parse-Failure Record
+# Reference: OODA brain parse-failure record
+
+!!! note "Migration condition"
+    Current releases emit these records. This contract becomes legacy only
+    after a release implements and selects the typed route and verifies the
+    decide/orient parsers are unreachable. It remains authoritative in
+    `legacy` and `shadow` route states. The planned typed route instead
+    propagates recipe and tool failures explicitly.
 
 Crate: `simard` · Module: `simard::ooda_brain::parse_failure`
 Closes the visibility gap that Issue [#1890](https://github.com/rysweet/Simard/issues/1890) opened. Sibling of [#1711](https://github.com/rysweet/Simard/issues/1711) (engineer-lifecycle decision protocol) and [#1748](https://github.com/rysweet/Simard/issues/1748) (silent deterministic fallback audit).
 
-This page is the normative definition of how `decide_with_brain` and `orient_with_brain` in `simard::ooda_loop` surface a brain-invocation failure (the dominant case is a JSON-parse failure; other adapter `Err` variants are covered identically — see [Scope of the record](#scope-of-the-record)). Before this contract, a brain failure produced a single `WARN` line of the form `no JSON object found in LLM response (got N bytes)` and was then silently substituted by `DeterministicFallbackDecideBrain` / `DeterministicFallbackOrientBrain`. The cycle still ran, the cycle report still claimed a decision, and the operator had no way to tell a healthy cycle from a degraded one.
+This page is the normative current record shape for parser-route operation.
 
 > **TL;DR** — Decide and orient brain failures fire four visibility channels in a fixed sequence: (1) a single `ERROR`-level structured `tracing` event, (2) a `brain_parse_failure` metric increment, (3) a new `parse_failure` block on the corresponding `BrainJudgmentRecord` (which lands in `cycle_reports/cycle_*.json`), and (4) a throttled `gh issue create` escalation at ≥3 consecutive failures per `(phase, goal_id)`. The cycle does **not** abort — it continues with a deterministic substitution whose record now carries a `parse_failure` block, so the cycle report makes the degraded state machine-readable.
 

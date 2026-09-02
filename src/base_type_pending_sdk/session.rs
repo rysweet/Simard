@@ -14,9 +14,9 @@ pub(crate) struct PendingSdkSession {
     pub(crate) descriptor: BaseTypeDescriptor,
     pub(crate) request: BaseTypeSessionRequest,
     pub(crate) not_implemented_reason: String,
-    /// Enrichment bridges exposed through the shared entry point (#1665). The
+    /// Enrichment memories exposed through the shared entry point (#1665). The
     /// pending adapter always errors on `run_turn` (the SDK is unimplemented),
-    /// so the bridges are surfaced only for [`BaseTypeSession::enrich_input`]
+    /// so the memories are surfaced only for [`BaseTypeSession::enrich_input`]
     /// contract uniformity.
     pub(crate) enrichment: EnrichmentClients,
     pub(crate) is_open: bool,

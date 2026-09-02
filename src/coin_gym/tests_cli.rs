@@ -1,7 +1,9 @@
 use super::profiles::{PersistedRun, ensure_profile, runs_dir, save_run};
 use super::target_loader::DemoScenario;
 use super::types::Strategy;
-use super::{coin_gym_usage, dispatch_with_home, execute_run};
+use super::{
+    AcceptanceReport, coin_gym_usage, dispatch_with_home, execute_run, run_acceptance_checks,
+};
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_string()).collect()
@@ -70,6 +72,7 @@ fn score_compare_improve_load_a_saved_run() {
         &PersistedRun {
             report: report.clone(),
             targets: scenario.targets.clone(),
+            offline: scenario.offline_scaffold(),
         },
     )
     .unwrap();
@@ -181,7 +184,9 @@ fn explicit_profile_name_is_sanitised() {
 #[test]
 fn usage_lists_all_subcommands() {
     let usage = coin_gym_usage();
-    for cmd in ["run", "score", "compare", "improve", "profiles"] {
+    for cmd in [
+        "run", "score", "compare", "improve", "contract", "verify", "profiles",
+    ] {
         assert!(usage.contains(cmd), "usage should mention {cmd}");
     }
 }
@@ -246,4 +251,174 @@ fn run_rejects_manifest_with_disjoint_script_keys() {
     let err =
         dispatch_with_home(dir.path(), args(&["run", "m", "--targets", &manifest])).unwrap_err();
     assert!(err.to_string().contains("pinned target"));
+}
+
+#[test]
+fn contract_command_runs_with_defaults_and_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // Default snapshot.
+    dispatch_with_home(home, args(&["contract"])).unwrap();
+    // Explicit snapshot + repeated split/project (comma-separated) + source.
+    dispatch_with_home(
+        home,
+        args(&[
+            "contract",
+            "--dataset",
+            "COIN-Bench/coin",
+            "--revision",
+            "v2026-07",
+            "--split",
+            "codeql_only,gcs_reachable",
+            "--project",
+            "cups,libraw",
+            "--source",
+            "image",
+        ]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn contract_rejects_unknown_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dispatch_with_home(dir.path(), args(&["contract", "--source", "magic"])).unwrap_err();
+    assert!(err.to_string().contains("unknown --source"));
+}
+
+/// The Phase-5 loop fixture (decoder+crypto generalise; generic overfits).
+const LOOP_SNAPSHOT: &str = include_str!("fixtures/improve_loop_snapshot.json");
+
+/// The single run-id under a profile's runs directory.
+fn only_run_id(home: &std::path::Path, profile: &str) -> String {
+    let runs = runs_dir(home, profile);
+    let mut ids: Vec<String> = std::fs::read_dir(&runs)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .map(|e| e.path().file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(ids.len(), 1, "expected exactly one run under {profile}");
+    ids.pop().unwrap()
+}
+
+#[test]
+fn improve_holdout_fresh_runs_full_cycle_via_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let manifest = write_manifest(home, "loop.json", LOOP_SNAPSHOT);
+
+    // A baseline run persists the offline scaffold (oracle + script) the loop needs.
+    dispatch_with_home(
+        home,
+        args(&["run", "m", "--targets", &manifest, "--profile", "loop"]),
+    )
+    .unwrap();
+    let run_id = only_run_id(home, "loop");
+
+    // The live self-improvement cycle runs end-to-end and banks durable tactics.
+    dispatch_with_home(
+        home,
+        args(&[
+            "improve",
+            &run_id,
+            "--profile",
+            "loop",
+            "--holdout",
+            "fresh",
+        ]),
+    )
+    .unwrap();
+
+    let tactics = super::improve_loop::load_tactic_memory(home, "loop").unwrap();
+    assert_eq!(tactics.tactics.len(), 2, "decoder + crypto tactics banked");
+}
+
+#[test]
+fn improve_holdout_rejects_unknown_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let manifest = write_manifest(home, "loop.json", LOOP_SNAPSHOT);
+    dispatch_with_home(
+        home,
+        args(&["run", "m", "--targets", &manifest, "--profile", "loop"]),
+    )
+    .unwrap();
+    let run_id = only_run_id(home, "loop");
+    let err = dispatch_with_home(
+        home,
+        args(&[
+            "improve",
+            &run_id,
+            "--profile",
+            "loop",
+            "--holdout",
+            "stale",
+        ]),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("only supports 'fresh'"));
+}
+
+// ── verify (measurable done-criteria self-check) ─────────────────────────────
+
+/// Assert every criterion in a report passed, with a helpful message naming the
+/// first failing row.
+fn assert_all_passed(report: &AcceptanceReport) {
+    if let Some(bad) = report.checks.iter().find(|c| !c.passed) {
+        panic!("criterion '{}' failed: {}", bad.criterion, bad.detail);
+    }
+    assert!(report.all_passed());
+}
+
+#[test]
+fn acceptance_checks_all_pass_on_the_sample_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = run_acceptance_checks(dir.path());
+
+    // Every design component (issue #2713) is exercised and asserted.
+    let names: Vec<&str> = report.checks.iter().map(|c| c.criterion).collect();
+    assert_eq!(
+        names,
+        vec![
+            "target-loader",
+            "baseline-runner",
+            "team-runner",
+            "scorer",
+            "leaderboard-comparator",
+            "self-improvement-loop",
+            "contract-wiring",
+        ],
+        "verify must cover the full LOCAL harness surface in a stable order"
+    );
+    assert_all_passed(&report);
+    assert_eq!(report.passed_count(), report.total());
+    assert_eq!(report.total(), 7);
+}
+
+#[test]
+fn acceptance_check_is_deterministic_and_hermetic() {
+    // Two independent runs against isolated temp homes yield identical reports,
+    // and neither touches the caller's real coin-gym profiles.
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let ra = run_acceptance_checks(a.path());
+    let rb = run_acceptance_checks(b.path());
+    assert_eq!(ra, rb, "verify must be deterministic across isolated homes");
+    assert_all_passed(&ra);
+}
+
+#[test]
+fn verify_command_dispatches_and_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    // The command uses its own throwaway temp home internally; `home` here is
+    // unused by verify but keeps the dispatch signature uniform.
+    dispatch_with_home(dir.path(), args(&["verify"])).unwrap();
+}
+
+#[test]
+fn verify_rejects_unexpected_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dispatch_with_home(dir.path(), args(&["verify", "--bogus", "x"])).unwrap_err();
+    assert!(err.to_string().contains("unknown flag"));
 }

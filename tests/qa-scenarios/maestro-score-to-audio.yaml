@@ -1,0 +1,54 @@
+name: maestro-score-to-audio
+app_type: cli
+description: |
+  Outside-in coverage for the EXAMPLE Maestro music composition &amp; production
+  identity: a musical brief must go end to end — compose → arrange → engrave →
+  produce → score &amp; production brief — through the identity's agentic recipe,
+  and the shipped DATA-ONLY package must load through the real Simard data-driven
+  loader with a ZERO-line `src/` footprint.
+
+  Maestro is an example non-engineering identity authored purely as data under
+  `examples/identities/maestro/` (identity.toml + prompts/ + recipes/). It is
+  loaded by `load_example_identity` (the thin data-driven rail), NEVER compiled
+  into `BuiltinIdentityLoader`, and adds no domain Rust to `src/`, no
+  operator_cli subcommand, and no `src/bin/*`. All domain tooling — LilyPond and
+  MuseScore (engraving), MIDI + open-source synths FluidSynth / TiMidity++ (the
+  DAW / render pass), and ffmpeg (encoding / mastering) — lives in the recipe and
+  the agent sessions it spawns.
+
+  Verified end to end by `tests/maestro_assets_valid.rs`:
+  - the shipped `examples/identities/maestro/` package loads via the data-driven
+    `load_example_identity` rail in curator mode, exposing all six phase prompts
+    (system + compose + arrange + engrave + produce + deliver);
+  - the identity declares a read-only write posture and no project writes;
+  - the package is NOT a builtin (the `BuiltinIdentityLoader` rejects it), proving
+    it is data-driven, not compiled in;
+  - every referenced prompt file exists, carries its stage heading, and instructs
+    the agent to treat inputs as untrusted data;
+  - the goal-session recipe `recipes/maestro-score-and-produce.yaml` drives the
+    full five-stage pipeline (compose → arrange → engrave → produce →
+    write-score-notes), threads the `brief_path` / `instrumentation` / `key` /
+    `tempo` / `duration` / `soundfont` / `output_dir` context vars, and shells out
+    to LilyPond / MuseScore / FluidSynth / TiMidity++ / ffmpeg; and
+  - a misspelled example name fails visibly (fail-closed), never silently falling
+    back to a builtin identity.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so the suite
+  runs under a single `bash -lc` wrapper that exits zero only when the
+  `maestro_assets_valid` integration test reports success.
+metadata:
+  tags:
+    - cli
+    - maestro
+    - identity
+    - example
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --test maestro_assets_valid 2>&1 | tee /tmp/maestro-qa.log | grep -q \"test result: ok\"'"
+    timeout: 600000

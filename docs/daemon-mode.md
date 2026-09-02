@@ -1,7 +1,7 @@
 ---
 title: Daemon mode (autonomous OODA loop)
 description: How Simard runs as a long-lived process, observing signals, ranking priorities, dispatching engineer subprocesses, and coordinating distributed work.
-last_updated: 2026-04-24
+last_updated: 2026-07-09
 owner: simard
 doc_type: concept
 ---
@@ -24,7 +24,12 @@ simard ooda run
 
 The daemon sleeps `60s` between cycles by default and emits a one-line summary of each cycle to stderr. Dashboard cycle numbers map 1:1 to these iterations.
 
-For a full how-to including systemd-user installation, see [Run the OODA daemon](howto/run-ooda-daemon.md).
+For a live host, the planned deployment path is `simard install` instead of
+pointing systemd at a worktree or copying binaries by hand. The planned
+installer owns `$SIMARD_HOME/bin/simard`, `$SIMARD_HOME/prompt_assets`, and the
+`simard-ooda.service` user unit with `WorkingDirectory=$SIMARD_HOME`. See
+[Run the OODA daemon](howto/run-ooda-daemon.md) and the
+[installer reference](reference/simard-installer.md).
 
 ## What the daemon observes
 

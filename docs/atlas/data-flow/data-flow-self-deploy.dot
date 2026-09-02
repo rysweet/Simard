@@ -1,0 +1,4 @@
+digraph DataFlowSelfDeploy { rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  commit -> prep -> checkout -> build -> pretest -> baseline -> backup -> drain -> reap -> swap -> restart -> health -> outcome; restart -> rollback [label="failure"]; health -> rollback [label="unhealthy"];
+  commit [label="merged target commit"]; prep [label="GitSourcePreparer"]; checkout [label="fetch if missing\ncheckout detached"]; build [label="build_self_deploy_candidate"]; pretest [label="run_pretest"]; baseline [label="open memory\ncapture baseline"]; backup [label="protective backup"]; drain [label="drain engineers"]; reap [label="reap old-binary orphans"]; swap [label="atomic_install"]; restart [label="systemd or exec restart"]; health [label="self health probe"]; outcome [label="SelfDeployOutcome"]; rollback [label="do_rollback"];
+}

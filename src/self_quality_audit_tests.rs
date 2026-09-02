@@ -51,8 +51,10 @@
 //! }
 //! impl SelfQualityAuditReport { pub fn summary(&self) -> String; }
 //!
-//! pub fn parse_self_quality_audit_text(stdout: &str)
-//!     -> Result<SelfQualityAuditReport, String>;
+//! // #4968: the brittle `parse_self_quality_audit_text` AUDIT_COMPLETE marker
+//! //  scraper is RETIRED — the rail now reads a typed record fail-closed:
+//! pub fn read_verified_self_quality_audit(path: &Path, invoke_start: SystemTime)
+//!     -> SimardResult<SelfQualityAuditRecord>;   // R1–R7, in self_quality_audit_record.rs
 //! pub fn run_self_quality_audit(repo_root: &Path, state_root: &Path,
 //!     home_override: Option<&Path>) -> SimardResult<SelfQualityAuditReport>;
 //! // resolve_recipe_path is a *private* fn (matches disk_health), so it is
@@ -63,9 +65,17 @@
 
 use crate::error::SimardError;
 use crate::self_quality_audit::{
-    DEFAULT_INTERVAL_SECS, SelfQualityAuditReport, interval_secs_from_env,
-    parse_self_quality_audit_text, read_last_run, run_self_quality_audit, should_run_self_audit,
-    write_last_run,
+    DEFAULT_INTERVAL_SECS, SelfQualityAuditReport, interval_secs_from_env, read_last_run,
+    run_self_quality_audit, should_run_self_audit, write_last_run,
+};
+// #4968: the typed-record read path that replaces `parse_self_quality_audit_text`.
+// These symbols do not exist yet, so their unresolved import is the intended,
+// deterministic RED signal under `cargo test` until the Builder lands
+// `src/self_quality_audit_record.rs` + the `record-self-quality-audit` verb.
+use crate::operator_cli::dispatch_operator_cli;
+use crate::self_quality_audit_record::{
+    MAX_AGE_SECS, SELF_QUALITY_AUDIT_SCHEMA, SelfQualityAuditRecord,
+    read_verified_self_quality_audit,
 };
 
 use std::path::Path;
@@ -292,160 +302,337 @@ fn stale_last_run_triggers_audit_after_interval() {
 }
 
 // ===========================================================================
-// 5. Marker parser — parse_self_quality_audit_text
-//    AUDIT_COMPLETE is REQUIRED; WAVE_COMPLETE counts; URLs collected per marker.
+// 5. #4968 — typed SelfQualityAuditRecord read path (replaces the deleted
+//    parse_self_quality_audit_text AUDIT_COMPLETE marker grammar).
+//
+//    The recipe's final ACT step writes ONE typed, owner-only (0o600),
+//    freshness-checked record; the rail reads it FAIL-CLOSED via
+//    read_verified_self_quality_audit (R1–R7). Every failure mode is a distinct
+//    AdapterInvocationFailed carrying its R-code — NEVER a silent default. Also
+//    covers the gated `simard cognition record-self-quality-audit` writer verb
+//    and writer/reader parity (one shared type, no drift).
 // ===========================================================================
 
-#[test]
-fn parse_full_marker_set() {
-    let text = "\
-AUDIT_STARTED
-WAVE_START=1
-WAVE_COMPLETE=1
-PR_OPENED=https://github.com/rysweet/Simard/pull/101
-WAVE_START=2
-WAVE_COMPLETE=2
-PR_OPENED=https://github.com/rysweet/Simard/pull/102
-CRUSTY_APPROVED=https://github.com/rysweet/Simard/pull/101
-PR_MERGED=https://github.com/rysweet/Simard/pull/101
-WAVE_START=3
-WAVE_COMPLETE=3
-WAVE_START=4
-WAVE_COMPLETE=4
-WAVE_START=5
-WAVE_COMPLETE=5
-CRUSTY_UNRESOLVED=https://github.com/rysweet/Simard/pull/102
-AUDIT_COMPLETE=5 waves run; 2 PRs opened, 1 merged, 1 crusty-unresolved
-";
-    let report = parse_self_quality_audit_text(text).expect("full marker set must parse");
+/// Write `bytes` verbatim to `path` as an owner-only `0o600` file (so R6 passes
+/// for every non-R6 case), creating parents. Used to author records the typed
+/// writer would never produce — malformed JSON, an unknown key, waves > 5 — so
+/// the reader's fail-closed matrix is exercised directly.
+fn write_raw_600(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+    std::fs::write(path, bytes).expect("write raw record");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0o600");
+    }
+}
 
-    assert_eq!(report.waves_completed, 5, "counts WAVE_COMPLETE markers");
-    assert_eq!(
-        report.prs_opened,
-        vec![
-            "https://github.com/rysweet/Simard/pull/101".to_string(),
-            "https://github.com/rysweet/Simard/pull/102".to_string(),
-        ]
-    );
-    assert_eq!(
-        report.prs_merged,
-        vec!["https://github.com/rysweet/Simard/pull/101".to_string()]
-    );
-    assert_eq!(
-        report.crusty_approved,
-        vec!["https://github.com/rysweet/Simard/pull/101".to_string()]
-    );
-    assert_eq!(
-        report.crusty_unresolved,
-        vec!["https://github.com/rysweet/Simard/pull/102".to_string()]
-    );
-    assert_eq!(
-        report.summary_line,
-        "5 waves run; 2 PRs opened, 1 merged, 1 crusty-unresolved"
-    );
+/// A fully-valid, fresh `SelfQualityAuditRecord` as raw JSON (a base to tweak
+/// per fail-closed test).
+fn valid_audit_json(epoch: u64) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "self-quality-audit/v1",
+        "written_at_epoch": epoch,
+        "waves_completed": 5,
+        "prs_opened": ["https://github.com/rysweet/Simard/pull/5001"],
+        "prs_merged": ["https://github.com/rysweet/Simard/pull/5001"],
+        "crusty_approved": ["https://github.com/rysweet/Simard/pull/5001"],
+        "crusty_unresolved": [],
+        "summary_line": "5 waves, 1 PR opened, 1 merged"
+    })
+}
+
+/// Assert a reader result is the fail-closed `Err` for R-code `code` (e.g.
+/// `"R4"`) — an `AdapterInvocationFailed` whose reason names that check. The
+/// reader must NEVER return `Ok` (a defaulted/partial record) on a bad input.
+fn assert_read_r(result: Result<SelfQualityAuditRecord, SimardError>, code: &str) {
+    match result {
+        Ok(rec) => panic!("expected fail-closed {code}, got Ok({rec:?})"),
+        Err(SimardError::AdapterInvocationFailed { reason, .. }) => assert!(
+            reason.contains(code),
+            "expected fail-closed reason to carry {code}, got: {reason}"
+        ),
+        Err(other) => panic!("expected AdapterInvocationFailed carrying {code}, got: {other:?}"),
+    }
+}
+
+/// Drive the operator CLI (the gated writer verb entry point).
+fn cli(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    dispatch_operator_cli(args.iter().map(|s| s.to_string()))
+}
+
+// --- pins: schema + freshness constant ---
+
+#[test]
+fn audit_schema_pin_is_v1() {
+    assert_eq!(SELF_QUALITY_AUDIT_SCHEMA, "self-quality-audit/v1");
 }
 
 #[test]
-fn parse_minimal_only_audit_complete() {
-    // The only required marker; everything else defaults to empty/zero.
-    let report = parse_self_quality_audit_text("AUDIT_COMPLETE=nothing to fix this month")
-        .expect("AUDIT_COMPLETE alone is a valid (no-op) audit");
-    assert_eq!(report.waves_completed, 0);
-    assert!(report.prs_opened.is_empty());
-    assert!(report.prs_merged.is_empty());
-    assert!(report.crusty_approved.is_empty());
-    assert!(report.crusty_unresolved.is_empty());
-    assert_eq!(report.summary_line, "nothing to fix this month");
+fn audit_max_age_secs_is_five_minutes() {
+    assert_eq!(MAX_AGE_SECS, 300);
 }
 
+// --- happy path: a valid, fresh, 0o600 record is accepted ---
+
 #[test]
-fn parse_waves_completed_counts_only_complete_not_start() {
-    // Three waves started, only two finished -> waves_completed == 2.
-    let text = "\
-WAVE_START=1
-WAVE_COMPLETE=1
-WAVE_START=2
-WAVE_COMPLETE=2
-WAVE_START=3
-AUDIT_COMPLETE=partial run: 2 of 3 waves finished
-";
-    let report = parse_self_quality_audit_text(text).unwrap();
-    assert_eq!(
-        report.waves_completed, 2,
-        "WAVE_START must not inflate the completed count"
+fn read_accepts_a_valid_fresh_owner_only_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let epoch = now_epoch();
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_audit_json(epoch)).unwrap(),
     );
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+
+    let rec = read_verified_self_quality_audit(&path, invoke_start)
+        .expect("a valid, fresh, 0o600 record must be accepted");
+    assert_eq!(rec.schema, "self-quality-audit/v1");
+    assert_eq!(rec.waves_completed, 5);
+    assert_eq!(rec.prs_opened.len(), 1);
+    assert_eq!(rec.summary_line, "5 waves, 1 PR opened, 1 merged");
+}
+
+// --- R1: absent / unreadable ---
+
+#[test]
+fn read_r1_absent_record_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R1");
+}
+
+// --- R2: present but not valid JSON ---
+
+#[test]
+fn read_r2_malformed_json_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    write_raw_600(&path, b"not valid json at all {{{");
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R2");
+}
+
+// --- R3: schema version pin ---
+
+#[test]
+fn read_r3_wrong_schema_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let mut json = valid_audit_json(now_epoch());
+    json["schema"] = serde_json::json!("self-quality-audit/v2");
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R3");
+}
+
+// --- R4: closed-type parse & bounds (deny_unknown_fields / waves > 5) ---
+
+#[test]
+fn read_r4_unknown_top_level_key_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let mut json = valid_audit_json(now_epoch());
+    json["bogus_extra_field"] = serde_json::json!("x");
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R4");
 }
 
 #[test]
-fn parse_missing_audit_complete_is_error() {
-    // Waves ran but no terminal marker -> the run is not trustworthy; reject it.
-    let text = "\
-WAVE_START=1
-WAVE_COMPLETE=1
-PR_OPENED=https://github.com/rysweet/Simard/pull/9
-";
-    let result = parse_self_quality_audit_text(text);
+fn read_r4_waves_completed_over_five_is_fail_closed() {
+    // waves_completed is bounded to 0..=5; a value > 5 is a hard R4 reject.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let mut json = valid_audit_json(now_epoch());
+    json["waves_completed"] = serde_json::json!(6);
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R4");
+}
+
+// --- R5: required-field validity (summary_line must be non-empty) ---
+
+#[test]
+fn read_r5_empty_summary_line_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let mut json = valid_audit_json(now_epoch());
+    json["summary_line"] = serde_json::json!("   ");
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R5");
+}
+
+// --- R6: owner-only permissions ---
+
+#[cfg(unix)]
+#[test]
+fn read_r6_non_owner_only_permissions_is_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_audit_json(now_epoch())).unwrap(),
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R6");
+}
+
+// --- R7: freshness / anti-replay ---
+
+#[test]
+fn read_r7_mtime_predates_invoke_start_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_audit_json(now_epoch())).unwrap(),
+    );
+    let invoke_start = SystemTime::now() + Duration::from_secs(1_000);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R7");
+}
+
+#[test]
+fn read_r7_stale_written_at_epoch_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let stale = now_epoch().saturating_sub(10_000);
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_audit_json(stale)).unwrap(),
+    );
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_self_quality_audit(&path, invoke_start), "R7");
+}
+
+// --- gated writer verb `simard cognition record-self-quality-audit` + parity ---
+
+#[test]
+fn cli_record_self_quality_audit_writes_a_record_the_reader_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let epoch = now_epoch();
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+
+    cli(&[
+        "cognition",
+        "record-self-quality-audit",
+        "--record-path",
+        path.to_str().unwrap(),
+        "--written-at-epoch",
+        &epoch.to_string(),
+        "--waves-completed",
+        "5",
+        "--summary-line",
+        "5 waves, 2 PRs opened, 1 merged, 1 crusty-unresolved",
+        "--pr-opened",
+        "https://github.com/rysweet/Simard/pull/5001",
+        "--pr-opened",
+        "https://github.com/rysweet/Simard/pull/5002",
+        "--pr-merged",
+        "https://github.com/rysweet/Simard/pull/5001",
+        "--crusty-approved",
+        "https://github.com/rysweet/Simard/pull/5001",
+        "--crusty-unresolved",
+        "https://github.com/rysweet/Simard/pull/5002",
+    ])
+    .expect("a valid self-quality-audit record write must exit Ok");
+
+    // Writer/reader parity — the reader accepts exactly what the writer produced.
+    let rec = read_verified_self_quality_audit(&path, invoke_start)
+        .expect("the reader must accept the record the writer just produced (no drift)");
+    assert_eq!(rec.schema, "self-quality-audit/v1");
+    assert_eq!(rec.waves_completed, 5);
+    assert_eq!(rec.prs_opened.len(), 2);
+    assert_eq!(rec.prs_merged.len(), 1);
+    assert_eq!(rec.crusty_unresolved.len(), 1);
+    assert_eq!(
+        rec.summary_line,
+        "5 waves, 2 PRs opened, 1 merged, 1 crusty-unresolved"
+    );
+
+    // And the file is owner-only 0o600 (persist_json's atomic 0o600 write).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "record must be written owner-only 0o600"
+        );
+    }
+}
+
+#[test]
+fn cli_record_self_quality_audit_requires_summary_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let res = cli(&[
+        "cognition",
+        "record-self-quality-audit",
+        "--record-path",
+        path.to_str().unwrap(),
+        "--written-at-epoch",
+        &now_epoch().to_string(),
+        "--waves-completed",
+        "0",
+        // no --summary-line
+    ]);
     assert!(
-        result.is_err(),
-        "missing AUDIT_COMPLETE must be a parse error"
+        res.is_err(),
+        "a non-empty --summary-line is required (validate-all-then-write-once)"
     );
-}
-
-#[test]
-fn parse_empty_audit_complete_is_error() {
-    // AUDIT_COMPLETE must carry a non-empty summary.
-    let result = parse_self_quality_audit_text("WAVE_COMPLETE=1\nAUDIT_COMPLETE=\n");
     assert!(
-        result.is_err(),
-        "empty AUDIT_COMPLETE value must be rejected"
+        !path.exists(),
+        "a validation failure must leave NO file on disk"
     );
-    let result_ws = parse_self_quality_audit_text("AUDIT_COMPLETE=   \n");
+}
+
+#[test]
+fn cli_record_self_quality_audit_rejects_waves_over_five() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("self_quality_audit/record.json");
+    let res = cli(&[
+        "cognition",
+        "record-self-quality-audit",
+        "--record-path",
+        path.to_str().unwrap(),
+        "--written-at-epoch",
+        &now_epoch().to_string(),
+        "--waves-completed",
+        "6",
+        "--summary-line",
+        "over the wave cap",
+    ]);
+    assert!(res.is_err(), "--waves-completed > 5 must be rejected");
     assert!(
-        result_ws.is_err(),
-        "whitespace-only AUDIT_COMPLETE value must be rejected"
+        !path.exists(),
+        "a rejected write must leave NO file on disk"
     );
 }
 
 #[test]
-fn parse_empty_string_is_error() {
-    assert!(
-        parse_self_quality_audit_text("").is_err(),
-        "empty output must be a parse error (no AUDIT_COMPLETE)"
-    );
-}
-
-#[test]
-fn parse_ignores_unknown_lines() {
-    let text = "\
-some human-readable preamble the agent printed
-AUDIT_STARTED
-WAVE_COMPLETE=1
-NOTE: this line is not a recognized marker
-AUDIT_COMPLETE=1 wave, no PRs
-";
-    let report = parse_self_quality_audit_text(text).unwrap();
-    assert_eq!(report.waves_completed, 1);
-    assert!(report.prs_opened.is_empty());
-    assert_eq!(report.summary_line, "1 wave, no PRs");
-}
-
-#[test]
-fn parse_trims_whitespace_around_markers_and_values() {
-    // Padding is embedded via explicit `\n` (not end-of-source-line whitespace)
-    // so the intent survives any whitespace-trimming tool while still exercising
-    // the parser's trimming of markers, URL values, and the AUDIT_COMPLETE summary.
-    let text = "  WAVE_COMPLETE=1  \n   PR_OPENED=https://github.com/rysweet/Simard/pull/7   \n  AUDIT_COMPLETE=  done with leading/trailing spaces  \n";
-    let report = parse_self_quality_audit_text(text).unwrap();
-    assert_eq!(report.waves_completed, 1);
-    assert_eq!(
-        report.prs_opened,
-        vec!["https://github.com/rysweet/Simard/pull/7".to_string()],
-        "PR URL must be trimmed"
-    );
-    assert_eq!(
-        report.summary_line, "done with leading/trailing spaces",
-        "AUDIT_COMPLETE summary must be trimmed"
-    );
+fn cli_record_self_quality_audit_rejects_non_absolute_record_path() {
+    let res = cli(&[
+        "cognition",
+        "record-self-quality-audit",
+        "--record-path",
+        "relative/record.json",
+        "--written-at-epoch",
+        &now_epoch().to_string(),
+        "--waves-completed",
+        "1",
+        "--summary-line",
+        "ok",
+    ]);
+    assert!(res.is_err(), "--record-path must be absolute");
 }
 
 // ===========================================================================

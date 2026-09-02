@@ -7,6 +7,20 @@ pub struct RelaunchConfig {
     pub canary_target_dir: PathBuf,
     pub health_timeout: Duration,
     pub manifest_dir: PathBuf,
+    /// Allow-list of environment variable NAMES that gate subprocesses may
+    /// inherit from the daemon's ambient environment, on top of the always
+    /// re-injected base set required for the gates to run at all (see
+    /// `scrub_gate_env` in `gates.rs`). Names only — the values are read from
+    /// the live environment at spawn time, never persisted here or logged. Empty
+    /// by default: gates then see only the deny-by-default base env floor.
+    ///
+    /// This is the additive knob (#4440) that lets an operator hand a gate the
+    /// one extra variable a healthy candidate legitimately needs — established
+    /// empirically from the #4420 `failing_gate`/`failing_detail` diagnostics —
+    /// without widening the base floor or inheriting the daemon's whole ambient
+    /// env (which could hijack a gate or drift the canary away from the deployed
+    /// systemd shape, the observed red-canary non-convergence).
+    pub canary_env: Vec<String>,
 }
 
 impl Default for RelaunchConfig {
@@ -16,6 +30,7 @@ impl Default for RelaunchConfig {
                 .join(format!("simard-canary-{}", std::process::id())),
             health_timeout: Duration::from_secs(30),
             manifest_dir: PathBuf::from("."),
+            canary_env: Vec::new(),
         }
     }
 }
@@ -34,7 +49,7 @@ impl Display for RelaunchGate {
             Self::Smoke => "smoke",
             Self::UnitTest => "unit-test",
             Self::GymBaseline => "gym-baseline",
-            Self::RpcHealth => "bridge-health",
+            Self::RpcHealth => "rpc-health",
         };
         f.write_str(label)
     }
@@ -50,7 +65,12 @@ pub struct GateResult {
 impl Display for GateResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let status = if self.passed { "PASS" } else { "FAIL" };
-        write!(f, "[{}] {}: {}", status, self.gate, self.detail)
+        // Sanitise `detail` through the same redaction+length bound the
+        // tracing/OTel sink uses (#4511). `detail` is built from untrusted
+        // subprocess stderr and can embed a token-bearing remote URL; the
+        // operator-CLI sink (`eprintln!("{r}")`) must not print it raw.
+        let detail = super::gates::bound_gate_detail(&self.detail);
+        write!(f, "[{}] {}: {}", status, self.gate, detail)
     }
 }
 
@@ -70,7 +90,7 @@ mod tests {
     #[test]
     fn relaunch_gate_display() {
         assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
-        assert_eq!(RelaunchGate::RpcHealth.to_string(), "bridge-health");
+        assert_eq!(RelaunchGate::RpcHealth.to_string(), "rpc-health");
     }
 
     #[test]
@@ -117,7 +137,7 @@ mod tests {
         assert_eq!(RelaunchGate::Smoke.to_string(), "smoke");
         assert_eq!(RelaunchGate::UnitTest.to_string(), "unit-test");
         assert_eq!(RelaunchGate::GymBaseline.to_string(), "gym-baseline");
-        assert_eq!(RelaunchGate::RpcHealth.to_string(), "bridge-health");
+        assert_eq!(RelaunchGate::RpcHealth.to_string(), "rpc-health");
     }
 
     #[test]
@@ -174,5 +194,42 @@ mod tests {
         };
         let debug = format!("{result:?}");
         assert!(debug.contains("RpcHealth"), "{debug}");
+    }
+
+    // #4511: the operator-CLI sink (`eprintln!("{r}")`) must sanitise `detail`
+    // symmetrically with the tracing/OTel sink — never printing an embedded
+    // credential nor an unbounded blob.
+    #[test]
+    fn gate_result_display_redacts_embedded_credentials() {
+        let result = GateResult {
+            gate: RelaunchGate::Smoke,
+            passed: false,
+            detail: "clone failed: https://x-access-token:ghp_SECRETTOKEN123@github.com/o/r.git"
+                .to_string(),
+        };
+        let display = result.to_string();
+        assert!(
+            !display.contains("ghp_SECRETTOKEN123"),
+            "token leaked to operator-CLI sink: {display}"
+        );
+        assert!(display.contains("***@github.com"), "{display}");
+    }
+
+    #[test]
+    fn gate_result_display_bounds_oversized_detail() {
+        let result = GateResult {
+            gate: RelaunchGate::UnitTest,
+            passed: false,
+            detail: "x".repeat(4096),
+        };
+        let display = result.to_string();
+        // Prefix "[FAIL] unit-test: " + bounded 512-char detail + "..." — the
+        // full 4096-char blob must never reach the terminal.
+        assert!(
+            display.len() < 600,
+            "detail not bounded on operator-CLI sink: len={}",
+            display.len()
+        );
+        assert!(display.ends_with("..."), "{display}");
     }
 }

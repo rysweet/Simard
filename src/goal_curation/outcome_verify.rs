@@ -62,7 +62,7 @@ pub const GOAL_LIVE_OUTCOME_VERIFICATION_METRIC: &str = "goal_live_outcome_verif
 const DEMOTED_PROGRESS_PERCENT: u32 = 90;
 
 /// Environment kill-switch: `SIMARD_OUTCOME_VERIFY=off` disables live outcome
-/// verification (the daemon leaves the bridge pair `None`, restoring the legacy
+/// verification (the daemon leaves the memory pair `None`, restoring the legacy
 /// curate path). Secure default is **ON**.
 ///
 /// Only the explicit documented value `off` (case-insensitive) disables. Any
@@ -373,6 +373,12 @@ mod tests {
             &self,
             _ctx: &crate::ooda_brain::EngineerLifecycleCtx,
         ) -> SimardResult<crate::ooda_brain::EngineerLifecycleDecision> {
+            unreachable!()
+        }
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
             unreachable!()
         }
         fn decide_goal_outcome_verification(

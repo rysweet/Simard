@@ -1,7 +1,7 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
-last_updated: 2026-04-03
+description: Reference for the shipped `simard` command tree, the installer-based deployment path, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -71,8 +71,10 @@ simard
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
+|- disk-reclaim [--apply] [--report-json] [--target-pct=N]
+|  `- exec --candidates <json|@file|@-> [--apply] [--report-json]
 |- update
-`- install
+`- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
 
 Bare `simard` prints this operator surface directly.
@@ -413,17 +415,49 @@ metric catalog behind it.
 
 ### `simard update`
 
-Self-update the binary to the latest GitHub release. Downloads the release asset matching the current platform and replaces the running binary.
+Self-update the binary to the latest GitHub release. Today this downloads the
+release asset matching the current platform and replaces the running binary.
+The planned installer integration is for `simard update` to hand the verified
+release binary and matching prompt assets to the same staging, backup, and
+systemd activation flow as `simard install`.
 
 ### `simard install`
 
-Install the Simard binary to `~/.simard/bin`. Used by the npx wrapper (`npx github:rysweet/Simard install`) to persist the binary for direct CLI use.
+Canonical host deployment rail. This command installs the currently executing
+Simard binary to `$SIMARD_HOME/bin/simard`, installs matching prompt assets to
+`$SIMARD_HOME/prompt_assets`, writes the user systemd units
+`simard-ooda.service` and `simard-signal.service`, preserves the previous live
+binary under `$SIMARD_HOME/.install-backups/`, restarts both services via
+`systemctl --user`, and **owns the `simard` PATH entrypoint** — it repairs
+`~/.local/bin/simard` to a symlink at `$SIMARD_HOME/bin/simard` and prunes
+verified-ours stale orphans (e.g. `~/.cargo/bin/simard`) so a deploy never
+leaves a version-skewed `simard` shadowing the fresh one on PATH. See the
+[installer reference](./simard-installer.md#path-entrypoint-ownership-guarantee).
+
+```text
+simard install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]
+               [--entrypoint-dir PATH] [--orphan-dir PATH ...]
+```
+
+`SIMARD_HOME` defaults to `~/.simard`; `--simard-home` overrides it for this
+install. The generated unit `WorkingDirectory` is the resolved
+`SIMARD_HOME`, never a source checkout, `target/`, or `worktrees/main`. The live
+binary is replaced by staging then atomic rename, not by copying over a running
+file.
+
+Use `--dry-run` to validate and print the plan without mutating live files or
+invoking systemd. Use `--systemd-user-dir` and `--systemctl` only for isolated
+hosts and hermetic tests.
+
+Contract: [Simard installer reference](./simard-installer.md).
 
 ### `simard self-health [--json] [--pre-deploy-facts=N]`
 
 Run the post-deploy health probe against the live store and print a report. The
-five probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
-`brains_llm_backed`, and `no_quarantine`; the report is healthy only when every
+six probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
+`brains_llm_backed`, `no_quarantine`, and `entrypoint_parity` (the PATH-resolved
+`simard --version` matches the installed binary — no stale entrypoint or foreign
+shadow); the report is healthy only when every
 probe is. `--json` emits the structured `SelfHealthReport`; `--pre-deploy-facts=N`
 supplies the memory baseline the self-deploy orchestrator captures before the
 swap. Exit code is `0` when healthy, non-zero otherwise. See the
@@ -448,6 +482,43 @@ source repo. See
 [run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md),
 [self-deploy source-prep](self-deploy-source-prep.md), and
 [verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
+
+## Disk reclamation command
+
+### `simard disk-reclaim [--apply] [--report-json] [--target-pct=N]`
+
+Run the agentic disk-reclamation capability: an analysis-only agent proposes
+reclaimable candidates (worktrees mapped to merged/closed PRs, orphaned
+de-registered dirs, stale build caches) and a deterministic Rust executor
+disposes of them behind non-bypassable safety rails, largest-first, until the
+home partition is under the target `%-used`.
+
+**Dry-run is the default** — with no flags it performs the full analysis and
+guard vetting but makes **zero** destructive changes, printing a would-remove
+report plus the human-review list. `--apply` performs the guarded reclamation;
+`--report-json` emits the `ReclaimReport` as JSON; `--target-pct=N` overrides
+`SIMARD_DISK_RECLAIM_PCT` for the run (clamped `1..=99`).
+
+Safety rails (deterministic, cannot be bypassed by the agent): never removes
+`worktrees/main` or a daemon `WorkingDirectory`, a path referenced by a live
+PID, a worktree with uncommitted/unpushed work not in a merged/closed PR, or an
+active recipe/engineer worktree. Anything a rail refuses is reported for human
+review, never deleted. `--apply` is refused when `geteuid() == 0`. No `--admin`
+/ `--no-verify` is ever passed to git.
+
+Exit codes: `0` success / already under threshold; `1` failure; `2` refused
+(e.g. `--apply` as root).
+
+### `simard disk-reclaim exec --candidates <json|@file|@-> [--apply] [--report-json]`
+
+The Rust-gated executor entry point that the `disk-reclaim.yaml` recipe calls
+internally, also usable directly. Reads a candidate list (inline JSON, `@file`,
+or `@-` for stdin) and feeds it to the guarded executor. **Every path is
+re-validated through the protected-path guard** regardless of what the JSON
+claims — a hand-edited candidate list cannot make it delete a protected path.
+
+See [Configure disk reclamation](../howto/configure-disk-reclamation.md) and the
+[Disk reclaim API reference](disk-reclaim-api.md).
 
 ## Compatibility mapping
 

@@ -1064,6 +1064,46 @@ pub(crate) const PART_01: &str = r#"
       }catch(e){el.innerHTML='<span class="err">Failed to reach /api/cognition/recall-precision</span>';}
     }
 
+    function enrichAttachClass(rate){
+      if(rate==null) return '';
+      if(rate>=0.95) return 'ok';
+      if(rate>=0.75) return 'warn';
+      return 'err';
+    }
+    async function fetchEnrichment(){
+      const el=document.getElementById('enrichment-panel');
+      if(!el) return;
+      const fresh=document.getElementById('enrichment-freshness');
+      try{
+        const d=await apiFetch('/api/enrichment');
+        if(fresh){
+          const f=d.freshness||'missing';
+          const dot=f==='live'?'#3fb950':(f==='stale'?'#d29922':'#8b949e');
+          fresh.innerHTML=`<span style="color:${dot}">●</span> ${esc(f)}`;
+        }
+        if(!d.available){
+          el.innerHTML='<span class="value">Not tracked yet — no enrichment decisions observed in the live snapshot.</span>';
+          return;
+        }
+        const rate=d.attach_rate;
+        const ratePct=rate==null?'n/a':(rate*100).toFixed(0)+'%';
+        const deg=d.degraded||{};
+        const degMem=deg.memory_ipc||0, degKnow=deg.knowledge_launch||0;
+        const fmt=(v)=>v==null?'n/a':(Math.round(v*10)/10);
+        let html=`
+          <div class="stat"><span class="label">Attach-rate</span><span class="value ${enrichAttachClass(rate)}">${ratePct} <span style="color:#8b949e">(${d.attached}/${d.decisions} decisions)</span></span></div>
+          <div class="stat"><span class="label">Avg facts / decision</span><span class="value">${fmt(d.avg_facts_injected)}</span></div>
+          <div class="stat"><span class="label">Avg procedures / decision</span><span class="value">${fmt(d.avg_procedures_injected)}</span></div>
+          <div class="stat"><span class="label">Avg preamble bytes</span><span class="value">${fmt(d.avg_preamble_bytes)}</span></div>
+          <div class="stat"><span class="label">Recall degrades</span><span class="value ${(degMem||degKnow)?'err':''}">memory-ipc ${degMem} · knowledge ${degKnow}</span></div>`;
+        if(d.last){
+          const l=d.last;
+          html+=`<div class="stat"><span class="label">Last decision</span><span class="value">attached=${l.attached} · ${l.facts_injected} facts · ${l.procedures_injected} procs · ${l.preamble_bytes}B <span style="color:#8b949e">${l.at?timeAgo(l.at):''}</span></span></div>`;
+        }
+        el.innerHTML=html;
+      }catch(e){el.innerHTML='<span class="err">Failed to reach /api/enrichment</span>';}
+    }
+
     async function fetchAgentOverview(){
       try{
         const d=await apiFetch('/api/activity');

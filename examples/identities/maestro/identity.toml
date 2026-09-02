@@ -1,0 +1,55 @@
+# Maestro — EXAMPLE music composition & production identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# Maestro turns a musical brief into an ENGRAVED SCORE (readable notation) plus a
+# RENDERED AUDIO TRACK (playable audio) — end to end. Its real behavior is
+# delivered by the agentic recipe in `recipes/maestro-score-and-produce.yaml`,
+# which may drive any external domain tooling — LilyPond / MuseScore for
+# engraving, MIDI + open-source synths (FluidSynth, TiMidity++) for the DAW /
+# render pass, and ffmpeg for encoding. None of that tooling lives in Simard's
+# daemon.
+
+[package]
+name = "maestro"
+version = "0.1.0"
+description = "Example identity: musical brief -> engraved score (LilyPond/MuseScore) + rendered audio track (MIDI + open-source synths)"
+
+[[identities]]
+name = "maestro"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "maestro-system"
+path = "prompts/maestro_system.md"
+
+[[identities.prompt_assets]]
+id = "maestro-compose"
+path = "prompts/maestro_compose.md"
+
+[[identities.prompt_assets]]
+id = "maestro-arrange"
+path = "prompts/maestro_arrange.md"
+
+[[identities.prompt_assets]]
+id = "maestro-engrave"
+path = "prompts/maestro_engrave.md"
+
+[[identities.prompt_assets]]
+id = "maestro-produce"
+path = "prompts/maestro_produce.md"
+
+[[identities.prompt_assets]]
+id = "maestro-deliver"
+path = "prompts/maestro_deliver.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"

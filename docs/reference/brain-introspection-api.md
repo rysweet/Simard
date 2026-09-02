@@ -1,7 +1,7 @@
 ---
 title: Brain introspection API
-description: Rust API reference for Simard's periodic brain self-examination and memory-hygiene pass — the run_brain_introspection daemon hook, the BrainIntrospectionReport struct, the enforce_prune_cap pure bound, parse_brain_introspection_text marker parsing, resolve_recipe_path, the brain-introspection recipe contract, and the SIMARD_BRAIN_INTROSPECTION_* configuration knobs.
-last_updated: 2026-06-27
+description: Rust API reference for Simard's periodic brain self-examination and memory-hygiene pass — the run_brain_introspection daemon hook, the BrainIntrospectionReport struct, the enforce_prune_cap pure bound, the typed BrainIntrospectionRecord + fail-closed read_verified_brain_introspection read path (issue #4968), resolve_recipe_path, the brain-introspection recipe contract, and the SIMARD_BRAIN_INTROSPECTION_* configuration knobs.
+last_updated: 2026-07-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -11,6 +11,7 @@ related:
   - ./disk-health-api.md
   - ./automatic-distillation-scheduler.md
   - ./ooda-brain-parse-failure-record.md
+  - ./record-brain-introspection-self-audit-cli.md
 ---
 
 # Brain introspection API
@@ -23,6 +24,16 @@ related:
 > `src/ooda_brain/prompt_store.rs`.
 
 **Module:** `src/brain_introspection.rs`
+
+!!! note "Typed-record read path (issue [#4968](https://github.com/rysweet/Simard/issues/4968))"
+    The recipe no longer emits text markers the hook scrapes from
+    `step_results[*].output`. As of #4968 the recipe's final ACT step calls the gated
+    `simard cognition record-brain-introspection` verb, which writes a typed
+    [`BrainIntrospectionRecord`](./record-brain-introspection-self-audit-cli.md#the-brainintrospectionrecord-schema);
+    the hook reads it **fail-closed** via `read_verified_brain_introspection` (R1–R7).
+    `parse_brain_introspection_text` and its marker grammar are **deleted**. The record
+    verb, schema, and read matrix are specified in
+    [Reference: record-brain-introspection / record-self-quality-audit](./record-brain-introspection-self-audit-cli.md).
 
 The `brain_introspection` module is a periodic daemon hook that performs a
 higher-level **brain self-examination + memory-hygiene** pass on its own
@@ -80,26 +91,30 @@ run_brain_introspection(&*clients.memory, &repo_root, &state_root, None)
        │        consolidated_facts = (semantic+procedural)_after
        │                             − (semantic+procedural)_before  (≥ 0)
        │
-       ├─ 4. spawn recipe-runner-rs brain-introspection.yaml
+       ├─ 4. compute record_path = state_root/brain_introspection/record.json
+       │        delete any stale file; capture invoke_start: SystemTime
+       │        spawn recipe-runner-rs brain-introspection.yaml
        │        --output-format json
-       │        -c state_root=… -c repo_path=…
+       │        -c state_root=… -c repo_path=… -c record_path=<abs>
        │        -c max_prune=<cap> -c baseline_runs=<n> -c stats=<json>
        │        (max_prune = enforce_prune_cap ceiling on *recommendations*)
        │             │
+       │             ▼  recipe's final ACT step:
+       │        simard cognition record-brain-introspection --record-path <abs> …
+       │             │   (writes typed BrainIntrospectionRecord, 0o600)
        │             ▼
-       │   JSON envelope (stdout)
-       │     { success, step_results: [{ step_id, output }] }
+       │   read_verified_brain_introspection(record_path, invoke_start)  (R1–R7)
        │             │
-       │             ▼
-       │   parse_brain_introspection_text(step output)
+       │             ├─ Ok(rec)  ⇒ recipe-owned fields (brain_health, patterns,
+       │             │              regressions, prune_requested, issue_url)
+       │             └─ Err(Rn)  ⇒ WARN + degrade (keep bounded hygiene; Ok report)
        │
-       ├─ 5. record final metrics; prune_requested = min(recipe count, cap);
-       │     consolidated_facts is the hook-measured delta (recipe marker is
-       │     an advisory echo); issue_url present
+       ├─ 5. record final metrics; prune_requested = min(record count, cap);
+       │     consolidated_facts is the hook-measured delta; issue_url from record
        ▼
 BrainIntrospectionReport { live_memories, sensory_pruned, consolidated_facts,
-                           prune_requested, brain_health, patterns,
-                           regressions, issue_url }
+                          prune_requested, brain_health, patterns,
+                          regressions, issue_url }
 ```
 
 **Split of labor.** The **Rust hook (daemon-side)** owns the verified,
@@ -117,7 +132,8 @@ operation runs in the hook; the recipe only *recommends*.
 
 Entry point, called from the daemon loop. Reads memory statistics, performs the
 bounded safe hygiene (sensory prune + additive consolidation), spawns the
-agentic recipe, parses its markers, records metrics, and returns the report.
+agentic recipe, reads the typed record it writes via
+`read_verified_brain_introspection`, records metrics, and returns the report.
 
 ```rust
 pub fn run_brain_introspection(
@@ -150,8 +166,8 @@ pub fn run_brain_introspection(
 
 Steps 1–3 are memory RPCs; a failure there returns the underlying `SimardError`
 (e.g. transport/`get_statistics`/`prune_expired_sensory`/`consolidate_episodes`
-failures) **before** the recipe is ever spawned. Steps 4–5 (recipe spawn + parse)
-return `SimardError::AdapterInvocationFailed`:
+failures) **before** the recipe is ever spawned. Steps 4–5 (recipe spawn + typed
+record read) return `SimardError::AdapterInvocationFailed`:
 
 | Stage | Condition                          | Error reason                                            |
 | ----- | ---------------------------------- | ------------------------------------------------------- |
@@ -159,15 +175,16 @@ return `SimardError::AdapterInvocationFailed`:
 | 4     | Recipe YAML not found              | `"recipe file brain-introspection.yaml not found…"`     |
 | 4     | `recipe-runner-rs` not on PATH     | `"recipe-runner-rs spawn failed: …"`                    |
 | 4     | Recipe exited non-zero             | `"recipe exited with <code>: <stderr>"`                 |
-| 5     | JSON deserialization failed        | `"failed to deserialize recipe JSON output: …"`         |
-| 5     | Empty step_results                 | `"no step results in recipe JSON output"`               |
-| 5     | Text markers missing BRAIN_HEALTH  | `"failed to parse recipe text output: …"`               |
+| 5     | Record read failed R1–R7           | `"brain-introspection record R{n}: <reason>"` — see the [read matrix](./record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7) |
 
-No fallback. The deterministic memory operations (steps 1–3) run **before** the
-recipe spawn, so a recipe failure never voids the bounded hygiene already
-performed. Any error — memory RPC or recipe — propagates to the daemon, which
-logs a `WARN` and continues the loop, mirroring the disk-health hook's fail-open
-behavior.
+No fallback at the **read seam**: `read_verified_brain_introspection` never returns
+a defaulted or partial record — any R1–R7 failure is a distinct typed `Err`. The
+deterministic memory operations (steps 1–3) run **before** the recipe spawn, so a
+recipe/record failure never voids the bounded hygiene already performed. Any error —
+memory RPC or record read — is caught by `run_brain_introspection`'s **best-effort
+outer contract**: it logs a `WARN`, keeps the bounded hygiene results, and returns
+`Ok(report)` with the hook-measured fields and empty recipe fields, so the daemon loop
+continues (mirroring the disk-health hook's fail-open behavior).
 
 ### `BrainIntrospectionReport`
 
@@ -181,10 +198,10 @@ pub struct BrainIntrospectionReport {
     pub sensory_pruned: usize,
     /// Facts/procedures added by consolidation, measured by the hook as the
     /// post−pre delta of (semantic + procedural) counts from `get_statistics`.
-    /// The recipe's `CONSOLIDATED_FACTS=` marker is an advisory echo only.
+    /// Always hook-measured — never taken from the recipe record.
     pub consolidated_facts: u64,
-    /// Number of value-bearing prune *candidates* the recipe recommended,
-    /// clamped to the cap (`min(recipe count, cap)`). Never auto-deleted.
+    /// Number of value-bearing prune *candidates* the record reported,
+    /// clamped to the cap (`min(record count, cap)`). Never auto-deleted.
     pub prune_requested: usize,
     /// Brain-health findings (>=1; e.g. "fallback rate 4.2% (baseline 1.1%)").
     pub brain_health: Vec<String>,
@@ -201,8 +218,8 @@ pub struct BrainIntrospectionReport {
 | -------------------- | ---------------- | ---------------------------------------------------------------- |
 | `live_memories`      | `u64`            | Non-sensory live memory count (hook-measured; includes the consolidation delta) |
 | `sensory_pruned`     | `usize`          | Already-expired transient sensory rows removed daemon-side (non-discretionary; **not** capped) |
-| `consolidated_facts` | `u64`            | Hook-measured (semantic + procedural) delta from the consolidation pass; recipe marker is advisory |
-| `prune_requested`    | `usize`          | Count of value-bearing prune *candidates* recommended, clamped ≤ cap (never auto-deleted) |
+| `consolidated_facts` | `u64`            | Hook-measured (semantic + procedural) delta from the consolidation pass; never taken from the record |
+| `prune_requested`    | `usize`          | Count of value-bearing prune *candidates* reported by the record, clamped ≤ cap (never auto-deleted) |
 | `brain_health`       | `Vec<String>`    | Brain-health summary lines (at least one required)               |
 | `patterns`           | `Vec<String>`    | Recurring-pattern findings (may be empty)                        |
 | `regressions`        | `Vec<String>`    | Regressions detected against the rolling baseline                |
@@ -248,12 +265,15 @@ expired-sensory cleanup.* (A future bounded destructive prune of value-bearing
 memory — see [Safety model](#safety-model) — will also be clamped by this cap
 once the backed-up server RPC lands.)
 
-### `parse_brain_introspection_text(stdout) → Result<BrainIntrospectionReport, String>`
+### `read_verified_brain_introspection(path, invoke_start) → SimardResult<BrainIntrospectionRecord>`
 
-Parses text markers from the agent step output. See
-[Marker grammar](#marker-grammar). Unknown lines are silently ignored
-(forward-compatible with LLM reasoning noise), exactly like
-`parse_disk_health_text`.
+Reads the typed record the recipe's final ACT step wrote, **fail-closed** over the
+full R1–R7 matrix (present/readable, well-formed JSON, schema pin, closed-type parse +
+bounds, required-field validity, owner-only `0o600` permissions, freshness /
+anti-replay). Each failure is a distinct typed `Err` — the reader **never** returns a
+defaulted or partial record. Defined in `src/brain_introspection_record.rs`; the full
+matrix, schema, and freshness model are specified in
+[Reference: record-brain-introspection / record-self-quality-audit](./record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7).
 
 ### `resolve_recipe_path(repo_root, home_override) → Option<PathBuf>`
 
@@ -269,46 +289,42 @@ disk-health module's layout.
 
 ---
 
-## Marker grammar
+## Recipe result contract (typed record)
 
-The recipe emits plain-text markers, one per line, in the final agent step
-output. The Rust shim parses them out of the `--output-format json` envelope's
-`step_results[*].output` strings.
+The recipe's **final ACT step** calls the gated
+`simard cognition record-brain-introspection` verb, which writes one typed
+[`BrainIntrospectionRecord`](./record-brain-introspection-self-audit-cli.md#the-brainintrospectionrecord-schema)
+(owner-only `0o600`) to the rail-supplied `record_path`. The record carries the
+**recipe-owned** findings only:
 
-```text
-BRAIN_HEALTH: <line>        # >=1 required; missing → parse error
-PATTERN: <line>            # 0..n
-REGRESSION: <line>         # 0..n
-PRUNE_CANDIDATE: <line>    # 0..n human-readable candidate descriptions
-PRUNE_REQUESTED=<u64>      # count of candidates (defaults to 0)
-CONSOLIDATED_FACTS=<u64>   # advisory echo only; hook delta is authoritative
-ISSUE_URL=<url>            # optional
+```jsonc
+{
+  "schema": "brain-introspection/v1",
+  "written_at_epoch": 1793558400,
+  "brain_health":  ["fallback rate 4.2% (baseline 1.1%)"],  // ≥1 required (R5)
+  "patterns":      ["…"],                                    // 0..n
+  "regressions":   ["…"],                                    // 0..n
+  "prune_candidates": ["…"],                                 // 0..n human-readable
+  "prune_requested": 4,                                      // hook re-clamps to cap
+  "issue_url": "https://github.com/rysweet/Simard/issues/5012"
+}
 ```
 
-**Parsing rules** (identical philosophy to the disk-health parser):
+**Field ownership rules:**
 
-- `BRAIN_HEALTH:` — at least one line **required**. Empty text after the colon
-  is skipped; if no non-empty `BRAIN_HEALTH:` line is present, parsing errors.
-- `PRUNE_REQUESTED=N` — optional `u64`, default `0`; the hook clamps it to the
-  cap before storing it as `prune_requested`.
-- `CONSOLIDATED_FACTS=N` — optional `u64`, default `0`. **Advisory only:** the
-  authoritative `consolidated_facts` is the hook-measured (semantic + procedural)
-  stats delta, since `consolidate_episodes` returns `Option<String>`, not a count
-  the recipe could observe. The marker is retained for human readability in the
-  raw envelope.
-- `ISSUE_URL=` — optional; sets `issue_url` to `Some(url)`.
-- `PATTERN:` / `REGRESSION:` / `PRUNE_CANDIDATE:` — optional, repeatable; empty
-  bodies skipped.
-- Unknown lines are silently ignored. Leading/trailing whitespace trimmed;
-  blank lines skipped.
+- `brain_health` — at least one non-empty line **required** (R5 fails closed
+  otherwise). Bounded list; each element sanitized and byte-capped.
+- `prune_requested` — the count of value-bearing candidates; the hook clamps it to
+  `enforce_prune_cap` before storing it. The recipe *recommends*, it never deletes.
+- `issue_url` — optional; the GitHub issue the run created or updated.
+- `live_memories`, `sensory_pruned`, `consolidated_facts` — **not** in the record.
+  The hook measures these from `get_statistics` / `prune_expired_sensory` /
+  `consolidate_episodes` and merges them into the final report; they are never taken
+  from the recipe. The old advisory `CONSOLIDATED_FACTS=` echo is removed.
 
-> **Why `PRUNE_REQUESTED` and not `PRUNED`.** The recipe never deletes
-> superseded memories in this increment — it *recommends* candidates. The marker
-> name reflects that the count is requested/recommended, not executed. The
-> daemon-side `sensory_pruned` field (transient sensory only) is the sole
-> actually-deleted count and is measured by the hook, not parsed from the
-> recipe. Likewise `consolidated_facts` is measured by the hook (a stats delta),
-> not taken from the recipe marker.
+There is no marker grammar and no `step_results[*].output` scraping — the recipe's
+free-text prose is irrelevant; only the typed record is read back, fail-closed
+([R1–R7](./record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7)).
 
 ---
 
@@ -320,14 +336,15 @@ The shim invokes `recipe-runner-rs` with:
 recipe-runner-rs <recipe_path> --output-format json \
   -c state_root=<state_root> \
   -c repo_path=<repo_root> \
+  -c record_path=<abs>          # state_root/brain_introspection/record.json \
   -c max_prune=<cap> \
   -c baseline_runs=<n> \
   -c stats=<json>
 ```
 
-- `--output-format json` — required, so step output (not just the recipe
-  summary line) is accessible. Same rationale as disk-health and
-  `stewardship::recipe_merge_judge`.
+- `-c record_path=<abs>` — the absolute path the hook derives, **pre-truncates**
+  (deletes any stale file), and captures `invoke_start` for, immediately before spawn.
+  The recipe passes it straight through to `record-brain-introspection --record-path`.
 - `-c stats=<json>` — the measured `CognitiveStatistics` (live counts, sensory
   pruned, consolidated) serialized to JSON, so the agentic pass reasons over
   **real** numbers the hook already gathered rather than re-deriving them.
@@ -339,29 +356,27 @@ recipe-runner-rs <recipe_path> --output-format json \
 
 ### Recipe steps (`brain-introspection.yaml`)
 
-A **single comprehensive agent step** (`id: brain-introspection`) performs all
-five phases, mirroring the proven `disk-health-check.yaml` single-step pattern
+A **single comprehensive agent step** (`id: brain-introspection`) performs the five
+analysis phases, mirroring the proven `disk-health-check.yaml` single-step pattern
 (the LLM runs `bash`/`gh` internally rather than relying on multi-step recipe
-sequencing):
+sequencing), and then a **final ACT step** records the typed result:
 
-| Phase | within the step   | emits                                              |
-| ----- | ----------------- | -------------------------------------------------- |
-| 1     | brain-health      | `BRAIN_HEALTH:`, `REGRESSION:`                     |
-| 2     | patterns          | `PATTERN:`                                         |
-| 3     | prune-recommend   | `PRUNE_CANDIDATE:`, `PRUNE_REQUESTED=`             |
-| 4     | consolidate       | `CONSOLIDATED_FACTS=` (advisory)                   |
-| 5     | output            | `ISSUE_URL=`                                       |
+| Phase | within the step   | contributes to the record        |
+| ----- | ----------------- | -------------------------------- |
+| 1     | brain-health      | `brain_health`, `regressions`    |
+| 2     | patterns          | `patterns`                       |
+| 3     | prune-recommend   | `prune_candidates`, `prune_requested` |
+| 4     | consolidate       | (hook-measured; not in record)   |
+| 5     | output            | `issue_url`                      |
+| ACT   | record            | `simard cognition record-brain-introspection --record-path <abs> …` |
 
 Phase 1 reads `~/.simard/metrics/metrics.jsonl` and the daemon log, computing
 the record-fallback rate, the `brain_lifecycle_decision` parse-failure rate,
 SIGTERM/degraded/quarantine counts, and 0-succeeded-action cycles, then compares
 them to the baseline window. Phase 5 creates or **updates** a GitHub issue
-(stable title ⇒ dedup, no spam) via `gh issue` and emits its URL. The
-`CONSOLIDATED_FACTS=` line is an advisory echo for the issue body — the hook does
-**not** trust it for the `consolidated_facts` field; the hook's own post−pre
-`get_statistics` delta is authoritative. The Rust shim parses the markers from
-the concatenation of all `step_results[*].output` strings, so the single step's
-output is consumed in full.
+(stable title ⇒ dedup, no spam) via `gh issue`. The final ACT step then calls the
+gated record verb exactly once; the consolidation count is the hook's own post−pre
+`get_statistics` delta, never a recipe-supplied number.
 
 ---
 
@@ -457,7 +472,7 @@ The hook writes to `~/.simard/metrics/metrics.jsonl` via
 
 These accumulate the rolling baseline the next run's brain-health step compares
 against (via `self_metrics::query_metrics` / `recent_metrics`). The first run
-finds no prior entries and reports `BRAIN_HEALTH: no prior baseline`.
+finds no prior entries and records `brain_health: ["no prior baseline"]`.
 
 ---
 
@@ -513,7 +528,8 @@ explicitly guards against. The safe resolution:
 | `run_brain_introspection`         | Stub `CognitiveMemoryOps` (InMemory transport, mirrors `memory_client/tests.rs`): asserts stats read, **unbounded** `prune_expired_sensory` call (no cap applied), `consolidated_facts` measured as the post−pre semantic+procedural delta, recipe spawn path; recipe-runner-missing → graceful WARN |
 | `no_destructive_value_prune`      | Asserts no hook path calls `prune_superseded` or a destructive semantic/procedural delete (the only deletion is expired-sensory cleanup) |
 | `resolve_recipe_path`             | Hot-reload (via `home_override`) vs. in-tree resolution; neither present → `None`    |
-| `parse_brain_introspection_text`  | Happy path; missing-required (`BRAIN_HEALTH`) → error; noisy LLM output tolerated    |
+| `read_verified_brain_introspection` | One dedicated test per R1–R7 case (missing/unreadable, malformed JSON, schema mismatch, unknown-field/bounds break, empty `brain_health`, non-`0o600`/wrong-owner, stale/replayed mtime) against a real 0o600 temp fixture, plus a happy-path read yielding the correct recipe-owned fields |
+| Rework-contract guard | `tests_rework_contract.rs` forbids `parse_brain_introspection_text` / `step_results` / `.output` scraping in `brain_introspection.rs` and requires `read_verified_*` + `record_path` |
 | Daemon interval gating            | `0` disables; elapsed triggers — mirrors the disk-health interval test              |
 | Prompt content-pin                | `embedded_fallback("brain_introspection.md")` is `Some`; prompt mentions brain-health, patterns, bounded-safe-prune, consolidation, gh-issue; recipe YAML content-pinned via `include_str!` |
 
@@ -546,3 +562,5 @@ additive-consolidate + recommend hook, the recipe, the prompt, the
   the per-cycle consolidation this pass reuses (and does not duplicate)
 - [OODA brain parse-failure record](./ooda-brain-parse-failure-record.md) — the
   `brain_lifecycle_decision` / parse-failure signal the brain-health step reads
+- [record-brain-introspection / record-self-quality-audit CLI](./record-brain-introspection-self-audit-cli.md) —
+  the gated writer verb, `BrainIntrospectionRecord` schema, and R1–R7 read matrix (#4968)

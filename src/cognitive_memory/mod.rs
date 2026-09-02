@@ -4,7 +4,7 @@
 //! deleted. The [`CognitiveMemoryOps`] trait defines the backend-agnostic API;
 //! the only implementation is [`LibraryCognitiveMemory`], which delegates to the
 //! upstream `amplihack-memory-lib` `CognitiveMemory` (persistent, lbug-backed).
-//! The legacy bridge client
+//! The legacy memory client
 //! ([`CognitiveMemoryClient`](crate::memory_client::CognitiveMemoryClient)) and
 //! the IPC client also implement the trait so callers stay backend-agnostic.
 
@@ -31,7 +31,7 @@ use crate::memory_cognitive::{
 ///
 /// Each field scales one scoring term; weights are un-normalized (only relative
 /// magnitudes matter). [`Default`] is the library-balanced baseline.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecallWeightSet {
     /// Weight on keyword overlap between the query and the fact text.
     pub text_relevance: f64,
@@ -266,7 +266,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// The default implementation delegates to
     /// [`search_facts`](Self::search_facts) (ignoring `weights`) so non-library
-    /// backends (legacy Python bridge, IPC client, test mocks) keep working with
+    /// backends (legacy Python memory, IPC client, test mocks) keep working with
     /// confidence-ranked keyword recall. Only [`LibraryCognitiveMemory`]
     /// overrides this to call the library's ranked recall.
     fn recall_facts_ranked(
@@ -349,7 +349,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// The default implementation ignores `caller_key` and delegates to
     /// [`store_fact`](Self::store_fact), so backends without caller-key dedup
-    /// (legacy Python bridge, IPC client, test mocks) keep storing the fact
+    /// (legacy Python memory, IPC client, test mocks) keep storing the fact
     /// (without dedup). Only [`LibraryCognitiveMemory`] performs the dedup.
     fn store_fact_with_caller_key(
         &self,
@@ -396,7 +396,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// is visible.
     ///
     /// The default implementation is a safe no-op (`Ok(ForgetReport::default())`)
-    /// for backends without a retention pass (legacy bridge, IPC client, test
+    /// for backends without a retention pass (legacy memory, IPC client, test
     /// stubs); only [`LibraryCognitiveMemory`] forgets.
     fn forget_low_value_facts(&self, _dry_run: bool) -> SimardResult<ForgetReport> {
         Ok(ForgetReport::default())
@@ -448,14 +448,14 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// `check_triggers`. Used when a goal is completed or paused.
     ///
     /// Default implementation is a no-op for backends that do not support
-    /// status transitions (legacy Python bridge, test stubs).
+    /// status transitions (legacy Python memory, test stubs).
     fn resolve_prospective(&self, _node_id: &str) -> SimardResult<()> {
         Ok(())
     }
 
     /// Mark an episode as distilled so subsequent distillation passes
     /// skip it. Default impl is a no-op for backends that do not
-    /// support metadata mutation (legacy Python bridge, test stubs).
+    /// support metadata mutation (legacy Python memory, test stubs).
     /// Issue #2281, PR-B.
     fn mark_episode_distilled(&self, _node_id: &str) -> SimardResult<()> {
         Ok(())
@@ -471,7 +471,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// `source_episode_ids` resolves to a real episode node here.
     ///
     /// Default impl returns `false` (fail-closed: an unresolvable id is treated
-    /// as ungrounded) so non-graph backends (legacy Python bridge, IPC client,
+    /// as ungrounded) so non-graph backends (legacy Python memory, IPC client,
     /// test stubs) keep compiling; only [`LibraryCognitiveMemory`] overrides it
     /// to look the episode up in the store.
     fn episode_exists(&self, _node_id: &str) -> SimardResult<bool> {
@@ -505,14 +505,21 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(vec![])
     }
 
-    /// Return up to `limit` recent episodes whose `content` contains
-    /// at least one of the supplied keywords (case-insensitive
-    /// substring). Newest first.
+    /// Return up to `limit` recent episodes whose `content` matches at least
+    /// one of the supplied keywords, newest first.
     ///
-    /// Default impl returns empty so legacy backends keep compiling.
-    /// [`LibraryCognitiveMemory`] overrides this with a case-insensitive
-    /// keyword-overlap scan ordered newest-first. Issue #2281, PR-C, problem 4;
-    /// #2299.
+    /// [`LibraryCognitiveMemory`] matches a **clean** keyword (non-empty, all
+    /// alphanumeric — the shape the natural-language callers emit) at a **word
+    /// boundary** (the keyword is a prefix of a whole content word), so a short
+    /// token embedded in the interior/suffix of an unrelated word ("test" in
+    /// "latest") no longer spuriously recalls, while its inflected forms still do
+    /// ("deploy" -> "deployed"). A keyword carrying any non-alphanumeric char —
+    /// a phrase or a bracketed provenance marker (`[reflect-occ=…]`) — keeps the
+    /// exact case-insensitive **substring** semantics its `reflection_lessons`
+    /// callers re-filter on.
+    ///
+    /// Default impl returns empty so legacy backends keep compiling. Issue #2281,
+    /// PR-C, problem 4; #2299.
     fn search_episodes_by_keywords(
         &self,
         _keywords: &[String],
@@ -534,7 +541,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// The default implementation splits `query` on whitespace into keywords and
     /// delegates to [`search_episodes_by_keywords`](Self::search_episodes_by_keywords)
-    /// (ignoring `weights`), so non-library backends (legacy Python bridge, IPC
+    /// (ignoring `weights`), so non-library backends (legacy Python memory, IPC
     /// client, test mocks) keep working with newest-first keyword recall. Only
     /// [`LibraryCognitiveMemory`] overrides this to call the library's ranked
     /// recall (relevance-gated, with a UNION backfill that keeps compressed
@@ -561,7 +568,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// sequence prefix; episode / procedure ids are raw).
     ///
     /// The default implementation is a no-op (`Ok(())`) for backends without
-    /// access tracking (legacy Python bridge, IPC client, test mocks); only
+    /// access tracking (legacy Python memory, IPC client, test mocks); only
     /// [`LibraryCognitiveMemory`] records the access.
     fn reinforce_access(&self, _node_id: &str, _kind: MemoryKind) -> SimardResult<()> {
         Ok(())
@@ -628,6 +635,18 @@ pub trait CognitiveMemoryOps: Send + Sync {
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
 
+    /// Recompute the cached statistics snapshot that
+    /// [`get_statistics`](Self::get_statistics) serves (issue #4756).
+    ///
+    /// Default is a **no-op**: backends without a snapshot fast path compute
+    /// their statistics on demand, so there is nothing to refresh and every
+    /// existing impl / test-double keeps compiling untouched.
+    /// [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory)
+    /// overrides it to recompute its snapshot *off* the heavy read lock via
+    /// `try_lock`, so a long-held write lock during canary startup can no longer
+    /// starve the memory-stats RPC into the 30s rpc-health timeout.
+    fn refresh_stats_snapshot(&self) {}
+
     /// Probe whether the store is *confirmed* empty, **failing closed** on a
     /// read error (issue #2561).
     ///
@@ -645,7 +664,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// [`StoreEmptiness::ConfirmedEmpty`]. The default implementation derives the
     /// answer from [`get_statistics`](Self::get_statistics) — which already
     /// returns a `Result`, so any backend that surfaces its read/transport
-    /// errors (the bridge and IPC clients, test mocks) fails closed for free, and
+    /// errors (the memory and IPC clients, test mocks) fails closed for free, and
     /// this is the single seam a future error-propagating count plugs into.
     ///
     /// # Backend note
@@ -680,7 +699,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     ///
     /// Default impl drops the provenance (and metadata) and delegates to
     /// [`store_fact`](Self::store_fact) so non-graph backends (legacy Python
-    /// bridge, IPC client, test stubs) keep compiling and still store the fact;
+    /// memory, IPC client, test stubs) keep compiling and still store the fact;
     /// only [`LibraryCognitiveMemory`] records the edges. Mirrors the
     /// `mark_episode_distilled` / `list_undistilled_episodes` extension pattern.
     #[allow(clippy::too_many_arguments)]
@@ -729,7 +748,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// callers tolerate facts that predate provenance wiring.
     ///
     /// Default impl returns empty so backends without a provenance graph
-    /// (legacy Python bridge, IPC client, test stubs) keep compiling;
+    /// (legacy Python memory, IPC client, test stubs) keep compiling;
     /// [`LibraryCognitiveMemory`] overrides it to traverse the graph.
     fn episodes_for_fact(&self, _fact_id: &str) -> SimardResult<Vec<String>> {
         Ok(vec![])
@@ -745,7 +764,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// powers the "edges / connections" section of `simard memory stats`.
     ///
     /// Default impl returns an all-zero [`GraphStats`] so backends without a
-    /// provenance graph (IPC client, bridge clients, test stubs) keep
+    /// provenance graph (IPC client, memory clients, test stubs) keep
     /// compiling; only [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory)
     /// overrides it to traverse the graph. Read-only — never mutates the store.
     fn graph_stats(&self) -> SimardResult<GraphStats> {
@@ -790,7 +809,7 @@ pub trait CognitiveMemoryOps: Send + Sync {
     /// Force a WAL checkpoint, collapsing the WAL into the main DB file.
     ///
     /// Defaults to a no-op for backends where this is not meaningful
-    /// (IPC client, bridge clients). Overridden by [`LibraryCognitiveMemory`]
+    /// (IPC client, memory clients). Overridden by [`LibraryCognitiveMemory`]
     /// to flush the library's lbug-backed store via `close`.
     ///
     /// Call this **before** taking a backup or shutting down the host
@@ -828,6 +847,12 @@ pub mod creative_idea;
 // module root so callers reference `cognitive_memory::LibraryCognitiveMemory`.
 mod library_adapter;
 pub use library_adapter::LibraryCognitiveMemory;
+
+// Cross-process open serialization for the lbug-backed store. Prevents a
+// transient lock conflict between two processes from being mis-classified by
+// the library as catalog corruption (which quarantines the DB and rebuilds it
+// empty, wiping cognitive memory). See the module docs for the full rationale.
+mod open_guard;
 
 // Issue #2420: migration-aware live-store path resolution. Re-exported at the
 // module root so the verified-backup path (`memory_backup`) and the daemon both
@@ -960,3 +985,30 @@ mod tests_recall_precision_bench;
 // Simard), and that the move is behaviour-preserving (parity gate).
 #[cfg(test)]
 mod tests_recall_precision_delegation;
+
+// Issue #4378: characterization teeth pinning the THREE deliberately-divergent
+// "text relevance" definitions — served word-boundary gate (`search_facts`),
+// ungated ranker (`recall_facts_ranked`), and the substring-proxy precision
+// metric (`metrics::precision_at_k`). Pins the divergence (so it cannot silently
+// widen) and the agreement case (so it is specific to interior/suffix substring
+// hits), keeping any future convergence a deliberate, test-visible edit.
+#[cfg(test)]
+mod tests_relevance_definition_divergence;
+
+// Recall quality: `search_episodes_by_keywords` matches CLEAN alphanumeric
+// keywords at a WORD BOUNDARY (marker-safe), extending the word-boundary gate
+// `recall_episodes_ranked` already uses to the flat keyword scan while keeping
+// the exact-marker substring path `reflection_lessons` depends on. Pins the
+// end-to-end contract against the live `LibraryCognitiveMemory` backend.
+#[cfg(test)]
+mod tests_whole_word_episode_recall;
+
+// Recall quality: `search_facts` gates a CLEAN natural-language query token at a
+// WORD BOUNDARY (concept OR content), extending the word-boundary recall gate
+// already applied to episodic recall to the FACT path so an interior/suffix
+// substring (`act` in "reactor", `own` in "download") no longer floats an
+// off-topic fact into the capped turn/OODA working-context recall. Concept and
+// colon-marker queries keep the library's exact substring semantics. Pins the
+// end-to-end contract against the live `LibraryCognitiveMemory` backend.
+#[cfg(test)]
+mod tests_fact_recall_word_boundary;

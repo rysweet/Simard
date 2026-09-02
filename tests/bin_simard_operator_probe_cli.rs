@@ -49,3 +49,45 @@ fn bootstrap_run_missing_args_fails() {
         "missing-args message expected, got: {msg}"
     );
 }
+
+#[test]
+fn coin_gym_verify_passes_and_reports_local_done_gate() {
+    // The LOCAL COIN Gym harness done-gate is hermetic and offline, so the
+    // operator-probe surface must exit 0 on the built-in sample and print the
+    // per-criterion PASS matrix plus the aggregate result. This proves the
+    // repo-grounded harness is reachable from the operator-probe binary, not
+    // only from the standalone `coin-gym` binary.
+    let assert = bin().arg("coin-gym-verify").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        stdout.contains("Probe mode: coin-gym-verify"),
+        "expected probe header, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("7/7 LOCAL acceptance criteria passed"),
+        "expected all done-gate criteria to pass, got: {stdout}"
+    );
+    // LOCAL-only framing must be present so the surface never implies live VM
+    // grading or external result posting.
+    assert!(
+        stdout.contains("LOCAL offline harness only"),
+        "expected LOCAL-only scope note, got: {stdout}"
+    );
+}
+
+#[test]
+fn coin_gym_verify_rejects_trailing_args() {
+    // The done-gate takes no arguments; trailing tokens are an operator error
+    // and must fail cleanly rather than silently ignoring them.
+    let assert = bin()
+        .args(["coin-gym-verify", "unexpected"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let msg = format!("{stderr}{stdout}");
+    assert!(
+        msg.contains("unexpected trailing arguments"),
+        "expected trailing-argument rejection, got: {msg}"
+    );
+}

@@ -35,6 +35,52 @@ impl Display for OodaPhase {
     }
 }
 
+/// Resolved identity-scoped cognition threaded into the OODA loop (#3125).
+///
+/// This is the small, OODA-facing projection of an [`IdentityManifest`]'s three
+/// cognition fields — identity seed goals, target-repo scope, and write-authority
+/// posture — carried on [`OodaState`] so the cold-start seeding site and the Act
+/// dispatch rail can consult them without threading the whole manifest.
+///
+/// [`IdentityCognition::default`] represents **Simard herself** (no identity): no
+/// seed-goal override, no explicit target scope, and `authority: None` — which
+/// [`crate::ooda_actions::advance_goal::spawn::posture_permits_spawn`] resolves
+/// to `Full`, so the default is byte-for-byte the pre-#3125 behaviour.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IdentityCognition {
+    /// The resolved identity's name, when one is set (for operator diagnostics).
+    pub identity_name: Option<String>,
+    /// Identity-declared seed goals. Empty => use `DEFAULT_SEED_GOALS`.
+    pub seed_goals: Vec<crate::identity::SeedGoal>,
+    /// Resolved target-repo scope (explicit or the union of seed-goal repos).
+    pub target_repos: Vec<String>,
+    /// Write-authority posture. `None` => no identity => `Full` (Simard). A named
+    /// identity whose posture cannot be resolved must be encoded as
+    /// `Some(IdentityAuthority::read_only())` (fail-closed).
+    pub authority: Option<crate::identity::IdentityAuthority>,
+}
+
+impl IdentityCognition {
+    /// Project the cognition-relevant fields out of a resolved identity manifest.
+    /// A named identity always yields `Some(authority)` so the deterministic
+    /// spawn rail treats it as an identity (never as "no identity").
+    pub fn from_manifest(manifest: &crate::identity::IdentityManifest) -> Self {
+        Self {
+            identity_name: Some(manifest.name.clone()),
+            seed_goals: manifest.seed_goals.clone(),
+            target_repos: manifest.resolved_target_repos(),
+            authority: Some(manifest.authority.clone()),
+        }
+    }
+
+    /// Whether this identity's posture permits dispatching a write-bearing
+    /// engineer. Delegates to the deterministic rail's semantics: no identity
+    /// (`None`) and `Full`/`ScopedWrite` permit; `ReadOnly` does not.
+    pub fn permits_spawn(&self) -> bool {
+        crate::ooda_actions::advance_goal::spawn::posture_permits_spawn(self.authority.as_ref())
+    }
+}
+
 /// Mutable state carried across OODA cycles.
 pub struct OodaState {
     pub current_phase: OodaPhase,
@@ -80,6 +126,9 @@ pub struct OodaState {
     /// done-gate ladder (mark done / drop / escalate). See
     /// `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker (Fix 3)").
     pub no_progress_tracker: crate::goal_curation::NoProgressTracker,
+    /// Resolved identity-scoped cognition (#3125). `Default` (no identity) keeps
+    /// Simard unchanged: default seed goals + engineer-dispatching Act phase.
+    pub identity_cognition: IdentityCognition,
 }
 
 impl OodaState {
@@ -98,7 +147,16 @@ impl OodaState {
             engineer_worktrees: HashMap::new(),
             last_distill_cycle: 0,
             no_progress_tracker: crate::goal_curation::NoProgressTracker::new(),
+            identity_cognition: IdentityCognition::default(),
         }
+    }
+
+    /// Attach resolved identity-scoped cognition (#3125). Additive builder; the
+    /// default is [`IdentityCognition::default`] (no identity => Simard).
+    #[must_use]
+    pub fn with_identity_cognition(mut self, cognition: IdentityCognition) -> Self {
+        self.identity_cognition = cognition;
+        self
     }
 
     /// Remove `goal_failure_counts` entries for goal IDs that are no longer
@@ -265,6 +323,19 @@ pub struct OodaConfig {
     /// Issues #2441/#2458. `1` would distil one-off failures (not recommended).
     #[serde(default = "default_lesson_recurrence_threshold")]
     pub lesson_recurrence_threshold: u32,
+    /// When `true`, [`run_ooda_cycle`](super::run_ooda_cycle) performs proactive
+    /// resource cleanup (disk/process reclamation) at the start of every cycle.
+    ///
+    /// This walks the real filesystem (`/tmp/simard-*-target`,
+    /// `~/.cargo-targets/`, each tens of GB) and can kill orphaned cargo
+    /// processes, so it is a **production-only** side effect. It defaults to
+    /// `false` so cargo-test never runs the expensive, non-hermetic cleanup —
+    /// which under a shared CI/dev host would walk hundreds of GB (parallel
+    /// OODA-cycle tests then thrash disk and hang) and could delete sibling
+    /// worktrees' target dirs or kill the test's own cargo. The daemon (the
+    /// live OODA loop) opts in explicitly.
+    #[serde(default)]
+    pub run_resource_cleanup: bool,
     /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
     /// Skipped during (de)serialization — reconstructed from env on boot.
     #[serde(skip)]
@@ -343,6 +414,9 @@ impl Default for OodaConfig {
                 crate::memory_consolidation::reflection_lessons::LESSON_RECURRENCE_THRESHOLD_ENV,
                 default_lesson_recurrence_threshold(),
             ),
+            // Off by default so cargo-test never runs the non-hermetic,
+            // filesystem-walking cleanup. The daemon opts in explicitly.
+            run_resource_cleanup: false,
             scaler,
         }
     }
@@ -500,7 +574,7 @@ pub trait OrchestratorSessionFactory: Send + Sync {
     ) -> crate::error::SimardResult<Box<dyn crate::base_types::BaseTypeSession>>;
 }
 
-/// All bridges needed by the OODA loop.
+/// All memories needed by the OODA loop.
 pub struct OodaClients {
     pub memory: Box<dyn CognitiveMemoryOps>,
     pub knowledge: KnowledgeClient,

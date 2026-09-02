@@ -1,0 +1,53 @@
+name: "RustyClawd dependency pins are fixed and resolvable"
+description: "Outside-in verification that Simard's rustyclawd-core and rustyclawd-tools Git dependencies both point at the RustyClawd commit carrying the RUSTSEC-2026-0204 fix, that Cargo.lock agrees with Cargo.toml, and that the pinned commit is fetchable from rysweet/RustyClawd."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "RustyClawd pins are fixed, locked, and fetchable"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/rustyclawd-pins-resolvable.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "supply-chain"
+    - "rustyclawd"
+    - "rustsec"
+    - "dependency-pin"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

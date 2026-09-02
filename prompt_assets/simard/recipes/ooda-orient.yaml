@@ -1,20 +1,25 @@
 # ooda-orient.yaml — Recipe-runner recipe for the OODA Orient brain.
 #
-# Replaces the direct LLM call + JSON parsing in RustyClawdOrientBrain
-# (issue #2115). Parsers eliminated in issue #2144.
+# Group A rework (issue #4785): the agent ACTS by calling the gated
+# `simard ooda record-orient` tool, which validates the numeric fields
+# (finite, in `[0,1]`, no urgency escalation above base) + a non-empty reason
+# and atomically writes one typed OrientDecisionRecord to {{record_path}}.
+# RecipeBrain::run_orient_recipe reads that typed record via
+# `read_verified_orient` — it NEVER scrapes this agent's prose. This replaces
+# the former "emit a decimal / JSON envelope → Rust scrapes stdout → Rust acts"
+# pattern (the forbidden emit→parse→act loop). `--base-urgency` is persisted in
+# the record so the reader can re-check the no-escalation invariant
+# self-consistently.
 #
-# The Rust shim (recipe_brain.rs) applies a 2-tier parse:
-#   1. First decimal float in text (e.g. `0.42`) → adjusted_urgency
-#   2. Deterministic floor — base_urgency - 0.2 * failure_count
+# Context vars (passed via -c by RecipeBrain::run_orient_recipe):
+#   record_path, simard_bin, goal_id, cycle_number, base_urgency, base_reason,
+#   failure_count
 #
-# Context vars (passed via -c):
-#   goal_id, base_urgency, base_reason, failure_count, escalation_note
-#
-# `escalation_note` (issue #2432 / #2421) is empty on the base attempt and
-# carries a schema-repair / higher-effort instruction on escalation-ladder
-# retries. When empty it renders to nothing, so base behaviour is unchanged.
-#
-# Output: agent stdout — bare decimal float as first token, followed by rationale
+# Output: NONE scraped from stdout. The agent RECORDS its judgment by calling the
+# `simard ooda record-orient` tool exactly once. An absent, malformed,
+# out-of-range, escalating, or goal/cycle-mismatched record fails CLOSED (the
+# orient caller records the failure and KEEPS the goal's BASE urgency) with NO
+# fabricated demotion (#1711, #2580).
 
 name: "ooda-orient"
 description: "OODA Orient brain — failure-penalty demotion judgment"
@@ -29,8 +34,6 @@ steps:
     type: "agent"
     agent: "default"
     prompt: |
-      {{escalation_note}}
-
       # OODA Brain — Orient Phase: Failure-Penalty Demotion
 
       ## ROLE
@@ -39,8 +42,9 @@ steps:
       phase has just computed a *base urgency* for one goal from its status
       (blocked / not-started / in-progress / completed) and any environmental
       boosts (open issues, dirty tree). You now judge how aggressively to demote
-      that urgency given the goal's recent failure history. Output a bare decimal
-      number as the first token of your response.
+      that urgency given the goal's recent failure history. You record your
+      judgment by calling the `simard ooda record-orient` tool (see the DECISION
+      section below).
 
       Be conservative. The deterministic floor — `urgency − 0.2 × failure_count`,
       clamped to `[0, 1]` — exists for a reason: it is well-tuned and never
@@ -51,7 +55,9 @@ steps:
       engineering guidelines (canonical in `CONTRIBUTING.md`): prove cognition
       gains on a benchmark AND a live, trended self-metric (G1); route
       memory-architecture work upstream to `amplihack-memory-lib` (G2); and prefer
-      agentic extraction over brittle parsing, and recipes/prompts over code (G3).
+      agentic extraction over brittle parsing, and recipes/prompts over code (G3); and
+      record investigation/testing findings as a GitHub issue and/or memory, never a
+      committed point-in-time report doc (G4, `no-point-in-time-docs`).
       This does not change your output contract below.
 
       ## CONTEXT
@@ -83,28 +89,41 @@ steps:
 
       ## DECISION
 
-      Choose how strongly to demote `base_urgency`.
+      Choose how strongly to demote `base_urgency`, then RECORD your judgment by
+      calling the `simard ooda record-orient` tool EXACTLY ONCE, using your
+      shell/bash tool. The daemon reads the typed record the tool writes; it does
+      NOT read your prose. Anything you print to stdout is ignored.
 
-      **Preferred — emit a structured JSON envelope.** Respond with a single JSON
-      object of this exact shape (a fenced ```json block is fine; the daemon
-      strips any surrounding banner/prose before parsing):
+      Run (substitute your chosen numbers and a concrete `<reason>`):
 
-      ```json
-      {"adjusted_urgency": <float>, "confidence": <float 0..1>, "rationale": "<short reason>"}
+      ```bash
+      "{{simard_bin}}" ooda record-orient \
+        --adjusted-urgency <A> \
+        --confidence <C> \
+        --demotion-applied <D> \
+        --base-urgency {{base_urgency}} \
+        --reason "<short concrete reason>" \
+        --record-path "{{record_path}}" \
+        --goal-id "{{goal_id}}" \
+        --cycle-number {{cycle_number}}
       ```
 
-      **Accepted fallback** — if you cannot emit JSON, output the adjusted
-      urgency as a bare decimal number (e.g. `0.42`) as the very first token of
-      your response, followed by your rationale (the daemon's fallback scanner
-      reads the first `N.N` pattern).
+      Field rules (the tool validates all of these and rejects a record that
+      violates any):
 
-      In BOTH forms the value must satisfy `0 ≤ adjusted_urgency ≤ base_urgency`;
-      an out-of-range or missing value is treated as unparseable. When your
-      output is unparseable the daemon does NOT silently apply the deterministic
-      floor as if it were your decision — it records a `brain_parse_error`,
-      retries you with a schema-repair prompt, and surfaces an explicit error
-      only if the bounded retry still fails (the goal keeps its base urgency,
-      never a fabricated demotion).
+      - `<A>` (adjusted urgency) must satisfy `0 ≤ A ≤ base_urgency` — you may
+        only demote, never escalate above `base_urgency`.
+      - `<C>` (confidence) is your confidence in `[0, 1]`.
+      - `<D>` (demotion applied) is `base_urgency − A`, in `[0, 1]`.
+      - `--reason` is MANDATORY and must be non-empty.
+
+      For a LARGE reason, write it to a file first and pass `--reason-path <FILE>`
+      instead of the inline `--reason` flag.
+
+      Call the tool EXACTLY ONCE. If you do not record a valid judgment, the
+      daemon does NOT silently apply the deterministic floor as if it were your
+      decision — it records an explicit failure and fails CLOSED, keeping the
+      goal's BASE urgency (never a fabricated demotion, #1711 / #2580).
 
       Reference scale (use this unless the situation clearly differs):
 
@@ -119,15 +138,25 @@ steps:
       spawn). You may be slightly *more aggressive* (closer to zero) when the
       goal_id pattern or reason suggests the goal itself is malformed.
 
-      ## EXAMPLES
+      ## EXAMPLES (the command to run, one per situation)
 
-      Good — single recent failure, standard floor demotion:
+      Single recent failure, standard floor demotion
+      (`base_urgency = 0.80`, `failure_count = 1` → adjusted `0.60`):
 
-      Input: `{"goal_id": "ship-v1", "base_urgency": 0.80, "base_reason": "not yet started", "failure_count": 1}`
-      Response: `0.60 1 failure: standard floor demotion`
+      ```bash
+      "{{simard_bin}}" ooda record-orient --adjusted-urgency 0.60 --confidence 0.9 \
+        --demotion-applied 0.20 --base-urgency {{base_urgency}} \
+        --reason "1 failure: standard floor demotion" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
+      ```
 
-      Good — chronic failures, drive toward zero:
+      Chronic failures, drive toward zero
+      (`base_urgency = 0.80`, `failure_count = 5` → adjusted `0.0`):
 
-      Input: `{"goal_id": "stuck-task", "base_urgency": 0.80, "base_reason": "blocked: needs human input", "failure_count": 5}`
-      Response: `0.0 5 consecutive failures: deprioritise below all unfailed work`
+      ```bash
+      "{{simard_bin}}" ooda record-orient --adjusted-urgency 0.0 --confidence 0.9 \
+        --demotion-applied 0.80 --base-urgency {{base_urgency}} \
+        --reason "5 consecutive failures: deprioritise below all unfailed work" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
+      ```
     output: "orient_result"

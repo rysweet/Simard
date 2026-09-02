@@ -55,7 +55,8 @@ tell-tale signatures:
 - **permission-denied** — exit 126 / `Permission denied`. **Remedy:** fix file
   permissions / ownership, or run through the correct interpreter.
 - **disk-full** — `No space left on device` (`ENOSPC`). **Remedy:** reclaim space
-  (caches, worktrees, logs); free the volume before retrying.
+  with the guarded agentic capability (`simard disk-reclaim --apply`, which frees
+  stale worktrees/caches behind hard safety rails); free the volume before retrying.
 - **out-of-memory** — an OOM-kill / `Out of memory`. **Remedy:** reduce
   concurrency or peak footprint; bound the workload.
 - **network-or-auth** — `Could not resolve host`, connection refused/unreachable,

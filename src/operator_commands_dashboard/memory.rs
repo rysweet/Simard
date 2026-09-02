@@ -18,6 +18,13 @@ const SNAPSHOT_MIN_INTERVAL_SECS: i64 = 300;
 /// (#2679). A snapshot whose `epoch_secs` is at-or-before `now - this` is the
 /// one-hour-ago baseline the live long-term total is diffed against.
 const TRAILING_WINDOW_SECS: f64 = 3600.0;
+/// Trailing window, in seconds, over which the "mem/hr" growth rate is measured
+/// (#4107). The rate is a *recent-activity* signal, so it is anchored at the
+/// newest sample and looks back at most this far — 24 hours. Older snapshots in
+/// the retained ring buffer (which spans weeks, including multi-day
+/// daemon-down gaps) are ignored so an active hour of memory formation is not
+/// diluted to ~0/hr by a multi-week denominator.
+const GROWTH_RATE_WINDOW_SECS: f64 = 86_400.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MemorySnapshot {
@@ -94,40 +101,73 @@ pub(crate) fn trend_label(deltas: &MemoryDeltas) -> &'static str {
     }
 }
 
-/// Compute a per-hour growth rate from a slice of snapshots using the oldest
-/// and newest entries within the window.
+/// A zero growth-rate payload — every rail reports `0.0/hr`. Returned when
+/// there is no usable pair of samples inside the trailing window (fewer than
+/// two snapshots, no prior sample within the window, or a degenerate zero-span
+/// pair), so the served rate is an honest "insufficient recent data" rather
+/// than a distorted whole-history figure.
+fn zero_rate() -> Value {
+    json!({
+        "total": 0.0,
+        "long_term_total": 0.0,
+        "episodic": 0.0,
+        "semantic": 0.0,
+        "procedural": 0.0,
+        "prospective": 0.0,
+    })
+}
+
+/// Compute a per-hour memory growth rate over a bounded trailing window (#4107).
+///
+/// The rate is a *recent-activity* signal. It is anchored at the **newest**
+/// snapshot and diffs against the **oldest snapshot still inside the trailing
+/// [`GROWTH_RATE_WINDOW_SECS`] window** (`epoch_secs >= newest - window`, edge
+/// inclusive). Snapshots older than the window — which in the retained
+/// ring-buffer can be weeks old and separated by multi-day daemon-down gaps —
+/// are ignored so they cannot dilute the denominator.
+///
+/// Returns [`zero_rate`] when there is no usable in-window pair:
+///   * fewer than two snapshots total;
+///   * only the newest sample lies inside the window (fresh daemon after a long
+///     gap) — an honest "insufficient recent data" rather than a distorted
+///     whole-span figure;
+///   * the in-window baseline and newest share an epoch (zero elapsed span).
+///
+/// This mirrors the bounded-window discipline of [`select_last_hour_baseline`]
+/// (#2679); the previous implementation used `snapshots[0]` (oldest *retained*)
+/// and divided by the full multi-week span, so the advertised "per hour" figure
+/// was meaningless.
 pub(crate) fn rate_per_hour(snapshots: &[MemorySnapshot]) -> Value {
     if snapshots.len() < 2 {
-        return json!({
-            "total": 0.0,
-            "long_term_total": 0.0,
-            "episodic": 0.0,
-            "semantic": 0.0,
-            "procedural": 0.0,
-            "prospective": 0.0,
-        });
+        return zero_rate();
     }
-    let oldest = &snapshots[0];
     let newest = &snapshots[snapshots.len() - 1];
-    let elapsed_hours = (newest.epoch_secs - oldest.epoch_secs) / 3600.0;
+    let window_start = newest.epoch_secs - GROWTH_RATE_WINDOW_SECS;
+
+    // Oldest snapshot at-or-after the window edge, excluding the newest itself.
+    // The buffer is appended in time order, so the first in-window entry is the
+    // oldest one inside the window.
+    let baseline = snapshots[..snapshots.len() - 1]
+        .iter()
+        .find(|s| s.epoch_secs >= window_start);
+
+    let baseline = match baseline {
+        Some(b) => b,
+        None => return zero_rate(),
+    };
+
+    let elapsed_hours = (newest.epoch_secs - baseline.epoch_secs) / 3600.0;
     if elapsed_hours < 0.001 {
-        return json!({
-            "total": 0.0,
-            "long_term_total": 0.0,
-            "episodic": 0.0,
-            "semantic": 0.0,
-            "procedural": 0.0,
-            "prospective": 0.0,
-        });
+        return zero_rate();
     }
     let rate = |newer: u64, older: u64| -> f64 { (newer as f64 - older as f64) / elapsed_hours };
     json!({
-        "total": rate(newest.total, oldest.total),
-        "long_term_total": rate(newest.long_term_total, oldest.long_term_total),
-        "episodic": rate(newest.episodic, oldest.episodic),
-        "semantic": rate(newest.semantic, oldest.semantic),
-        "procedural": rate(newest.procedural, oldest.procedural),
-        "prospective": rate(newest.prospective, oldest.prospective),
+        "total": rate(newest.total, baseline.total),
+        "long_term_total": rate(newest.long_term_total, baseline.long_term_total),
+        "episodic": rate(newest.episodic, baseline.episodic),
+        "semantic": rate(newest.semantic, baseline.semantic),
+        "procedural": rate(newest.procedural, baseline.procedural),
+        "prospective": rate(newest.prospective, baseline.prospective),
     })
 }
 
@@ -219,6 +259,7 @@ pub(crate) async fn memory_history() -> Json<Value> {
         "snapshots": history,
         "deltas": deltas,
         "rate_per_hour": rate,
+        "rate_window_secs": GROWTH_RATE_WINDOW_SECS,
         "trend": trend,
         "snapshot_count": history.len(),
         "sample_interval_seconds": SNAPSHOT_MIN_INTERVAL_SECS,
@@ -242,6 +283,26 @@ pub(crate) async fn memory_history() -> Json<Value> {
 ///   3. Empty history has no baseline (`None`); the caller then diffs the live
 ///      total against itself, yielding an honest `0`.
 pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f64) -> Option<u64> {
+    select_last_hour_baseline_snapshot(history, now_secs).map(|s| s.long_term_total)
+}
+
+/// Select the SNAPSHOT that best represents "one hour ago" for the trailing-hour
+/// delta (#2679 / #4318), returning the whole snapshot so the caller can read
+/// both its `long_term_total` (the baseline count) AND its `epoch_secs` (to
+/// compute the *actual* window the count covers).
+///
+/// The selection rule is identical to [`select_last_hour_baseline`] — the
+/// scalar helper delegates here — but exposing the snapshot lets
+/// [`memory_recent_at`] surface `last_hour_window_secs = now − baseline.epoch`.
+/// That window can legitimately exceed one hour when `memory_history.json` has a
+/// gap wider than an hour straddling the 1 h mark: the most-recent snapshot
+/// at-or-before `now − 3600` is then arbitrarily older than 1 h, so the count is
+/// net growth over that *longer* span. Surfacing the true window lets the
+/// caption stay honest instead of hardcoding "in the last hour" (#4318).
+pub(crate) fn select_last_hour_baseline_snapshot(
+    history: &[MemorySnapshot],
+    now_secs: f64,
+) -> Option<&MemorySnapshot> {
     if history.is_empty() {
         return None;
     }
@@ -256,22 +317,27 @@ pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f6
         .filter(|s| s.epoch_secs <= cutoff)
         .max_by(cmp_epoch)
         .or_else(|| history.iter().min_by(cmp_epoch))
-        .map(|s| s.long_term_total)
 }
 
 /// `GET /api/memory/recent` — recent-memory listing.
 ///
 /// De-fork Phase 2b (issue #2307): this panel previously enumerated every
 /// node type with raw Cypher against the deleted native LadybugDB schema. The
-/// library backend exposes no equivalent "list all nodes by type" API through
-/// `CognitiveMemoryOps`, so the per-item listing is reported as unavailable
-/// rather than reading the abandoned native store.
+/// per-item listing was then stubbed to always-empty on the library backend.
 ///
-/// The *aggregate* stored total, however, is available via the same
-/// `get_statistics()` path that `/api/memory/history` uses. We surface it as
-/// `total` so the Memory tab can stop telling a human "No memories stored yet"
-/// while tens of thousands of memories are actually held (#2358). The per-item
-/// list stays empty/unavailable on this backend.
+/// That stub was stale: the same shared reader (`open_reader_client`) that
+/// backs `/api/memory/graph` DOES enumerate per-item memory through
+/// `CognitiveMemoryOps::list_all_episodes` (newest-first by `temporal_index`).
+/// So the Memory tab's "Recent Memories" panel (frontend #1997) — which already
+/// ships a renderer expecting `items:[{category,summary,timestamp}]` — was
+/// permanently empty even while the daemon logged thousands of episodes. We now
+/// populate `items` from the most recent episodes so the panel answers "what
+/// has Simard been remembering/observing recently?".
+///
+/// The *aggregate* stored total is available via the same `get_statistics()`
+/// path that `/api/memory/history` uses. We surface it as `total` so the Memory
+/// tab can stop telling a human "No memories stored yet" while tens of
+/// thousands of memories are actually held (#2358).
 ///
 /// `last_hour_count` (#2679): this field previously returned a hardcoded literal
 /// `0` — a placeholder left by de-fork Phase 2b (#2307) — so the dashboard told
@@ -295,31 +361,58 @@ pub(crate) async fn memory_recent() -> Json<Value> {
 /// (see [`select_last_hour_baseline`]). The read fails closed: on a live-read
 /// error it returns an `error` payload with `last_hour_count: null` — never a
 /// misleading `0`.
+///
+/// `last_hour_window_secs` (#4318): the ACTUAL span the count covers,
+/// `now − baseline.epoch_secs`. It is ~3600 in steady state but can be larger
+/// when `memory_history.json` has a gap wider than an hour straddling the 1 h
+/// mark (the baseline is then older than 1 h, so the count is net growth over
+/// that longer span). The frontend labels the true window instead of hardcoding
+/// "in the last hour". `null` when there is no baseline snapshot at all.
 pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value> {
-    // Preserved back-compat note describing the per-item listing limitation.
-    let note = "Per-item recent-memory listing is unavailable on the library \
-                backend (de-fork Phase 2b, #2307); `total` is the live aggregate \
-                stored count. See /api/memory/history for the per-type breakdown.";
+    let note = "Recent items are the newest episodic memories (events Simard \
+                recorded), newest-first; `total` is the live aggregate stored \
+                count across all six memory types. See /api/memory/graph for the \
+                full per-type graph and /api/memory/history for the per-type \
+                growth breakdown.";
 
-    // Live read via the SAME shared reader path `/api/memory/history` uses so
-    // the count reflects real writes, not a divergent store.
-    let stats =
-        match open_reader_client(state_root).and_then(|reader| reader.ops().get_statistics()) {
-            Ok(s) => s,
-            Err(e) => {
-                // Fail closed (#2561 prior art): surface the error and emit a null
-                // count so the frontend renders "—", never a misleading 0.
-                return Json(json!({
-                    "items": [],
-                    "total": Value::Null,
-                    "last_hour_count": Value::Null,
-                    "available": false,
-                    "note": note,
-                    "error": format!("Cannot read cognitive memory: {e}"),
-                    "server_time": chrono::Utc::now().to_rfc3339(),
-                }));
-            }
-        };
+    // Open the shared reader ONCE and reuse it for both the aggregate statistics
+    // (drives `last_hour_count`/`total`) and the per-item episode enumeration
+    // (drives `items`) — the same reader path `/api/memory/graph` uses, so the
+    // listing reflects real writes, not a divergent store.
+    let reader = match open_reader_client(state_root) {
+        Ok(r) => r,
+        Err(e) => {
+            // Fail closed (#2561 prior art): surface the error and emit a null
+            // count so the frontend renders "—", never a misleading 0.
+            return Json(json!({
+                "items": [],
+                "total": Value::Null,
+                "last_hour_count": Value::Null,
+                "last_hour_window_secs": Value::Null,
+                "available": false,
+                "note": note,
+                "error": format!("Cannot read cognitive memory: {e}"),
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+    };
+    let ops = reader.ops();
+
+    let stats = match ops.get_statistics() {
+        Ok(s) => s,
+        Err(e) => {
+            return Json(json!({
+                "items": [],
+                "total": Value::Null,
+                "last_hour_count": Value::Null,
+                "last_hour_window_secs": Value::Null,
+                "available": false,
+                "note": note,
+                "error": format!("Cannot read cognitive memory: {e}"),
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+    };
 
     let total = stats.total();
     // "Remembered" ⇒ consolidated long-term memory (facts + procedures +
@@ -339,17 +432,74 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
     // Absent a one-hour-ago baseline (empty history), diff the live total
     // against itself → honest 0. `saturating_sub` clamps a pruning-dominated
     // (net-negative) interval to 0 without underflowing.
+    let baseline_snapshot = select_last_hour_baseline_snapshot(&history, now_secs);
     let baseline = select_last_hour_baseline(&history, now_secs).unwrap_or(live_long_term);
     let last_hour_count = live_long_term.saturating_sub(baseline);
+    // The ACTUAL window the count covers (#4318): `now − baseline.epoch`. When
+    // history has a gap wider than an hour, the chosen baseline is older than
+    // 1 h and this exceeds 3600 s — the count is net growth over that longer
+    // span, NOT one hour. Surfacing it lets the caption tell the truth instead
+    // of hardcoding "in the last hour". `null` when there is no baseline
+    // snapshot at all (empty history → count is an honest 0 over no window).
+    let last_hour_window_secs = baseline_snapshot.map(|s| (now_secs - s.epoch_secs).max(0.0));
+
+    // Per-item recent feed: the newest episodes (newest-first by temporal_index),
+    // capped. Episodes are the only memory type carrying a wall-clock timestamp,
+    // so they form the natural time-ordered "recent activity" stream. A read
+    // failure here is best-effort (the aggregate above is still valid): report an
+    // empty list with `available:false` rather than failing the whole endpoint.
+    let (items, items_available) = match ops.list_all_episodes(RECENT_ITEMS_MAX as u32) {
+        Ok(episodes) => (build_recent_episode_items(&episodes), true),
+        Err(_) => (Vec::new(), false),
+    };
 
     Json(json!({
-        "items": [],
+        "items": items,
         "total": total,
         "last_hour_count": last_hour_count,
-        "available": false,
+        "last_hour_window_secs": last_hour_window_secs,
+        "available": items_available,
         "note": note,
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Maximum number of recent per-item episodes returned by `/api/memory/recent`.
+/// Bounds the payload; the panel is a "recent glance", not a full dump (the
+/// graph tab covers exhaustive enumeration).
+const RECENT_ITEMS_MAX: usize = 25;
+
+/// Map recent episodes to the frontend "Recent Memories" item shape
+/// (`{category, summary, timestamp, ...}`, part_03.rs `fetchRecentMemories`).
+/// Episodes render under the "Past event" category. `summary`/content is bounded
+/// by [`GRAPH_NODE_CONTENT_MAX`] so a single large episode cannot bloat the
+/// payload.
+///
+/// `timestamp` carries the episode's real `created_at` as an RFC3339 instant
+/// (issue #4383) so the frontend's `timeAgo()` can render a "time ago" label.
+/// It falls back to `null` — never a fabricated epoch — for episodes that
+/// genuinely lack a timestamp (e.g. mock backends or records serialized before
+/// the field existed), so the panel degrades honestly to a blank label rather
+/// than a nonsensical 1970s date. Newest-first ordering still derives from the
+/// `temporal_index` sort, not this field.
+fn build_recent_episode_items(
+    episodes: &[crate::memory_cognitive::CognitiveEpisode],
+) -> Vec<Value> {
+    episodes
+        .iter()
+        .map(|e| {
+            json!({
+                "category": "Past event",
+                "summary": truncate_graph_content(&e.content),
+                "timestamp": e
+                    .created_at
+                    .map(|t| json!(t.to_rfc3339()))
+                    .unwrap_or(Value::Null),
+                "source": e.source_label,
+                "node_id": e.node_id,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
@@ -533,13 +683,18 @@ pub(crate) fn build_live_memory_graph(
     ops: &dyn crate::cognitive_memory::CognitiveMemoryOps,
 ) -> Value {
     let cap = GRAPH_MAX_PER_TYPE as u32;
-    let stats = ops.get_statistics().unwrap_or_default();
 
     let mut nodes: Vec<Value> = Vec::new();
     let mut edges: Vec<Value> = Vec::new();
+    // Fail-LOUD accumulator (issue #2627): a read `Err` or a stats-vs-nodes
+    // discrepancy is recorded here and surfaced as a top-level `error` rather
+    // than swallowed into a phantom empty/partial graph. A genuinely empty
+    // store leaves this empty and OMITS the `error` key.
+    let mut errors: Vec<String> = Vec::new();
 
     // Six type hubs — always present so the legend + all six filters are
-    // meaningful even when a type currently holds no items.
+    // meaningful even when a type currently holds no items (and so an in-build
+    // failure still renders a legend-complete graph behind the error overlay).
     for (ty, label) in MEMORY_TYPE_HUBS {
         nodes.push(json!({
             "id": format!("hub:{ty}"),
@@ -550,88 +705,188 @@ pub(crate) fn build_live_memory_graph(
         }));
     }
 
-    // Semantic facts — wildcard enumeration (confidence-desc), capped.
-    if let Ok(facts) = ops.search_facts("*", cap, 0.0) {
-        for f in facts {
-            let id = graph_node_id("fact", &f.node_id);
-            nodes.push(json!({
-                "id": id.clone(),
-                "type": "SemanticFact",
-                "label": graph_label(&f.concept),
-                "content": truncate_graph_content(&f.content),
-                "confidence": f.confidence,
-                "tags": f.tags,
-            }));
-            edges.push(json!({"source": id, "target": "hub:SemanticFact"}));
+    // Live statistics. A read failure must NOT be swallowed into an all-zeros
+    // phantom (the retired `unwrap_or_default()`): record it and drop the
+    // discrepancy guard (we have no trustworthy counts to compare against).
+    let stats = match ops.get_statistics() {
+        Ok(s) => Some(s),
+        Err(e) => {
+            errors.push(format!("statistics read failed: {e}"));
+            None
         }
-    }
+    };
+
+    // Each enumerator yields `Some(item_node_count)` on success (0 = read OK but
+    // empty) or `None` when the read itself failed (already recorded in
+    // `errors`). The count feeds the stats-vs-nodes discrepancy guard below.
+
+    // Semantic facts — wildcard enumeration (confidence-desc), capped.
+    let semantic_items = match ops.search_facts("*", cap, 0.0) {
+        Ok(facts) => {
+            let mut count = 0usize;
+            for f in facts {
+                let id = graph_node_id("fact", &f.node_id);
+                nodes.push(json!({
+                    "id": id.clone(),
+                    "type": "SemanticFact",
+                    "label": graph_label(&f.concept),
+                    "content": truncate_graph_content(&f.content),
+                    "confidence": f.confidence,
+                    "tags": f.tags,
+                }));
+                edges.push(json!({"source": id, "target": "hub:SemanticFact"}));
+                count += 1;
+            }
+            Some(count)
+        }
+        Err(e) => {
+            errors.push(format!("semantic-fact read failed: {e}"));
+            None
+        }
+    };
 
     // Episodes — unfiltered enumeration, newest-first, capped.
-    if let Ok(episodes) = ops.list_all_episodes(cap) {
-        for e in episodes {
-            let id = graph_node_id("episode", &e.node_id);
-            nodes.push(json!({
-                "id": id.clone(),
-                "type": "EpisodicMemory",
-                "label": graph_label(&e.content),
-                "content": truncate_graph_content(&e.content),
-                "source": e.source_label,
-            }));
-            edges.push(json!({"source": id, "target": "hub:EpisodicMemory"}));
+    let episodic_items = match ops.list_all_episodes(cap) {
+        Ok(episodes) => {
+            let mut count = 0usize;
+            for e in episodes {
+                let id = graph_node_id("episode", &e.node_id);
+                nodes.push(json!({
+                    "id": id.clone(),
+                    "type": "EpisodicMemory",
+                    "label": graph_label(&e.content),
+                    "content": truncate_graph_content(&e.content),
+                    "source": e.source_label,
+                }));
+                edges.push(json!({"source": id, "target": "hub:EpisodicMemory"}));
+                count += 1;
+            }
+            Some(count)
         }
-    }
+        Err(e) => {
+            errors.push(format!("episodic-memory read failed: {e}"));
+            None
+        }
+    };
 
     // Procedures — wildcard enumeration (usage-desc), capped.
-    if let Ok(procedures) = ops.recall_procedure("*", cap) {
-        for p in procedures {
-            let id = graph_node_id("procedure", &p.node_id);
-            let body = truncate_graph_content(&p.steps.join("\n"));
-            nodes.push(json!({
-                "id": id.clone(),
-                "type": "ProceduralMemory",
-                "label": graph_label(&p.name),
-                "content": body,
-                "steps": p.steps.len(),
-                "usage_count": p.usage_count,
-            }));
-            edges.push(json!({"source": id, "target": "hub:ProceduralMemory"}));
+    let procedural_items = match ops.recall_procedure("*", cap) {
+        Ok(procedures) => {
+            let mut count = 0usize;
+            for p in procedures {
+                let id = graph_node_id("procedure", &p.node_id);
+                let body = truncate_graph_content(&p.steps.join("\n"));
+                nodes.push(json!({
+                    "id": id.clone(),
+                    "type": "ProceduralMemory",
+                    "label": graph_label(&p.name),
+                    "content": body,
+                    "steps": p.steps.len(),
+                    "usage_count": p.usage_count,
+                }));
+                edges.push(json!({"source": id, "target": "hub:ProceduralMemory"}));
+                count += 1;
+            }
+            Some(count)
         }
-    }
+        Err(e) => {
+            errors.push(format!("procedural-memory read failed: {e}"));
+            None
+        }
+    };
 
     // Prospective memories — every status, priority-ordered, capped.
-    if let Ok(prospective) = ops.list_all_prospective(cap) {
-        for pr in prospective {
-            let id = graph_node_id("prospective", &pr.node_id);
-            let body = truncate_graph_content(&format!(
-                "when: {}\n→ {}",
-                pr.trigger_condition, pr.action_on_trigger
-            ));
-            nodes.push(json!({
-                "id": id.clone(),
-                "type": "ProspectiveMemory",
-                "label": graph_label(&pr.description),
-                "content": body,
-                "status": pr.status,
-                "priority": pr.priority,
-            }));
-            edges.push(json!({"source": id, "target": "hub:ProspectiveMemory"}));
+    let prospective_items = match ops.list_all_prospective(cap) {
+        Ok(prospective) => {
+            let mut count = 0usize;
+            for pr in prospective {
+                let id = graph_node_id("prospective", &pr.node_id);
+                let body = truncate_graph_content(&format!(
+                    "when: {}\n→ {}",
+                    pr.trigger_condition, pr.action_on_trigger
+                ));
+                nodes.push(json!({
+                    "id": id.clone(),
+                    "type": "ProspectiveMemory",
+                    "label": graph_label(&pr.description),
+                    "content": body,
+                    "status": pr.status,
+                    "priority": pr.priority,
+                }));
+                edges.push(json!({"source": id, "target": "hub:ProspectiveMemory"}));
+                count += 1;
+            }
+            Some(count)
+        }
+        Err(e) => {
+            errors.push(format!("prospective-memory read failed: {e}"));
+            None
+        }
+    };
+
+    // Stats-vs-nodes discrepancy guard (issue #2627): if statistics claim an
+    // ENUMERABLE type holds content while its enumerator read OK yet yielded no
+    // item nodes, the store would be misrepresented as hub-only. Fail loud.
+    // Scoped strictly to the four enumerable types — working memory and the
+    // sensory buffer are transient and hub-only (no per-item enumerator), so
+    // non-zero working/sensory counts with zero item nodes is a VALID state.
+    // `emitted.is_some()` skips types whose read already failed (double-flag),
+    // and a capped read always emits `cap > 0` items so capping never trips it.
+    if let Some(s) = &stats {
+        let checks: [(&str, u64, Option<usize>); 4] = [
+            ("semantic fact", s.semantic_count, semantic_items),
+            ("episodic memory", s.episodic_count, episodic_items),
+            ("procedural memory", s.procedural_count, procedural_items),
+            ("prospective memory", s.prospective_count, prospective_items),
+        ];
+        for (name, stat, emitted) in checks {
+            if let Some(0) = emitted
+                && stat > 0
+            {
+                errors.push(format!(
+                    "{name} statistics report {stat} item(s) but the live \
+                     enumerator returned none (stats-vs-nodes discrepancy)"
+                ));
+            }
         }
     }
 
-    json!({
+    let stats_block = match &stats {
+        Some(s) => json!({
+            "working": s.working_count,
+            "semantic": s.semantic_count,
+            "episodic": s.episodic_count,
+            "procedural": s.procedural_count,
+            "prospective": s.prospective_count,
+            "sensory": s.sensory_count,
+        }),
+        // Statistics could not be read — surface null, never a phantom all-zeros
+        // block (the `error` field carries the real cause).
+        None => Value::Null,
+    };
+
+    let mut payload = json!({
         "nodes": nodes,
         "edges": edges,
+        // The reader WAS reachable (this builder only runs against a live `ops`),
+        // so `available` stays true even for an in-build read failure — the
+        // handler owns the reader-unreachable `available:false` branch.
         "available": true,
-        "stats": {
-            "working": stats.working_count,
-            "semantic": stats.semantic_count,
-            "episodic": stats.episodic_count,
-            "procedural": stats.procedural_count,
-            "prospective": stats.prospective_count,
-            "sensory": stats.sensory_count,
-        },
+        "stats": stats_block,
         "timestamp": chrono::Utc::now().to_rfc3339(),
-    })
+    });
+
+    if !errors.is_empty() {
+        // Single, non-empty top-level error surface. OMITTED entirely (not null)
+        // on the success/empty paths so the client only shows the error overlay
+        // for a genuine failure.
+        payload["error"] = Value::String(format!(
+            "Memory graph loaded with errors: {}",
+            errors.join("; ")
+        ));
+    }
+
+    payload
 }
 
 /// `GET /api/memory/graph` — LIVE cognitive-memory graph visualization
@@ -642,8 +897,12 @@ pub(crate) fn build_live_memory_graph(
 /// via a single shared reader ([`open_reader_client`]) and renders it through
 /// [`build_live_memory_graph`]: six type hubs, live per-item nodes for the four
 /// enumerable memory types linked to their hubs, and `stats` mirroring
-/// `get_statistics()`. When the reader is unreachable the graph falls back to an
-/// empty, `available:false` payload with a path-free note rather than erroring.
+/// `get_statistics()`. When the reader is unreachable the handler fails LOUD
+/// (issue #2627): it returns a path-free top-level `error` with an empty graph
+/// (`available:false`), never a silent blank or a hidden `note` — so the Memory
+/// tab shows a visible error state instead of an empty canvas. The
+/// client-facing `error` is sanitized (no filesystem paths, SR-DATA-1); the
+/// underlying cause (which may embed the socket path) is logged server-side.
 pub(crate) async fn memory_graph() -> Json<Value> {
     let state_root = resolve_state_root();
     match open_reader_client(&state_root) {
@@ -652,14 +911,17 @@ pub(crate) async fn memory_graph() -> Json<Value> {
             tracing::warn!(
                 target: "simard::dashboard",
                 error = %e,
-                "memory_graph: cognitive reader unavailable; serving empty graph"
+                "memory_graph: cognitive reader unavailable; failing loud with an \
+                 empty graph + error"
             );
             Json(json!({
                 "nodes": [],
                 "edges": [],
                 "available": false,
-                "note": "Cognitive memory reader is currently unavailable; \
-                         showing an empty graph.",
+                // Fail-LOUD, PATH-FREE (SR-DATA-1): the detailed cause `e` may
+                // embed the socket/state-root path, so it is logged above rather
+                // than returned. The client shows this as a visible error state.
+                "error": "Cognitive memory reader is unavailable.",
                 "stats": {
                     "working": 0,
                     "semantic": 0,
@@ -878,6 +1140,94 @@ mod tests_memory_history {
         }];
         let r = rate_per_hour(&single);
         assert_eq!(r["total"], 0.0);
+    }
+
+    /// Build a snapshot at `epoch_secs` with every long-term rail equal to
+    /// `long_term` (split across episodic) so the rate math is easy to assert.
+    fn snap_at(epoch_secs: f64, long_term: u64) -> MemorySnapshot {
+        MemorySnapshot {
+            timestamp: "".into(),
+            epoch_secs,
+            sensory: 0,
+            working: 0,
+            episodic: long_term,
+            semantic: 0,
+            procedural: 0,
+            prospective: 0,
+            total: long_term,
+            long_term_total: long_term,
+        }
+    }
+
+    /// #4107: an ancient baseline outside the trailing 24 h window must NOT be
+    /// used. The rate is anchored at the newest sample and diffs against the
+    /// oldest sample *inside* the window, so a multi-week-old first snapshot
+    /// cannot dilute the denominator to a meaningless near-zero figure.
+    #[test]
+    fn rate_per_hour_ignores_ancient_baseline_outside_window() {
+        let day = 86_400.0;
+        // Newest at t=40 days. An ancient sample 39 days ago (outside the 24 h
+        // window) plus a fresh one 1 h before newest (inside the window).
+        let newest_t = 40.0 * day;
+        let snaps = vec![
+            snap_at(newest_t - 39.0 * day, 100), // ancient, out of window
+            snap_at(newest_t - 3600.0, 200),     // 1 h ago, in window
+            snap_at(newest_t, 260),              // newest
+        ];
+        let r = rate_per_hour(&snaps);
+        // Windowed: (260 - 200) / 1 h = 60/hr — NOT the whole-history
+        // (260 - 100) / (~40 days) ≈ 0.17/hr the naive calc would report.
+        assert_eq!(r["long_term_total"], 60.0);
+        assert_eq!(r["episodic"], 60.0);
+    }
+
+    /// #4107: when only the newest sample lies inside the trailing window
+    /// (a fresh daemon after a long down-gap), report 0.0 — an honest
+    /// "insufficient recent data" rather than a distorted whole-span figure.
+    #[test]
+    fn rate_per_hour_no_recent_sample_reports_zero() {
+        let day = 86_400.0;
+        let newest_t = 10.0 * day;
+        let snaps = vec![
+            snap_at(newest_t - 8.0 * day, 100), // way outside the 24 h window
+            snap_at(newest_t, 500),             // newest — the only in-window sample
+        ];
+        let r = rate_per_hour(&snaps);
+        assert_eq!(r["long_term_total"], 0.0, "no in-window baseline → 0.0");
+        assert_eq!(r["total"], 0.0);
+    }
+
+    /// #4107: the trailing-window edge is inclusive. A baseline exactly at
+    /// `newest - GROWTH_RATE_WINDOW_SECS` is used (not dropped by an off-by-one).
+    #[test]
+    fn rate_per_hour_window_edge_is_inclusive() {
+        let newest_t = 1_000_000.0;
+        let snaps = vec![
+            // Exactly 24 h before newest — must be included.
+            snap_at(newest_t - GROWTH_RATE_WINDOW_SECS, 100),
+            snap_at(newest_t, 124),
+        ];
+        let r = rate_per_hour(&snaps);
+        // (124 - 100) / 24 h = 1.0/hr.
+        assert_eq!(r["long_term_total"], 1.0);
+    }
+
+    /// #4107: a sample just *outside* the window edge is excluded, and the
+    /// oldest sample still *inside* the window becomes the baseline.
+    #[test]
+    fn rate_per_hour_selects_oldest_in_window_baseline() {
+        let newest_t = 1_000_000.0;
+        let snaps = vec![
+            // 1 second past the 24 h edge — excluded.
+            snap_at(newest_t - GROWTH_RATE_WINDOW_SECS - 1.0, 0),
+            // Oldest inside the window (12 h ago) — the chosen baseline.
+            snap_at(newest_t - 12.0 * 3600.0, 100),
+            snap_at(newest_t - 3600.0, 130),
+            snap_at(newest_t, 160),
+        ];
+        let r = rate_per_hour(&snaps);
+        // (160 - 100) / 12 h = 5.0/hr, using the oldest in-window sample.
+        assert_eq!(r["long_term_total"], 5.0);
     }
 
     #[test]
@@ -1174,12 +1524,12 @@ mod tests_memory_graph {
             text.contains(fact_marker),
             "the live semantic fact {fact_marker:?} must appear in the graph nodes \
              (LIVE data, not a placeholder). Nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
         assert!(
             text.contains(ep_marker),
             "the live episode {ep_marker:?} must appear in the graph nodes. Nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
         let types = node_types(v);
         assert!(
@@ -1212,13 +1562,13 @@ mod tests_memory_graph {
         assert!(
             text.contains(proc_marker),
             "the live procedure {proc_marker:?} must appear in the graph nodes; nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
         assert!(
             text.contains(prosp_marker),
             "the live prospective memory {prosp_marker:?} must appear in the graph \
              nodes; nodes: {}",
-            &v["nodes"]
+            v["nodes"]
         );
     }
 
@@ -1356,5 +1706,456 @@ mod tests_memory_graph {
             "EpisodicMemory nodes ({episodic}) must be capped near GRAPH_MAX_PER_TYPE \
              (~200, +1 hub) — an uncapped per-type dump is a DoS vector on large stores"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fail-LOUD contract (issue #2627): the memory graph must NEVER silently
+    // blank. A data-load failure — reader unreachable, a per-type
+    // statistics/enumeration read `Err`, or a stats-vs-nodes discrepancy — must
+    // surface a top-level `error` string; a genuinely empty store is a distinct,
+    // VALID non-error state. See
+    // docs/reference/dashboard-memory-graph-fail-loud.md.
+    //
+    // TDD note (Step 7 / red): these FAIL against the current builder, which
+    // swallows every read error via `unwrap_or_default()` / `if let Ok(...)` and
+    // never emits `error`, and whose handler returns a silent `available:false`
+    // + `note` payload on reader failure. They pass once the builder/handler are
+    // rewired to fail loud.
+    // -----------------------------------------------------------------------
+
+    use crate::error::{SimardError, SimardResult};
+    use crate::memory_cognitive::{
+        CognitiveEpisode, CognitiveFact, CognitiveProcedure, CognitiveProspective,
+        CognitiveWorkingSlot,
+    };
+
+    /// True iff the payload carries a top-level `error` key that is a non-empty
+    /// string. The contract OMITS `error` entirely (not `null`) on the
+    /// success/empty paths, so a present-but-null key is treated as absent.
+    fn error_string(v: &Value) -> Option<String> {
+        v.as_object()
+            .and_then(|m| m.get("error"))
+            .and_then(|e| e.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Whether the top-level `error` key is present at all. On the non-error
+    /// paths the key must be OMITTED (not serialized as `null`).
+    fn has_error_key(v: &Value) -> bool {
+        v.as_object().is_some_and(|m| m.contains_key("error"))
+    }
+
+    /// The set of `type` literals carried by the always-present type-hub nodes
+    /// (`"hub": true`).
+    fn hub_types(v: &Value) -> HashSet<String> {
+        nodes_of(v)
+            .iter()
+            .filter(|n| n.get("hub").and_then(Value::as_bool) == Some(true))
+            .filter_map(|n| n["type"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// An in-build failure (per-type read `Err` or discrepancy) must still keep
+    /// the six type hubs so the legend and all six filters stay meaningful.
+    fn assert_six_hub_types(v: &Value) {
+        let hubs = hub_types(v);
+        for t in NODE_TYPE_ALLOWLIST {
+            assert!(
+                hubs.contains(t),
+                "an in-build failure must keep the six type hubs (legend/filters stay \
+                 meaningful); missing hub {t:?}. Nodes: {}",
+                v["nodes"]
+            );
+        }
+    }
+
+    /// Configurable fault-injecting [`CognitiveMemoryOps`] double. Each read the
+    /// graph builder relies on can be flipped to return `Err` (the `*_err`
+    /// flags) or to yield a controlled value; `get_statistics` returns the
+    /// `stats` block verbatim. This exercises the fail-LOUD paths deterministically
+    /// without a live daemon — a read fault, or a store whose `stats` claim
+    /// content while the matching enumerator yields nothing (the stats-vs-nodes
+    /// discrepancy). Every write op is a benign `Ok` (never used by the builder).
+    #[derive(Default)]
+    struct GraphFaultOps {
+        stats: CognitiveStatistics,
+        stats_err: bool,
+        facts_err: bool,
+        episodes_err: bool,
+        procedures_err: bool,
+        prospective_err: bool,
+        facts: Vec<CognitiveFact>,
+        episodes: Vec<CognitiveEpisode>,
+        procedures: Vec<CognitiveProcedure>,
+        prospective: Vec<CognitiveProspective>,
+    }
+
+    impl GraphFaultOps {
+        fn boom(op: &str) -> SimardError {
+            SimardError::MemoryIntegrityError {
+                path: std::path::PathBuf::from("<graph-fault-double>"),
+                reason: format!("injected {op} read fault (fail-loud test double)"),
+            }
+        }
+    }
+
+    impl CognitiveMemoryOps for GraphFaultOps {
+        fn record_sensory(&self, _m: &str, _r: &str, _t: u64) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        fn prune_expired_sensory(&self) -> SimardResult<usize> {
+            Ok(0)
+        }
+        fn push_working(&self, _s: &str, _c: &str, _t: &str, _r: f64) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        fn get_working(&self, _t: &str) -> SimardResult<Vec<CognitiveWorkingSlot>> {
+            Ok(vec![])
+        }
+        fn clear_working(&self, _t: &str) -> SimardResult<usize> {
+            Ok(0)
+        }
+        fn store_episode(
+            &self,
+            _c: &str,
+            _s: &str,
+            _m: Option<&serde_json::Value>,
+        ) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        fn consolidate_episodes(&self, _b: u32) -> SimardResult<Option<String>> {
+            Ok(None)
+        }
+        fn store_fact(
+            &self,
+            _c: &str,
+            _co: &str,
+            _cf: f64,
+            _t: &[String],
+            _s: &str,
+        ) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        fn search_facts(&self, _q: &str, _l: u32, _m: f64) -> SimardResult<Vec<CognitiveFact>> {
+            if self.facts_err {
+                return Err(Self::boom("search_facts"));
+            }
+            Ok(self.facts.clone())
+        }
+        fn store_procedure(&self, _n: &str, _s: &[String], _p: &[String]) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        fn recall_procedure(&self, _q: &str, _l: u32) -> SimardResult<Vec<CognitiveProcedure>> {
+            if self.procedures_err {
+                return Err(Self::boom("recall_procedure"));
+            }
+            Ok(self.procedures.clone())
+        }
+        fn store_prospective(
+            &self,
+            _d: &str,
+            _tc: &str,
+            _a: &str,
+            _p: i64,
+        ) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        fn check_triggers(&self, _c: &str) -> SimardResult<Vec<CognitiveProspective>> {
+            Ok(vec![])
+        }
+        fn list_all_episodes(&self, _limit: u32) -> SimardResult<Vec<CognitiveEpisode>> {
+            if self.episodes_err {
+                return Err(Self::boom("list_all_episodes"));
+            }
+            Ok(self.episodes.clone())
+        }
+        fn list_all_prospective(&self, _limit: u32) -> SimardResult<Vec<CognitiveProspective>> {
+            if self.prospective_err {
+                return Err(Self::boom("list_all_prospective"));
+            }
+            Ok(self.prospective.clone())
+        }
+        fn get_statistics(&self) -> SimardResult<CognitiveStatistics> {
+            if self.stats_err {
+                return Err(Self::boom("get_statistics"));
+            }
+            Ok(self.stats.clone())
+        }
+    }
+
+    #[test]
+    fn build_live_memory_graph_surfaces_statistics_read_error() {
+        // Trigger #2 (per-type read Err): a failing get_statistics() must NOT be
+        // swallowed by `unwrap_or_default()` into a phantom all-zeros graph.
+        let ops = GraphFaultOps {
+            stats_err: true,
+            ..Default::default()
+        };
+        let v = build_live_memory_graph(&ops);
+        assert!(
+            error_string(&v).is_some(),
+            "a get_statistics() read error must surface as a non-empty `error` field \
+             (fail-loud), not be swallowed by unwrap_or_default(); got {v}"
+        );
+        assert_eq!(
+            v["available"],
+            Value::Bool(true),
+            "an in-build read failure keeps available:true (the reader WAS reachable); got {v}"
+        );
+        assert_six_hub_types(&v);
+    }
+
+    #[test]
+    fn build_live_memory_graph_surfaces_each_enumerator_read_error() {
+        // Trigger #2 for every per-item enumerator: a read Err from any of the four
+        // trait enumerators must surface as `error`, not be dropped by the old
+        // `if let Ok(...)` swallow that silently produced a partial graph.
+        type FaultSetter = fn(&mut GraphFaultOps);
+        let cases: [(&str, FaultSetter); 4] = [
+            ("search_facts", |o| o.facts_err = true),
+            ("list_all_episodes", |o| o.episodes_err = true),
+            ("recall_procedure", |o| o.procedures_err = true),
+            ("list_all_prospective", |o| o.prospective_err = true),
+        ];
+        for (name, set) in cases {
+            let mut ops = GraphFaultOps::default();
+            set(&mut ops);
+            let v = build_live_memory_graph(&ops);
+            assert!(
+                error_string(&v).is_some(),
+                "a {name}() read error must surface as a non-empty `error` field \
+                 (fail-loud), not be swallowed into a partial graph; got {v}"
+            );
+            assert_eq!(
+                v["available"],
+                Value::Bool(true),
+                "an in-build enumerator failure keeps available:true; got {v}"
+            );
+            assert_six_hub_types(&v);
+        }
+    }
+
+    #[test]
+    fn build_live_memory_graph_flags_stats_vs_nodes_discrepancy_per_enumerable_type() {
+        // Trigger #3: a store whose stats claim an ENUMERABLE type holds content
+        // while its enumerator yields zero item nodes would misrepresent a populated
+        // store as hub-only. The builder must fail loud rather than silently degrade.
+        for ty in ["semantic", "episodic", "procedural", "prospective"] {
+            let mut ops = GraphFaultOps::default();
+            match ty {
+                "semantic" => ops.stats.semantic_count = 5,
+                "episodic" => ops.stats.episodic_count = 5,
+                "procedural" => ops.stats.procedural_count = 5,
+                "prospective" => ops.stats.prospective_count = 5,
+                _ => unreachable!(),
+            }
+            let v = build_live_memory_graph(&ops);
+            assert!(
+                error_string(&v).is_some(),
+                "stats.{ty} = 5 but 0 item nodes for it must surface a discrepancy \
+                 `error` (fail-loud), not present a populated store as hub-only; got {v}"
+            );
+            assert_eq!(
+                v["available"],
+                Value::Bool(true),
+                "a discrepancy is an in-build failure — available stays true; got {v}"
+            );
+            assert_six_hub_types(&v);
+        }
+    }
+
+    #[test]
+    fn build_live_memory_graph_discrepancy_guard_exempts_transient_types() {
+        // False-positive guard: working memory + the sensory buffer are transient
+        // and hub-only (no per-item enumerator), so non-zero working/sensory counts
+        // with zero item nodes is a VALID state — it must NOT trip the discrepancy
+        // error. The guard is scoped strictly to the four enumerable types.
+        let mut ops = GraphFaultOps::default();
+        ops.stats.working_count = 9;
+        ops.stats.sensory_count = 9;
+        let v = build_live_memory_graph(&ops);
+        assert!(
+            !has_error_key(&v),
+            "non-zero working/sensory counts with hub-only rendering is valid and must \
+             NOT be flagged as an error (discrepancy guard is scoped to the four \
+             enumerable types); got {v}"
+        );
+        assert_eq!(v["available"], Value::Bool(true));
+        assert_six_hub_types(&v);
+    }
+
+    #[test]
+    fn build_live_memory_graph_genuine_empty_is_not_an_error() {
+        // A truly empty store (all enumerable stats 0, every read Ok+empty) is a
+        // distinct, VALID state: six hubs, no item nodes, no edges, available:true,
+        // and `error` OMITTED (not null) so the client shows the neutral empty
+        // message rather than the error overlay.
+        let ops = GraphFaultOps::default();
+        let v = build_live_memory_graph(&ops);
+        assert!(
+            !has_error_key(&v),
+            "a genuinely empty store must OMIT the `error` key entirely (not null); got {v}"
+        );
+        assert_eq!(v["available"], Value::Bool(true));
+        assert_six_hub_types(&v);
+        let item_nodes = nodes_of(&v)
+            .iter()
+            .filter(|n| n.get("hub").and_then(Value::as_bool) != Some(true))
+            .count();
+        assert_eq!(
+            item_nodes, 0,
+            "an empty store must render hubs only, no item nodes; got {v}"
+        );
+        assert!(
+            edges_of(&v).is_empty(),
+            "an empty store has no edges; got {v}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(cognitive_memory)]
+    async fn memory_graph_handler_reader_unavailable_surfaces_path_free_error() {
+        // Fail-LOUD trigger #1 (reader unreachable): when open_reader_client() fails
+        // closed (socket present but unconnectable), the handler must return a
+        // sanitized `error` — NOT the retired silent `available:false` + `note`
+        // payload — and the error must be PATH-FREE (SR-DATA-1): no state_root,
+        // $HOME, or temp-dir path may leak to the client. Invariant on this branch:
+        // `error` present <=> nodes == [] && available == false.
+        use crate::memory_ipc::{
+            clear_in_process_writer, clear_tier2_store_cache, socket_path_for,
+        };
+
+        clear_in_process_writer();
+        clear_tier2_store_cache();
+        let state = HermeticState::new();
+        let root = state.state_root().to_path_buf();
+
+        // Occupy the socket path with a plain file: `sock.exists()` is true but the
+        // connect fails, so open_reader_client() must fail closed (no divergent
+        // tier-2 fallback). This is the deterministic way to force the
+        // reader-unavailable branch without a live daemon (mirrors
+        // memory_ipc::tests_launcher_fail_closed_2896).
+        let sock = socket_path_for(&root);
+        if let Some(parent) = sock.parent() {
+            std::fs::create_dir_all(parent).expect("create socket parent dir");
+        }
+        std::fs::write(&sock, b"not a socket").expect("occupy socket path");
+
+        let out = memory_graph().await;
+        let v = &out.0;
+
+        clear_tier2_store_cache();
+
+        let err = error_string(v).unwrap_or_else(|| {
+            panic!(
+                "reader-unavailable must surface a non-empty `error` (fail-loud), \
+                 replacing the retired silent available:false + note payload; got {v}"
+            )
+        });
+        assert_eq!(
+            nodes_of(v).len(),
+            0,
+            "reader-unavailable invariant: nodes must be [] when error is present; got {v}"
+        );
+        assert_eq!(
+            v["available"],
+            Value::Bool(false),
+            "reader-unavailable invariant: available must be false; got {v}"
+        );
+        assert!(
+            v.as_object().is_some_and(|m| !m.contains_key("note")),
+            "the retired silent `note` fallback must be replaced by `error` (single \
+             error surface); got {v}"
+        );
+
+        // SR-DATA-1: no filesystem path may leak into the client-facing error string.
+        let root_str = root.to_string_lossy();
+        assert!(
+            !err.contains(root_str.as_ref()),
+            "the client-facing `error` must be PATH-FREE (SR-DATA-1) — it leaked the \
+             state_root path {root_str:?}: {err:?}"
+        );
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = home.to_string_lossy().to_string();
+            if !home.is_empty() {
+                assert!(
+                    !err.contains(&home),
+                    "the client-facing `error` leaked $HOME {home:?}: {err:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_recent_episode_timestamp {
+    //! Issue #4383: `/api/memory/recent` must surface the episode's real
+    //! `created_at` so the "Recent Memories" panel can render a "time ago"
+    //! label, and degrade to JSON `null` (never a fabricated epoch) when the
+    //! episode genuinely lacks a timestamp.
+    use super::build_recent_episode_items;
+    use crate::memory_cognitive::CognitiveEpisode;
+
+    fn episode(
+        node_id: &str,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> CognitiveEpisode {
+        CognitiveEpisode {
+            node_id: node_id.to_string(),
+            content: format!("content for {node_id}"),
+            source_label: "unit".to_string(),
+            temporal_index: 0,
+            compressed: false,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn surfaces_created_at_as_rfc3339() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-07-21T08:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let items = build_recent_episode_items(&[episode("epi-1", Some(ts))]);
+        assert_eq!(items.len(), 1);
+        let got = items[0]["timestamp"]
+            .as_str()
+            .expect("a supplied created_at must render as a JSON string, not null");
+        let parsed = chrono::DateTime::parse_from_rfc3339(got)
+            .expect("timestamp must be valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            parsed, ts,
+            "the exact instant must round-trip: {}",
+            items[0]
+        );
+    }
+
+    #[test]
+    fn degrades_missing_created_at_to_null() {
+        let items = build_recent_episode_items(&[episode("epi-2", None)]);
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]["timestamp"].is_null(),
+            "an absent created_at must degrade to JSON null, never a fabricated \
+             epoch: {}",
+            items[0],
+        );
+        // The key must still be present so the frontend shape is stable.
+        assert!(
+            items[0].get("timestamp").is_some(),
+            "the `timestamp` key must always be present: {}",
+            items[0],
+        );
+    }
+
+    #[test]
+    fn preserves_frontend_item_shape() {
+        let items = build_recent_episode_items(&[episode("epi-3", None)]);
+        let item = &items[0];
+        assert_eq!(item["category"].as_str(), Some("Past event"));
+        assert_eq!(item["source"].as_str(), Some("unit"));
+        assert_eq!(item["node_id"].as_str(), Some("epi-3"));
+        assert!(item["summary"].is_string());
     }
 }

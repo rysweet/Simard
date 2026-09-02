@@ -177,6 +177,7 @@ mod tests {
             distill_min_episodes: 25,
             distill_interval_cycles: 50,
             lesson_recurrence_threshold: 2,
+            run_resource_cleanup: false,
             scaler: None,
         }
     }
