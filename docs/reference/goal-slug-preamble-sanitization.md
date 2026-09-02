@@ -140,9 +140,9 @@ It deliberately does **not** strip the bare `INFO `/`WARN ` or
 noise on the stdout surface, because those false-positive on legitimate title
 prose. A `{`/`"`/`[`-leading JSON line is never treated as a preamble line.
 
-After the launcher lines are removed, the remaining lines are rejoined and the
-result is trimmed. If nothing matched, the input is returned as
-`Cow::Borrowed` (zero-copy) so clean titles pay no allocation cost.
+After the launcher lines are removed, the remaining lines are rejoined. If
+nothing matched, the input is returned as `Cow::Borrowed` (zero-copy) so clean
+titles pay no allocation cost.
 
 ### Anchoring, not substring matching
 
@@ -202,7 +202,7 @@ stability tests) asserts:
 ## Examples
 
 ```rust
-use simard::goals::types::goal_slug;
+use simard::goals::goal_slug;
 
 // Clean title — unchanged, byte-identical to legacy output.
 assert_eq!(goal_slug("Fix broken features"), "fix-broken-features");

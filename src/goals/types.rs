@@ -222,8 +222,8 @@ fn strip_launcher_preamble(title: &str) -> Cow<'_, str> {
 ///
 /// When the raw kebab-case slug would exceed the cap, the slug is truncated
 /// at a clean dash boundary and an 8-hex-character SHA-256 prefix of the
-/// ORIGINAL title is appended for collision resistance. Two distinct titles
-/// that share the truncated prefix therefore still produce distinct slugs:
+/// preamble-stripped title is appended for collision resistance. Two distinct
+/// titles that share the truncated prefix therefore still produce distinct slugs:
 ///
 /// ```text
 ///   "Drive amplihack-rs to feature parity with the retired Python amplihack"
