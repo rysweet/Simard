@@ -5,7 +5,7 @@
 //! Its `tick()` performs the exact current per-cycle work in the same order
 //! (heartbeat → `run_ooda_cycle` → persist report/episode/health/metrics), so
 //! the daemon's external cadence and side-effects are byte-for-byte preserved.
-//! The `tick()` body is a `todo!()` stub during TDD; the OODA state/memories/
+//! The `tick()` body is implemented; the OODA state/memories/
 //! config it owns are moved in at construction, matching Appendix A.7/A.9.
 
 use std::time::Instant;
@@ -70,6 +70,10 @@ impl CognitiveThread for OodaThread {
 
     fn kind(&self) -> ThreadKind {
         ThreadKind::Ooda
+    }
+
+    fn purpose(&self) -> &'static str {
+        "Run the primary Observe-Orient-Decide-Act reasoning cycle"
     }
 
     fn policy(&self) -> SchedulePolicy {
@@ -138,6 +142,8 @@ impl CognitiveThread for OodaThread {
             // enforces this and never accrues errors against it.
             consecutive_errors: 0,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

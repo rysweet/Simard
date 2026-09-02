@@ -5,6 +5,11 @@
 //!   - cycle_number, phase (final phase of the cycle), duration_secs,
 //!     actions_taken, summary, timestamp.
 //!
+//! Alongside the bounded window it reports `latest_cycle_number` — the
+//! authoritative cumulative cycle number (the single "Cycle #N" source, #1680)
+//! — so the Cycle History tab can state the real lifetime cycle count instead
+//! of the `MAX_CYCLES`-capped window size.
+//!
 //! This lets the dashboard render a time-series of cycle durations and
 //! actions so Simard-as-reader can answer: "Are my cycles getting faster
 //! or slower?" and "Did my last cycle improve things?"
@@ -13,6 +18,7 @@ use axum::Json;
 use serde_json::{Value, json};
 
 use super::current_work::read_recent_cycle_reports;
+use super::cycle_source::latest_persisted_cycle_number;
 use super::routes::resolve_state_root;
 use super::thinking_collapse::{CollapseMode, collapse_reports_with};
 
@@ -23,9 +29,18 @@ pub(crate) async fn ooda_cycles() -> Json<Value> {
     let state_root = resolve_state_root();
     let raw_reports = read_recent_cycle_reports(&state_root, MAX_CYCLES);
 
-    // `total_cycles` reports the RAW (pre-collapse) count so "N cycles recorded"
-    // reflects real activity even after equivalent cycles collapse into one row.
+    // `total_cycles` is the number of cycle reports in THIS bounded view
+    // (`MAX_CYCLES` newest), pre-collapse, so "showing N" reflects real rows even
+    // after equivalent cycles collapse into one display row.
     let raw_count = raw_reports.len();
+
+    // `latest_cycle_number` is the AUTHORITATIVE cumulative cycle number — the
+    // highest persisted cycle-report index, the single source every "Cycle #N"
+    // panel reads (#1680). Surfacing it lets the Cycle History tab report the
+    // real lifetime cycle count instead of the `MAX_CYCLES`-capped window size,
+    // which otherwise reads as "only 50 cycles ever ran" while System Status
+    // shows cycle #1800+.
+    let latest_cycle_number = latest_persisted_cycle_number(&state_root);
 
     // Flatten each `{cycle_number, report:{…}}` entry into a single object that
     // carries BOTH the fields the collapse pass needs (cycle_number, summary,
@@ -119,6 +134,7 @@ pub(crate) async fn ooda_cycles() -> Json<Value> {
     Json(json!({
         "cycles": cycles,
         "total_cycles": raw_count,
+        "latest_cycle_number": latest_cycle_number,
         "duration_trend": trend,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))

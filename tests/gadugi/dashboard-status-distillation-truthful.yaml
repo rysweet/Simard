@@ -1,0 +1,53 @@
+name: "Dashboard Status Distillation Truthfulness"
+description: "Outside-in check that the unified Status snapshot (Overview 'System Status' MEMORY / BRAIN cognitive line, GET /api/status/snapshot, `simard status`, TUI Status tab) never reports `distillation absent` while distillation is actually running. Before the fix `cognitive_processes` was hard-coded to `CognitiveHealth::default()`, so the cognitive line always read `distillation absent` even when the daemon had flushed `simard.distill.runs{result=ok}` and the SAME snapshot's Telemetry section derived a live `distill_fail_pct` from it — hiding a basic self-understanding fact. The cognitive line must agree with the telemetry that feeds `distill_fail_pct`."
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Status snapshot cognitive distillation agrees with published telemetry"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-status-distillation-truthful.sh"
+    timeout: 120000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "dashboard"
+    - "status"
+    - "distillation"
+    - "cognitive"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

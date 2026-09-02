@@ -1,0 +1,69 @@
+// Simard metacognitive atlas — Diagram 1: top-level system map.
+//
+// Code-first: every node maps to a real module/symbol in current source. The
+// three subsystems are joined by the shared scheduler ("the brain",
+// src/cognitive_threads/mind.rs). The Overseer subsystem is a DESIGN SKETCH
+// (src/overseer/mod.rs is `#![allow(dead_code)]`, not wired into `main`) and is
+// therefore drawn with dashed borders/edges.
+//
+// Render (optional, CI-safe): dot -Tsvg system-map.dot -o system-map.svg
+digraph simard_system_map {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", shape=box, style=rounded];
+    edge [fontname="Helvetica"];
+    labelloc="t";
+    label="Simard metacognitive model — top-level system map (code-derived)";
+
+    // --- The brain: shared scheduler + memory (src/cognitive_threads) ---
+    subgraph cluster_brain {
+        label="The brain — shared scheduler & memory (src/cognitive_threads)";
+        style=rounded;
+        color="#4C566A";
+        mind      [label="Mind (scheduler)\nmind.rs"];
+        schedule  [label="SchedulePolicy\nschedule.rs"];
+        memory    [label="Cognitive memory model\n(see cognitive-memory.md)"];
+        telemetry [label="Thread telemetry\ntelemetry.rs"];
+        mind -> schedule [label="ticks by policy"];
+        mind -> telemetry [label="emits"];
+    }
+
+    // --- Cognitive-threads layer: the closed roster of 13 (ThreadName::ALL) ---
+    subgraph cluster_threads {
+        label="Cognitive-threads layer — ThreadName::ALL (13 threads)";
+        style=rounded;
+        color="#5E81AC";
+        threads [label="13 reflective/background threads\n(recipe → record → rail)\nsrc/cognitive_threads/threads/*"];
+    }
+
+    // --- OODA layer: the authoritative loop ---
+    subgraph cluster_ooda {
+        label="OODA layer — authoritative loop";
+        style=rounded;
+        color="#A3BE8C";
+        ooda_thread [label="OodaThread\nThreadKind::Ooda, Priority::Critical\nthreads/ooda.rs"];
+        ooda_loop   [label="OODA cycle\nsrc/ooda_loop/*"];
+        ooda_brain  [label="OODA reasoners\nsrc/ooda_brain/*"];
+        ooda_thread -> ooda_loop;
+        ooda_loop -> ooda_brain [label="orient/decide"];
+    }
+
+    // --- Overseer layer: DESIGN SKETCH, not wired to runtime ---
+    subgraph cluster_overseer {
+        label="Overseer layer — DESIGN SKETCH (not wired into main)";
+        style=dashed;
+        color="#B48EAD";
+        overseer [label="Overseer meta-OODA\nsrc/overseer/* (#![allow(dead_code)])",
+                  style="rounded,dashed"];
+    }
+
+    // Scheduler owns all threads (OODA + the 13) — the brain runs the mind.
+    mind -> threads       [label="schedules"];
+    mind -> ooda_thread   [label="schedules (Critical)"];
+    threads -> memory     [label="reads/writes", style=dashed, dir=both];
+    ooda_brain -> memory  [label="reads/writes", style=dashed, dir=both];
+    threads -> telemetry  [label="feeds"];
+
+    // Overseer (aspirational) would consume thread telemetry via thread_oversight.
+    telemetry -> overseer [label="thread_oversight consumes (design)", style=dashed];
+}

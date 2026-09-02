@@ -8,14 +8,16 @@ description: >
   fixed-window dedup was insufficient, how exponential backoff rate-limits
   without ever permanently silencing a genuinely recurring gap, how this makes
   the Overseer ACT on a gap once rather than observe it forever (meta bugs
-  #4255 / #4126), and the planned cross-process open-issue check (future work).
-last_updated: 2026-07-17
+  #4255 / #4126), and the durable cross-process open-issue check (#4717) that
+  makes the guarantee survive daemon restarts.
+last_updated: 2026-07-26
 review_schedule: as-needed
 owner: simard
 doc_type: concept
 status: reference
 related:
   - ../reference/overseer-backoff-gate-api.md
+  - ../reference/overseer-gap-scan-durable-dedup.md
   - ../howto/configure-overseer-gap-scan-backoff.md
   - ../reference/overseer-workstream-gap-scan.md
   - ../reference/overseer-recipe-launch-idempotency.md
@@ -84,8 +86,9 @@ The fix
 ([BackoffGate reference](../reference/overseer-backoff-gate-api.md)) is
 deliberately additive — it adds a new primitive rather than mutating the
 existing `WhisperGate`, so every current caller is untouched. An in-process
-exponential-backoff gate guards the gap-cover act path, with a cross-process
-open-issue equivalence check planned as a follow-on (future work).
+exponential-backoff gate guards the gap-cover act path, with a durable
+cross-process open-issue check ([#4717](https://github.com/rysweet/Simard/issues/4717))
+layered on top so the guarantee survives a daemon restart.
 
 ### Exponential BackoffGate (in-process) — implemented
 
@@ -108,15 +111,22 @@ Because the gate lives in the decide/act seam and only holds a suppressed plan,
 it gives a clean guarantee **within one running daemon**: at most one open
 covering issue per distinct gap for the life of the process.
 
-### Open-issue equivalence check (cross-process) — future work
+### Open-issue equivalence check (cross-process) — implemented (#4717)
 
 The BackoffGate is in-memory, so a daemon restart forgets its state and a cold
-gate could re-file a duplicate that is already open on GitHub. A planned
-follow-on would, before launching a gap-cover recipe, do a **best-effort** GitHub
-query (reusing the existing `stewardship::dedup` helpers) for an already-open
-**equivalent** issue and skip the launch if one exists (failing toward surfacing
-on any API error). This cross-process layer is **not** part of #4186; it is
-documented here as intended direction only.
+gate could re-file a duplicate that is already open on GitHub. The durable
+open-issue check closes that seam: before filing a covering issue for a fresh
+gap, the Overseer queries GitHub (reusing the `stewardship::gh_client` dedup
+helpers — a fast `stewardship-signature:` body search unioned with a
+strongly-consistent newest-open-issues scan) for an already-open **equivalent**
+issue keyed by the gap's stable `workstream-gap:<signature>`. If one exists it
+**reuses** it (no new issue, counted as `reused_existing`); otherwise it files
+one. Unlike the earlier best-effort sketch, the check is **fail-loud**: a `gh`
+error creates and notifies nothing rather than blind-filing. This layer runs
+*after* the in-process BackoffGate/WhisperGate pre-filter, so bursts never
+trigger a query storm. See the
+[durable dedup reference](../reference/overseer-gap-scan-durable-dedup.md) for
+the typed surface and the two-tier gate.
 
 ## How this makes the Overseer ACT (not just observe)
 
@@ -146,7 +156,7 @@ protect.
 
 - **One open covering issue per distinct gap within a process.** The in-process
   gate holds duplicate coverage plans across ticks; the cross-process case
-  (restarts) is the planned open-issue check (future work).
+  (restarts) is closed by the durable open-issue check (#4717).
 - **Never permanently silent.** The window is capped and resets after silence; a
   genuinely recurring gap always re-surfaces.
 - **Additive / non-breaking.** A new `BackoffGate` primitive; existing
@@ -160,6 +170,8 @@ protect.
 
 - [Overseer BackoffGate & gap-scan dedup reference](../reference/overseer-backoff-gate-api.md)
   — the typed API, config accessors, and wiring.
+- [Overseer gap-scan durable open-issue dedup reference](../reference/overseer-gap-scan-durable-dedup.md)
+  — the durable, GitHub-side cross-process check (#4717).
 - [Configure Overseer gap-scan backoff](../howto/configure-overseer-gap-scan-backoff.md)
   — tune the window and verify end-to-end.
 - [Overseer workstream gap-scan](../reference/overseer-workstream-gap-scan.md) —

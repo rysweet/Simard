@@ -367,4 +367,40 @@ impl SessionCheckpoint {
         let path = state_root.join(CHECKPOINT_FILENAME);
         let _ = std::fs::remove_file(path);
     }
+
+    /// Whether this checkpoint represents a mid-session state a fresh engineer
+    /// process can safely resume from.
+    ///
+    /// Checkpoints are only written at the `Intake`..=`Execution` phase
+    /// boundaries and are cleared on successful completion, so any checkpoint
+    /// that loads at one of those phases marks work that was interrupted before
+    /// the session finished. Terminal phases (`Reflection`, `Summarize`,
+    /// `Persistence`, `Complete`, `Failed`) are never resumable — either the
+    /// remaining work is cheap/idempotent enough to just re-run from the
+    /// `Execution` result, or the session already reached a terminal outcome.
+    pub fn is_resumable(&self) -> bool {
+        matches!(
+            self.completed_phase,
+            SessionPhase::Intake
+                | SessionPhase::Preparation
+                | SessionPhase::Planning
+                | SessionPhase::Execution
+        )
+    }
+
+    /// The recorded agent result iff the `Execution` phase completed AND both
+    /// the action and its verification were persisted.
+    ///
+    /// This is the linchpin of resume idempotency: when it returns `Some`, a
+    /// resuming engineer reuses the already-executed agent session instead of
+    /// spawning a new one, which is what prevents a completed session from
+    /// opening a duplicate PR or redoing expensive, non-idempotent work.
+    pub fn resumable_execution(&self) -> Option<(ExecutedEngineerAction, VerificationReport)> {
+        if self.completed_phase >= SessionPhase::Execution
+            && let (Some(action), Some(verification)) = (&self.action, &self.verification)
+        {
+            return Some((action.clone(), verification.clone()));
+        }
+        None
+    }
 }

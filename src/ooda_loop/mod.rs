@@ -31,6 +31,10 @@ mod tests_orient_extra;
 #[cfg(test)]
 mod tests_parse_failure_1890;
 #[cfg(test)]
+mod tests_per_goal_cycle;
+#[cfg(test)]
+mod tests_record_decision_rail;
+#[cfg(test)]
 mod tests_types;
 
 // Fix 3 (issue #1): integration tests for the no-progress breaker wiring.
@@ -49,6 +53,13 @@ mod tests_no_progress_investigation;
 // over them, so no goal is ever stranded with a bare, unexplained block.
 #[cfg(test)]
 mod tests_no_progress_reinvestigation;
+
+// process_health (TDD): the churn-stopping side effects of the terminal-quarantine
+// rung — the re-investigation pass skips quarantined goals (never re-investigates,
+// re-schedules, or re-files them) and an at-bound evidence-less UNCLEAR-CRITERIA
+// stall is durably marked + blocked with real evidence.
+#[cfg(test)]
+mod tests_quarantine_churn;
 
 // Issue #16 (follow-up, TDD): direct unit tests for the production
 // `DeterministicNoProgressReasoner` — pin the terminal-rung invariant that it

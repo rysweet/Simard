@@ -177,6 +177,32 @@ mod tests {
         assert!(worktree_branch(tmp.path()).is_none());
     }
 
+    /// Regression (issue #4722): the tracked-worktree routing must decide
+    /// staleness from a **positively-confirmed merged/closed PR** and must NEVER
+    /// use a `git merge-base` branch-ancestry test against origin/main. A fresh
+    /// worktree at origin/main is an ancestor of origin/main, so an ancestry test
+    /// would wrongly flag it and delete its live build cache. This source-scan
+    /// locks the invariant: if anyone reintroduces the ancestry staleness flag
+    /// into this module, this test goes red.
+    ///
+    /// The forbidden flag needle is assembled with `concat!` so this test's own
+    /// source text never contains the contiguous literal (which would make the
+    /// scan self-match).
+    #[test]
+    fn routing_never_uses_merge_base_ancestry_flag() {
+        let src = include_str!("prod.rs");
+        let forbidden_flag = concat!("--is", "-ancestor");
+        let forbidden_bare = concat!("is", "-ancestor");
+        assert!(
+            !src.contains(forbidden_flag),
+            "prod.rs must not reintroduce the `git merge-base` ancestry staleness flag ({forbidden_flag})",
+        );
+        assert!(
+            !src.contains(forbidden_bare),
+            "no branch-ancestry staleness check may appear in the reclaim routing",
+        );
+    }
+
     #[test]
     fn pr_state_no_prs_is_not_reclaimable() {
         // An empty array means no PR references this head — never reclaimable.

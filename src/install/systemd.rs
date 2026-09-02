@@ -100,7 +100,7 @@ fn render_unit(
     service_path: &str,
 ) -> String {
     format!(
-        "[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={working_directory}\nExecStart={binary} {args}\nRestart=always\nRestartSec=10\nEnvironment=SIMARD_HOME={working_directory}\nEnvironment=SIMARD_PROMPT_ASSETS_DIR={working_directory}/prompt_assets/simard\nEnvironment=PATH={service_path}\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\n# Preserve spawned engineer children across daemon restart; they finish on the\n# old inode while the new daemon takes over dispatch.\nKillMode=process\nWorkingDirectory={working_directory}\nExecStart={binary} {args}\nRestart=always\nRestartSec=10\nEnvironment=SIMARD_HOME={working_directory}\nEnvironment=SIMARD_PROMPT_ASSETS_DIR={working_directory}/prompt_assets/simard\nEnvironment=PATH={service_path}\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 

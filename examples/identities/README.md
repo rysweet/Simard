@@ -1,9 +1,11 @@
 # Example identities — data-only identity packages
 
-This directory is the durable home for **example non-engineering identities**
-(cartographer, atelier, concierge, gastronome, bursar, kinema, loremaster, terra, sommelier, …). These are
-**examples of what Simard's pluggable-identity framework can produce** — they are
-**not** part of Simard's own daemon.
+This directory is the durable home for **example non-engineering identities** —
+demonstrations of what Simard's pluggable-identity framework can produce. They
+are **not** part of Simard's own daemon. Each example is a self-describing,
+data-only package under `examples/identities/<name>/`; the index of shipped
+examples below is **derived from those package directories**, so adding one is a
+pure data change (see [Reference and shipped example packages](#reference-and-shipped-example-packages)).
 
 ## Read this first: the boundary
 
@@ -164,107 +166,40 @@ before authoring. In short:
 
 ## Reference and shipped example packages
 
-[`cartographer/`](./cartographer/) is the reference example identity: a pure
-prompt + recipe data package that turns a dataset and a question into a served
-interactive dashboard with a written narrative. It exists to prove the pattern
-end-to-end — defined entirely as data, loaded with zero `src/` changes.
+Each example identity is a **self-describing package**: its descriptive blurb
+lives in its own `examples/identities/<name>/README.md`, not in this shared file.
+[`cartographer/`](./cartographer/README.md) is the **reference package** — copy
+its shape when authoring a new example.
 
-[`gastronome/`](./gastronome/) is a second worked example in the same shape: a
-culinary menu- and event-design identity that turns a menu brief and its
-constraints (headcount, dietary needs, budget, service time) into a costed,
-nutrition-analyzed, service-scaled menu with a prep schedule. Its four-stage
-recipe (compose → nutrition & cost → scale → schedule) shows how a data-only
-identity drives real domain rigor (a nutrition table, a costing roll-up, yield
-math, backward-from-service scheduling) entirely from prompts and a recipe, with
-zero `src/` changes.
+The index below is **generated**: it is derived from the package directories
+under `examples/identities/`, in alphabetical order, with one linked entry per
+package. **Do not hand-edit the block between the markers** — adding, renaming, or
+removing an example is a pure data change (create or delete its package
+directory), and the index updates itself. The
+`tests/example_identities_index_valid.rs` staleness gate asserts the committed
+block is byte-for-byte what `render_identity_index` derives; regenerate it with:
 
-[`bursar/`](./bursar/) is a third example: an investment-portfolio **research &
-advisory** identity (research/advisory only — it **never** executes trades,
-places orders, or moves money). It takes a portfolio and a mandate through a
-five-stage loop — asset allocation → backtesting → risk analysis → rebalancing
-**plan** → report — driving domain tooling (`pandas`, `backtrader`, `QuantLib`)
-from its recipe, again with zero `src/` changes. A rebalancing "plan" is a
-document of proposed trades for a human to review, not an instruction the
-identity carries out.
+```bash
+UPDATE_EXPECT=1 cargo test --test example_identities_index_valid
+```
 
-[`atelier/`](./atelier/) is a fourth example: an industrial & furniture /
-product-design identity that turns a parametric product brief into a
-**fabrication-ready package** — a 3D model, a render, and fabrication exports
-(STEP/STL, a cut list, and a bill of materials) — through a five-stage loop
-(brief → model → render → fabricate → handoff). Its recipes drive external CAD
-tooling (Blender `bpy`, FreeCAD, OpenSCAD) directly from their agent sessions,
-again with zero `src/` changes.
+<!-- BEGIN GENERATED IDENTITY INDEX -->
+- [atelier](./atelier/README.md)
+- [bursar](./bursar/README.md)
+- [cartographer](./cartographer/README.md)
+- [concierge](./concierge/README.md)
+- [gastronome](./gastronome/README.md)
+- [kinema](./kinema/README.md)
+- [loremaster](./loremaster/README.md)
+- [maestro](./maestro/README.md)
+- [terra](./terra/README.md)
+- [vitruvia](./vitruvia/README.md)
+<!-- END GENERATED IDENTITY INDEX -->
 
-Its two goal-session recipes are
-[`atelier-parametric-modeling.yaml`](./atelier/recipes/atelier-parametric-modeling.yaml)
-(brief → parametric model → render, building and verifying manifold geometry)
-and
-[`atelier-fabrication-export.yaml`](./atelier/recipes/atelier-fabrication-export.yaml)
-(export STEP/STL + cut list + BOM → persist the package with a design/build
-narrative). `tests/atelier_example_identity_valid.rs` — run by the
-`tests/qa-scenarios/atelier-example-identity.yaml` scenario — proves the package
-loads through the data-driven loader and its recipes drive the full pipeline.
-
-[`concierge/`](./concierge/) is a fifth example, in the hospitality
-domain: it turns a hotel brief into a durable operations package — a property
-program and layout, a guest-experience and brand design, and runnable
-reservations / PMS / housekeeping / channel-management workflows whose
-reservation lifecycle (book → check-in → check-out → housekeeping → restored
-availability) is exercised with enforced no-double-booking and
-availability-conservation invariants. Like every example here it carries **no**
-`BuiltinIdentityLoader` arm — it is defined entirely by the data files in its
-package and loaded by `load_example_identity`. Its assets are validated
-end-to-end by `tests/concierge_example_assets_valid.rs` and the
-`tests/qa-scenarios/concierge-example-end-to-end.yaml` scenario.
-
-[`kinema/`](./kinema/) is a sixth example: an **animation & motion-graphics**
-identity that turns a story brief and a shot list into a rendered, playable
-animation sequence with a written motion brief. Its four-stage recipe
-(storyboard → rig → render → motion brief) drives real domain tooling — Blender
-(Grease Pencil for 2D, armature rigging + Cycles/EEVEE for 3D), Synfig (vector 2D
-tweening), and Natron (node-based compositing) — entirely from its recipe and the
-agent sessions it spawns, again with zero `src/` changes.
-
-[`loremaster/`](./loremaster/) is a seventh example: a **tabletop-RPG campaign
-designer & game master** identity that turns a campaign brief into a durable,
-**playable campaign module** — world lore & factions, NPCs, XP-budget-balanced
-encounters, session-prep material, and a **Foundry VTT** module — and then
-**runs a session end to end** (roll initiative → resolve combat → terminating
-outcome, with seeded/reproducible dice) to prove the module actually plays. It
-works with **Dungeons & Dragons and other tabletop RPGs** using **open SRD
-content only** (SRD 5.1, CC-BY 4.0 / OGL). Its two goal-session recipes are
-[`loremaster-campaign-module.yaml`](./loremaster/recipes/loremaster-campaign-module.yaml)
-(world & lore → NPCs & encounters → session prep → assemble & run) and
-[`loremaster-encounter-balance.yaml`](./loremaster/recipes/loremaster-encounter-balance.yaml)
-(build & XP-budget-balance encounters → run a combat encounter and verify the
-invariants). It enforces the safety invariants that make a run trustworthy:
-SRD-legal content only, every encounter's **adjusted XP budget** (Σ monster XP ×
-the SRD encounter multiplier) inside its target difficulty band, and **no
-accidental TPK**. Like every example here it carries **no** `BuiltinIdentityLoader`
-arm — it is defined entirely by the data files in its package and loaded by
-`load_example_identity`. Its assets are validated end-to-end by
-`tests/loremaster_example_assets_valid.rs` and the
-`tests/qa-scenarios/loremaster-example-end-to-end.yaml` scenario.
-
-[`terra/`](./terra/) is an eighth example: a **virtual-worlds & game-level**
-identity that turns a world brief into a **launchable, navigable 3D scene** — end
-to end. Its four-stage recipe (world design & blockout → terrain & asset authoring
-→ scene assembly → world brief) plans the spaces, navigation graph, and
-interaction beats; authors the terrain and assets in Blender and exports glTF/.glb;
-wires them into a runnable scene with a player controller, collision, a baked
-navmesh, and interaction triggers; and **verifies the scene launches and is
-navigable**. It drives real domain tooling — Godot (game levels, GDScript,
-`NavigationRegion3D` navmesh, headless `godot --headless --export-release` build),
-Blender (terrain + asset authoring via `bpy`, glTF/.glb export), and A-Frame /
-WebXR (in-browser explorable 3D worlds) — entirely from its recipe and the agent
-sessions it spawns, again with zero `src/` changes. Its assets are validated
-end-to-end by `tests/terra_assets_valid.rs` and the
-`tests/qa-scenarios/terra-world-build-end-to-end.yaml` scenario.
-
-> **All domain tooling lives in the recipes.** Atelier's OpenSCAD/FreeCAD/Blender
-> steps, concierge's booking / PMS / channel-management workflows,
-> loremaster's SRD rules engine / seeded dice roller / Foundry VTT exporter, and
-> terra's Godot / Blender / A-Frame world-building tooling run
-> inside the agent sessions the recipes spawn — never in Simard's Rust daemon.
-> Simard's `src/` stays pure Rust (no Python, no `kuzu`, no CAD engine, no PMS
-> module, no dice engine, no game engine).
+> **All domain tooling lives in the recipes.** Every example's domain tooling —
+> CAD engines, booking / PMS / channel-management workflows, rules engines and
+> seeded dice rollers, game engines, notation and audio toolchains — runs inside
+> the agent sessions the recipes spawn, never in Simard's Rust daemon. Simard's
+> `src/` stays pure Rust (no Python, no `kuzu`, no CAD engine, no PMS module, no
+> dice engine, no game engine). Each package's own README describes what that
+> identity does and which tooling its recipes drive.

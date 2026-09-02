@@ -1,0 +1,87 @@
+name: distill-dedup-crowded-concept-window
+app_type: cli
+description: |
+  Verify the identity-dedup step of the shared distillation write boundary
+  (`fact_reliability::commit_gated_fact`) survives a concept neighborhood larger
+  than its fixed prior-scan window (perpetual-cognition goal: raise distillation
+  fact-yield quality and recall precision by not promoting redundant facts).
+
+  The distillation concept vocabulary is a tiny CLOSED set (`KNOWN_CONCEPTS` =
+  {pr-pattern, bug-pattern, lesson-learned}), so many genuinely distinct facts
+  pile up under one label. `search_facts` returns priors ranked
+  confidence-descending and capped at `DEDUP_PRIOR_SCAN_LIMIT` (5); once more
+  than five higher-confidence facts share a concept, a real content-duplicate is
+  pushed out of the same-concept window and escapes dedup — the redundant fact is
+  promoted, inflating semantic memory and dragging recall precision down. The
+  gate now unions the concept-keyed scan with a CONTENT-keyed scan so the exact
+  restatement surfaces even when its concept is crowded, while an explicit
+  canonical-concept guard keeps dedup keyed on the full (concept, content)
+  identity so identical content under a DIFFERENT concept is never merged.
+
+  Behavior is proven by the hermetic in-crate unit tests this scenario drives.
+  The CLI runner rejects any non-zero exit, so a failing test fails the scenario.
+  No live-host state is mutated (the tests run against an in-memory database).
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # A content-duplicate crowded past the width-5 same-concept window by five
+  # stronger (0.9) facts still dedups via the content-keyed scan (before this
+  # fix it was promoted a second time). First invocation compiles the binary.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::commit_gated_fact_dedups_duplicate_crowded_out_of_concept_window"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The content scan does NOT introduce a cross-concept false merge: identical
+  # content under a different concept is a distinct identity and stays stored.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::commit_gated_fact_content_scan_preserves_cross_concept_identity"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression guard: the pre-existing dedup contracts (exact re-commit,
+  # whitespace-variant, and cross-concept-label-variant restatements) still hold
+  # under the unioned two-scan dedup.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::commit_gated_fact_stores_dedups_and_quarantines"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::commit_gated_fact_dedups_across_concept_label_variants"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

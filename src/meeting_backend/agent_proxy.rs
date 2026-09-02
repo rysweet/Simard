@@ -845,11 +845,40 @@ mod tests {
     // ── issue #2549: repo-derived workdir (no hardcoded operator path) ──
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_derives_repo_root_from_cwd() {
-        // `cargo test` runs inside this git checkout, so resolution must yield
-        // a real repository root — and it must NOT be the old hardcoded path.
-        let resolved = resolve_agent_workdir()
-            .expect("workdir should resolve to the repo root inside a git checkout");
+        // Exercise cwd-derivation (`git rev-parse --show-toplevel`) without
+        // mutating process-global cwd — `set_current_dir` corrupts concurrent
+        // cwd-readers (e.g. `procfs_probe_detects_self_cwd`) in the same parallel
+        // test binary. Clear any override, then guard on a discoverable root:
+        // assert full invariants inside a checkout (CI); skip cleanly when none is
+        // found (the self-deploy gate's non-git build dir, issue #4505) instead of
+        // `.expect()`-panicking. Serialised because clearing WORKDIR_ENV is shared
+        // with the override tests below.
+        // Contract: docs/testing/checkout-independent-workdir-tests.md
+        let prev = std::env::var_os(WORKDIR_ENV);
+        // SAFETY: env mutation is serialised via the serial key above.
+        unsafe { std::env::remove_var(WORKDIR_ENV) };
+
+        let resolved = resolve_agent_workdir();
+
+        // Restore before asserting so a panic cannot leak the cleared override.
+        unsafe {
+            if let Some(v) = &prev {
+                std::env::set_var(WORKDIR_ENV, v);
+            }
+        }
+
+        let Some(resolved) = resolved else {
+            // No git checkout discoverable from cwd (self-deploy gate) — nothing
+            // to assert; skip cleanly with a traced decision, not a silent fallback.
+            debug!(
+                "resolve_agent_workdir_derives_repo_root_from_cwd: no repo root \
+                 discoverable from cwd — skipping repo-root assertions (issue #4505)"
+            );
+            return;
+        };
+
         assert!(resolved.is_dir(), "resolved workdir must exist");
         assert!(
             resolved.join(".git").exists(),
@@ -892,12 +921,18 @@ mod tests {
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_ignores_nonexistent_override() {
+        // A bogus override must be ignored and resolution must fall through to
+        // cwd-derivation. No cwd mutation (see the derives-from-cwd test above for
+        // why): set a non-existent WORKDIR_ENV, restore it, then guard on a
+        // discoverable root. Skips cleanly outside a checkout (issue #4505); either
+        // way it must NEVER be the hardcoded operator path.
         let prev = std::env::var_os(WORKDIR_ENV);
         // SAFETY: env mutation is serialised via the serial key above.
         unsafe { std::env::set_var(WORKDIR_ENV, "/nonexistent/simard/meeting/dir") };
 
         let resolved = resolve_agent_workdir();
 
+        // Restore before asserting so a panic cannot leak the bogus override.
         unsafe {
             match &prev {
                 Some(v) => std::env::set_var(WORKDIR_ENV, v),
@@ -905,9 +940,15 @@ mod tests {
             }
         }
 
-        // A bogus override must fall through to cwd-derivation (the repo root),
-        // never a hardcoded path — so inside the checkout we still get a repo.
-        let resolved = resolved.expect("should fall through to repo root");
+        let Some(resolved) = resolved else {
+            // Bogus override correctly ignored, and no repo root is discoverable
+            // from cwd (self-deploy gate). Nothing to assert; skip cleanly.
+            debug!(
+                "resolve_agent_workdir_ignores_nonexistent_override: bogus override \
+                 ignored and no repo root discoverable from cwd — skipping (issue #4505)"
+            );
+            return;
+        };
         assert_ne!(
             resolved,
             PathBuf::from("/home/azureuser/src/Simard/worktrees/main"),

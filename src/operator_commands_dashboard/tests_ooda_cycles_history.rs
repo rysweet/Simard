@@ -166,6 +166,72 @@ async fn ooda_cycles_total_cycles_is_raw_precollapse_count() {
 
 #[tokio::test]
 #[serial_test::serial(cognitive_memory)]
+async fn ooda_cycles_latest_cycle_number_is_the_authoritative_index_not_the_row_count() {
+    // Persisted cycle numbers are the cumulative daemon index, NOT 1..=N. The
+    // Cycle History tab must report the real lifetime cycle number, so
+    // `latest_cycle_number` tracks the highest persisted filename index — never
+    // the number of rows scanned.
+    let state = HermeticState::new();
+    for cycle in [500u32, 501u32] {
+        let ts = format!("2026-07-06T04:00:0{}Z", cycle % 10);
+        write_report(
+            state.state_root(),
+            cycle,
+            &progress_body(cycle, &format!("g{cycle}"), Some(&ts)),
+        );
+    }
+
+    let resp = ooda_cycles().await.0;
+    assert_eq!(
+        resp["latest_cycle_number"], 501,
+        "latest_cycle_number must be the highest persisted cycle index (501), got: {resp}"
+    );
+    assert_eq!(
+        resp["total_cycles"], 2,
+        "total_cycles is the count of reports in the window, got: {resp}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn ooda_cycles_latest_cycle_number_exceeds_capped_window() {
+    // With more persisted cycles than the MAX_CYCLES=50 scan window, the tab
+    // would otherwise read "50 cycles recorded" while the daemon is far past
+    // that. `latest_cycle_number` must expose the true lifetime count so the UI
+    // can render "Showing last 50 of <lifetime>" instead of undercounting.
+    let state = HermeticState::new();
+    for cycle in 1..=60u32 {
+        let ts = format!("2026-07-06T05:{:02}:00Z", cycle % 60);
+        write_report(
+            state.state_root(),
+            cycle,
+            &progress_body(cycle, "g1", Some(&ts)),
+        );
+    }
+
+    let resp = ooda_cycles().await.0;
+    let total = resp["total_cycles"]
+        .as_u64()
+        .expect("total_cycles is a number");
+    let latest = resp["latest_cycle_number"]
+        .as_u64()
+        .expect("latest_cycle_number is a number");
+    assert_eq!(
+        total, 50,
+        "the window is capped at MAX_CYCLES=50, got: {resp}"
+    );
+    assert_eq!(
+        latest, 60,
+        "latest_cycle_number must reflect the true lifetime cycle count, got: {resp}"
+    );
+    assert!(
+        latest > total,
+        "the fix's premise: lifetime count exceeds the capped window, got: {resp}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
 async fn ooda_cycles_rows_carry_real_timestamps_and_legacy_gets_empty() {
     let state = HermeticState::new();
     // A progressing cycle WITH a timestamp, and a legacy deferral cycle WITHOUT

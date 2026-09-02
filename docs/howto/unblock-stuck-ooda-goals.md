@@ -227,6 +227,7 @@ under `~/.simard/agent_logs/`.
 
 ## Related
 
+- [Diagnose a no-progress breaker issue storm](./diagnose-a-no-progress-breaker-issue-storm.md) — when the daemon auto-files many duplicate `ooda-stuck` "goal stuck after guided retry (UNCLEAR-CRITERIA)" issues; the durable suppression marker now caps filings at one per goal.
 - [Simard CLI reference: `simard goal`](../reference/simard-cli.md)
 - [Re-investigate bare-blocked OODA goals](./reinvestigate-bare-blocked-goals.md) — the daemon now auto-upgrades bare `[OODA-SAFEGUARD]` blocks to a concrete WHY every cycle (#17), so manual unblocking is rarely needed.
 - [Recover goal board](./recover-goal-board.md)

@@ -20,6 +20,11 @@ pub struct InstallLayout {
     pub systemd_user_dir: PathBuf,
     pub ooda_unit_path: PathBuf,
     pub signal_unit_path: PathBuf,
+    /// Owned PATH entrypoint: `$ENTRYPOINT_DIR/simard` (default `~/.local/bin/simard`).
+    pub entrypoint_path: PathBuf,
+    /// Known orphan `simard` paths to reconcile (default `[~/.cargo/bin/simard]`).
+    /// The entrypoint path is excluded — it is repaired, never pruned.
+    pub orphan_paths: Vec<PathBuf>,
     pub transaction_id: String,
 }
 
@@ -32,7 +37,29 @@ pub struct StagingLayout {
 
 #[derive(Debug)]
 pub struct InstallLock {
-    _file: fs::File,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    file: fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        // Release the advisory lock explicitly instead of relying on the file
+        // close alone. `flock` locks live on the open file description, so any
+        // sibling that `fork`/`exec`s while this guard is held inherits the same
+        // locked description; the kernel keeps the lock until *every* inherited
+        // descriptor is closed, which can outlast this guard by the child's
+        // brief fork→exec window. An explicit `LOCK_UN` drops the shared lock
+        // immediately, so a subsequent acquire never races that window.
+        //
+        // SAFETY: `flock` only reads the still-open lock-file descriptor; the
+        // File is closed immediately after this returns.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 pub fn resolve(config: &InstallConfig) -> InstallResult<InstallLayout> {
@@ -41,6 +68,21 @@ pub fn resolve(config: &InstallConfig) -> InstallResult<InstallLayout> {
 
     let systemd_user_dir = resolve_systemd_user_dir(config)?;
     validate_install_path("systemd user directory", &systemd_user_dir)?;
+
+    let entrypoint_dir = resolve_entrypoint_dir(config)?;
+    validate_install_path("entrypoint directory", &entrypoint_dir)?;
+    let entrypoint_path = entrypoint_dir.join("simard");
+
+    let orphan_dirs = resolve_orphan_dirs(config)?;
+    let mut orphan_paths = Vec::new();
+    for dir in &orphan_dirs {
+        validate_install_path("orphan directory", dir)?;
+        let path = dir.join("simard");
+        // The entrypoint is repaired in place, never pruned as an orphan.
+        if path != entrypoint_path && !orphan_paths.contains(&path) {
+            orphan_paths.push(path);
+        }
+    }
 
     let transaction_id = transaction_id()?;
     let bin_dir = simard_home.join("bin");
@@ -61,6 +103,8 @@ pub fn resolve(config: &InstallConfig) -> InstallResult<InstallLayout> {
         systemd_user_dir,
         ooda_unit_path,
         signal_unit_path,
+        entrypoint_path,
+        orphan_paths,
         transaction_id,
     })
 }
@@ -148,7 +192,7 @@ pub fn acquire_install_lock(layout: &InstallLayout) -> InstallResult<InstallLock
         }
     }
 
-    Ok(InstallLock { _file: file })
+    Ok(InstallLock { file })
 }
 
 pub fn backup_path(layout: &InstallLayout, name: &str) -> PathBuf {
@@ -181,6 +225,38 @@ fn resolve_systemd_user_dir(config: &InstallConfig) -> InstallResult<PathBuf> {
         super::InstallError::new("HOME is required to default the systemd user directory")
     })?;
     Ok(home.join(".config").join("systemd").join("user"))
+}
+
+fn resolve_entrypoint_dir(config: &InstallConfig) -> InstallResult<PathBuf> {
+    if let Some(path) = &config.entrypoint_dir {
+        return Ok(path.clone());
+    }
+    if let Some(value) = std::env::var_os("SIMARD_ENTRYPOINT_DIR") {
+        return Ok(PathBuf::from(value));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        super::InstallError::new("HOME is required to default the PATH entrypoint directory")
+    })?;
+    Ok(home.join(".local").join("bin"))
+}
+
+fn resolve_orphan_dirs(config: &InstallConfig) -> InstallResult<Vec<PathBuf>> {
+    if let Some(dirs) = &config.orphan_dirs {
+        return Ok(dirs.clone());
+    }
+    if let Some(value) = std::env::var_os("SIMARD_ORPHAN_DIRS") {
+        let raw = os_str_to_unit_path("SIMARD_ORPHAN_DIRS", &value)?;
+        let dirs: Vec<PathBuf> = raw
+            .split(':')
+            .filter(|entry| !entry.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        return Ok(dirs);
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        super::InstallError::new("HOME is required to default the entrypoint orphan directories")
+    })?;
+    Ok(vec![home.join(".cargo").join("bin")])
 }
 
 pub fn validate_install_path(label: &str, path: &Path) -> InstallResult<()> {
@@ -261,6 +337,8 @@ mod tests {
             systemd_user_dir: root.join("systemd"),
             ooda_unit_path: root.join("systemd/simard-ooda.service"),
             signal_unit_path: root.join("systemd/simard-signal.service"),
+            entrypoint_path: root.join(".local/bin/simard"),
+            orphan_paths: vec![root.join(".cargo/bin/simard")],
             transaction_id: "test-tx".to_string(),
         }
     }

@@ -1,0 +1,70 @@
+digraph repo_surface {
+    graph [rankdir=TD, labelloc="t", label="Simard repository surface", fontsize=20];
+    node [shape=box, style="rounded,filled", fillcolor="#f8fbff", color="#4a6fa5", fontname="Arial"];
+    edge [color="#586069", fontname="Arial"];
+
+    repo [label="Simard repository", shape=folder, fillcolor="#eef7ff"];
+    cargo [label="Cargo.toml\npackage simard 0.33.1\nedition 2024"];
+    cargo_lock [label="Cargo.lock\nlocked dependency graph"];
+    build_rs [label="build.rs\nbuild timestamp helper"];
+    src [label="src\nRust source tree\n910 rs files", shape=folder];
+    tests [label="tests\nintegration and QA scenarios", shape=folder];
+    scripts [label="scripts\noperational shell helpers", shape=folder];
+    prompt_assets [label="prompt_assets\nbundled prompts and identity assets", shape=folder];
+    docs [label="docs\noperator and design documentation", shape=folder];
+    examples [label="examples\nsample identities and usage", shape=folder];
+    github [label=".github\nworkflows and automation", shape=folder];
+    cargo_dir [label=".cargo\ncargo configuration", shape=folder];
+    claude_dir [label=".claude\nagent configuration", shape=folder];
+    amplifier_bundle [label="amplifier-bundle\nrecipe and agent assets", shape=folder];
+    hooks [label="hooks\nlocal automation hooks", shape=folder];
+    npm [label="npm package wrapper\nand JS tests", shape=folder];
+    specs [label="Specs\ndesign specifications", shape=folder];
+    ai_working [label="ai_working\nworking context", shape=folder];
+    supply_chain [label="supply-chain\nadvisory policy assets", shape=folder];
+
+    repo -> {cargo cargo_lock build_rs src tests scripts prompt_assets docs examples github cargo_dir claude_dir amplifier_bundle hooks npm specs ai_working supply_chain};
+
+    default_run [label="default run simard"];
+    explicit_bins [label="12 explicit Cargo bin targets"];
+    features [label="features\ndefault signal dashboard_audit"];
+    profiles [label="release dev test profiles"];
+    cargo -> {default_run explicit_bins features profiles};
+
+    daemon [label="src/main.rs\ndaemon and operator CLI entry"];
+    lib [label="src/lib.rs\nmodule export surface"];
+    src_bins [label="src/bin\ncommand binaries", shape=folder];
+    top_modules [label="about 90 top level Rust modules"];
+    src -> {daemon lib src_bins top_modules};
+    default_run -> daemon;
+
+    bin_simard_gym [label="simard-gym"];
+    bin_coin_gym [label="coin-gym"];
+    bin_simard_rust_gym [label="simard-rust-gym"];
+    bin_ooda_step [label="simard-ooda-step"];
+    bin_improve_step [label="simard-improve-step"];
+    bin_self_improve [label="simard-self-improve-recipe"];
+    bin_engineer_step [label="simard-engineer-step"];
+    bin_engineer_loop [label="simard-engineer-loop-recipe"];
+    bin_audit_pass [label="simard-audit-pass01\ndashboard_audit"];
+    bin_audit_dashboard [label="simard-audit-dashboard\ndashboard_audit"];
+    bin_tui [label="simard-tui\nnested bin"];
+    bin_supply_chain [label="supply-chain-steward"];
+    bin_operator_probe [label="simard-operator-probe\nauto discovered candidate"];
+    src_bins -> {bin_simard_gym bin_coin_gym bin_simard_rust_gym bin_ooda_step bin_improve_step bin_self_improve bin_engineer_step bin_engineer_loop bin_audit_pass bin_audit_dashboard bin_tui bin_supply_chain bin_operator_probe};
+
+    ooda [label="ooda_loop\nooda_brain\nooda_actions"];
+    memory [label="cognitive_memory\nmemory_consolidation\nmemory_ipc"];
+    operator [label="operator_cli\noperator_commands\ndashboards"];
+    overseer [label="overseer\nstewardship\ngoal_curation"];
+    meeting [label="meeting_backend\nmeeting_facilitator\nmeeting_repl"];
+    gym [label="gym\ncoin_gym\nself_improve\nengineer_loop"];
+    lib -> {ooda memory operator overseer meeting gym};
+
+    qa [label="tests qa-scenarios\nyaml fixtures"];
+    install_scripts [label="install redeploy\ndiagnostic scripts"];
+    atlas [label="docs atlas\noutput root"];
+    tests -> qa;
+    scripts -> install_scripts;
+    docs -> atlas;
+}

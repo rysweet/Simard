@@ -1,7 +1,7 @@
 ---
 title: Self-quality-audit API
-description: Rust API reference for Simard's recurring monthly self-quality-audit — the run_self_quality_audit daemon hook, the SelfQualityAuditReport struct, the interval_secs_from_env / should_run_self_audit pure functions, the read_last_run / write_last_run disk persistence, resolve_recipe_path, the monthly-self-quality-audit recipe contract and text markers, and the SIMARD_SELF_AUDIT_INTERVAL configuration knob.
-last_updated: 2026-07-02
+description: Rust API reference for Simard's recurring monthly self-quality-audit — the run_self_quality_audit daemon hook, the SelfQualityAuditReport struct, the interval_secs_from_env / should_run_self_audit pure functions, the read_last_run / write_last_run disk persistence, resolve_recipe_path, the monthly-self-quality-audit recipe contract, and the typed SelfQualityAuditRecord + fail-closed read_verified_self_quality_audit read path (issue #4968), plus the SIMARD_SELF_AUDIT_INTERVAL configuration knob.
+last_updated: 2026-07-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -10,6 +10,7 @@ related:
   - ../howto/configure-self-quality-audit.md
   - ./disk-health-api.md
   - ./brain-introspection-api.md
+  - ./record-brain-introspection-self-audit-cli.md
 ---
 
 # Self-quality-audit API
@@ -26,10 +27,21 @@ related:
 The `self_quality_audit` module is a thin Rust shim (a **pure recipe invoker**,
 modeled on `disk_health.rs`) that fires on its own env-gated interval, spawns
 `recipe-runner-rs` to run the five-wave, crusty-gated self-audit recipe against
-Simard's own repository, deserializes the JSON envelope, parses text markers
+Simard's own repository, reads the typed record the recipe writes fail-closed
 into a structured `SelfQualityAuditReport`, and — uniquely among the periodic
 tasks — **persists its last-run timestamp to disk** so a ~monthly cadence
 survives daemon restarts.
+
+!!! note "Typed-record read path (issue [#4968](https://github.com/rysweet/Simard/issues/4968))"
+    The recipe no longer emits text markers (`AUDIT_COMPLETE=`, `PR_OPENED=`, …) the
+    shim scrapes from `step_results[*].output`. As of #4968 the recipe's final ACT
+    step calls the gated `simard cognition record-self-quality-audit` verb, which
+    writes a typed
+    [`SelfQualityAuditRecord`](./record-brain-introspection-self-audit-cli.md#the-selfqualityauditrecord-schema);
+    the hook reads it **fail-closed** via `read_verified_self_quality_audit` (R1–R7).
+    `parse_self_quality_audit_text` and its marker grammar are **deleted**. The record
+    verb, schema, and read matrix are specified in
+    [Reference: record-brain-introspection / record-self-quality-audit](./record-brain-introspection-self-audit-cli.md).
 
 Each run:
 
@@ -42,8 +54,9 @@ Each run:
 3. **Self-merge** — merges each PR that is both crusty-approved and CI-green
    (respecting branch protection); leaves crusty-unresolved PRs open for human
    follow-up.
-4. **Output** — emits text markers parsed into the report; the daemon logs a
-   fire line and a completion line. No snapshot repo doc is ever written.
+4. **Output** — calls the gated `record-self-quality-audit` verb writing the typed
+   record the hook reads; the daemon logs a fire line and a completion line. No
+   snapshot repo doc is ever written.
 
 This page is the executable contract. For design rationale (cadence choice, the
 disk-persistence decision, the bounded crusty loop) see
@@ -67,22 +80,21 @@ run_self_quality_audit(&repo_root, &state_root, None)
    ├─ resolve_recipe_path(repo_root, None)     → monthly-self-quality-audit.yaml
    │       (hot-reload path first, then in-tree)
    │
+   ├─ record_path = state_root/self_quality_audit/record.json
+   │       delete any stale file; capture invoke_start: SystemTime
+   │
    ├─ spawn recipe-runner-rs <path> --output-format json
-   │        -c state_root=… -c repo_path=…
+   │        -c state_root=… -c repo_path=… -c record_path=<abs>
    │        (env AMPLIHACK_AGENT_BINARY from RuntimeConfig)
    │             │
+   │             ▼  recipe's final ACT step:
+   │        simard cognition record-self-quality-audit --record-path <abs> …
+   │             │   (writes typed SelfQualityAuditRecord, 0o600)
    │             ▼
-   │     JSON envelope (stdout)
-   │       { success, step_results: [{ step_id, output }] }
+   │        read_verified_self_quality_audit(record_path, invoke_start)  (R1–R7)
    │             │
-   │             ▼
-   │     serde_json::from_slice::<RecipeOutput>()
-   │             │
-   │             ▼
-   │     step_results[*].output   (agent's raw text output)
-   │             │
-   │             ▼
-   │     parse_self_quality_audit_text()   (marker parser)
+   │             ├─ Ok(rec)  ⇒ build report
+   │             └─ Err(Rn)  ⇒ AdapterInvocationFailed (propagates)
    ▼
 SelfQualityAuditReport { waves_completed, prs_opened, prs_merged,
                          crusty_approved, crusty_unresolved, summary_line }
@@ -91,9 +103,9 @@ SelfQualityAuditReport { waves_completed, prs_opened, prs_merged,
 ```
 
 **Split of labor.** The **Rust hook** owns the interval gate, disk-backed
-last-run persistence, subprocess spawn, marker parsing, and logging. The
-**recipe (subprocess)** owns all LLM judgment: the five quality-audit waves, the
-crusty proxy review loop, and the self-merge decisions.
+last-run persistence, subprocess spawn, the fail-closed typed-record read, and
+logging. The **recipe (subprocess)** owns all LLM judgment: the five quality-audit
+waves, the crusty proxy review loop, and the self-merge decisions.
 
 ---
 
@@ -101,9 +113,11 @@ crusty proxy review loop, and the self-merge decisions.
 
 ### `run_self_quality_audit(repo_root, state_root, home_override) → SimardResult<SelfQualityAuditReport>`
 
-Entry point, called from the daemon loop. Resolves the recipe YAML, spawns
-`recipe-runner-rs` with `--output-format json`, deserializes the JSON envelope,
-extracts each step's output, parses the markers, and returns the report.
+Entry point, called from the daemon loop. Resolves the recipe YAML, derives and
+pre-truncates the record path, captures `invoke_start`, spawns `recipe-runner-rs`
+with `--output-format json` and `-c record_path=<abs>`, then reads the typed record
+the recipe wrote via `read_verified_self_quality_audit` (fail-closed R1–R7) and
+returns the report.
 
 ```rust
 pub fn run_self_quality_audit(
@@ -130,13 +144,13 @@ pub fn run_self_quality_audit(
 | Recipe YAML not found                | `"recipe file monthly-self-quality-audit.yaml not found…"` |
 | `recipe-runner-rs` not on PATH       | `"recipe-runner-rs spawn failed: …"`                     |
 | Recipe exited non-zero               | `"recipe exited with <code>: <stderr>"`                  |
-| JSON deserialization failed          | `"failed to deserialize recipe JSON output: …"`          |
-| Empty `step_results`                 | `"no step results in recipe JSON output"`                |
-| Text markers missing `AUDIT_COMPLETE`| `"failed to parse recipe text output: …"`                |
+| Record read failed R1–R7             | `"self-quality-audit record R{n}: <reason>"` — see the [read matrix](./record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7) |
 
-No fallback. If the recipe fails for any reason, the error propagates to the
-caller (the OODA daemon), which logs `WARN: self quality-audit failed: …` and
-continues the cycle. The daemon persists last-run regardless.
+No fallback. `read_verified_self_quality_audit` never returns a defaulted or partial
+record — any R1–R7 failure is a distinct typed `Err`. If the recipe fails for any
+reason (spawn, non-zero exit, or an invalid/missing record), the error propagates to
+the caller (the OODA daemon), which logs `WARN: self quality-audit failed: …` and
+continues the cycle. The daemon persists last-run regardless, on `Ok` and on `Err`.
 
 ---
 
@@ -266,47 +280,55 @@ pub struct SelfQualityAuditReport {
 }
 ```
 
-Built by `parse_self_quality_audit_text()` from the extracted step output — not
-deserialized directly (serde is used only for the `RecipeOutput` / `StepResult`
-envelope, as in `disk_health.rs`).
+Built from the typed [`SelfQualityAuditRecord`](./record-brain-introspection-self-audit-cli.md#the-selfqualityauditrecord-schema)
+returned by `read_verified_self_quality_audit()` — a direct field mapping, not
+scraped from step output. The `RecipeOutput` / `StepResult` envelope-scrape path used
+by the old marker parser is deleted.
 
 | Field               | Type          | Description                                                    |
 | ------------------- | ------------- | ------------------------------------------------------------- |
-| `waves_completed`   | `u32`         | Count of `WAVE_COMPLETE=<n>` markers observed (0–5)           |
-| `prs_opened`        | `Vec<String>` | URLs from `PR_OPENED=<url>` markers                           |
-| `prs_merged`        | `Vec<String>` | URLs from `PR_MERGED=<url>` markers                           |
-| `crusty_approved`   | `Vec<String>` | URLs from `CRUSTY_APPROVED=<url>` markers                     |
-| `crusty_unresolved` | `Vec<String>` | URLs from `CRUSTY_UNRESOLVED=<url>` markers (open, need human) |
-| `summary_line`      | `String`      | Text from the required `AUDIT_COMPLETE=<summary>` marker (always present — its absence is a parse error, so this is a plain `String`, not `Option`) |
+| `waves_completed`   | `u32`         | `waves_completed` from the record (0–5; a value `> 5` is rejected at R4) |
+| `prs_opened`        | `Vec<String>` | `prs_opened` URLs from the record                            |
+| `prs_merged`        | `Vec<String>` | `prs_merged` URLs from the record                            |
+| `crusty_approved`   | `Vec<String>` | `crusty_approved` URLs from the record                       |
+| `crusty_unresolved` | `Vec<String>` | `crusty_unresolved` URLs from the record (open, need human)  |
+| `summary_line`      | `String`      | The record's required non-empty `summary_line` (its absence fails R5, so this is a plain `String`, not `Option`) |
 
 **Methods:**
 
 - `summary() → String` — one-line summary for the daemon completion log,
   synthesized from the counts (distinct from the raw `summary_line` field, which
-  is the agent's own `AUDIT_COMPLETE=` text). Format:
+  is the agent's own record summary text). Format:
   `"self quality-audit: complete — N waves, X PRs opened, Y merged, Z crusty-unresolved"`.
 
 ---
 
-## Text markers (recipe → hook)
+## Record result contract (typed record)
 
-The recipe emits plain-text markers (one per line, not inside code fences),
-parsed by `parse_self_quality_audit_text()`. Any other line is ignored.
+The recipe's **final ACT step** calls the gated
+`simard cognition record-self-quality-audit` verb, which writes one typed
+[`SelfQualityAuditRecord`](./record-brain-introspection-self-audit-cli.md#the-selfqualityauditrecord-schema)
+(owner-only `0o600`) to the rail-supplied `record_path`:
 
-| Marker | Cardinality | Meaning |
-| --- | --- | --- |
-| `AUDIT_STARTED` | 1 | Audit began (advisory; daemon also logs its own fire line) |
-| `WAVE_START=<n>` | 0..5 | Wave `n` (1–5) began |
-| `WAVE_COMPLETE=<n>` | 0..5 | Wave `n` finished; counted into `waves_completed` |
-| `PR_OPENED=<url>` | 0..n | A wave opened a pull request |
-| `CRUSTY_APPROVED=<url>` | 0..n | crusty-old-engineer approved this PR |
-| `CRUSTY_UNRESOLVED=<url>` | 0..n | crusty still unsatisfied after 3 rounds; PR left open |
-| `PR_MERGED=<url>` | 0..n | PR self-merged (crusty-approved AND CI-green) |
-| `AUDIT_COMPLETE=<summary>` | **1 (REQUIRED)** | Terminal summary; its absence is a parse error |
+```jsonc
+{
+  "schema": "self-quality-audit/v1",
+  "written_at_epoch": 1793558400,
+  "waves_completed": 5,                       // 0..=5 (R4 rejects > 5)
+  "prs_opened":       ["…/pull/5001", "…/pull/5002"],
+  "prs_merged":       ["…/pull/5001"],
+  "crusty_approved":  ["…/pull/5001"],
+  "crusty_unresolved":["…/pull/5002"],
+  "summary_line": "5 waves, 4 PRs opened, 3 merged, 1 crusty-unresolved"
+}
+```
 
-`AUDIT_COMPLETE` is **required** — the parser returns
-`SimardError::AdapterInvocationFailed` if no non-empty `AUDIT_COMPLETE=` line is
-present (mirrors the required-`BRAIN_HEALTH:`/`DISK_USED_PCT` contracts).
+`summary_line` is **required** and non-empty — its absence fails the read matrix at
+R5 (replacing the old required `AUDIT_COMPLETE=<summary>` marker). Each URL list is
+bounded and every element is sanitized and byte-capped. There is no marker grammar
+and no `step_results[*].output` scraping: the recipe's free-text prose is irrelevant;
+only the typed record is read back, fail-closed
+([R1–R7](./record-brain-introspection-self-audit-cli.md#the-fail-closed-read-matrix-r1r7)).
 
 ---
 
@@ -320,24 +342,27 @@ A single `type: agent` step (mirrors `disk-health-check.yaml` /
 
 **Context vars** (passed via `-c`):
 
-| Var          | Meaning                                                    |
-| ------------ | ---------------------------------------------------------- |
-| `state_root` | `~/.simard` — logs/state live here                        |
-| `repo_path`  | repository root of `rysweet/Simard` being audited         |
+| Var           | Meaning                                                    |
+| ------------- | ---------------------------------------------------------- |
+| `state_root`  | `~/.simard` — logs/state live here                        |
+| `repo_path`   | repository root of `rysweet/Simard` being audited         |
+| `record_path` | absolute path (`state_root/self_quality_audit/record.json`) the hook derived, pre-truncated, and passes to the final `record-self-quality-audit` ACT step |
 
 **Agent responsibilities:**
 
 1. Run **five sequential SEEK→VALIDATE→FIX waves** invoking the amplihack
-   `quality-audit` skill on `rysweet/Simard`; emit `WAVE_START=`/`WAVE_COMPLETE=`
-   around each and `PR_OPENED=<url>` for each PR opened.
+   `quality-audit` skill on `rysweet/Simard`, opening a PR for each validated fix.
 2. For **each** PR, invoke the `crusty-old-engineer` skill as Ryan's proxy
-   reviewer, looping **≤3 rounds** until satisfied. Emit `CRUSTY_APPROVED=<url>`
-   on approval or `CRUSTY_UNRESOLVED=<url>` if still unsatisfied after 3 rounds
-   (leave the PR open).
+   reviewer, looping **≤3 rounds** until satisfied (record the URL under
+   `crusty_approved` on approval, or `crusty_unresolved` if still unsatisfied after
+   3 rounds — leave the PR open).
 3. **Self-merge** each PR that is crusty-approved AND CI-green (respect branch
-   protection); emit `PR_MERGED=<url>`.
-4. Emit a terminal `AUDIT_COMPLETE=<one-line summary>`.
-5. Never write a snapshot/point-in-time doc — the output is PRs + markers.
+   protection); track it under `prs_merged`.
+4. **Final ACT step:** call `simard cognition record-self-quality-audit
+   --record-path <record_path> --waves-completed <n> --summary-line "<summary>" …`
+   exactly once, passing the accumulated PR / crusty URL lists. Its absence (no valid
+   record) is a fail-closed read error, not a silent success.
+5. Never write a snapshot/point-in-time doc — the output is PRs + the typed record.
 
 ---
 
@@ -415,6 +440,7 @@ if crate::self_quality_audit::should_run_self_audit(elapsed, self_audit_interval
 
 ```rust
 pub mod self_quality_audit;
+pub mod self_quality_audit_record;   // typed record + read_verified_self_quality_audit (#4968)
 
 #[cfg(test)]
 mod self_quality_audit_tests;
@@ -426,7 +452,8 @@ mod self_quality_audit_tests;
 
 **File:** `src/self_quality_audit_tests.rs` (`#[cfg(test)]`)
 
-The scheduling logic is covered by pure unit tests (no subprocess, no network):
+The scheduling logic is covered by pure unit tests (no subprocess, no network),
+and the typed-record read path by fixture-backed reader tests:
 
 | Test | Asserts |
 | --- | --- |
@@ -437,6 +464,9 @@ The scheduling logic is covered by pure unit tests (no subprocess, no network):
 | persistence round-trip | `write_last_run` then `read_last_run` returns the same epoch |
 | persistence — garbage | `read_last_run` on a non-numeric file returns `None` |
 | simulated restart | after writing a *recent* epoch, the gate stays `false` (no immediate re-fire across a restart) |
+| `read_verified_self_quality_audit` R1–R7 | one dedicated test per case (missing/unreadable, malformed JSON, schema mismatch, unknown-field/bounds break / `waves_completed > 5`, empty `summary_line`, non-`0o600`/wrong-owner, stale/replayed mtime) against a real 0o600 temp fixture |
+| happy path | a valid record yields the correct `SelfQualityAuditReport` |
+| rework-contract guard | `tests_rework_contract.rs` forbids `parse_self_quality_audit_text` / `step_results` / `.output` scraping in `self_quality_audit.rs` and requires `read_verified_*` + `record_path` |
 
 ---
 
@@ -446,3 +476,4 @@ The scheduling logic is covered by pure unit tests (no subprocess, no network):
 - [Configure the monthly self-quality-audit (how-to)](../howto/configure-self-quality-audit.md) — operator guide
 - [Disk health API](./disk-health-api.md) — the pure recipe-invoker shim this hook is modeled on
 - [Brain introspection API](./brain-introspection-api.md) — the sibling periodic task whose pattern this reuses
+- [record-brain-introspection / record-self-quality-audit CLI](./record-brain-introspection-self-audit-cli.md) — the gated writer verb, `SelfQualityAuditRecord` schema, and R1–R7 read matrix (#4968)

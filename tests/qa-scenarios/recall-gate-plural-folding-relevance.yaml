@@ -1,0 +1,105 @@
+name: recall-gate-plural-folding-relevance
+app_type: cli
+description: |
+  Outside-in proof that the recall relevance gate
+  (`LibraryCognitiveMemory::shares_word_prefix`, applied by ranked episodic
+  recall, keyword episode recall, and fact recall) folds regular singular/plural
+  inflections, closing the asymmetry a prefix-only word-boundary gate left open —
+  a recall-quality axis of the standing cognition-improvement goal.
+
+  The word-boundary gate anchors a query token to the start of a content word,
+  which recalls `test` -> "tests" (query is a prefix of the content word) but NOT
+  the reverse: `"test".starts_with("tests")` is false, so a query phrased in the
+  plural (`"stabilize the flaky tests"`) silently missed an episode that used the
+  singular ("wrote a test ..."). Because the live preparation path
+  (`memory_consolidation::prepare_context`) recalls with raw objective tokens
+  against free-text episode content, that asymmetry dropped genuinely relevant
+  prior episodes from the reasoner's working context.
+
+  The gate now also admits a PLURAL query token onto the SINGULAR content word by
+  conservative, length-guarded EQUALITY folding (`tests` -> "test",
+  `caches` -> "cache", `categories` <-> "category"), mirroring the singular/plural
+  folding `knowledge_context::token_matches_pack` already applies to pack
+  selection (PR #4241 lineage). Folding matches only on whole-word EQUALITY of a
+  generated variant (never a prefix) and only when the stem clears the minimum
+  length, so it cannot re-introduce the interior over-matching the word-boundary
+  rule removed (`buses` does not surface "business"; a short token like `is` does
+  not fold to "i").
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract against the live library-backed `LibraryCognitiveMemory` adapter:
+    - the pure gate helpers (`word_boundary_gate_tests`): plural query folds onto
+      singular content, `-y`/`-ies` folds both ways, folding does NOT re-introduce
+      interior matching, and short tokens never fold to a fragment — plus the
+      pre-existing interior/suffix rejection and inflectional-recall preservation;
+    - the end-to-end ranked-episodic tests (`tests_ranked_episodic`): a plural
+      query recalls the singular-form episode, alongside the pre-existing
+      word-boundary / inflectional / backfill / ordering behaviours;
+    - the fact-recall gate (`fact_query_gate_tests`) and broader consolidation
+      suite are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The pure recall gate helpers, including the new plural/singular folding cases
+  # and the pre-existing word-boundary / inflectional behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::library_adapter::word_boundary_gate_tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # End-to-end ranked episodic recall, including the new plural-query-folds-onto-
+  # singular-content integration test and the pre-existing gate behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_ranked_episodic"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The fact-recall gate shares the same `shares_word_prefix` predicate; prove it
+  # is unregressed by the folding change.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::library_adapter::fact_query_gate_tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader consolidation suite proves no regression in the preparation path
+  # (`prepare_context`) that consumes ranked episodic recall.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

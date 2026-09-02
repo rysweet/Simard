@@ -1,6 +1,6 @@
 use crate::goals::{GoalRecord, GoalStatus};
 
-use super::format::print_text;
+use super::format::format_labeled;
 
 pub(crate) struct GoalRegisterView {
     sections: [GoalRegisterSection; 4],
@@ -32,9 +32,16 @@ impl GoalRegisterView {
         }
     }
 
+    pub(crate) fn render_lines(&self) -> Vec<String> {
+        self.sections
+            .iter()
+            .flat_map(GoalRegisterSection::render_lines)
+            .collect()
+    }
+
     pub(crate) fn print(&self) {
-        for section in &self.sections {
-            section.print();
+        for line in self.render_lines() {
+            println!("{line}");
         }
     }
 }
@@ -67,19 +74,20 @@ impl GoalRegisterSection {
         }
     }
 
-    fn print(&self) {
-        println!("{} count: {}", self.label, self.goals.len());
+    fn render_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("{} count: {}", self.label, self.goals.len())];
         if self.goals.is_empty() {
-            println!("{}: <none>", self.label);
-            return;
+            lines.push(format!("{}: <none>", self.label));
+            return lines;
         }
 
         for (index, goal) in self.goals.iter().enumerate() {
-            print_text(
+            lines.push(format_labeled(
                 &format!("{} goal {}", self.heading, index + 1),
-                goal.concise_label(),
-            );
+                &goal.concise_label(),
+            ));
         }
+        lines
     }
 }
 
@@ -176,19 +184,51 @@ mod tests {
     }
 
     #[test]
-    fn goal_register_view_print_does_not_panic_with_goals() {
+    fn goal_register_view_render_lines_lists_goals_by_section_with_concise_labels() {
         let records = vec![
             make_goal("Alpha", GoalStatus::Active, 1),
             make_goal("Beta", GoalStatus::Proposed, 2),
         ];
         let view = GoalRegisterView::from_records(records);
-        view.print(); // should not panic
+        let lines = view.render_lines();
+        // Sections render in Active, Proposed, Paused, Completed order. Populated
+        // sections list each goal via its `p{priority} [{status}] {title}` label;
+        // empty sections render a `<none>` placeholder.
+        assert_eq!(
+            lines,
+            vec![
+                "Active goals count: 1".to_string(),
+                "Active goal 1: p1 [active] Alpha".to_string(),
+                "Proposed goals count: 1".to_string(),
+                "Proposed goal 1: p2 [proposed] Beta".to_string(),
+                "Paused goals count: 0".to_string(),
+                "Paused goals: <none>".to_string(),
+                "Completed goals count: 0".to_string(),
+                "Completed goals: <none>".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn goal_register_view_print_does_not_panic_empty() {
+    fn goal_register_view_render_lines_empty_reports_none_for_every_section() {
         let view = GoalRegisterView::from_records(vec![]);
-        view.print(); // should not panic
+        let lines = view.render_lines();
+        assert_eq!(
+            lines,
+            vec![
+                "Active goals count: 0",
+                "Active goals: <none>",
+                "Proposed goals count: 0",
+                "Proposed goals: <none>",
+                "Paused goals count: 0",
+                "Paused goals: <none>",
+                "Completed goals count: 0",
+                "Completed goals: <none>",
+            ]
+        );
+        // The `print` wrapper only forwards `render_lines` to stdout; exercise it
+        // once so the `println!` path stays covered without capturing stdout.
+        view.print();
     }
 
     #[test]

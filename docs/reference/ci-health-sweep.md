@@ -100,7 +100,7 @@ workflow recovers](#closing-tracking-issues-when-a-workflow-recovers---file-issu
 
 ```
 src/ci_health/
-├── mod.rs        public entrypoint, GOVERNED_REPOS, sweep_live/sweep_fixture/report_to_json, run_sweep
+├── mod.rs        public entrypoint, governed_repos() (embedded ecosystem roster), sweep_live/sweep_fixture/report_to_json, run_sweep
 ├── types.rs      WorkflowState, RunConclusion, WorkflowRun/Snapshot, RepoSnapshot (head_sha, green_from_cache), FleetSnapshot
 ├── classify.rs   WorkflowVerdict, IgnoreReason, build_report, repo_cacheable, update_cache_from_report, FleetReport (serializable DTOs)
 ├── cache.rs      GreenShaCache — persisted {repo -> last-known-green head SHA}
@@ -113,7 +113,7 @@ src/ci_health/
 
 ## Last-known-green head-SHA cache
 
-Re-reading every workflow and its latest run for all ten `GOVERNED_REPOS` on
+Re-reading every workflow and its latest run for all ten governed repos on
 every cycle is wasteful when the fleet is already green and unchanged — the
 churn loop the standing CI-health goal kept falling into. To break it, the sweep
 caches, per repo, the default-branch **head commit SHA** at which the repo was
@@ -188,7 +188,7 @@ simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--from-jso
 ```
 
 - Without `--from-json`, the sweep reads live GitHub state via `gh` for every
-  slug in [`ci_health::GOVERNED_REPOS`]: the repo's default branch
+  slug in [`ci_health::governed_repos`]: the repo's default branch
   (`gh repo view`), its default-branch head commit SHA
   (`gh api repos/<owner>/<repo>/commits/<default> --jq .sha`, the cache key),
   workflow states + ids (`gh workflow list --json name,state,id`), and
@@ -253,9 +253,27 @@ the [Stewardship](./stewardship-api.md) dedup contract rather than forking it:
   (`gh issue list --state open --limit <N>`, no `--search`) and dedups against
   the union. This is what makes "exactly one issue per broken workflow" hold
   across back-to-back sweeps, not just across well-separated ones.
-- **Fail-loud.** A `gh` error on the search propagates and **no** issue is filed
-  for that signature — the loop never assumes "no matches" on a degraded search,
-  matching the orchestrator steward's contract.
+- **Fail-loud, with a reported exception for cross-repo auth denials.** A `gh`
+  error on the search/create propagates and **no** issue is filed for that
+  signature — the loop never assumes "no matches" on a degraded search, matching
+  the orchestrator steward's contract. The one exception is an **authorization**
+  denial (the token cannot write the failing repo — a governed sibling without
+  `STEWARD_GH_TOKEN`): that failure is recorded as a reported `UnauthorizedSkip`
+  and the sweep continues to the next distinct failure, so one unwritable repo
+  never starves filing for the rest of the fleet (Simard's own issues included)
+  nor aborts the scheduled run. The skip is printed loudly and the repo still
+  appears in the report, so it is surfaced — not silently dropped. When running
+  under GitHub Actions the skip is *additionally* emitted as a `::warning::`
+  annotation, so a standing missing-token misconfiguration surfaces on the run
+  summary even though the sweep now stays green through the skip (rather than
+  being visible only in a successful run's raw logs). The exception is
+  deliberately narrow — **only** the explicit permanent permission-denial
+  phrasings count (`Resource not accessible by integration` /
+  `... by personal access token` / `must have admin rights`). An *unrecognized*
+  403 (a transient **rate-limit** 403 — GitHub returns secondary/abuse limits as
+  HTTP 403 too — or a proxy/policy 403) is **not** assumed to be a permission
+  denial and still fails loud, so a burst-throttled or otherwise-degraded write
+  is never masked as "unauthorized" and left untracked.
 
 #### Root-cause diagnosis in the issue body
 
@@ -371,18 +389,30 @@ tracking issue of every workflow that is **green again**:
   failing→green transition *always* re-collects the repo (its cache entry was
   invalidated while it was failing), so resolution fires exactly at the
   transition; a steadily-green cached repo has no open issue left to close.
-- **Fail-loud.** A `gh` error on either the list or the close propagates — a
-  degraded list never silently resolves nothing, and a failed close is never
-  mistaken for a resolved issue. Resolution runs **even when the fleet is green**,
-  because a green fleet can still carry stale issues from a since-recovered
-  failure; the closed issues are printed after the report alongside any
-  filed/matched ones.
+- **Fail-loud, with a reported exception for cross-repo auth denials.** A `gh`
+  error on either the list or the close propagates — a degraded list never
+  silently resolves nothing, and a failed close is never mistaken for a resolved
+  issue. The one exception mirrors filing: a per-repo **authorization** denial
+  (the token cannot read/close that governed sibling's issues) is recorded as a
+  reported `UnauthorizedSkip` and resolution continues with the rest of the
+  fleet rather than aborting the run. Resolution runs **even when the fleet is
+  green**, because a green fleet can still carry stale issues from a
+  since-recovered failure; the closed issues (and any skips) are printed after
+  the report alongside any filed/matched ones.
 
 ### Governed fleet
 
-`GOVERNED_REPOS` is the source of truth in code for the swept slugs; it mirrors
-the ecosystem table in `prompt_assets/simard/engineer_system.md` (note
-`amplihack` → `amplihack-rs` on GitHub).
+The swept slugs come from [`ci_health::governed_repos`], which at **runtime** calls
+[`load_stewarded_roster_from_env`] — the single source of truth for Simard's
+identity-curated `stewarded_repos` roster (durable at
+`<state_root>/identity-state/simard/stewarded_repos.toml`, seeded once from
+`prompt_assets/simard/identity/stewarded_repos.seed.toml`) — validated by the same
+loader the Overseer's `ecosystem-observe` sweep uses (note `amplihack` →
+`amplihack-rs` on GitHub). ci_health no longer compile-time-embeds the roster
+(`include_str!` is gone), so there is no second hardcoded roster to drift: curating
+the `stewarded_repos` collection (an `add_item` edit that survives self-deploys)
+extends this sweep. An empty or corrupt roster is a fail-loud error, never a
+silently empty sweep that would report the fleet green.
 
 ## Scheduled recurring sweep
 
@@ -412,9 +442,21 @@ the supply-chain steward's `advisory-scan.yml`.
   workflow's `github.token`. Cross-repo issue writes (a sibling repo's failure
   files an issue in *that* repo) need a token with fleet-wide `issues:write`;
   the default token is scoped to this repo only. With the bot token absent, the
-  green path and Simard's own issues still work, and a sibling failure surfaces
-  as a fail-loud `gh issue create` error (a visible red run) rather than a
-  silently-dropped failure — fail-safe, not fail-open, matching advisory-scan.
+  green path and Simard's own issues still work, and a sibling the token cannot
+  write surfaces as a **reported unauthorized skip**: a loud stderr line names
+  the repo/workflow and the underlying `Resource not accessible by integration`
+  error, and the sibling still appears in the printed `FleetReport` — so the
+  failure is never silently dropped (fail-safe, not fail-open). Crucially the
+  skip does **not** abort the sweep: every writable repo (Simard's own failure
+  included) is still filed, recovered issues are still closed, and the scheduled
+  run stays green under `--exit-zero`. This deliberately replaces the earlier
+  "a cross-repo write denial fails the whole run red" behavior, which defeated
+  `--exit-zero`: one unwritable sibling turned Simard's own `ci-health` run red
+  on every sweep, which the next sweep re-detected as a fresh actionable failure
+  — the exact self-referential loop `--exit-zero` exists to prevent. Configure
+  `STEWARD_GH_TOKEN` (fleet-wide `issues:write`) to actually file/close those
+  cross-repo tracking issues instead of skipping them. A genuine `gh`/parse
+  error (not an authorization denial) still fails the run loud.
 - **Concurrency.** A `ci-health` concurrency group (no cancel-in-progress) means
   two runs never race on the same tracking issues.
 - **Build & cache.** The sweep runs `cargo run --bin simard`, so it must compile

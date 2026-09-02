@@ -172,23 +172,23 @@ pub enum GoalOutcomeDecision {
 ```
 
 The serde tag/rename convention (`choice`, snake_case) matches
-`EngineerLifecycleDecision`. As with the lifecycle and decide decisions, the
-recipe does **not** emit the `choice`-tagged form directly — it emits a flat
-`{"decision": "<snake_case_variant>", "rationale": "…"}` envelope, which a
-dedicated mapper (`outcome_decision_from_variant`, analogous to
-`lifecycle_decision_from_variant` in `recipe_brain.rs`) translates into the
-`choice`-tagged Rust enum.
+`EngineerLifecycleDecision`. **As of Group D (epic #4719, issue #4967) the
+outcome seam no longer scrapes JSON from the recipe's stdout.** The reasoner
+RECORDS its verdict by calling the gated `simard ooda record-outcome` tool,
+which validates the closed enum through
+[`GoalOutcomeDecision::from_choice_fields`](#goaloutcomedecision) and atomically
+writes one typed `OutcomeDecisionRecord` (schema `simard.ooda.outcome.v1`).
+`RecipeBrain` then reads that record back via `read_verified_outcome` — it never
+parses the agent's prose. The former stdout-scraping mapper
+(`outcome_decision_from_variant`) and its `OutcomeEnvelope` were deleted.
 
-> **`replan_hint` needs an extended envelope.** The shared `DecisionEnvelope`
-> shim reads only `decision` + `rationale`; every extra struct-variant field is
-> defaulted to empty (this is why `ReclaimAndRedispatch::redispatch_context` is
-> always `String::new()` from the recipe today, pinned by
-> `reclaim_redispatch_context_always_empty`). Because `Replan` carries a
-> load-bearing `replan_hint`, the outcome-verify parser **must** read an optional
-> `replan_hint` field explicitly (either extend `DecisionEnvelope` with a
-> `#[serde(default)] replan_hint: String` or add an `OutcomeEnvelope`). If it
-> follows the existing shim unchanged, `replan_hint` will always be empty and the
-> `replan` → re-scope guidance documented in the how-to will never arrive.
+> **`replan_hint` ownership.** `replan_hint` is a load-bearing, `replan`-only
+> field. It is threaded end-to-end through the typed record: the tool accepts an
+> optional `--replan-hint` (owned by `replan`; rejected on any other choice by
+> the shared chokepoint), and the flattened `OutcomeDecisionRecord` serializes it
+> alongside the `choice` tag. Because the record round-trips through
+> `GoalOutcomeDecision`'s own serde representation (not the lossy shared
+> `DecisionEnvelope` shim), the hint can never be silently defaulted away.
 
 ## `OodaBrain::decide_goal_outcome_verification`
 
@@ -216,9 +216,9 @@ pub trait OodaBrain: Send + Sync {
 
 | Impl | Behavior |
 | --- | --- |
-| `RecipeBrain` | Loads `ooda-goal-outcome-verification.yaml` via `RecipeBrain::new(repo_root, "ooda-goal-outcome-verification.yaml", "recipe-outcome-verify-brain")`, renders the ctx, runs the recipe, parses the decision envelope. |
+| `RecipeBrain` | Loads `ooda-goal-outcome-verification.yaml` via `RecipeBrain::new(repo_root, "ooda-goal-outcome-verification.yaml", "recipe-outcome-verify-brain")`, renders the ctx over a fresh per-call temp dir, runs the recipe (`run_outcome_verify_recipe`), then reads the typed record via `read_verified_outcome` — stdout is ignored. Every read-verification failure is a fail-closed `Err`. |
 | `DeterministicLifecycleBrain` (floor) | Conservative: always `KeepOpenAndReport`, never `MarkAchieved`. |
-| `RustyClawdBrain<S>` | Not migrated — inherits the defaulted method (`KeepOpenAndReport`) so it compiles and never accidentally completes a goal. |
+| `RustyClawdBrain<S>` | Not migrated for the outcome seam — inherits the defaulted method (`KeepOpenAndReport`) so it compiles and never accidentally completes a goal. (Its separate per-goal-cycle seam WAS migrated to the typed `record-decision` record in Group D.) |
 | Test doubles (`StubOutcomeBrain`) | Return the injected decision (or `Err`) for hermetic tests. |
 
 The three existing `OodaBrain` impls (`RecipeBrain`, `DeterministicLifecycleBrain`,
@@ -315,42 +315,53 @@ fields (`reverify_count`, re-plan marker) are `#[serde(default)]` so
 ## The reasoning recipe
 
 `prompt_assets/simard/recipes/ooda-goal-outcome-verification.yaml` follows the
-[`ooda-engineer-lifecycle.yaml`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml)
-shape: role → live-context vars → snake_case `choice` options → JSON envelope →
-few-shot examples. It is installed to the hot-reload path
-`~/.simard/prompt_assets/...` for production; tests use a `home_override`
-tempdir.
+[`ooda-per-goal-cycle.yaml`](https://github.com/rysweet/Simard/blob/main/prompt_assets/simard/recipes/ooda-per-goal-cycle.yaml)
+typed-record shape: role → live-context vars → snake_case `choice` options →
+**record-the-verdict-via-tool** instructions → few-shot examples. It is installed
+to the hot-reload path `~/.simard/prompt_assets/...` for production; tests use a
+`home_override` tempdir.
 
-Context vars (passed via `-c`, each rendered through
+Context vars (passed via `-c`; trusted daemon-minted paths verbatim, each
+model-facing string rendered through
 [`sanitize_context_var`](#sanitization-boundary)):
 
 | Var | Meaning |
 | --- | --- |
+| `record_path` | Owner-only per-call temp path the tool writes the typed record to (trusted). |
+| `simard_bin` | Resolved `current_exe()` the agent invokes for `record-outcome` (trusted). |
+| `cycle_number` | Sentinel `REASONER_RECORD_CYCLE` (0) — the outcome ctx carries no cycle number; `goal_id` (R6) binds identity. |
 | `goal_id`, `goal_title` | Goal identity. |
 | `success_criteria` | What "achieved" actually means for this goal. |
 | `artifact_signals` | Merged/closed/deployed summary from the done-gate. |
 | `live_signals` | Rendered list of `{source, kind, verified, detail, observed_at}`. |
 | `reverify_count` | Times this goal has already been re-verified. |
 
-Output envelope (a fenced ```json block is fine; the shim strips banners):
+Output: **NONE scraped from stdout.** The agent RECORDS its verdict by calling
+the `simard ooda record-outcome` tool exactly once:
 
-```json
-{"decision": "reopen", "rationale": "PR #4821 merged and deployed, but journald still shows E2BIG on the next real spawn; live effect absent"}
+```bash
+"{{simard_bin}}" ooda record-outcome --choice reopen \
+  --reason "PR #4821 merged and deployed, but journald still shows E2BIG on the next real spawn; live effect absent" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
-A `replan` decision additionally carries `replan_hint` (read by the extended
-outcome-verify envelope parser — see [`GoalOutcomeDecision`](#goaloutcomedecision)):
+A `replan` decision additionally passes `--replan-hint` (owned by `replan`;
+rejected on any other choice — see [`GoalOutcomeDecision`](#goaloutcomedecision)):
 
-```json
-{"decision": "replan", "rationale": "artifact shipped but at the wrong layer; success criteria untouched", "replan_hint": "target the spawn arg-length path, not the packer"}
+```bash
+"{{simard_bin}}" ooda record-outcome --choice replan \
+  --reason "artifact shipped but at the wrong layer; success criteria untouched" \
+  --replan-hint "target the spawn arg-length path, not the packer" \
+  --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
 ```
 
-where `decision` is exactly one of `mark_achieved`, `reopen`, `replan`,
+where `--choice` is exactly one of `mark_achieved`, `reopen`, `replan`,
 `keep_open_and_report`. The recipe's few-shot set **includes the kgpacks /
 E2BIG case** (artifact present, outcome absent → `reopen`) so the reasoning is
 anchored on the exact failure this step exists to catch. A genuine "it's really
-achieved, live" answer is a real decision — emit `mark_achieved` explicitly; an
-unparseable output is a `brain_parse_error` that surfaces (never a silent
+achieved, live" answer is a real decision — record `mark_achieved` explicitly; a
+record that is absent, malformed, out-of-enum, or goal/cycle-mismatched fails
+CLOSED via `read_verified_outcome` and surfaces (never a silent
 `keep_open_and_report`).
 
 > **The recipe never carries the safety invariant.** The recipe is

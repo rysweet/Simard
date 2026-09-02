@@ -149,10 +149,28 @@ pub struct CapabilityHandler {
     engineer_liveness: Option<Box<dyn EngineerLiveness>>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 struct ActorBinding {
     cycle_id: String,
     goal_id: String,
+    actor_identity: String,
+    repository_json: Vec<u8>,
+    grants_json: Vec<u8>,
+    engineer_permissions_json: Vec<u8>,
+    working_directory_json: Option<Vec<u8>>,
+    observe_only: bool,
+}
+
+/// Identity + authorization-scope key for a reused actor session.
+///
+/// This is the ONLY comparison used to detect an `AuthorizationScopeViolation`
+/// when re-leasing an existing `session_id`. It deliberately excludes the
+/// mutable per-cycle lease metadata (`cycle_id`/`goal_id`): re-leasing the same
+/// stable session for a new cycle of the SAME identity and scope is legitimate
+/// and refreshed via `ON CONFLICT(session_id) DO UPDATE`. A change to any of
+/// these six fields on a reused `session_id` is a genuine security violation.
+#[derive(Debug, Eq, PartialEq)]
+struct ActorScopeKey {
     actor_identity: String,
     repository_json: Vec<u8>,
     grants_json: Vec<u8>,
@@ -189,6 +207,19 @@ impl ActorBinding {
                 .map_err(serialization)?,
             observe_only: actor.is_observe_only(),
         })
+    }
+
+    /// Extract the identity + authorization-scope key used for the reused-session
+    /// violation check. Excludes mutable per-cycle metadata (`cycle_id`/`goal_id`).
+    fn scope_key(&self) -> ActorScopeKey {
+        ActorScopeKey {
+            actor_identity: self.actor_identity.clone(),
+            repository_json: self.repository_json.clone(),
+            grants_json: self.grants_json.clone(),
+            engineer_permissions_json: self.engineer_permissions_json.clone(),
+            working_directory_json: self.working_directory_json.clone(),
+            observe_only: self.observe_only,
+        }
     }
 
     fn into_context(self, session_id: &str) -> CapabilityResult<AuthenticatedToolContext> {
@@ -232,6 +263,17 @@ impl CapabilityHandler {
             policy,
             engineer_liveness: None,
         })
+    }
+
+    /// Delete every transient actor-session lease.
+    ///
+    /// Intended for authoritative daemon startup, when no actor session can
+    /// still be in flight. Runtime scope enforcement remains unchanged.
+    pub(crate) fn purge_actor_sessions(&self) -> CapabilityResult<()> {
+        self.lock()?
+            .execute("DELETE FROM actor_sessions", [])
+            .map_err(persistence)?;
+        Ok(())
     }
 
     /// Inject the authoritative engineer-liveness provider used by the
@@ -355,7 +397,7 @@ impl CapabilityHandler {
         let existing_binding = load_actor_binding(&transaction, &actor.session_id)?;
         if existing_binding
             .as_ref()
-            .is_some_and(|existing| existing != &binding)
+            .is_some_and(|existing| existing.scope_key() != binding.scope_key())
         {
             return Err(CapabilityError::new(
                 CapabilityErrorCode::AuthorizationScopeViolation,
@@ -3231,5 +3273,260 @@ mod terminal_for_session_tests {
             handler.terminal_for_session("bad id!").is_err(),
             "an invalid session identifier must be rejected"
         );
+    }
+}
+
+/// Regression tests for issue #4197 — the typed-OODA actor-session
+/// identity-binding false violation.
+///
+/// A PERPETUAL/STANDING goal re-leases the SAME stable per-goal `session_id`
+/// (`ooda-<sha256(goal_id)[..16]>`) on every cycle, while the per-cycle
+/// `cycle_id` advances each tick. With a 30-day lease the prior row never
+/// expires between the ~7-minute cycle retries, so `register_actor_session`
+/// loads the still-live binding and — before this fix — compared the WHOLE
+/// binding (including the mutable per-cycle `cycle_id`). The stored binding
+/// differed only in `cycle_id`, so every re-lease raised a false
+/// `AuthorizationScopeViolation` ("actor session is already bound to a
+/// different identity or authorization scope"), crash-looping the goal forever
+/// while the board still showed it "not-started".
+///
+/// The fix narrows the violation guard to compare ONLY the identity /
+/// authorization-scope fields (actor_identity, repository, grants,
+/// engineer_permissions, working_directory, observe_only). A changed per-cycle
+/// `cycle_id` (and the 1:1 `goal_id`) is legitimate lease metadata refreshed by
+/// the existing `ON CONFLICT(session_id) DO UPDATE` upsert, and MUST NOT be a
+/// violation. A genuine change to any of the six scope fields on a reused
+/// `session_id` MUST still be rejected.
+#[cfg(test)]
+mod actor_session_scope_tests {
+    use super::*;
+
+    const REPO_OWNER: &str = "rysweet";
+    const REPO_NAME: &str = "Simard";
+    const POLICY_REVISION: &str = "policy-v1";
+
+    /// Mirror production: a 30-day actor-session lease (`route.rs`), which
+    /// never expires between the short cycle retries that trip the bug.
+    const LEASE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+    fn open_handler(dir: &std::path::Path) -> CapabilityHandler {
+        CapabilityHandler::open(
+            dir.join("outcomes.sqlite3"),
+            CapabilityPolicy::new(POLICY_REVISION),
+        )
+        .expect("open capability handler")
+    }
+
+    /// A goal-session actor mirroring `typed_goal_session.rs`: a STABLE
+    /// per-goal `session_id` with a PER-CYCLE `cycle_id`, holding one fixed
+    /// identity + authorization scope.
+    fn goal_actor(session_id: &str, cycle_id: &str, goal_id: &str) -> AuthenticatedToolContext {
+        AuthenticatedToolContext::new(
+            "goal-session-actor",
+            session_id,
+            [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+        )
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, REPO_NAME))
+        .bound_to_cycle_goal(cycle_id, goal_id)
+        .with_engineer_permissions(["repo_read"])
+    }
+
+    /// Read the persisted `actor_sessions` row straight from the ledger so a
+    /// test can assert the mutable lease metadata was refreshed by the upsert.
+    fn stored_binding(handler: &CapabilityHandler, session_id: &str) -> ActorBinding {
+        let connection = handler.lock().expect("lock ledger");
+        load_actor_binding(&connection, session_id)
+            .expect("query actor binding")
+            .expect("a binding must be persisted for this session")
+    }
+
+    /// Register `cycle-1`, then attempt to re-lease the SAME `session_id` under
+    /// `cycle-2` with `mutated` (a changed identity/authorization scope) and
+    /// assert it is rejected as an `AuthorizationScopeViolation`.
+    fn assert_scope_change_rejected(mutated: AuthenticatedToolContext, what: &str) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let session = "ooda-stable-session";
+        let goal = "goal-perpetual";
+
+        handler
+            .register_actor_session(
+                &goal_actor(session, "cycle-1", goal),
+                "request-cycle-1",
+                "cycle-1",
+                goal,
+                LEASE,
+            )
+            .expect("baseline lease of the stable session id must succeed");
+
+        let err = handler
+            .register_actor_session(&mutated, "request-cycle-2", "cycle-2", goal, LEASE)
+            .expect_err("a changed identity/authorization scope must be rejected, not accepted");
+        assert_eq!(
+            err.code(),
+            CapabilityErrorCode::AuthorizationScopeViolation,
+            "a changed {what} on a reused session id must be a scope violation"
+        );
+    }
+
+    /// TEST 1 — CORE REGRESSION.
+    ///
+    /// Two `register_actor_session` calls, SAME `session_id` + SAME
+    /// identity/scope, DIFFERENT per-cycle `cycle_id`: both must succeed and the
+    /// persisted row's mutable metadata (`cycle_id`/`goal_id`/token) must be
+    /// refreshed to the new cycle.
+    #[test]
+    fn re_leasing_same_session_with_new_cycle_refreshes_metadata() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        let session = "ooda-stable-session";
+        let goal = "goal-perpetual";
+
+        // Cycle 1: first lease of the stable session id.
+        let lease1 = handler
+            .register_actor_session(
+                &goal_actor(session, "cycle-1", goal),
+                "request-cycle-1",
+                "cycle-1",
+                goal,
+                LEASE,
+            )
+            .expect("first cycle must lease the stable session id");
+
+        // Cycle 2 (~7 min later, the 30-day lease is NOT expired): SAME identity
+        // and scope, only the per-cycle cycle_id advances. This is a legitimate
+        // re-lease and MUST succeed rather than raise a false violation.
+        let lease2 = handler
+            .register_actor_session(
+                &goal_actor(session, "cycle-2", goal),
+                "request-cycle-2",
+                "cycle-2",
+                goal,
+                LEASE,
+            )
+            .expect("re-leasing the same session for a new cycle must succeed");
+
+        // Each re-lease mints a fresh token (token rotation preserved).
+        assert_ne!(
+            lease1.token, lease2.token,
+            "each re-lease must mint a fresh token"
+        );
+
+        // The persisted row's mutable lease metadata is refreshed to cycle 2.
+        let binding = stored_binding(&handler, session);
+        assert_eq!(
+            binding.cycle_id, "cycle-2",
+            "the persisted cycle_id must be refreshed to the new cycle"
+        );
+        assert_eq!(
+            binding.goal_id, goal,
+            "the persisted goal_id must be refreshed via the upsert"
+        );
+
+        // The refreshed lease authenticates against the NEW cycle...
+        handler
+            .authenticate_actor_session(&lease2.token, session, "cycle-2", goal)
+            .expect("the cycle-2 token must authenticate against cycle-2");
+        // ...and the superseded cycle no longer authenticates.
+        assert!(
+            handler
+                .authenticate_actor_session(&lease2.token, session, "cycle-1", goal)
+                .is_err(),
+            "the superseded cycle must no longer authenticate"
+        );
+    }
+
+    /// TEST 2a — a genuinely changed `actor_identity` on the SAME `session_id`
+    /// must still be rejected as an `AuthorizationScopeViolation`.
+    #[test]
+    fn changed_actor_identity_on_reused_session_is_rejected() {
+        let mutated = AuthenticatedToolContext::new(
+            "intruder-identity",
+            "ooda-stable-session",
+            [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+        )
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, REPO_NAME))
+        .bound_to_cycle_goal("cycle-2", "goal-perpetual")
+        .with_engineer_permissions(["repo_read"]);
+        assert_scope_change_rejected(mutated, "actor_identity");
+    }
+
+    /// TEST 2b — a changed bound `repository` (even one still inside policy) on
+    /// the SAME `session_id` must still be rejected.
+    #[test]
+    fn changed_repository_on_reused_session_is_rejected() {
+        let mutated = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            "ooda-stable-session",
+            [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+        )
+        // A different repo under the same policy-allowed owner: governance still
+        // permits it, but it is a DIFFERENT authorization scope.
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, "OtherRepo"))
+        .bound_to_cycle_goal("cycle-2", "goal-perpetual")
+        .with_engineer_permissions(["repo_read"]);
+        assert_scope_change_rejected(mutated, "repository");
+    }
+
+    /// TEST 2c — ESCALATED grants on the SAME `session_id` must still be
+    /// rejected (no silent privilege widening).
+    #[test]
+    fn escalated_grants_on_reused_session_is_rejected() {
+        let mutated = AuthenticatedToolContext::new(
+            "goal-session-actor",
+            "ooda-stable-session",
+            [
+                CapabilityGrant::RecordAction(ActionKind::SpawnEngineer),
+                // A new, more powerful grant the baseline lease never held.
+                CapabilityGrant::DirectMerge,
+            ],
+        )
+        .scoped_to_repository(RepositoryRef::new(REPO_OWNER, REPO_NAME))
+        .bound_to_cycle_goal("cycle-2", "goal-perpetual")
+        .with_engineer_permissions(["repo_read"]);
+        assert_scope_change_rejected(mutated, "grants");
+    }
+
+    /// TEST 2d — flipping `observe_only` on the SAME `session_id` must still be
+    /// rejected (an observe-only lease cannot silently gain mutation scope, nor
+    /// vice-versa).
+    #[test]
+    fn changed_observe_only_on_reused_session_is_rejected() {
+        let mutated =
+            goal_actor("ooda-stable-session", "cycle-2", "goal-perpetual").with_observe_only(true);
+        assert_scope_change_rejected(mutated, "observe_only");
+    }
+
+    /// TEST 3 — a PERPETUAL/STANDING goal re-entering the typed goal-session
+    /// across two consecutive cycles no longer fails with the identity-binding
+    /// error. This is the end-to-end shape of the crash-loop from #4197.
+    #[test]
+    fn perpetual_goal_reentry_across_consecutive_cycles_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handler = open_handler(dir.path());
+        // A stable per-goal session id (#4197) shared across EVERY cycle of a
+        // perpetual goal; the per-cycle cycle_id mirrors the production format
+        // `cycle-<n>-<goal_id>`.
+        let session = "ooda-continuously-research";
+        let goal = "continuously-research-and-improve-your-own-cogn-70ab8541";
+
+        for cycle in 1..=2 {
+            let cycle_id = format!("cycle-{cycle}-{goal}");
+            let request_id = format!("request-{cycle}");
+            handler
+                .register_actor_session(
+                    &goal_actor(session, &cycle_id, goal),
+                    &request_id,
+                    &cycle_id,
+                    goal,
+                    LEASE,
+                )
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "perpetual goal cycle {cycle} must re-lease the stable session id \
+                         without an identity-binding violation, got: {err:?}"
+                    )
+                });
+        }
     }
 }

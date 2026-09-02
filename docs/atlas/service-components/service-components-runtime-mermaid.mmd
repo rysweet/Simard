@@ -1,0 +1,83 @@
+graph TD
+    DaemonMod["operator_commands_ooda::daemon"]
+    Brains["operator_commands_ooda::daemon::brains"]
+    Persistence["operator_commands_ooda::persistence"]
+    DashboardTask["operator_commands_dashboard"]
+    RunCycle["ooda_loop::run_ooda_cycle"]
+    Observe["ooda_loop::observe"]
+    Orient["ooda_loop::orient"]
+    Decide["ooda_loop::decide"]
+    Act["ooda_loop::act"]
+    Curate["ooda_loop::curate"]
+    PhaseWeights["ooda_loop::phase_weights"]
+    Coverage["ooda_loop::coverage"]
+    NoProgress["ooda_loop::no_progress"]
+    Dispatch["ooda_actions::dispatch_actions_bounded"]
+    Concurrent["ooda_actions::concurrent"]
+    AdvanceSpawn["ooda_actions::advance_goal::spawn"]
+    GoalSession["ooda_actions::goal_session"]
+    TypedSession["ooda_actions::advance_goal::typed_goal_session"]
+    TypedLedger["typed_ooda::CapabilityHandler"]
+    BrainTraits["ooda_brain traits"]
+    RecipeBrain["ooda_brain::RecipeBrain"]
+    PromptStore["ooda_brain::prompt_store"]
+    MemoryOps["CognitiveMemoryOps"]
+    MemoryIpc["memory_ipc reader writer"]
+    MemoryConsolidation["memory_consolidation"]
+    GoalCuration["goal_curation"]
+    GoalBoardStore["goal_board_store"]
+    EngineerWorktree["engineer_worktree"]
+    ThreadsMind["cognitive_threads::Mind"]
+    OverseerTick["overseer::run_overseer_tick_isolated"]
+    JournalTick["journal::run_journal_tick_with_prs_in_repo"]
+    SelfMetrics["self_metrics::collect_and_record_all"]
+    Telemetry["telemetry snapshot"]
+
+    DaemonMod --> Brains
+    DaemonMod --> Persistence
+    DaemonMod --> DashboardTask
+    DaemonMod --> RunCycle
+    DaemonMod --> GoalBoardStore
+    DaemonMod --> MemoryIpc
+    DaemonMod --> ThreadsMind
+    DaemonMod --> OverseerTick
+    DaemonMod --> JournalTick
+    DaemonMod --> SelfMetrics
+    DaemonMod --> Telemetry
+
+    Brains --> BrainTraits
+    Brains --> RecipeBrain
+    Brains --> PromptStore
+    RunCycle --> Observe
+    RunCycle --> Orient
+    RunCycle --> Decide
+    RunCycle --> Act
+    RunCycle --> Curate
+    RunCycle --> Coverage
+    RunCycle --> NoProgress
+    Observe --> MemoryOps
+    Observe --> MemoryConsolidation
+    Orient --> BrainTraits
+    Orient --> GoalCuration
+    Orient --> PhaseWeights
+    Decide --> BrainTraits
+    Act --> Dispatch
+    Curate --> GoalCuration
+    Curate --> GoalBoardStore
+    Curate --> MemoryConsolidation
+    NoProgress --> GoalCuration
+    NoProgress --> Dispatch
+
+    Dispatch --> Concurrent
+    Dispatch --> AdvanceSpawn
+    Dispatch --> GoalSession
+    Dispatch --> TypedSession
+    Concurrent --> MemoryOps
+    Concurrent --> BrainTraits
+    AdvanceSpawn --> BrainTraits
+    AdvanceSpawn --> EngineerWorktree
+    GoalSession --> MemoryOps
+    GoalSession --> GoalCuration
+    TypedSession --> TypedLedger
+    TypedSession --> EngineerWorktree
+    TypedLedger --> GoalBoardStore

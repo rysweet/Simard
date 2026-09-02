@@ -461,7 +461,15 @@ pub(crate) const PART_04: &str = r#"            let fmt;
                   }
                   const det=o.detail||'';
                   const detLow=det.toLowerCase();
-                  const hasArtifact=detLow.indexOf('pr #')>=0||detLow.indexOf('commit')>=0;
+                  // 'commit' matches the outcome-ledger verb 'committed', which
+                  // the typed OODA ledger uses for BOTH a real action
+                  // ("…committed and effect completed") and the two no-progress
+                  // terminals ("typed no-action committed", "…blocked terminal
+                  // committed"). Only real progress produced an artifact, so
+                  // exclude the no-progress bookkeeping phrases (#4292).
+                  const hasArtifact=(detLow.indexOf('pr #')>=0||detLow.indexOf('commit')>=0)
+                    &&detLow.indexOf('no-action committed')<0
+                    &&detLow.indexOf('blocked terminal committed')<0;
                   const isAssessmentOnly=detLow.indexOf('assessed')>=0&&detLow.indexOf('verified=0')>=0;
                   const linkIcon=hasArtifact?'<span style="color:#2ea043;margin-right:4px" title="produced artifact">🔗</span>':'';
                   const assessBadge=(!hasArtifact&&isAssessmentOnly)?' <span class="badge-assessment" style="background:#fb8500;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">assessment only</span>':'';
@@ -485,6 +493,18 @@ pub(crate) const PART_04: &str = r#"            let fmt;
     }
 
     /* --- OODA Cycle History (issue #2135) --- */
+    // Honest cycle-count label: the endpoint returns `total_cycles` (rows in the
+    // bounded window) and `latest_cycle_number` (the authoritative cumulative
+    // cycle count, #1680). When the daemon has run more cycles than the window
+    // shows, say so explicitly instead of rendering the capped window size as
+    // the lifetime total.
+    function cycleCountLabel(d){
+      const shown=d.total_cycles||0;
+      const lifetime=d.latest_cycle_number||0;
+      return lifetime>shown
+        ? `Showing last ${shown} of ${lifetime} cycles run`
+        : `${shown} cycles recorded`;
+    }
     async function fetchOodaCycles(){
       try{
         const d=await apiFetch('/api/ooda-cycles');
@@ -497,14 +517,14 @@ pub(crate) const PART_04: &str = r#"            let fmt;
         // a trend, render only an honest cycle count — never a permanently
         // broken "not enough data" chart/placeholder.
         if(dir==='insufficient_data'){
-          trendEl.innerHTML=`<div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+          trendEl.innerHTML=`<div style="color:#8b949e;font-size:.85rem">${cycleCountLabel(d)}</div>`;
         }else{
           const trendColors={improving:'var(--green)',degrading:'var(--red)',stable:'var(--yellow)'};
           const trendLabels={improving:'↓ Improving',degrading:'↑ Degrading',stable:'→ Stable'};
           const trendColor=trendColors[dir]||'#8b949e';
           let trendHtml=`<div style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
             <div><strong style="color:${trendColor}">${trendLabels[dir]||dir}</strong></div>
-            <div style="color:#8b949e;font-size:.85rem">${d.total_cycles||0} cycles recorded</div>`;
+            <div style="color:#8b949e;font-size:.85rem">${cycleCountLabel(d)}</div>`;
           if(trend.recent_avg_secs!=null){
             trendHtml+=`<div style="font-size:.85rem">Recent avg: <strong>${trend.recent_avg_secs}s</strong></div>
               <div style="font-size:.85rem">Older avg: <strong>${trend.older_avg_secs}s</strong></div>

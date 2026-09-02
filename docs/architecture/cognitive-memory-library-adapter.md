@@ -1,7 +1,7 @@
 ---
 title: Library-backed Cognitive Memory (the sole backend)
 description: How Simard's CognitiveMemoryOps trait is backed by amplihack-memory-lib's persistent CognitiveMemory through the LibraryCognitiveMemory adapter. As of de-fork Phase 2b this is the ONLY on-disk cognitive-memory backend; the native LadybugDB fork has been deleted.
-last_updated: 2026-07-03
+last_updated: 2026-07-18
 owner: simard
 doc_type: reference
 related:
@@ -203,6 +203,20 @@ pub fn open(state_root: &Path) -> SimardResult<Self> {
 - The adapter **never** opens, reads, writes, or migrates the abandoned native
   store at `~/.simard/cognitive_memory.ladybug`. No data migration runs.
 
+### Cross-process open serialization
+
+Before delegating to `open_persistent`, `open` acquires a cross-process advisory
+`flock` on the sidecar `state_root/cognitive.open.lock`
+(`cognitive_memory::open_guard`). lbug takes a POSIX/PID lock on the store and
+mis-classifies a *lock conflict* from a second concurrent process as *catalog
+corruption* — quarantining the DB and rebuilding it EMPTY. Serializing opens at
+this seam means the library never sees a concurrent open on the same path: a
+transient race waits (bounded backoff) and proceeds, while a store still held by
+another live process makes the second opener **fail loud** instead of wiping
+memory. Same-process opens share the lock (re-entrant, matching lbug's per-PID
+semantics). See
+[Cognitive-Memory Open Serialization](../reference/cognitive-memory-open-serialization.md).
+
 ---
 
 ## API reference
@@ -247,7 +261,7 @@ let mem = LibraryCognitiveMemory::in_memory()?;
 | `get_statistics()` | `get_statistics() -> HashMap<String, usize>` | Folded into the typed `CognitiveStatistics` DTO. |
 | `mark_episode_distilled(node_id)` | `mark_episode_distilled(node_id) -> bool` | **Implemented (Phase 2b).** Delegates; the returned `bool` (false if the id is absent) is ignored to satisfy the trait's `Result<()>` no-payload contract. |
 | `list_undistilled_episodes(limit)` | `list_undistilled_episodes(limit) -> Vec<EpisodicMemory>` | **Implemented (Phase 2b).** Delegates and converts to `CognitiveEpisode`. |
-| `search_episodes_by_keywords(keywords, limit)` | `get_episodes(usize::MAX, include_compressed = true)` + filter | Recall all episodes (compressed included so consolidation sources stay recallable), filter on case-insensitive `content.contains`, short-circuit at `limit`. |
+| `search_episodes_by_keywords(keywords, limit)` | `get_episodes(usize::MAX, include_compressed = true)` + filter | Recall all episodes (compressed included so consolidation sources stay recallable), then a **marker-safe word-boundary** filter: a clean alphanumeric keyword matches at a word boundary (`shares_word_prefix`), a phrase/marker keyword keeps case-insensitive `content.contains`; short-circuit at `limit`. See [Keyword matching](#keyword-matching-word-boundary-vs-substring). |
 | `search_episodes_starting_with(prefix, limit)` | `get_episodes(usize::MAX, include_compressed = true)` + filter | Recall all episodes, filter on `content.starts_with`, pair each match with the library record's `created_at` to build the `(content, recorded_at)` return. |
 | `is_read_only()` | n/a | Always `false` — the library backend is a writer (no read-only constructor). |
 | `checkpoint()` | library `close()` (CHECKPOINT) | Issues a LadybugDB CHECKPOINT, collapsing the WAL into the main file so a subsequent reopen of the same path observes all committed writes. |
@@ -256,14 +270,18 @@ let mem = LibraryCognitiveMemory::in_memory()?;
 
 Thin converters translate library records into Simard DTOs
 (`src/memory_cognitive.rs`). Each converter maps the fields Simard models
-(`content`, `source_label`, `temporal_index`, `node_id`, …), drops fields the
-flat DTOs do not carry (e.g. `created_at` — which
-`search_episodes_starting_with` instead reads directly to build its
-`(content, recorded_at)` return), and casts widths (`priority` i32 → i64):
+(`content`, `source_label`, `temporal_index`, `node_id`, …) and casts widths
+(`priority` i32 → i64). `to_episode` additionally carries the library
+`EpisodicMemory::created_at` through as `CognitiveEpisode::created_at:
+Option<DateTime<Utc>>` (issue #4383) so the dashboard "Recent Memories" panel
+(`GET /api/memory/recent`) can render a "time ago" label; it is `None` only for
+callers/backends that genuinely lack a timestamp (never a fabricated epoch).
+`search_episodes_starting_with` still reads `created_at` directly to build its
+`(content, recorded_at)` return:
 
 | Library type | Simard DTO |
 |---|---|
-| `EpisodicMemory` | `CognitiveEpisode` (`compressed` ← `compressed`) |
+| `EpisodicMemory` | `CognitiveEpisode` (`compressed` ← `compressed`, `created_at` ← `Some(created_at)`) |
 | `SemanticFact` | `CognitiveFact` |
 | `ProceduralMemory` | `CognitiveProcedure` |
 | `ProspectiveMemory` | `CognitiveProspective` (`priority` i32 → i64) |
@@ -426,7 +444,8 @@ Two trait methods have no single library call and are composed in the adapter:
 
 | Method | Why it matters | Adapter implementation |
 |---|---|---|
-| `search_episodes_by_keywords` | keyword episode recall | recall **all** episodes via `get_episodes(usize::MAX, include_compressed = true)`, filter on case-insensitive `content.contains`, short-circuit at `limit` |
+| `search_episodes_by_keywords` | keyword episode recall | recall **all** episodes via `get_episodes(usize::MAX, include_compressed = true)`, apply the **marker-safe word-boundary** keyword filter (see below), short-circuit at `limit` |
+| `search_facts` | keyword fact recall | delegate matching to `library.search_facts`, then apply the **marker-safe word-boundary** relevance gate on a clean natural-language query (see below); wildcard/empty bypass it |
 | `search_episodes_starting_with` | progress-evidence `since` timestamp gate | recall all episodes, filter on `content.starts_with`, pair each with the record's `created_at` |
 
 These remain in-adapter because the library does not expose an equivalent
@@ -434,6 +453,86 @@ single-shot query at the pinned commit. Promoting them into the library is a
 desirable upstream follow-up (tracked at
 [amplihack-memory-lib#85](https://github.com/rysweet/amplihack-memory-lib/issues/85)).
 No trait method panics or silently degrades.
+
+### Keyword matching: word-boundary vs substring
+
+`search_episodes_by_keywords` partitions its query keywords by shape so it gets
+recall precision on natural-language callers **without** breaking the callers
+that depend on exact-substring match:
+
+- A **clean** keyword — non-empty and entirely alphanumeric, the shape the
+  natural-language callers emit (`cognitive_threads::creative_ideas` recalls with
+  `"meeting"` / `"conversation"` / `"decision"`, and `memory_consolidation::tokenize_objective`
+  produces the same) — is matched at a **word boundary** via `shares_word_prefix`:
+  the keyword must be a prefix of a whole word in the episode content. A short
+  token merely embedded in the interior or suffix of an unrelated word (`test` in
+  "latest", `own` in "download", `decision` in "indecision") no longer floats an
+  off-topic episode into recall, while a query stem still recalls its inflected
+  forms (`deploy` → "deployed" / "deploys"). This is the same word-boundary gate
+  `recall_episodes_ranked` uses, extended to the flat keyword scan.
+- A keyword carrying **any non-alphanumeric character** — a phrase or, crucially,
+  a bracketed provenance **marker** (`[reflect-occ=…]`, `[reflect-key=…|…]`) that
+  `memory_consolidation::reflection_lessons` writes and re-filters on with exact
+  `content.contains(marker)` — keeps the legacy case-insensitive **substring**
+  semantics. Its dedup / recurring-failure counting is unchanged.
+
+The word-boundary tokenization is skipped entirely on the marker-only path (no
+clean keyword present), so `reflection_lessons::count_recurring_failures` (which
+scans with `limit = u32::MAX`) does no extra work. The pure helpers are
+unit-tested in `library_adapter::word_boundary_gate_tests`; the end-to-end
+contract is pinned in `cognitive_memory::tests_whole_word_episode_recall`.
+
+#### Singular/plural folding closes the prefix asymmetry
+
+A word-boundary **prefix** gate is directional: it recalls `test` → "tests"
+(the query is a prefix of the content word) but not the reverse, because
+`"test".starts_with("tests")` is false. So a query phrased in the plural
+(`memory_consolidation::tokenize_objective` emits raw objective tokens, e.g.
+`"stabilize the flaky tests"`) silently missed an episode written in the
+singular ("wrote a **test** …") — dropping a genuinely relevant prior from the
+reasoner's working context.
+
+`shares_word_prefix` therefore also admits a **conservative singular/plural
+fold** (`needle_matches_word`): a plural query token matches the singular content
+word by whole-word **equality** of a generated variant — regular `-s`/`-es`
+(`tests` → "test", `caches` → "cache") and the shape-changing `-y` ↔ `-ies` pair
+in both directions (`categories` ↔ "category"). Folding matches only on equality
+(never a prefix) and only when the stripped stem clears a two-character minimum,
+so — unlike a prefix on a stripped stem — it cannot re-introduce the interior
+over-matching the word-boundary rule removed (`buses` does not surface
+"business"; `is` does not fold to "i"). This is the same guarded folding
+`knowledge_context::token_matches_pack` applies to pack selection (PR #4241
+lineage), now shared by episodic, keyword, and fact recall so the cognition
+stack folds regular plurals uniformly.
+
+### Keyword matching (facts): the same gate on `search_facts`
+
+`search_facts` applies the identical clean/raw partition to the **fact** path.
+The library matches each query token as a raw case-insensitive substring of a
+fact's `concept` OR `content`, so a clean natural-language token floated facts in
+on the interior/suffix of an unrelated word (`act` in "reactor", `own` in
+"download", `test` in "latest") — polluting the capped working-context recall
+`base_type_turn::prepare_turn_context` feeds to reasoning. The adapter now
+post-filters the library's results:
+
+- A **clean** query token (entirely alphanumeric) is kept only when it is a
+  prefix of a whole word in the `concept` OR `content` (`shares_word_prefix` on
+  both fields), dropping interior/suffix noise while preserving inflectional
+  recall (`deploy` → "deployed").
+- A **raw** token (any non-alphanumeric char — a hyphenated concept like
+  `bug-pattern`, or a `journal:` / `goal-edge:` / `sub:` marker) keeps the
+  library's exact substring semantics its callers store and re-filter on. A query
+  with no clean token bypasses the gate, so concept/marker callers are unaffected.
+
+Truncation to `limit` is **deferred until after** the gate (the library is queried
+unbounded on the clean-token path), so a relevant fact ranked behind an
+interior-substring false positive is not dropped before the gate runs — matching
+`recall_episodes_ranked`. Wildcard (`"*"`) / empty queries keep the return-all
+path and are never gated. The pure helpers (`partition_fact_query`,
+`fact_shares_query_relevance`) are unit-tested in
+`library_adapter::fact_query_gate_tests`; the end-to-end contract is pinned in
+`cognitive_memory::tests_fact_recall_word_boundary`. See also
+[Tokenized fact recall › Word-boundary relevance gate](../reference/cognitive-memory-fact-recall.md#word-boundary-relevance-gate-recall-precision).
 
 ---
 

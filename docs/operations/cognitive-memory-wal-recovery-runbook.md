@@ -216,8 +216,11 @@ older build, **copy them out before anything sweeps them**:
 
 ```bash
 mkdir -p ~/simard-memory-recovery/$(date +%Y%m%d_%H%M%S)
-cp -a ~/.simard/cognitive.corrupt-* ~/simard-memory-recovery/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
-cp -a ~/.simard/backups            ~/simard-memory-recovery/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
+# Live-backend quarantines live next to the store, under state/; the legacy
+# native backend left them at the top level. Copy both.
+cp -a ~/.simard/state/cognitive*.corrupt-* ~/simard-memory-recovery/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
+cp -a ~/.simard/cognitive*.corrupt-*       ~/simard-memory-recovery/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
+cp -a ~/.simard/backups                    ~/simard-memory-recovery/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
 ```
 
 Do **not** run `simard cleanup` until you have recovered or copied out the
