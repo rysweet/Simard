@@ -267,6 +267,17 @@ fn spawn_stats_snapshot_refresher(memory: std::sync::Weak<dyn CognitiveMemoryOps
     }
 }
 
+fn record_graph_memory_self_metrics(
+    g: &crate::memory_cognitive::GraphStats,
+    record_goal_board_snapshot_metric: impl FnOnce(u64, u64),
+) {
+    crate::cognitive_memory::metrics::record_provenance_coverage_metric(
+        g.facts_with_provenance,
+        g.facts_total,
+    );
+    record_goal_board_snapshot_metric(g.distinct_snapshot_caller_keys, g.snapshot_facts_total);
+}
+
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
@@ -1754,46 +1765,37 @@ pub fn run_ooda_daemon(
                             &[(names::ATTR_TYPE, "sensory")],
                         );
                     }
-                    if let Ok(g) = memories.memory.graph_stats() {
-                        telemetry::gauge_set(
-                            names::MEMORY_EDGES,
-                            g.derives_from_edges as i64,
-                            &[(names::ATTR_TYPE, "DERIVES_FROM")],
-                        );
-                        telemetry::gauge_set(
-                            names::MEMORY_EDGES,
-                            g.similar_to_edges as i64,
-                            &[(names::ATTR_TYPE, "SIMILAR_TO")],
-                        );
-                        telemetry::gauge_set(
-                            names::MEMORY_EDGES,
-                            g.supersedes_edges as i64,
-                            &[(names::ATTR_TYPE, "SUPERSEDES")],
-                        );
-                        // Emit the durable graph-memory grounding-coverage
-                        // self-metric from the SAME snapshot (no extra store
-                        // read): fraction of semantic facts connected into the
-                        // DERIVES_FROM provenance graph. Turns a grounding
-                        // regression — facts entering semantic memory without a
-                        // provenance edge — into a comparable, regressable
-                        // `metrics.jsonl` series instead of only raw edge-count
-                        // gauges. Best-effort; no-op on an empty store.
-                        crate::cognitive_memory::metrics::record_provenance_coverage_metric(
-                            g.facts_with_provenance,
-                            g.facts_total,
-                        );
-                        // Emit the durable snapshot-layer dedup-hygiene
-                        // self-metric from the SAME snapshot: average liveness
-                        // of the snapshot layer (distinct streams / retained
-                        // revisions). Turns a pruning/hygiene regression —
-                        // superseded snapshot revisions accumulating faster than
-                        // controlled forgetting reclaims them — into a
-                        // comparable, regressable `metrics.jsonl` series.
-                        // Best-effort; no-op on an empty snapshot layer.
-                        crate::cognitive_memory::metrics::record_snapshot_dedup_ratio_metric(
-                            g.distinct_snapshot_caller_keys,
-                            g.snapshot_facts_total,
-                        );
+                    match memories.memory.graph_stats() {
+                        Ok(g) => {
+                            telemetry::gauge_set(
+                                names::MEMORY_EDGES,
+                                g.derives_from_edges as i64,
+                                &[(names::ATTR_TYPE, "DERIVES_FROM")],
+                            );
+                            telemetry::gauge_set(
+                                names::MEMORY_EDGES,
+                                g.similar_to_edges as i64,
+                                &[(names::ATTR_TYPE, "SIMILAR_TO")],
+                            );
+                            telemetry::gauge_set(
+                                names::MEMORY_EDGES,
+                                g.supersedes_edges as i64,
+                                &[(names::ATTR_TYPE, "SUPERSEDES")],
+                            );
+                            // Emit both durable graph-memory self-metrics from
+                            // this same snapshot, with no additional store read.
+                            record_graph_memory_self_metrics(
+                                &g,
+                                crate::cognitive_memory::metrics::record_goal_board_snapshot_dedup_ratio_metric,
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "simard::memory",
+                                error = %error,
+                                "failed to read graph statistics; edge gauges and graph-memory self-metrics were not recorded",
+                            );
+                        }
                     }
                     // Flush the metrics snapshot with the per-cycle enrichment
                     // rollup section attached (issue #2942) so the dashboard's
@@ -2420,6 +2422,39 @@ mod tests {
     use crate::rpc::RpcErrorPayload;
     use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
+
+    #[test]
+    fn graph_memory_metric_sweep_uses_goal_board_graph_stats_fields() {
+        let stats = crate::memory_cognitive::GraphStats {
+            distinct_snapshot_caller_keys: 3,
+            snapshot_facts_total: 12,
+            ..Default::default()
+        };
+
+        let mut recorded = None;
+        record_graph_memory_self_metrics(&stats, |distinct_caller_keys, snapshot_facts_total| {
+            crate::cognitive_memory::metrics::record_goal_board_snapshot_dedup_ratio_metric_with(
+                distinct_caller_keys,
+                snapshot_facts_total,
+                |name, value, context| {
+                    recorded = Some((name.to_string(), value, context.to_string()));
+                    Ok::<(), ()>(())
+                },
+            )
+            .expect("construct goal-board metric entry through injected writer");
+        });
+
+        let (name, value, context) = recorded.expect("one goal-board metric entry");
+        assert_eq!(
+            name,
+            crate::cognitive_memory::metrics::GOAL_BOARD_SNAPSHOT_DEDUP_RATIO_METRIC
+        );
+        assert_eq!(value, 0.25);
+        let context: serde_json::Value =
+            serde_json::from_str(&context).expect("metric context JSON");
+        assert_eq!(context["snapshot_facts"], 12);
+        assert_eq!(context["distinct_caller_keys"], 3);
+    }
 
     fn mock_memory() -> Box<dyn CognitiveMemoryOps> {
         Box::new(CognitiveMemoryClient::new(Box::new(

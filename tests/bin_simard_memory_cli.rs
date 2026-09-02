@@ -252,10 +252,9 @@ fn stats_shows_edges_and_dedup_section_via_direct_open() {
         Some(1),
         "the snapshot caller key must be grouped: {report}"
     );
-    // The durable `fact_snapshot_dedup_ratio` self-metric (emitted per OODA
-    // cycle by the daemon) is defined over *exactly* these operator-visible
-    // counts, so its inputs can never silently diverge from what `memory stats`
-    // renders. One stream holding one revision is a healthy liveness of 1.0.
+    // The durable `goal_board_snapshot_dedup_ratio` self-metric uses these
+    // operator-visible goal-board counts. One stream holding one revision is a
+    // healthy liveness of 1.0.
     let snapshot_facts = report["snapshot_dedup"]["snapshot_facts"]
         .as_u64()
         .expect("snapshot_facts must be numeric");
@@ -263,12 +262,12 @@ fn stats_shows_edges_and_dedup_section_via_direct_open() {
         .as_u64()
         .expect("distinct_caller_keys must be numeric");
     assert_eq!(
-        simard::cognitive_memory::metrics::snapshot_dedup_ratio(
+        simard::cognitive_memory::metrics::goal_board_snapshot_dedup_ratio(
             distinct_caller_keys,
             snapshot_facts,
         ),
         Some(1.0),
-        "fact_snapshot_dedup_ratio must derive from the operator-visible counts: {report}"
+        "goal_board_snapshot_dedup_ratio must derive from the operator-visible counts: {report}"
     );
     assert!(
         report.get("edges_note").is_none(),

@@ -453,40 +453,41 @@ self-metrics they sit alongside.
 ## Observability: snapshot-dedup-hygiene self-metric
 
 Grounding coverage watches whether facts enter the graph *connected*; a sibling
-self-metric watches whether the **snapshot layer stays lean**. Snapshot facts
-(those written under a stable caller/dedup key — goal-board snapshots and the
-like) are revisioned: each new revision `SUPERSEDES` the prior one, and
+self-metric watches whether the **goal-board snapshot layer stays lean**.
+Goal-board snapshots are revisioned: each new revision `SUPERSEDES` the prior
+one, and
 `prune_superseded` (controlled forgetting) reclaims the archived revisions over
 time. `graph_stats()` already reports two raw counts for this layer:
 
 | Field | Meaning |
 |---|---|
-| `snapshot_facts_total` | every snapshot revision still held (live + not-yet-pruned superseded) |
-| `distinct_snapshot_caller_keys` | distinct logical snapshot streams behind them |
+| `snapshot_facts_total` | every goal-board snapshot revision still held (live + not-yet-pruned superseded) |
+| `distinct_snapshot_caller_keys` | distinct logical goal-board snapshot streams behind them |
 
-The durable `fact_snapshot_dedup_ratio` self-metric is the hygiene *health*
-signal derived from them. Once per OODA cycle the daemon — from the **same**
-`graph_stats()` snapshot it already collects for the OTel edge gauges and the
-grounding-coverage metric — emits one sample to the `metrics.jsonl` series:
+The durable `goal_board_snapshot_dedup_ratio` self-metric is the hygiene *health*
+signal derived from them. After each successful OODA cycle, when `graph_stats()`
+succeeds, the daemon emits one sample to the `metrics.jsonl` series from the
+**same** snapshot it already collects for the OTel edge gauges and the
+grounding-coverage metric:
 
 ```
-fact_snapshot_dedup_ratio = distinct_snapshot_caller_keys / snapshot_facts_total
+goal_board_snapshot_dedup_ratio = distinct_snapshot_caller_keys / snapshot_facts_total
 ```
 
-- **What it measures.** The average *liveness* of the snapshot layer, in
-  `(0.0, 1.0]`. `1.0` means every stream holds a single live revision; the value
-  falls toward `0` as superseded revisions pile up (its inverse — total /
-  distinct — is the mean revisions retained per stream).
+- **What it measures.** The average *liveness* of goal-board snapshot streams,
+  in `[0.0, 1.0]`. `1.0` means every stream holds a single live revision; the
+  value falls toward `0` as superseded revisions pile up. When every snapshot
+  fact has a valid caller key, its inverse — total / distinct — is the mean
+  revisions retained per stream.
 - **Why it matters.** That accumulation is exactly the monotonic-growth failure
   controlled forgetting exists to prevent: if `prune_superseded` stops keeping
   pace, archived revisions bloat semantic memory. Previously that was visible
-  only as the raw `graph_stats()` counts, never as a durable, comparable,
-  regressable series — so a *ratio* (store-size-independent) makes a pruning
-  regression raise the same gym-history signal every other cognition self-metric
-  (`fact_provenance_coverage`, `recall_precision_at_k`, `distill_fact_yield`)
-  does.
-- **Undefined on an empty snapshot layer.** When the store holds zero snapshot
-  facts, the ratio is *undefined* and **no** sample is emitted (skip rather than
+  only as the raw `graph_stats()` counts. The store-size-independent ratio adds
+  a durable, comparable history for operator analysis and future automated
+  regression detection; it does not currently create a Gym history signal.
+- **Undefined on an empty goal-board snapshot layer.** When the store holds zero
+  goal-board snapshot facts, the ratio is *undefined* and **no** sample is
+  emitted (skip rather than
   drag the series to a misleading `0.0`), mirroring the `fact_provenance_coverage`
   convention. `distinct_snapshot_caller_keys` is clamped to `snapshot_facts_total`
   defensively so a miscount can never yield a ratio above `1.0`. The emitter is
@@ -494,15 +495,16 @@ fact_snapshot_dedup_ratio = distinct_snapshot_caller_keys / snapshot_facts_total
   observation: it never changes memory state.
 
 The scoring is a pure function
-(`cognitive_memory::metrics::snapshot_dedup_ratio`) with the per-cycle emitter
-(`record_snapshot_dedup_ratio_metric`) beside `record_provenance_coverage_metric`,
-so both graph-memory hygiene self-metrics sit together.
+(`cognitive_memory::metrics::goal_board_snapshot_dedup_ratio`) with the
+per-cycle emitter (`record_goal_board_snapshot_dedup_ratio_metric`) beside
+`record_provenance_coverage_metric`, so both graph-memory hygiene self-metrics
+sit together.
 
 ---
 
 ## Testing
 
-The feature is covered by a TDD round-trip test (in
+Provenance is covered by a TDD round-trip test (in
 `src/cognitive_memory/tests_provenance.rs`) that:
 
 1. opens an in-memory backend via `LibraryCognitiveMemory::in_memory()`
@@ -518,11 +520,28 @@ returns an empty list) and passes once the adapter records and traverses
 the `DERIVES_FROM` edge — proving the link is recallable end-to-end
 through Simard's own API.
 
+Goal-board snapshot hygiene is covered by:
+
+1. ratio boundary tests in `src/cognitive_memory/metrics.rs`,
+2. a hermetic injected-writer metric-entry construction test that asserts the
+   metric name, value, and serialized context (it does not exercise the real
+   JSONL storage path), and
+3. a daemon wiring test that passes asymmetric `GraphStats` counts through
+   `record_graph_memory_self_metrics` and the goal-board emitter's injected
+   writer, then asserts the resulting metric name, `0.25` value, and serialized
+   `snapshot_facts` / `distinct_caller_keys` context. The asymmetric counts make
+   the test fail if the numerator and denominator are reversed.
+
+The process-boundary `memory stats --json` test in
+`tests/bin_simard_memory_cli.rs` separately proves the same goal-board counts
+are exposed to operators.
+
 Run the relevant suites with:
 
 ```bash
 cargo test cognitive_memory
 cargo test memory_consolidation
+cargo test graph_memory_metric_sweep_uses_goal_board_graph_stats_fields
 ```
 
 ---
@@ -538,12 +557,13 @@ cargo test memory_consolidation
   `facts_with_provenance` / `facts_total` snapshot the coverage metric reads.
 - `src/cognitive_memory/metrics.rs` — `provenance_coverage()` (pure ratio) and
   `record_provenance_coverage_metric()` (per-cycle `fact_provenance_coverage`
-  emitter), plus the sibling `snapshot_dedup_ratio()` /
-  `record_snapshot_dedup_ratio_metric()` (per-cycle `fact_snapshot_dedup_ratio`
-  emitter), plus the `GraphStats` snapshot type in `src/memory_cognitive.rs`.
+  emitter), plus the sibling `goal_board_snapshot_dedup_ratio()` /
+  `record_goal_board_snapshot_dedup_ratio_metric()` (per-cycle
+  `goal_board_snapshot_dedup_ratio` emitter), plus the `GraphStats` snapshot
+  type in `src/memory_cognitive.rs`.
 - `src/operator_commands_ooda/daemon/mod.rs` — the per-cycle sweep that reads
-  `graph_stats()` for the OTel edge gauges and emits the coverage self-metric
-  from the same snapshot.
+  `graph_stats()` for the OTel edge gauges and emits both graph-memory
+  self-metrics from the same snapshot.
 - `src/memory_consolidation/distillation.rs` — distillation writer that
   threads `source_episode_id` as `DERIVES_FROM` provenance.
 - `src/memory_consolidation/mod.rs` — `reflection_memory_operations` that
