@@ -177,7 +177,7 @@ impl Default for AuditOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Reason {
     /// Mutates a watched process-global variable via `set_var`/`remove_var`
-    /// (or the `EnvGuard` test helper).
+    /// (or the `EnvGuard` / `SkipGuard` test helpers).
     MutatesEnv { var: String },
     /// Reads the state-root/socket env default (directly, or via
     /// `resolve_state_root` / `default_state_root` / `simard_state_root`).
@@ -502,6 +502,19 @@ impl<'a, 'ast> Visit<'ast> for BodyScan<'a> {
                 self.reasons.push(Reason::MutatesEnv { var });
             }
 
+            // (B) SkipGuard test-helper mutation (src/gym_runner_client.rs):
+            // `SkipGuard::set`/`clear` always set/remove the hard-coded
+            // `SIMARD_SKIP_GYM` var, so the var name is implicit (not an arg) and
+            // must be supplied here rather than resolved from the call site.
+            if penult == "SkipGuard"
+                && (last == "set" || last == "clear")
+                && self.watched.watches_mutation("SIMARD_SKIP_GYM")
+            {
+                self.reasons.push(Reason::MutatesEnv {
+                    var: "SIMARD_SKIP_GYM".to_string(),
+                });
+            }
+
             // (A) HermeticState constructor.
             if penult == "HermeticState"
                 && matches!(
@@ -775,5 +788,63 @@ fn anyvar_default_isolates_every_env_writer_across_sessions() {
         !legacy_flagged.contains("unrelated_writer_without_key"),
         "pre-#2375 StateRootSurface policy must ignore unrelated vars: \
          {legacy_flagged:?}"
+    );
+}
+
+/// Regression guard for the `SkipGuard` env-helper blind spot (the
+/// `SIMARD_SKIP_GYM` writers in `src/gym_runner_client.rs`). Their `set_var`/
+/// `remove_var` is hidden inside `SkipGuard`'s impl methods, so the direct-call
+/// scan never sees it; before this recognizer a caller could drop back to the
+/// bare `#[serial]` (an independent lock) and silently re-introduce the
+/// environ-realloc race that tore `cost_tracking::ledger_path`'s `HOME` read in
+/// the meeting-turn cost regression. The `SkipGuard::set`/`clear` recognizer
+/// makes that an auto-caught build failure, not an author obligation.
+///
+/// Reads in-memory source fixtures only; it mutates no env, so it carries no
+/// serial key.
+#[test]
+fn skip_guard_helper_mutation_requires_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fixture.rs"),
+        "#[test]\n\
+         #[serial]\n\
+         fn skip_guard_without_key() {\n\
+         let _g = SkipGuard::set(\"1\");\n\
+         }\n\
+         #[test]\n\
+         #[serial]\n\
+         fn skip_guard_clear_without_key() {\n\
+         let _g = SkipGuard::clear();\n\
+         }\n\
+         #[test]\n\
+         #[serial_test::serial(cognitive_memory)]\n\
+         fn skip_guard_with_key() {\n\
+         let _g = SkipGuard::set(\"1\");\n\
+         }\n",
+    )
+    .unwrap();
+
+    let opts = AuditOptions {
+        roots: vec![dir.path().to_path_buf()],
+        excluded_prefixes: Vec::new(),
+        watched: EnvWatch::AnyVar,
+        allowlist: Vec::new(),
+    };
+    let flagged: BTreeSet<String> = audit_env_mutating_tests(&opts)
+        .into_iter()
+        .map(|o| o.test_name)
+        .collect();
+    assert!(
+        flagged.contains("skip_guard_without_key"),
+        "SkipGuard::set without the cognitive_memory key must be flagged: {flagged:?}"
+    );
+    assert!(
+        flagged.contains("skip_guard_clear_without_key"),
+        "SkipGuard::clear without the cognitive_memory key must be flagged: {flagged:?}"
+    );
+    assert!(
+        !flagged.contains("skip_guard_with_key"),
+        "a SkipGuard writer sharing the cognitive_memory key must be accepted: {flagged:?}"
     );
 }

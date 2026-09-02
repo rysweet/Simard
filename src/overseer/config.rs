@@ -61,6 +61,21 @@ pub const SIMARD_OVERSEER_GAP_SCAN_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN";
 /// disables the scan by stealth nor divides by zero.
 pub const SIMARD_OVERSEER_GAP_SCAN_EVERY_N_ENV: &str = "SIMARD_OVERSEER_GAP_SCAN_EVERY_N";
 
+/// Opt-out flag for the agentic **Overseer health-review** rail: each due tick a
+/// reasoning step reads the OODA journal + `simard status` + `simard goal list`,
+/// detects crash-loops / shared failure signatures, and drives remediation
+/// through `LaunchRecipe` / `EscalateBlockedGoal`. ON by default whenever the
+/// acting Overseer runs; an explicit falsey value (`0`/`false`/`no`/`off`)
+/// disables it. Health-review only makes sense while the Overseer runs, so a
+/// disabled Overseer forces it off regardless of this flag.
+pub const SIMARD_OVERSEER_HEALTH_REVIEW_ENV: &str = "SIMARD_OVERSEER_HEALTH_REVIEW";
+
+/// Override for the systemd `--user` unit whose journal the health-review recipe
+/// reads. Defaults to the OODA daemon unit (`simard-ooda.service`); an operator
+/// may point it at a differently-named unit. Unset/empty falls back to the
+/// default — a blank value never yields an empty `-u` argument.
+pub const SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV: &str = "SIMARD_OVERSEER_HEALTH_REVIEW_UNIT";
+
 /// Opt-out switch for the periodic stale-engineer-claim reaper (issue #4099).
 /// The reaper is ENABLED by default; only an explicit falsey value here disables
 /// it. Distinct from the acting-Overseer gate: the reaper is a safety mechanism
@@ -88,6 +103,33 @@ pub const OVERSEER_AUTHOR_LOGIN_ENV: &str = "SIMARD_OVERSEER_AUTHOR_LOGIN";
 /// verifies/merges/deploys its OWN PRs and never re-opens its own goals.
 pub const DEFAULT_OVERSEER_AUTHOR_LOGIN: &str = "simard-overseer[bot]";
 
+/// Opt-in flag (default OFF, truthy-required) for the native Overseer Signal
+/// operator-liaison (issue #4911, Deliverable 1). Master-gated: an explicitly
+/// disabled Overseer forces it off regardless.
+pub const SIMARD_OVERSEER_SIGNAL_LIAISON_ENV: &str = "SIMARD_OVERSEER_SIGNAL_LIAISON";
+
+/// Opt-in flag (default OFF, truthy-required) for the autonomous PR rework loop
+/// (issue #4911, Deliverable 2). When OFF, a fixable hold stays held-with-reason.
+/// Master-gated.
+pub const SIMARD_OVERSEER_REWORK_ENV: &str = "SIMARD_OVERSEER_REWORK";
+
+/// Per-PR rework attempt cap (issue #4911). Parsed as an integer and clamped to
+/// `1..=10`; unset/empty/unparseable ⇒ [`DEFAULT_REWORK_MAX_ATTEMPTS`].
+pub const SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS_ENV: &str = "SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS";
+
+/// Default per-PR rework attempt cap: a small bound so a self-fighting loop
+/// escalates to a human quickly rather than churning.
+pub const DEFAULT_REWORK_MAX_ATTEMPTS: u32 = 3;
+
+/// Operator E.164 the liaison accepts messages from (mirrors
+/// `SIMARD_OVERSEER_EMAIL_TO`). Required for Deliverable 1 to act.
+pub const SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER_ENV: &str =
+    "SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER";
+
+/// Operator Signal group id the liaison acts on. Required for Deliverable 1 to
+/// act (both operator number AND group id must be configured).
+pub const SIMARD_OVERSEER_SIGNAL_GROUP_ID_ENV: &str = "SIMARD_OVERSEER_SIGNAL_GROUP_ID";
+
 /// Default observer cadence: 15 minutes — frequent enough to catch churn, far
 /// below any launch/merge cadence (M1 files at most one deduped issue per
 /// recurring signature, so a tighter interval adds no writes).
@@ -100,6 +142,94 @@ pub const MIN_OVERSEER_INTERVAL_SECS: u64 = 60;
 /// Ultimate fallback when `SIMARD_DAILY_BUDGET_USD` is unset, empty, unparseable,
 /// or non-positive. Mirrors the OODA loop's historical default.
 pub const DEFAULT_DAILY_BUDGET_USD: f64 = 500.0;
+
+/// Env var (#893) that overrides how many *consecutive* transient cycle failures
+/// the `overseer` meta-thread will self-heal through (mapping to `"backoff"`)
+/// before it escalates to `"erroring"`. Unset/empty/unparseable/zero/negative
+/// all fall back to [`DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING`] — a bad value
+/// can never disable self-healing.
+pub const OVERSEER_TRANSIENT_BACKOFF_CEILING_ENV: &str =
+    "SIMARD_OVERSEER_TRANSIENT_BACKOFF_CEILING";
+
+/// Default consecutive-transient self-heal ceiling (#893). Bounded so a
+/// hard-down dependency that fails transiently forever cannot hide behind an
+/// infinite backoff (SR-2) — after this many consecutive transient failures the
+/// meta-thread escalates to `"erroring"`. Must be `>= 1` so at least one
+/// self-healing backoff is always permitted.
+pub const DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING: u32 = 3;
+
+/// Env var (Problem 1 / issue #4186) setting the BASE suppression window
+/// (seconds) of the gap-scan dedup [`crate::overseer::guardrails::BackoffGate`].
+/// Unset/empty/unparseable/zero/negative all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_BASE_SECS`] — a bad base can never collapse the
+/// window to `0` and let every duplicate coverage relaunch through.
+pub const SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV: &str = "SIMARD_OVERSEER_BACKOFF_BASE_SECS";
+
+/// Env var (Problem 1 / issue #4186) setting the exponential GROWTH multiplier of
+/// the gap-scan dedup [`crate::overseer::guardrails::BackoffGate`]. Must be `> 1`
+/// so the window genuinely grows; unset/empty/unparseable/`<= 1` all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_MULTIPLIER`].
+pub const SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV: &str = "SIMARD_OVERSEER_BACKOFF_MULTIPLIER";
+
+/// Env var (Problem 1 / issue #4186) setting the hard CAP (seconds) on the
+/// gap-scan dedup [`crate::overseer::guardrails::BackoffGate`] window, bounding
+/// suppression so a genuinely-recurring gap is never silenced longer than this.
+/// Unset/empty/unparseable/zero/negative all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_MAX_SECS`].
+pub const SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV: &str = "SIMARD_OVERSEER_BACKOFF_MAX_SECS";
+
+/// Default base suppression window (15 min) for the gap-scan dedup backoff — the
+/// same window the sibling [`WhisperGate`]-based dedup rails use.
+pub const DEFAULT_OVERSEER_BACKOFF_BASE_SECS: i64 = 900;
+
+/// Default exponential growth multiplier for the gap-scan dedup backoff.
+pub const DEFAULT_OVERSEER_BACKOFF_MULTIPLIER: i64 = 2;
+
+/// Default hard cap (24 h) on the gap-scan dedup backoff window: suppression is
+/// bounded so a real recurring gap always resurfaces within a day.
+pub const DEFAULT_OVERSEER_BACKOFF_MAX_SECS: i64 = 86_400;
+
+/// Opt-out flag (issue #4930) for the durable **issue-cooldown ledger** that
+/// de-duplicates the OODA-core auto-issue filers (`ooda-stuck`,
+/// `recurring_goal_reblock`, `workstream_gap:issue`) across daemon exec-reload,
+/// restart, and cross-client goal-board merges. ENABLED by default; only an
+/// explicit falsey value (`0`/`false`/`no`/`off`) disables it, in which case
+/// each filer falls back to its prior per-path dedup. Kept default-ON so the
+/// storm-suppression safety mechanism is never lost by stealth.
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_ENV: &str = "SIMARD_OVERSEER_ISSUE_COOLDOWN";
+
+/// Env var (issue #4930) setting the BASE cooldown window (seconds) of the
+/// [`crate::overseer::issue_cooldown::IssueCooldownLedger`]. Clamped UP to at
+/// least one full OODA cycle ([`overseer_interval_secs`]) so the same
+/// `(goal, finding)` can never re-file every cycle — the storm's defining
+/// symptom. Unset/empty/unparseable/zero/negative fall back to
+/// [`DEFAULT_ISSUE_COOLDOWN_BASE_SECS`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS";
+
+/// Env var (issue #4930) setting the hard CAP (seconds) on the issue-cooldown
+/// window. Clamped UP to `>= base` so the window can never be negative. A
+/// still-open finding therefore re-surfaces at least once per cap. Unset/empty/
+/// unparseable/zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_MAX_SECS`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS";
+
+/// Env var (issue #4930) setting the rolling-hour emit budget shared with the
+/// [`crate::overseer::guardrails::WhisperGate`] semantics. Unset/empty/
+/// unparseable/zero fall back to [`DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR`].
+pub const SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR_ENV: &str =
+    "SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR";
+
+/// Default base issue-cooldown window: 6 h — already well above the one-OODA-cycle
+/// hard floor, favouring quiet-by-default while still re-surfacing daily.
+pub const DEFAULT_ISSUE_COOLDOWN_BASE_SECS: i64 = 21_600;
+
+/// Default issue-cooldown window cap: 24 h, so a still-open finding is never
+/// permanently silenced.
+pub const DEFAULT_ISSUE_COOLDOWN_MAX_SECS: i64 = 86_400;
+
+/// Default rolling-hour emit budget for the issue-cooldown ledger.
+pub const DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR: usize = 20;
 
 /// Resolve the Overseer master flag from an env resolver. Fail-safe: only an
 /// explicit truthy value (`1`/`true`/`yes`/`on`, case-insensitive) enables the
@@ -243,6 +373,228 @@ pub fn gap_scan_every_n_from(lookup: impl Fn(&str) -> Option<String>) -> u64 {
 /// Production entry point: read the real process environment.
 pub fn gap_scan_every_n() -> u64 {
     gap_scan_every_n_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the agentic **Overseer health-review** rail is enabled, with
+/// **default ON** opt-out semantics consistent with the acting Overseer. Enabled
+/// UNLESS [`SIMARD_OVERSEER_HEALTH_REVIEW_ENV`] is an explicit falsey value — AND
+/// only while the acting Overseer itself is enabled (an explicitly-disabled
+/// Overseer forces health-review off).
+pub fn health_review_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    // No Overseer ⇒ no health-review.
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    // Opt-out: enabled unless an explicit falsey value is set.
+    !matches!(
+        lookup(SIMARD_OVERSEER_HEALTH_REVIEW_ENV).as_deref().map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn health_review_enabled() -> bool {
+    health_review_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the systemd `--user` unit the health-review recipe reads the journal
+/// from. Returns the [`SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV`] override when set
+/// to a non-empty value, else the OODA daemon unit ([`crate::install::paths::OODA_UNIT`]).
+/// A blank override never yields an empty unit.
+pub fn health_review_service_unit_from(lookup: impl Fn(&str) -> Option<String>) -> String {
+    match lookup(SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => crate::install::paths::OODA_UNIT.to_string(),
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn health_review_service_unit() -> String {
+    health_review_service_unit_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the consecutive-transient self-heal ceiling `N` (#893) from an env
+/// resolver. Fail-safe: unset/empty/whitespace/unparseable/zero/negative all
+/// fall back to [`DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING`] — a garbage value
+/// can never disable self-healing (the floor is always `>= 1`).
+pub fn overseer_transient_backoff_ceiling_from(lookup: impl Fn(&str) -> Option<String>) -> u32 {
+    match lookup(OVERSEER_TRANSIENT_BACKOFF_CEILING_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .unwrap_or(DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING),
+        _ => DEFAULT_OVERSEER_TRANSIENT_BACKOFF_CEILING,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_transient_backoff_ceiling() -> u32 {
+    overseer_transient_backoff_ceiling_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan dedup backoff BASE window (seconds) from an env resolver
+/// (Problem 1 / issue #4186). Fail-safe: unset/empty/whitespace/unparseable/
+/// zero/negative all fall back to [`DEFAULT_OVERSEER_BACKOFF_BASE_SECS`] — a
+/// garbage base can never collapse the suppression window to `0`.
+pub fn overseer_backoff_base_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    match lookup(SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_OVERSEER_BACKOFF_BASE_SECS),
+        _ => DEFAULT_OVERSEER_BACKOFF_BASE_SECS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_backoff_base_secs() -> i64 {
+    overseer_backoff_base_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan dedup backoff GROWTH multiplier from an env resolver
+/// (Problem 1 / issue #4186). Fail-safe: unset/empty/whitespace/unparseable or
+/// any value `<= 1` (which would stop the window growing) all fall back to
+/// [`DEFAULT_OVERSEER_BACKOFF_MULTIPLIER`].
+pub fn overseer_backoff_multiplier_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    match lookup(SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 1)
+            .unwrap_or(DEFAULT_OVERSEER_BACKOFF_MULTIPLIER),
+        _ => DEFAULT_OVERSEER_BACKOFF_MULTIPLIER,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_backoff_multiplier() -> i64 {
+    overseer_backoff_multiplier_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the gap-scan dedup backoff hard CAP (seconds) from an env resolver
+/// (Problem 1 / issue #4186). Fail-safe: unset/empty/whitespace/unparseable/
+/// zero/negative all fall back to [`DEFAULT_OVERSEER_BACKOFF_MAX_SECS`].
+pub fn overseer_backoff_max_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    match lookup(SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_OVERSEER_BACKOFF_MAX_SECS),
+        _ => DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn overseer_backoff_max_secs() -> i64 {
+    overseer_backoff_max_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the durable issue-cooldown ledger (issue #4930) is enabled
+/// from an env resolver. Opt-out: ENABLED unless an explicit falsey value
+/// (`0`/`false`/`no`/`off`) is set. Unset/empty/garbage all leave the ledger ON
+/// so the storm-suppression mechanism is never lost by stealth.
+pub fn issue_cooldown_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(
+        lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_ENV)
+            .as_deref()
+            .map(str::trim),
+        Some(v) if is_falsey(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_enabled() -> bool {
+    issue_cooldown_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown BASE window (seconds) from an env resolver,
+/// clamped UP to at least one full OODA cycle ([`resolve_interval_secs`]) so the
+/// same `(goal, finding)` can never re-file every cycle. Unset/empty/unparseable/
+/// zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_BASE_SECS`]; the cycle
+/// floor is then applied regardless.
+pub fn issue_cooldown_base_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    let requested = match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_BASE_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_BASE_SECS),
+        _ => DEFAULT_ISSUE_COOLDOWN_BASE_SECS,
+    };
+    // Never drop below one OODA cycle — the storm's defining symptom.
+    requested.max(resolve_interval_secs(&lookup) as i64)
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_base_secs() -> i64 {
+    issue_cooldown_base_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown window CAP (seconds) from an env resolver, clamped
+/// UP to `>= base` so the window is never negative. Unset/empty/unparseable/
+/// zero/negative fall back to [`DEFAULT_ISSUE_COOLDOWN_MAX_SECS`].
+pub fn issue_cooldown_cap_secs_from(lookup: impl Fn(&str) -> Option<String>) -> i64 {
+    let requested = match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_MAX_SECS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_MAX_SECS),
+        _ => DEFAULT_ISSUE_COOLDOWN_MAX_SECS,
+    };
+    requested.max(issue_cooldown_base_secs_from(&lookup))
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_cap_secs() -> i64 {
+    issue_cooldown_cap_secs_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the issue-cooldown rolling-hour emit budget from an env resolver.
+/// Unset/empty/unparseable/zero fall back to
+/// [`DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR`] — a bad value never collapses the
+/// budget to `0` and permanently silences a finding.
+pub fn issue_cooldown_cap_per_hour_from(lookup: impl Fn(&str) -> Option<String>) -> usize {
+    match lookup(SIMARD_OVERSEER_ISSUE_COOLDOWN_CAP_PER_HOUR_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => s
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR),
+        _ => DEFAULT_ISSUE_COOLDOWN_CAP_PER_HOUR,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn issue_cooldown_cap_per_hour() -> usize {
+    issue_cooldown_cap_per_hour_from(|k| std::env::var(k).ok())
 }
 
 /// Resolve whether the stale-engineer-claim reaper (issue #4099) is enabled.
@@ -390,6 +742,22 @@ pub fn automerge_author() -> Option<String> {
 /// (`not-simard-autonomous`, `simard-autonomous-ish`) through the gate.
 pub const SIMARD_ENGINEER_PR_LABEL: &str = "simard-autonomous";
 
+/// The environment-variable name the amplihack publish step
+/// (`workflow_publish_pr.sh`, amplihack-rs #979) reads for the comma-separated
+/// list of best-effort labels to stamp on a PR at `gh pr create` time.
+///
+/// This is the SHELL CONTRACT wire name: `workflow_publish_pr.sh` greps for the
+/// literal `WORKFLOW_PR_LABELS`, so this constant's VALUE is frozen — renaming
+/// the Rust identifier is fine, but changing the string would silently break the
+/// contract and make every engineer PR invisible to the self-merge queue again.
+///
+/// Every Simard-side PR-producing spawn/recipe site sets this env var to
+/// [`SIMARD_ENGINEER_PR_LABEL`] so the published PR carries the durable
+/// engineer marker. The variable is INERT until amplihack-rs #979 lands the
+/// consumer (`workflow_publish_pr.sh`); until then it is a harmless,
+/// backward-compatible no-op (unset => existing behavior).
+pub const WORKFLOW_PR_LABELS_ENV: &str = "WORKFLOW_PR_LABELS";
+
 /// The Rust-deterministic, engineer-EXCLUSIVE head-branch namespaces. These are
 /// code-generated and NEVER hand-typed by a human operator, so a head branch
 /// under one of them is proof-of-Simard-origin. They are the SECONDARY
@@ -421,6 +789,101 @@ pub fn is_engineer_branch(head: &str) -> bool {
     ENGINEER_BRANCH_PREFIXES
         .iter()
         .any(|prefix| head.starts_with(prefix))
+}
+
+// ─── agentic merge-queue reasoning scope (issue #4097) ─────────────────────
+//
+// The reasoning-scope gate is DELIBERATELY DISTINCT from the automerge sensor
+// gates above. Those gate merge ACTION and fail CLOSED (unset ⇒ OFF). This one
+// gates merge REASONING and fails OPEN-TO-THE-ROSTER (unset ⇒ reason over the
+// governed roster), because the ROOT-CAUSE bug (#4097) was that an unset env
+// silently disabled ALL merge reasoning. Reasoning is broad and safe (it only
+// proposes); merge AUTHORIZATION stays narrow (the re-narrowing projection +
+// objective + agentic gates). So broadening the reasoning scope can NEVER widen
+// what is authorized to merge.
+
+/// Operator override for the agentic merge-queue REASONING scope (#4097).
+/// Three-way: UNSET/blank ⇒ reason over the governed roster (default-ON);
+/// an explicit comma-separated `owner/name` list ⇒ narrowed reasoning; an
+/// explicit `off`/falsey value ⇒ reasoning DISABLED (surfaced LOUD upstream,
+/// never a silent OFF). Distinct from `SIMARD_AUTOMERGE_REPOS` (which gates
+/// merge ACTION), so reasoning stays on even when autonomous merge is off.
+pub const SIMARD_MERGE_REASONING_SCOPE_ENV: &str = "SIMARD_MERGE_REASONING_SCOPE";
+
+/// The resolved merge-queue reasoning scope (#4097). See
+/// [`merge_reasoning_scope_from`]. `Roster` carries no list — the caller uses
+/// the governed roster it already loaded; `Explicit` carries the narrowed,
+/// roster-intersected list in operator order; `Disabled` is the ONLY value that
+/// turns reasoning off, and only on an explicit operator opt-out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeReasoningScope {
+    /// Unset / blank scope: reason over the full governed roster (default-ON).
+    Roster,
+    /// An operator-narrowed explicit list (already intersected with the roster so
+    /// a broadened reasoning scope can never name an off-roster repo). Empty when
+    /// the operator list is entirely off-roster (fail-closed: nothing to scan).
+    Explicit(Vec<String>),
+    /// The operator EXPLICITLY disabled reasoning. Surfaced LOUD upstream.
+    Disabled,
+}
+
+/// True iff `v` is an explicit REASONING-DISABLE value. Case-insensitive,
+/// trimmed. Distinct from the acting-Overseer [`is_falsey`] set: it additionally
+/// honors the plain word `disabled`. Only these exact values disable reasoning;
+/// unset/blank/garbage never do (that is the whole point of the #4097 fix).
+fn is_reasoning_disabled_value(v: &str) -> bool {
+    let norm = v.trim().to_ascii_lowercase();
+    matches!(norm.as_str(), "off" | "disabled" | "0" | "false" | "no")
+}
+
+/// Resolve the merge-queue reasoning scope from an env resolver and the governed
+/// `roster` (#4097).
+///
+/// - UNSET / blank / whitespace-only ⇒ [`MergeReasoningScope::Roster`]
+///   (DEFAULT-ON — the #4097 fix: an unset env must NOT silently disable
+///   reasoning as the retired automerge-allowlist gate did).
+/// - An explicit `off`/`disabled`/`0`/`false`/`no` ⇒ [`MergeReasoningScope::Disabled`]
+///   (the ONLY disable path, surfaced LOUD upstream).
+/// - Any other value is treated as an explicit comma-separated `owner/name`
+///   allowlist ⇒ [`MergeReasoningScope::Explicit`], trimmed and parsed in order,
+///   then INTERSECTED with `roster` so a broadened reasoning scope can never name
+///   an off-roster repo (reasoning can only narrow, never widen the roster).
+pub fn merge_reasoning_scope_from(
+    lookup: impl Fn(&str) -> Option<String>,
+    roster: &[String],
+) -> MergeReasoningScope {
+    let raw = lookup(SIMARD_MERGE_REASONING_SCOPE_ENV).unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return MergeReasoningScope::Roster;
+    }
+    if is_reasoning_disabled_value(trimmed) {
+        return MergeReasoningScope::Disabled;
+    }
+    let explicit: Vec<String> = trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let on_roster = roster.iter().any(|r| r == s);
+            if !on_roster {
+                tracing::warn!(
+                    target: "overseer::merge",
+                    repo = %s,
+                    "SIMARD_MERGE_REASONING_SCOPE names an off-roster repo — dropping \
+                     (reasoning can only NARROW the governed roster, never widen it)"
+                );
+            }
+            on_roster
+        })
+        .map(str::to_string)
+        .collect();
+    MergeReasoningScope::Explicit(explicit)
+}
+
+/// Production entry point: read the real process environment (#4097).
+pub fn merge_reasoning_scope(roster: &[String]) -> MergeReasoningScope {
+    merge_reasoning_scope_from(|k| std::env::var(k).ok(), roster)
 }
 
 /// Resolve the daily budget from an env resolver, falling back to
@@ -472,6 +935,92 @@ fn is_truthy(v: &str) -> bool {
 fn is_falsey(v: &str) -> bool {
     let norm = v.trim().to_ascii_lowercase();
     matches!(norm.as_str(), "0" | "false" | "no" | "off")
+}
+
+/// Resolve whether the native Overseer **Signal operator-liaison** (issue #4911,
+/// Deliverable 1) is enabled. **Default OFF** — explicit truthy required — AND
+/// only while the acting Overseer itself is enabled (an explicitly-disabled
+/// Overseer forces it off regardless of the liaison flag).
+pub fn signal_liaison_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    matches!(
+        lookup(SIMARD_OVERSEER_SIGNAL_LIAISON_ENV).as_deref().map(str::trim),
+        Some(v) if is_truthy(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_liaison_enabled() -> bool {
+    signal_liaison_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve whether the autonomous **PR rework loop** (issue #4911, Deliverable 2)
+/// is enabled. **Default OFF** — explicit truthy required — AND master-gated by
+/// the acting Overseer flag. When OFF, a fixable hold stays held-with-reason.
+pub fn rework_enabled_from(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    if !overseer_acting_enabled_from(&lookup) {
+        return false;
+    }
+    matches!(
+        lookup(SIMARD_OVERSEER_REWORK_ENV).as_deref().map(str::trim),
+        Some(v) if is_truthy(v)
+    )
+}
+
+/// Production entry point: read the real process environment.
+pub fn rework_enabled() -> bool {
+    rework_enabled_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the per-PR rework attempt cap. Default [`DEFAULT_REWORK_MAX_ATTEMPTS`]
+/// (3); a parsed value is clamped to `1..=10`; unset/empty/unparseable falls back
+/// to the default. Never panics and never yields 0 (which would disable rework
+/// by stealth).
+pub fn rework_max_attempts_from(lookup: impl Fn(&str) -> Option<String>) -> u32 {
+    match lookup(SIMARD_OVERSEER_REWORK_MAX_ATTEMPTS_ENV)
+        .as_deref()
+        .map(str::trim)
+    {
+        Some(s) if !s.is_empty() => match s.parse::<u32>() {
+            Ok(n) => n.clamp(1, 10),
+            Err(_) => DEFAULT_REWORK_MAX_ATTEMPTS,
+        },
+        _ => DEFAULT_REWORK_MAX_ATTEMPTS,
+    }
+}
+
+/// Production entry point: read the real process environment.
+pub fn rework_max_attempts() -> u32 {
+    rework_max_attempts_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the configured operator E.164 the liaison accepts messages from.
+/// Trimmed; `None` when unset or empty.
+pub fn signal_operator_number_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    non_empty_trimmed(lookup(SIMARD_OVERSEER_SIGNAL_OPERATOR_NUMBER_ENV))
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_operator_number() -> Option<String> {
+    signal_operator_number_from(|k| std::env::var(k).ok())
+}
+
+/// Resolve the configured operator Signal group id the liaison acts on. Trimmed;
+/// `None` when unset or empty.
+pub fn signal_group_id_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    non_empty_trimmed(lookup(SIMARD_OVERSEER_SIGNAL_GROUP_ID_ENV))
+}
+
+/// Production entry point: read the real process environment.
+pub fn signal_group_id() -> Option<String> {
+    signal_group_id_from(|k| std::env::var(k).ok())
+}
+
+/// Trim a looked-up value and return `None` if it is absent or empty.
+fn non_empty_trimmed(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -778,6 +1327,22 @@ mod tests {
         );
     }
 
+    /// The env var name the amplihack publish step (`workflow_publish_pr.sh`,
+    /// amplihack-rs #979) reads for best-effort PR labels is a FROZEN wire
+    /// contract. The shell consumer greps for the literal `WORKFLOW_PR_LABELS`;
+    /// renaming the constant's VALUE (even while keeping the Rust identifier)
+    /// would silently break the contract and make every engineer PR invisible
+    /// to the self-merge queue again. Pin the exact string so a rename can't
+    /// pass CI unnoticed.
+    #[test]
+    fn workflow_pr_labels_env_is_the_frozen_wire_name() {
+        assert_eq!(
+            WORKFLOW_PR_LABELS_ENV, "WORKFLOW_PR_LABELS",
+            "the env var name is a shell-contract shared with \
+             workflow_publish_pr.sh (amplihack-rs #979); its value must not drift"
+        );
+    }
+
     /// Only the two Rust-deterministic, engineer-EXCLUSIVE branch namespaces are
     /// recognised: `engineer/` (engineer_worktree/mod.rs) and `chore/advisory-`
     /// (supply_chain_steward/execute.rs). Both are code-generated and never used
@@ -829,6 +1394,176 @@ mod tests {
         assert!(
             !is_engineer_branch(""),
             "an empty head ref must never qualify (fail-closed)"
+        );
+    }
+
+    // ── Overseer gap-scan backoff params (Problem 1 / issue #4186) ───────────
+    //
+    // TDD (RED) contract for the `SIMARD_OVERSEER_BACKOFF_*` env accessors that
+    // parameterise the new `guardrails::BackoffGate`. They mirror the existing
+    // `*_from(lookup)` + clamp pattern (`gap_scan_every_n_from`,
+    // `overseer_transient_backoff_ceiling_from`): a garbage / out-of-range value
+    // must never DISABLE suppression or cause overflow, so every accessor
+    // fails-safe to its documented default.
+
+    #[test]
+    fn backoff_base_secs_defaults_and_honours_valid_values() {
+        assert_eq!(
+            overseer_backoff_base_secs_from(env(&[])),
+            DEFAULT_OVERSEER_BACKOFF_BASE_SECS,
+            "unset ⇒ default base window"
+        );
+        assert_eq!(DEFAULT_OVERSEER_BACKOFF_BASE_SECS, 900);
+        assert_eq!(
+            overseer_backoff_base_secs_from(env(&[(
+                SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV,
+                "1800"
+            )])),
+            1800,
+            "an explicit positive value is honoured"
+        );
+    }
+
+    #[test]
+    fn backoff_base_secs_fails_safe_on_bad_values() {
+        // Empty / whitespace / garbage / zero / negative all clamp to the
+        // default — a bad base window can never collapse the suppression window
+        // to 0 (which would let every duplicate through).
+        for bad in ["", "   ", "abc", "0", "-5", "9.5"] {
+            assert_eq!(
+                overseer_backoff_base_secs_from(env(&[(
+                    SIMARD_OVERSEER_BACKOFF_BASE_SECS_ENV,
+                    bad
+                )])),
+                DEFAULT_OVERSEER_BACKOFF_BASE_SECS,
+                "{bad:?} must fall back to the default base window"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_multiplier_defaults_and_rejects_le_one() {
+        assert_eq!(
+            overseer_backoff_multiplier_from(env(&[])),
+            DEFAULT_OVERSEER_BACKOFF_MULTIPLIER,
+            "unset ⇒ default multiplier"
+        );
+        assert_eq!(DEFAULT_OVERSEER_BACKOFF_MULTIPLIER, 2);
+        assert_eq!(
+            overseer_backoff_multiplier_from(env(&[(SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV, "3")])),
+            3,
+            "an explicit multiplier > 1 is honoured"
+        );
+        // A multiplier <= 1 would make the backoff never grow (or shrink),
+        // defeating the purpose — every such value must clamp to the default.
+        for bad in ["1", "0", "-2", "", "abc"] {
+            assert_eq!(
+                overseer_backoff_multiplier_from(env(&[(
+                    SIMARD_OVERSEER_BACKOFF_MULTIPLIER_ENV,
+                    bad
+                )])),
+                DEFAULT_OVERSEER_BACKOFF_MULTIPLIER,
+                "{bad:?} must clamp to the default multiplier (reject <= 1)"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_max_secs_defaults_and_fails_safe() {
+        assert_eq!(
+            overseer_backoff_max_secs_from(env(&[])),
+            DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+            "unset ⇒ default 24h cap"
+        );
+        assert_eq!(DEFAULT_OVERSEER_BACKOFF_MAX_SECS, 86_400);
+        assert_eq!(
+            overseer_backoff_max_secs_from(env(&[(SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV, "3600")])),
+            3600,
+            "an explicit positive cap is honoured"
+        );
+        for bad in ["", "  ", "nope", "0", "-1"] {
+            assert_eq!(
+                overseer_backoff_max_secs_from(env(&[(SIMARD_OVERSEER_BACKOFF_MAX_SECS_ENV, bad)])),
+                DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+                "{bad:?} must fall back to the default cap"
+            );
+        }
+    }
+
+    #[test]
+    fn backoff_defaults_form_a_coherent_growing_bounded_window() {
+        // base < cap and multiplier > 1 — the invariant the BackoffGate needs so
+        // the window genuinely grows yet stays bounded. Enforced at compile time
+        // (these are `const`s) so a future edit that breaks the invariant fails
+        // the build, not just this test.
+        const _: () = assert!(
+            DEFAULT_OVERSEER_BACKOFF_BASE_SECS < DEFAULT_OVERSEER_BACKOFF_MAX_SECS,
+            "the base window must be below the cap"
+        );
+        const _: () = assert!(
+            DEFAULT_OVERSEER_BACKOFF_MULTIPLIER > 1,
+            "the multiplier must grow the window"
+        );
+    }
+
+    // ─── [standing] agentic health-review opt-out + service unit ───────────
+
+    #[test]
+    fn health_review_enabled_by_default_with_the_acting_overseer() {
+        // Opt-OUT semantics: unset (acting Overseer default-on) ⇒ enabled.
+        assert!(health_review_enabled_from(env(&[])));
+    }
+
+    #[test]
+    fn health_review_disabled_on_explicit_falsey_values() {
+        for falsey in ["0", "false", "FALSE", "no", "off", "  off  "] {
+            assert!(
+                !health_review_enabled_from(env(&[(SIMARD_OVERSEER_HEALTH_REVIEW_ENV, falsey)])),
+                "{falsey:?} should DISABLE the health-review rail"
+            );
+        }
+    }
+
+    #[test]
+    fn health_review_stays_on_for_truthy_empty_or_garbage_values() {
+        for on in ["1", "true", "yes", "on", "", "  ", "maybe", "2"] {
+            assert!(
+                health_review_enabled_from(env(&[(SIMARD_OVERSEER_HEALTH_REVIEW_ENV, on)])),
+                "{on:?} must leave the health-review rail ON (default)"
+            );
+        }
+    }
+
+    #[test]
+    fn health_review_forced_off_when_the_acting_overseer_is_disabled() {
+        // A disabled acting Overseer forces the rail off regardless of the flag.
+        assert!(!health_review_enabled_from(env(&[
+            (OVERSEER_ENABLED_ENV, "false"),
+            (SIMARD_OVERSEER_HEALTH_REVIEW_ENV, "true"),
+        ])));
+    }
+
+    #[test]
+    fn health_review_service_unit_defaults_to_the_ooda_unit() {
+        assert_eq!(
+            health_review_service_unit_from(env(&[])),
+            crate::install::paths::OODA_UNIT
+        );
+        // A blank override never yields an empty unit.
+        assert_eq!(
+            health_review_service_unit_from(env(&[(SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV, "  ")])),
+            crate::install::paths::OODA_UNIT
+        );
+    }
+
+    #[test]
+    fn health_review_service_unit_reads_explicit_override() {
+        assert_eq!(
+            health_review_service_unit_from(env(&[(
+                SIMARD_OVERSEER_HEALTH_REVIEW_UNIT_ENV,
+                " simard-custom.service "
+            )])),
+            "simard-custom.service"
         );
     }
 }

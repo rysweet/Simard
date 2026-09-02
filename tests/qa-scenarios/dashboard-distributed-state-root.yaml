@@ -1,0 +1,37 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Guards the dashboard Distributed panel state-root resolution fix (#2835): the
+# `/api/distributed` VM probe must build its `check_vm.sh` path through the
+# canonical `simard_state_root()` resolver, so a malformed (relative)
+# `SIMARD_STATE_ROOT` is sanitized to the `$HOME/.simard` fallback instead of
+# being honored verbatim. A single `cli` agent runs the hermetic regression
+# script; a non-zero exit is a real pass/fail gate.
+name: simard-dashboard-distributed-state-root
+description: >-
+  Standalone dashboard /api/distributed resolves the check_vm.sh probe path via
+  the canonical state-root resolver, sanitizing a relative SIMARD_STATE_ROOT to
+  $HOME/.simard so the Distributed panel still probes the real VM instead of
+  silently reporting it unreachable.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+    - dashboard
+  priority: high
+steps:
+  - name: Run the standalone dashboard distributed state-root regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-dashboard-distributed-state-root.sh
+    timeout: 300000

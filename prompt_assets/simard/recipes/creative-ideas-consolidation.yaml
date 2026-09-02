@@ -1,5 +1,6 @@
 # creative-ideas-consolidation.yaml — Recipe-runner recipe for the ONE-TIME
-# Creative Ideas consolidation maintenance pass (issue #2925).
+# Creative Ideas consolidation maintenance pass (issue #2925; Group C
+# typed-record rework of epic #4719).
 #
 # Operator-invoked (NOT the daily tick), via `simard creative-ideas consolidate`.
 # Given the WHOLE existing idea pool, it clusters the ideas by SEMANTIC
@@ -14,20 +15,21 @@
 # (not shared words) is the whole point — a word-set metric cannot collapse the
 # ~104 semantically-overlapping ideas the board accumulated.
 #
-# Context var (already sanitized by the Rust shim; untrusted DATA only):
-#   existing_pool — the whole pool, one idea per line as
-#     `node_id | idea_id | idea — rationale`.
+# Context vars (passed via -c by RecipeBrain::run_idea_consolidation_recipe; the
+# free-text var is already sanitized by the Rust shim; untrusted DATA only):
+#   record_path, clusters_path, simard_bin, goal_id, cycle_number, existing_pool
+# where `existing_pool` is the whole pool, one idea per line as
+#   `node_id | idea_id | idea — rationale`.
 #
-# Output (read from the clean result channel, NOT stdout scraping):
-#   {"clusters": [
-#     {"canonical_id": "<node_id to keep>",
-#      "redundant_ids": ["<node_id>", ...],
-#      "merged_rationale": "<rationale to append to the canonical>",
-#      "evidence": ["<optional supporting text/link>", ...]}
-#   ]}
-# An empty `clusters` array is a valid "nothing to consolidate" answer. Ideas in
-# no cluster are left untouched. Unparseable output fails closed: the applier
-# writes nothing and surfaces the error (retry later). The pass is dry-run first.
+# Output: NONE scraped from stdout. The agent writes its cluster JSON array to
+# {{clusters_path}} (a file, never argv — avoids E2BIG for a large pool), then
+# RECORDS its verdict by calling the `simard ooda record-idea-consolidation` tool
+# exactly once (writing a typed IdeaConsolidationRecord to {{record_path}}).
+# RecipeBrain reads that typed record via `read_verified_idea_consolidation` — it
+# never parses this agent's prose. An empty cluster array is a valid "nothing to
+# consolidate" answer (reads back as an empty list). An absent, malformed, or
+# goal/cycle-mismatched record surfaces as an Err: the applier writes NOTHING and
+# surfaces the error (retried later) — it never guesses on your behalf.
 
 name: "creative-ideas-consolidation"
 description: "Creative Ideas — cluster the existing pool by semantic duplication (#2925)"
@@ -74,31 +76,60 @@ steps:
         mechanisms. When unsure, leave an idea OUT of every cluster — a wrong
         merge loses a real idea. Singletons need no cluster.
 
-      ## OUTPUT FORMAT
+      ## HOW TO RECORD YOUR DECISION (write the file, then call the tool)
 
-      Respond with a single JSON object (a fenced ```json block is fine):
+      The daemon reads the typed record the tool writes; it does NOT read your
+      prose. Anything you print to stdout is ignored. Recording is TWO steps:
 
-      ```json
-      {"clusters": [
-        {"canonical_id": "<node_id to keep>",
-         "redundant_ids": ["<node_id>", "<node_id>"],
-         "merged_rationale": "<combined rationale to append to the canonical>",
-         "evidence": ["<optional supporting text/link>"]}
-      ]}
-      ```
+      1. Write your clusters as a JSON ARRAY to the file at `{{clusters_path}}`
+         (using your file-write/shell tool). Each element is one cluster:
 
-      An empty `clusters` array is a valid answer when nothing is a true semantic
-      duplicate. If your output is unparseable the applier writes NOTHING and
-      surfaces the error (retried later) — it never guesses on your behalf.
+         ```json
+         [
+           {"canonical_id": "<node_id to keep>",
+            "redundant_ids": ["<node_id>", "<node_id>"],
+            "merged_rationale": "<combined rationale to append to the canonical>",
+            "evidence": ["<optional supporting text/link>"]}
+         ]
+         ```
+
+         An EMPTY array `[]` is a valid "nothing is a true semantic duplicate"
+         answer. Ideas in no cluster are left untouched. A cluster missing a
+         `canonical_id` is dropped on read.
+
+      2. Record the verdict by calling the `simard ooda record-idea-consolidation`
+         tool EXACTLY ONCE, pointing it at the file you just wrote:
+
+         ```bash
+         "{{simard_bin}}" ooda record-idea-consolidation \
+           --clusters-path "{{clusters_path}}" \
+           --record-path "{{record_path}}" \
+           --goal-id "{{goal_id}}" \
+           --cycle-number {{cycle_number}}
+         ```
+
+      Call the tool EXACTLY ONCE. If you do not write valid clusters and record a
+      valid decision, the applier writes NOTHING and surfaces the error (retried
+      later) — it never guesses on your behalf. The pass is dry-run first.
 
       ## EXAMPLE
 
+      Write to `{{clusters_path}}`:
+
       ```json
-      {"clusters": [
+      [
         {"canonical_id": "node-7a3f",
          "redundant_ids": ["node-91cc", "node-4d20"],
          "merged_rationale": "cache the goal-board reads: three entries all propose caching goal_board.json across OODA cycles",
          "evidence": ["node-4d20 measured 12% fewer reads"]}
-      ]}
+      ]
+      ```
+
+      Then run:
+
+      ```bash
+      "{{simard_bin}}" ooda record-idea-consolidation \
+        --clusters-path "{{clusters_path}}" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
     output: "idea_consolidation_result"

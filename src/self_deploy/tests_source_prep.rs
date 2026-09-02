@@ -941,3 +941,287 @@ fn remove_stale_checkout_is_noop_when_absent() {
     let dest = root.path().join("does-not-exist");
     remove_stale_checkout(&dest).expect("a missing checkout path must be a no-op, not an error");
 }
+
+// ---------------------------------------------------------------------------
+// prepare(): reset the DIRTY canonical source checkout before `checkout
+// --detach` (issue #4878, Mode (a)). The observed self-deploy failure is:
+//
+//   error: Your local changes to the following files would be overwritten by
+//   checkout: .github/hooks/amplihack-hooks.json
+//   Please commit your changes or stash them before you switch branches.
+//   Aborting
+//
+// A prior self-deploy left the disposable canonical checkout
+// (`self_deploy_src_dir()`) with locally-modified tracked files and/or
+// untracked cruft, so every subsequent `checkout --detach <merged sha>`
+// aborts and the running binary can never adopt shipped fixes.
+//
+// The fix adds a gated `reset_source_tree` step (`git reset --hard` + `git
+// clean -fd`, env-scrubbed) that runs *after* fetch and *before* checkout —
+// but ONLY when the resolved repo is the canonical `self_deploy_src_dir()`
+// disposable checkout. A `repo_override` / `SIMARD_SELF_DEPLOY_REPO` deploy
+// (tests, non-standard installs, an operator's own tree) must NEVER be reset:
+// a dirty override still fails loudly at checkout, exactly as before.
+//
+// These tests MUST fail in the red phase (no reset step exists yet) and MUST
+// pass once `reset_source_tree` is wired into both `prepare` and
+// `prepare_existing_repo`, without any test edits.
+// ---------------------------------------------------------------------------
+
+/// The tracked hook file the observed abort names — a modified-but-uncommitted
+/// tracked file that blocks `checkout --detach`.
+const HOOK_REL: &str = ".github/hooks/amplihack-hooks.json";
+const C1_HOOK: &str = "{\"amplihack\":1}\n";
+const C2_HOOK: &str = "{\"amplihack\":2}\n";
+/// The divergent local edit a wedged self-deploy tree carries.
+const LOCAL_HOOK: &str = "{\"amplihack\":\"LOCAL-WEDGE\"}\n";
+const STRAY_UNTRACKED: &str = "stray-untracked.tmp";
+
+/// Init an "origin" on `main` whose seed commit (c1) tracks both `VERSION` and
+/// the `.github/hooks/amplihack-hooks.json` file the self-deploy checkout is
+/// observed to leave locally modified. Returns (origin_path, c1_sha).
+fn init_origin_with_hook(dir: &Path) -> (PathBuf, String) {
+    std::fs::create_dir_all(dir.join(".github/hooks")).unwrap();
+    git_run(dir, &["init", "--initial-branch=main", "--quiet"]);
+    git_run(dir, &["config", "user.email", "t@e.com"]);
+    git_run(dir, &["config", "user.name", "t"]);
+    git_run(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("VERSION"), "c1\n").unwrap();
+    std::fs::write(dir.join(HOOK_REL), C1_HOOK).unwrap();
+    git_run(dir, &["add", "-A"]);
+    git_run(dir, &["commit", "-m", "c1", "--quiet"]);
+    let sha = git_out(dir, &["rev-parse", "HEAD"]);
+    (dir.to_path_buf(), sha)
+}
+
+/// Advance `origin` to a merged head (c2) that MODIFIES the tracked hook file,
+/// so a stale checkout carrying a local edit to it aborts `checkout --detach`
+/// unless the tree is reset first. Returns c2_sha.
+fn add_merged_commit_touching_hook(origin: &Path) -> String {
+    std::fs::write(origin.join("VERSION"), "c2\n").unwrap();
+    std::fs::write(origin.join(HOOK_REL), C2_HOOK).unwrap();
+    git_run(origin, &["add", "-A"]);
+    git_run(
+        origin,
+        &["commit", "-m", "c2 (merged head touches hook)", "--quiet"],
+    );
+    git_out(origin, &["rev-parse", "HEAD"])
+}
+
+/// Reproduce the wedged tree: overwrite the TRACKED hook file with divergent
+/// local content (the "Your local changes … would be overwritten" trigger) and
+/// drop an untracked stray file that `git clean -fd` must remove.
+fn dirty_tracked_hook_and_untracked(repo: &Path) {
+    std::fs::write(repo.join(HOOK_REL), LOCAL_HOOK).unwrap();
+    std::fs::write(repo.join(STRAY_UNTRACKED), b"stray\n").unwrap();
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn prepare_resets_dirty_canonical_checkout_before_checking_out_merged_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    // Force the branch-3 (persistent canonical checkout) resolution: no override.
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    let origin = tmp.path().join("origin");
+    init_origin_with_hook(&origin);
+
+    // `GitSourcePreparer::new()` resolves to the canonical persistent checkout.
+    // Clone origin into it while origin is still at c1...
+    let persistent = self_deploy_src_dir();
+    clone_local(&origin, &persistent);
+
+    // ...then origin advances to the merged head c2, which modifies the hook.
+    let c2 = add_merged_commit_touching_hook(&origin);
+    assert_ne!(
+        git_out(&persistent, &["rev-parse", "HEAD"]),
+        c2,
+        "precondition: the canonical clone is stale at c1"
+    );
+
+    // Wedge the canonical checkout exactly as observed: a locally-modified
+    // tracked hook file (which would otherwise abort `checkout --detach c2`)
+    // plus an untracked stray file.
+    dirty_tracked_hook_and_untracked(&persistent);
+
+    let prepared = GitSourcePreparer::new().prepare(&c2).expect(
+        "a dirty canonical checkout must be reset+cleaned so the merged head checks out cleanly",
+    );
+
+    assert_eq!(
+        std::fs::canonicalize(&prepared).unwrap(),
+        std::fs::canonicalize(&persistent).unwrap(),
+        "prepare must return the canonical persistent checkout"
+    );
+    assert_eq!(
+        git_out(&persistent, &["rev-parse", "HEAD"]),
+        c2,
+        "prepared HEAD must be the merged head c2 (the abort must be gone)"
+    );
+    assert!(
+        !git_cmd(&persistent, &["symbolic-ref", "-q", "HEAD"])
+            .status()
+            .unwrap()
+            .success(),
+        "HEAD must be detached at the merged commit (so SIMARD_GIT_HASH == c2)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(persistent.join(HOOK_REL)).unwrap(),
+        C2_HOOK,
+        "reset --hard must discard the local hook edit so the tree matches c2"
+    );
+    assert!(
+        !persistent.join(STRAY_UNTRACKED).exists(),
+        "git clean -fd must remove the untracked stray file"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn prepare_resets_before_checkout_even_on_the_skip_fetch_present_commit_branch() {
+    // The reset must guard BOTH the fetch and the skip-fetch (commit-already-
+    // present) paths — otherwise a wedged tree whose target is already local
+    // would still abort. Prove it with origin destroyed after cloning so any
+    // fetch would fail: only a skipped fetch + a reset can succeed.
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    let origin = tmp.path().join("origin");
+    let (_o, c1) = init_origin_with_hook(&origin);
+    let c2 = add_merged_commit_touching_hook(&origin);
+
+    // Clone AFTER origin already holds c2, so BOTH commits are present locally
+    // and the clone's HEAD is c2.
+    let persistent = self_deploy_src_dir();
+    clone_local(&origin, &persistent);
+    assert_eq!(
+        git_out(&persistent, &["rev-parse", "HEAD"]),
+        c2,
+        "precondition: the clone is at c2 with c1 also present in the object store"
+    );
+
+    // Target the already-present OLDER commit c1 (differs from HEAD=c2 in the
+    // hook) so prepare() takes the skip-fetch branch. Destroy origin to prove
+    // no network fetch is attempted.
+    std::fs::remove_dir_all(&origin).unwrap();
+
+    // Wedge with a local edit to the tracked hook; `checkout --detach c1` would
+    // abort without a reset because c1 and c2 differ in that file.
+    dirty_tracked_hook_and_untracked(&persistent);
+
+    let prepared = GitSourcePreparer::new()
+        .prepare(&c1)
+        .expect("an already-present target must reset+clean and check out WITHOUT re-fetching");
+
+    assert_eq!(
+        std::fs::canonicalize(&prepared).unwrap(),
+        std::fs::canonicalize(&persistent).unwrap(),
+        "prepare must return the canonical persistent checkout"
+    );
+    assert_eq!(
+        git_out(&persistent, &["rev-parse", "HEAD"]),
+        c1,
+        "prepared HEAD must be the already-present target c1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(persistent.join(HOOK_REL)).unwrap(),
+        C1_HOOK,
+        "reset must land the tree exactly on c1"
+    );
+    assert!(
+        !persistent.join(STRAY_UNTRACKED).exists(),
+        "git clean -fd must remove the untracked stray file on the skip-fetch path too"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn resetting_the_source_checkout_never_touches_the_warm_target_dir() {
+    // The warm cargo cache lives in a SEPARATE dir under the state root
+    // (`self_deploy_target_dir()`). The reset (`git reset --hard` + `git clean
+    // -fd`) is scoped strictly to the source checkout and must never reach into
+    // the warm dir — or every self-deploy would go cold. This is the guard
+    // against a wrong-tree reset.
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    let warm = self_deploy_target_dir();
+    std::fs::create_dir_all(&warm).unwrap();
+    let sentinel = warm.join("incremental-artifact.bin");
+    std::fs::write(&sentinel, b"warm-cache-must-survive").unwrap();
+
+    let origin = tmp.path().join("origin");
+    init_origin_with_hook(&origin);
+    let persistent = self_deploy_src_dir();
+    clone_local(&origin, &persistent);
+    let c2 = add_merged_commit_touching_hook(&origin);
+    dirty_tracked_hook_and_untracked(&persistent);
+
+    GitSourcePreparer::new()
+        .prepare(&c2)
+        .expect("a dirty canonical checkout must still prepare after reset");
+
+    assert!(
+        sentinel.exists(),
+        "the warm target-dir sentinel must survive the source reset"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sentinel).unwrap(),
+        "warm-cache-must-survive",
+        "the warm cache contents must be untouched by the source reset"
+    );
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn dirty_non_canonical_override_is_not_reset_and_still_fails_loud_at_checkout() {
+    // GATE: the reset fires ONLY for the canonical `self_deploy_src_dir()`
+    // disposable checkout. A `repo_override` / `SIMARD_SELF_DEPLOY_REPO` deploy
+    // must NOT be silently reset — that would destroy an operator's or a test's
+    // working tree. A dirty override therefore still fails LOUDLY at checkout,
+    // exactly as it did before the fix (no behavior change for overrides).
+    let tmp = tempfile::tempdir().unwrap();
+    // Point the canonical source dir somewhere that is NOT the override so the
+    // gate is genuinely exercised (closed).
+    let canonical_state = tmp.path().join("state");
+    let _state = EnvGuard::set(STATE_ROOT_ENV, &canonical_state);
+    let _override_env = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    let origin = tmp.path().join("origin");
+    init_origin_with_hook(&origin);
+
+    // The override checkout is a DISTINCT path from the canonical source dir.
+    let override_repo = tmp.path().join("override-checkout");
+    clone_local(&origin, &override_repo);
+    let c2 = add_merged_commit_touching_hook(&origin);
+    assert_ne!(
+        override_repo,
+        self_deploy_src_dir(),
+        "precondition: the override must not be the canonical source dir (gate closed)"
+    );
+
+    // Wedge the override with a local tracked-hook edit + an untracked stray.
+    dirty_tracked_hook_and_untracked(&override_repo);
+
+    let err = GitSourcePreparer::at(&override_repo)
+        .prepare(&c2)
+        .expect_err("a dirty non-canonical override must NOT be reset; checkout must abort loudly");
+    assert!(
+        matches!(err, SafeUpdateError::CheckoutFailed { .. }),
+        "the gate must skip the reset for overrides so the dirty tree aborts at checkout, got: {err:?}"
+    );
+
+    // Proof the override tree was NOT wiped: the local edit + untracked stray survive.
+    assert_eq!(
+        std::fs::read_to_string(override_repo.join(HOOK_REL)).unwrap(),
+        LOCAL_HOOK,
+        "the override's local hook edit must be preserved (reset must be gated off)"
+    );
+    assert!(
+        override_repo.join(STRAY_UNTRACKED).exists(),
+        "the override's untracked file must be preserved (clean must be gated off)"
+    );
+}

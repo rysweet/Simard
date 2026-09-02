@@ -261,6 +261,7 @@ impl CognitiveMemoryOps for EpisodeMock {
                 source_label: r.source_label,
                 temporal_index: r.temporal_index,
                 compressed: r.compressed,
+                created_at: None,
             })
             .collect())
     }
@@ -599,6 +600,66 @@ fn distillation_quarantines_low_reliability_fact() {
         !stored.contains(&"bug-pattern".to_string()),
         "the low-reliability fact must NOT be promoted into semantic memory"
     );
+}
+
+/// Seam-parity + fact-yield guard (grounding surface-form robustness): a
+/// distilled fact whose `source_episode_id` carries stray SURROUNDING whitespace
+/// (an LLM re-emitting a real id with a trailing newline/space) must still ground
+/// against the batch and be PROMOTED — exactly as the IPC server seam already
+/// does (its `any_episode_exists` grounding trims). Before the fix the in-process
+/// sink did an untrimmed `contains`, so this genuinely-grounded fact scored
+/// ungrounded (≤0.4) and was silently quarantined — a real fact lost, and the two
+/// write-boundary seams disagreeing on disposition. The persisted provenance must
+/// also thread the TRIMMED id so its `DERIVES_FROM` edge resolves.
+#[test]
+fn distillation_grounds_whitespace_padded_source_episode_id() {
+    let n = DISTILL_MIN_EPISODES as usize + 5;
+    let mock = EpisodeMock::with_episodes(n_episodes(n));
+    let runner = FixedFactsRunner {
+        facts: vec![
+            (
+                "pr-pattern".to_string(),
+                "enable auto-merge before final review".to_string(),
+                " epi_00002 ".to_string(), // padded id of a REAL batch episode
+            ),
+            (
+                "bug-pattern".to_string(),
+                "empty outcome list panics cycle".to_string(),
+                "epi_00004\n".to_string(), // trailing newline on a REAL id
+            ),
+        ],
+        call_count: AtomicU32::new(0),
+    };
+
+    let report = distill_recent_episodes_with_runner(&mock, &runner).unwrap();
+
+    assert_eq!(
+        report.fact_count, 2,
+        "both whitespace-padded-but-grounded facts must be promoted (seam parity)"
+    );
+    assert_eq!(
+        report.quarantined_count, 0,
+        "a grounded fact must not be quarantined merely for a padded cited id"
+    );
+
+    // Provenance threads the TRIMMED id, so the DERIVES_FROM edge resolves.
+    let prov = mock.provenance_calls();
+    let by_concept: std::collections::HashMap<&str, &(String, String, Vec<String>)> =
+        prov.iter().map(|c| (c.0.as_str(), c)).collect();
+    let pr = by_concept.get("pr-pattern").expect("pr-pattern provenance");
+    assert_eq!(
+        pr.1, "distill:epi_00002",
+        "source_id must carry the trimmed id, not the padded one"
+    );
+    assert_eq!(
+        pr.2,
+        vec!["epi_00002".to_string()],
+        "provenance episode id must be trimmed so the DERIVES_FROM edge resolves"
+    );
+    let bug = by_concept
+        .get("bug-pattern")
+        .expect("bug-pattern provenance");
+    assert_eq!(bug.2, vec!["epi_00004".to_string()]);
 }
 
 /// Integrity guard: a weaker new fact must not downgrade a stronger existing copy

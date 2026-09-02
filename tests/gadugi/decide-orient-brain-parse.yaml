@@ -1,5 +1,5 @@
-name: "Decide + Orient Brain Parse (issue #2421)"
-description: "Outside-in proof that the decide and orient RecipeBrain phases recover real decisions/urgency from recipe-runner-rs JSON output instead of silently defaulting to AdvanceGoal (decide) or scraping 0.0 from the banner timing string (orient). Reproduces the text-mode banner bug and validates the json-mode fix at the recipe-runner boundary (no LLM), then runs the in-tree parser pins + JSON-envelope recovery tests."
+name: "Decide + Orient Brain Typed-Record Seam (issue #4785, Group A)"
+description: "Outside-in proof that the decide and orient RecipeBrain phases ACT through the gated `simard ooda record-decide|record-orient` tool + a fail-CLOSED typed-record reader (schemas simard.ooda.decide.v1 / simard.ooda.orient.v1), instead of scraping a JSON envelope / first action word (decide) or a bare urgency decimal off the banner timing (orient). Asserts the recipes call the record tool and scrape NOTHING from stdout, then runs the in-tree typed-record round-trip + R1–R8 fail-closed reader tests and the source/recipe rework contract."
 version: "1.0.0"
 
 config:
@@ -27,7 +27,7 @@ agents:
         logLevel: "info"
 
 steps:
-  - name: "Decide/orient brain parse: text-mode banner bug vs json-mode fix + parser pins"
+  - name: "Decide/orient brain typed-record seam: recipes act via record tool, fail-closed reader"
     agent: "cli-agent"
     action: "execute_command"
     params:

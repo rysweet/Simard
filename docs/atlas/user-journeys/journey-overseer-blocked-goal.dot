@@ -1,0 +1,19 @@
+digraph JourneyOverseerBlockedGoal {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+  tick [label="overseer tick"];
+  observe [label="run_cycle observes board"];
+  blocked [label="blocked_goals_from_board"];
+  signal [label="Signal::GoalBlocked"];
+  orient [label="orient -> GoalHygiene problem"];
+  why [label="root_cause WHY + recurrence"];
+  decide [label="decide_blocked_goal"];
+  escalate [label="EscalateBlockedGoal -> operator notification"];
+  unblock [label="UnblockGoal -> board unblock"];
+  report [label="Report if no action"];
+  tick -> observe -> blocked -> signal -> orient -> why -> decide;
+  decide -> escalate [label="recurring or needs_review"];
+  decide -> unblock [label="perpetual no-progress false-park"];
+  decide -> report [label="otherwise"];
+}

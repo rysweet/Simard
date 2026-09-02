@@ -496,8 +496,15 @@ impl CopilotSdkSession {
             });
         }
 
-        // Record cost estimate.
-        let prompt_chars = input.objective.len();
+        // Record cost estimate. `formatted` is the exact prompt streamed to
+        // copilot on stdin above (the enriched preamble + identity context +
+        // objective wrapped in the `## Objective` / `## Instructions` scaffold),
+        // so it — not the bare `input.objective` — is the true prompt size.
+        // Recording `input.objective.len()` here undercounted meeting prompt
+        // tokens (often by tens of KB), inverting the Cost tab's prompt/
+        // completion ratio and understating spend (issue #4164). Matches the
+        // PTY path, which already records the enriched objective's length.
+        let prompt_chars = formatted.len();
         let completion_chars = response_text.len();
         if let Err(e) = crate::cost_tracking::record_cost(
             self.request.session_id.as_str(),
@@ -514,7 +521,7 @@ impl CopilotSdkSession {
 
         let objective_summary = objective_metadata(&input.objective);
         let evidence = vec![
-            format!("copilot-adapter-mode=meeting"),
+            "copilot-adapter-mode=meeting".to_string(),
             format!("copilot-meeting-session-id={session_id}"),
             format!("copilot-adapter-command={MEETING_COPILOT_BINARY}"),
             format!("copilot-adapter-turn={}", self.turn_count),

@@ -163,6 +163,24 @@ pub fn observed_from_snapshot(snap: &StatusSnapshot) -> ObservedState {
         // read-only status snapshot; left empty here so this projection stays
         // additive and side-effect free.
         recent_step_failures: Vec::new(),
+        // Deploy-drift (#2590) is surfaced by the ACTING Overseer's Observe pass
+        // (the `observe_deploy_drift` rail runs the fail-safe ReconcileDetector),
+        // not from the read-only status snapshot; left `None` here so this
+        // projection stays additive and side-effect free.
+        deploy_drift: None,
+        // Agentic merge-queue reasoning (#4097: reasoned_prs / triaged_issues /
+        // merge_reasoning_status) is populated by the acting Overseer's Observe
+        // pass via the `observe-merge-queue` recipe rail, not from the read-only
+        // status snapshot; left empty / Unknown here so this projection stays
+        // additive and side-effect free.
+        reasoned_prs: Vec::new(),
+        triaged_issues: Vec::new(),
+        merge_reasoning_status: crate::overseer::capabilities::MergeReasoningStatus::Unknown,
+        // The agentic health-review verdict ([standing]) is set by the acting
+        // Overseer's `health_review` pass, not from the read-only status
+        // snapshot; left NotRun here so this projection stays additive and
+        // side-effect free.
+        health_review_status: crate::overseer::capabilities::HealthReviewStatus::NotRun,
     }
 }
 
@@ -285,7 +303,10 @@ pub struct SurveyedIssue {
 /// whose signature is in `coverage` is deduped away (never re-flagged).
 ///
 /// - Goals: a `Blocked` goal is DELEGATED to `goal_health` and never re-flagged
-///   here (no double-notify). A p1/p2 goal with no assignee, no active
+///   here (no double-notify). A standing/perpetual goal is likewise never
+///   flagged — it is a permanent duty advanced by the OODA goal loop, has no
+///   terminal done-state, and would otherwise oscillate uncovered every cycle.
+///   A p1/p2 non-standing goal with no assignee, no active
 ///   PR/branch/session/engineer ref, and no coverage is a gap.
 /// - Issues: an open issue carrying a high-signal label with no coverage is a gap.
 /// - Anomalies: a live anomaly with no coverage is a gap.
@@ -305,6 +326,16 @@ pub fn detect_workstream_gaps(
     for g in &board.active {
         // Blocked goals flow through goal_health; never re-flag them here.
         if matches!(g.status, GoalProgress::Blocked(_)) {
+            continue;
+        }
+        // Standing/perpetual goals are a permanent duty, not a one-shot
+        // uncovered gap: they have no terminal done-state, can never be
+        // `Completed`, and a merged PR gives them no coverage — so a bare
+        // standing goal (no live assignee/wip_ref) would oscillate back to
+        // "uncovered" every cycle and re-notify forever. They advance through
+        // the OODA goal loop, not the gap-scan; never re-flag them here
+        // (mirrors the `Blocked` delegation above).
+        if g.is_perpetual() {
             continue;
         }
         if g.priority > GAP_GOAL_PRIORITY_BAR || goal_has_active_workstream(g) {
@@ -579,6 +610,10 @@ impl CognitiveThread for OverseerSensorThread {
         SchedulePolicy::Interval(Duration::from_secs(self.interval_secs))
     }
 
+    fn purpose(&self) -> &'static str {
+        "Read-only observe of Simard's own telemetry, filing anomaly issues"
+    }
+
     fn priority(&self) -> Priority {
         // Background, never-critical: it must never steal budget from OODA.
         Priority::Low
@@ -676,6 +711,8 @@ impl CognitiveThread for OverseerSensorThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

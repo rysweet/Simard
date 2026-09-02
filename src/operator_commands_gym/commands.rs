@@ -185,6 +185,44 @@ pub fn run_gym_recall_precision() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Run the fixed reliability-gate benchmark, append one comparable score to the
+/// shared gym history, and print the score plus the gym signal.
+///
+/// Perpetual-cognition goal (reasoner reliability): the operator on-ramp to the
+/// reliability-gate benchmark rail. Mirrors [`run_gym_recall_precision`] — reuses
+/// the same [`crate::gym_history::default_db_path`] the OODA gym step and the
+/// dashboard correlation use, so a benchmark score written here is the exact
+/// score those read back, and the score flows through the same
+/// [`crate::gym_history::generate_signals`] regression machinery. The benchmark
+/// scores a frozen, rubric-labeled corpus through the SAME
+/// `fact_reliability::fact_passes_gate` the live write boundaries use, so its
+/// accuracy is `1.0` on a correct gate and a drop signals a discrimination
+/// regression.
+pub fn run_gym_reliability_gate() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::fact_reliability_bench::{reliability_gate_corpus_size, run_reliability_gate_bench};
+    use crate::gym_history::{ScoreHistory, default_db_path, generate_signals};
+
+    let history = ScoreHistory::open(default_db_path())?;
+    let commit = Some(env!("SIMARD_GIT_HASH").to_string());
+    let record = run_reliability_gate_bench(&history, commit)?;
+    // The gym signal needs a prior run to compare against; on the first run the
+    // scenario has a single record and `generate_signals` yields nothing for it.
+    let signal = generate_signals(&history, &record.suite_id)?
+        .into_iter()
+        .find(|s| s.scenario_id == record.scenario_id)
+        .map(|s| s.signal.to_string())
+        .unwrap_or_else(|| "stable".to_string());
+    println!(
+        "{}/{}: score={:.4} signal={} samples={}",
+        record.suite_id,
+        record.scenario_id,
+        record.score,
+        signal,
+        reliability_gate_corpus_size(),
+    );
+    Ok(())
+}
+
 /// Run the enrichment ablation (issue #2942): the hard proof that recalled
 /// memory *influences* a decision. Seeds a hermetic in-memory cognitive store
 /// with representative facts/procedures, renders one decision WITH recall

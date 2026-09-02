@@ -8,7 +8,6 @@ use super::{InstallError, InstallResult, err};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenderedUnits {
     pub ooda: String,
-    pub signal: String,
 }
 
 pub fn render_units(layout: &InstallLayout) -> InstallResult<RenderedUnits> {
@@ -20,6 +19,11 @@ pub fn render_units(layout: &InstallLayout) -> InstallResult<RenderedUnits> {
     })?;
     let service_path = render_service_path(home)?;
 
+    // Only the OODA daemon is deployed as a unit now. The Signal operator
+    // channel is hosted IN-PROCESS by the OODA daemon (converge-to-single-
+    // daemon), so a second `simard-signal.service` is no longer written,
+    // enabled, or restarted; any previously-installed one is decommissioned by
+    // [`decommission_signal`].
     Ok(RenderedUnits {
         ooda: render_unit(
             "Simard OODA daemon",
@@ -28,23 +32,11 @@ pub fn render_units(layout: &InstallLayout) -> InstallResult<RenderedUnits> {
             "ooda run",
             &service_path,
         ),
-        signal: render_unit(
-            "Simard Signal service",
-            home,
-            binary,
-            "signal run",
-            &service_path,
-        ),
     })
 }
 
 pub fn install_units(layout: &InstallLayout, units: &RenderedUnits) -> InstallResult<()> {
     write_unit_atomically(&layout.ooda_unit_path, &units.ooda, &layout.transaction_id)?;
-    write_unit_atomically(
-        &layout.signal_unit_path,
-        &units.signal,
-        &layout.transaction_id,
-    )?;
     Ok(())
 }
 
@@ -61,9 +53,42 @@ pub fn resolve_systemctl(configured: Option<&Path>) -> InstallResult<PathBuf> {
 pub fn activate(systemctl: &Path) -> InstallResult<()> {
     run_systemctl(systemctl, &["--user", "daemon-reload"])?;
     run_systemctl(systemctl, &["--user", "enable", OODA_UNIT])?;
-    run_systemctl(systemctl, &["--user", "enable", SIGNAL_UNIT])?;
     run_systemctl(systemctl, &["--user", "restart", OODA_UNIT])?;
-    run_systemctl(systemctl, &["--user", "restart", SIGNAL_UNIT])?;
+    Ok(())
+}
+
+/// Decommission any previously-installed separate `simard-signal.service` so an
+/// upgrade converges an existing host onto the single OODA daemon (which now
+/// hosts the Signal channel in-process). Best-effort and idempotent: stopping
+/// and disabling a unit that is not loaded, or removing a unit file that is
+/// already gone, is NOT an error — a fresh install simply has nothing to remove.
+/// Leaving the old unit running would double-connect to signal-cli (two
+/// processes racing on `recv`), so this must run on every install.
+pub fn decommission_signal(systemctl: &Path, signal_unit_path: &Path) -> InstallResult<()> {
+    // Stop + disable the running/enabled unit if present. Lenient: a missing
+    // unit yields a non-zero status we intentionally ignore.
+    run_systemctl_lenient(systemctl, &["--user", "disable", "--now", SIGNAL_UNIT]);
+
+    // Remove the unit file so `daemon-reload` forgets it entirely.
+    let removed = match fs::remove_file(signal_unit_path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return err(format!(
+                "failed to remove obsolete signal unit {}: {e}",
+                signal_unit_path.display()
+            ));
+        }
+    };
+
+    if removed {
+        // Reload so systemd drops the now-deleted unit from its view.
+        run_systemctl_lenient(systemctl, &["--user", "daemon-reload"]);
+        println!(
+            "Decommissioned obsolete unit {} — the OODA daemon now hosts the Signal channel in-process",
+            signal_unit_path.display()
+        );
+    }
     Ok(())
 }
 
@@ -75,7 +100,7 @@ fn render_unit(
     service_path: &str,
 ) -> String {
     format!(
-        "[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={working_directory}\nExecStart={binary} {args}\nRestart=always\nRestartSec=10\nEnvironment=SIMARD_HOME={working_directory}\nEnvironment=SIMARD_PROMPT_ASSETS_DIR={working_directory}/prompt_assets/simard\nEnvironment=PATH={service_path}\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription={description}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\n# Preserve spawned engineer children across daemon restart; they finish on the\n# old inode while the new daemon takes over dispatch.\nKillMode=process\nWorkingDirectory={working_directory}\nExecStart={binary} {args}\nRestart=always\nRestartSec=10\nEnvironment=SIMARD_HOME={working_directory}\nEnvironment=SIMARD_PROMPT_ASSETS_DIR={working_directory}/prompt_assets/simard\nEnvironment=PATH={service_path}\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -181,6 +206,30 @@ fn run_systemctl(systemctl: &Path, args: &[&str]) -> InstallResult<()> {
         ));
     }
     Ok(())
+}
+
+/// Run a systemctl command best-effort: a spawn failure or non-zero status is
+/// logged and swallowed. Used for decommissioning an obsolete unit, where "the
+/// unit is not loaded / does not exist" is the expected non-zero outcome on a
+/// clean host and must not fail the install.
+fn run_systemctl_lenient(systemctl: &Path, args: &[&str]) {
+    match Command::new(systemctl).args(args).status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            println!(
+                "note: {} {} exited with {status} (ignored — likely nothing to decommission)",
+                systemctl.display(),
+                args.join(" ")
+            );
+        }
+        Err(error) => {
+            println!(
+                "note: could not run {} {} ({error}); skipping decommission step",
+                systemctl.display(),
+                args.join(" ")
+            );
+        }
+    }
 }
 
 fn find_in_path(name: &Path) -> InstallResult<PathBuf> {

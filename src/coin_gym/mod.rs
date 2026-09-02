@@ -13,7 +13,8 @@
 //! executor that delegates to `coin evaluate` (real Docker wiring is Phase 3), a
 //! scorer, a leaderboard comparator, an offline failure-analyst plus
 //! overfitting-reviewer gate, profiles, and the
-//! `coin-gym run|score|compare|improve|profiles` CLI. The whole pipeline runs
+//! `coin-gym run|score|compare|improve|contract|verify|profiles` CLI. The whole
+//! pipeline runs
 //! offline against a mock oracle so it is exercised without a VM. Live grading
 //! (Phase 3 VM) remains a follow-up on issue #2823; the live self-improvement
 //! loop with verify/rollback (Phase 5, issue #2825) is implemented offline in
@@ -64,7 +65,18 @@ use leaderboard::compare_to_leaderboard;
 use profiles::{PersistedRun, default_home, ensure_profile, list_profiles, load_run, save_run};
 use scorer::{Score, score_run};
 use target_loader::DemoScenario;
-use types::{CoinGymError, CoinGymResult, RunReport, Strategy};
+use types::{CoinGymError, CoinGymResult, RunReport, Strategy, TargetFamily};
+
+/// Scope note for the LOCAL COIN Gym acceptance done-gate.
+///
+/// Shared verbatim by the `coin-gym verify` CLI gate ([`cmd_verify`]) and the
+/// operator-probe surface (`simard_operator_probe coin-gym-verify`,
+/// `crate::operator_commands::run_coin_gym_verify_probe`) so the two can never
+/// drift on what the gate does and does not cover. Rendered after a `scope: `
+/// prefix by the CLI and a `Scope:` label by the probe.
+pub(crate) const LOCAL_ACCEPTANCE_SCOPE_NOTE: &str = "LOCAL offline harness only. \
+     Live VM grading (`coin evaluate`/`coin verify`) is Phase 3 — externally gated \
+     on a provisioned Docker host (issue #2823) and intentionally out of this gate.";
 
 /// CLI usage string.
 #[must_use]
@@ -77,6 +89,7 @@ pub fn coin_gym_usage() -> &'static str {
      \x20 compare <run-id> [--profile <name>]\n\
      \x20 improve <run-id> [--profile <name>] [--holdout fresh]\n\
      \x20 contract [--dataset <repo>] [--revision <tag>] [--split a,b] [--project x,y] [--source rebuild|image]\n\
+     \x20 verify\n\
      \x20 profiles\n\
      \n\
      Offline scaffold (Phase 4): runs grade against a mock oracle. Live grading\n\
@@ -84,7 +97,9 @@ pub fn coin_gym_usage() -> &'static str {
      --holdout fresh` runs the Phase-5 self-improvement loop (failure-analyst →\n\
      overfitting gate → verify on held-out fresh → keep/rollback + durable tactic\n\
      memory) offline. `contract` prints the real coin evaluate/verify wiring\n\
-     without running anything (LOCAL-ONLY). See\n\
+     without running anything (LOCAL-ONLY). `verify` runs the LOCAL harness\n\
+     acceptance self-check (measurable done-criteria) offline and exits non-zero\n\
+     if any criterion fails. See\n\
      docs/howto/run-the-coin-gym-harness.md."
 }
 
@@ -119,6 +134,7 @@ where
         "compare" => cmd_compare(home, rest),
         "improve" => cmd_improve(home, rest),
         "contract" => cmd_contract(rest),
+        "verify" => cmd_verify(rest),
         "profiles" => cmd_profiles(home, rest),
         other => Err(CoinGymError::Usage(format!(
             "unknown command '{other}'\n{}",
@@ -467,6 +483,372 @@ fn cmd_contract(rest: &[String]) -> CoinGymResult<()> {
     println!("  abstain:  /answer/{ANSWER_UNREACHABLE_MD}  (and NO {ANSWER_BLOB_BIN})");
     println!("verdict:  read `reached` from each result.json (never re-checked locally)");
     Ok(())
+}
+
+// ── verify (measurable done-criteria self-check) ─────────────────────────────
+
+/// The published leaderboard model used to exercise the comparator during
+/// `verify`. It must be a real row in [`leaderboard::published_leaderboard`].
+const VERIFY_PUBLISHED_MODEL: &str = "GPT-5.4";
+
+/// One acceptance criterion result in the LOCAL COIN Gym done-gate self-check.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AcceptanceCheck {
+    /// Short, stable name of the criterion.
+    pub criterion: &'static str,
+    /// Whether the criterion held.
+    pub passed: bool,
+    /// Human-readable measured detail (counts, percentages, or the failure).
+    pub detail: String,
+}
+
+impl AcceptanceCheck {
+    fn pass(criterion: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            criterion,
+            passed: true,
+            detail: detail.into(),
+        }
+    }
+
+    fn fail(criterion: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            criterion,
+            passed: false,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The full acceptance report for the LOCAL COIN Gym harness.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AcceptanceReport {
+    /// One row per criterion, in a stable order.
+    pub checks: Vec<AcceptanceCheck>,
+}
+
+impl AcceptanceReport {
+    /// Number of criteria that passed.
+    pub(crate) fn passed_count(&self) -> usize {
+        self.checks.iter().filter(|c| c.passed).count()
+    }
+
+    /// Total number of criteria evaluated.
+    pub(crate) fn total(&self) -> usize {
+        self.checks.len()
+    }
+
+    /// `true` only when every criterion passed.
+    pub(crate) fn all_passed(&self) -> bool {
+        !self.checks.is_empty() && self.checks.iter().all(|c| c.passed)
+    }
+}
+
+/// The `contract` wiring criterion: the executor can build a non-empty
+/// `coin evaluate`/`coin verify` argv (independent of the sample snapshot).
+fn contract_wiring_check() -> AcceptanceCheck {
+    let exec = CoinEvaluateExecutor::new(CoinEvaluateConfig::new("COIN-Bench/coin", "v2026-07"));
+    let evaluate = exec.build_evaluate_argv();
+    let verify = exec.build_verify_argv("<experiment-id>", None);
+    if !evaluate.is_empty() && !verify.is_empty() {
+        AcceptanceCheck::pass(
+            "contract-wiring",
+            format!(
+                "evaluate ({} args) + verify ({} args) argv present; LOCAL-ONLY={LOCAL_ONLY}",
+                evaluate.len(),
+                verify.len()
+            ),
+        )
+    } else {
+        AcceptanceCheck::fail(
+            "contract-wiring",
+            format!(
+                "empty argv (evaluate={} verify={})",
+                evaluate.len(),
+                verify.len()
+            ),
+        )
+    }
+}
+
+/// Run the LOCAL COIN Gym acceptance self-check: exercise every harness
+/// component (issue #2713 design summary) offline against the built-in sample
+/// snapshot and assert a concrete, measurable postcondition for each. This is
+/// the machine-checkable **done-criteria** for the LOCAL harness goal. Live VM
+/// grading (Phase 3, issue #2823) is externally gated and intentionally out of
+/// this gate's scope.
+///
+/// `mem_home` isolates the self-improvement tactic memory so the check never
+/// touches the user's real profiles; callers should pass a throwaway directory.
+pub(crate) fn run_acceptance_checks(mem_home: &Path) -> AcceptanceReport {
+    let mut checks = Vec::new();
+
+    // 1. Target loader: pinned + held-out fresh slices, both families present.
+    let scenario = match DemoScenario::sample() {
+        Ok(s) => {
+            let pinned = s.targets.pinned.len();
+            let held = s.targets.held_out_fresh.len();
+            let has_frontier = s
+                .targets
+                .pinned
+                .iter()
+                .any(|t| t.family == TargetFamily::Frontier);
+            let has_ntr = s
+                .targets
+                .pinned
+                .iter()
+                .any(|t| t.family == TargetFamily::NonTrivialReachable);
+            if pinned > 0 && held > 0 && has_frontier && has_ntr {
+                checks.push(AcceptanceCheck::pass(
+                    "target-loader",
+                    format!(
+                        "{pinned} pinned + {held} held-out-fresh target(s); both families present"
+                    ),
+                ));
+                Some(s)
+            } else {
+                checks.push(AcceptanceCheck::fail(
+                    "target-loader",
+                    format!(
+                        "pinned={pinned} held_out_fresh={held} \
+                         frontier={has_frontier} non_trivial_reachable={has_ntr}"
+                    ),
+                ));
+                None
+            }
+        }
+        Err(e) => {
+            checks.push(AcceptanceCheck::fail(
+                "target-loader",
+                format!("sample snapshot failed to load: {e}"),
+            ));
+            None
+        }
+    };
+
+    let Some(scenario) = scenario else {
+        for criterion in [
+            "baseline-runner",
+            "team-runner",
+            "scorer",
+            "leaderboard-comparator",
+            "self-improvement-loop",
+        ] {
+            checks.push(AcceptanceCheck::fail(
+                criterion,
+                "skipped: sample snapshot unavailable",
+            ));
+        }
+        checks.push(contract_wiring_check());
+        return AcceptanceReport { checks };
+    };
+
+    let expected = scenario.targets.pinned.len();
+    let baseline = execute_run(VERIFY_PUBLISHED_MODEL, Strategy::Baseline, &scenario);
+
+    // 2. Baseline runner: exactly one graded outcome per pinned target.
+    match &baseline {
+        Ok(report) if report.outcomes.len() == expected && expected > 0 => {
+            checks.push(AcceptanceCheck::pass(
+                "baseline-runner",
+                format!(
+                    "{} outcome(s) for {expected} pinned target(s)",
+                    report.outcomes.len()
+                ),
+            ));
+        }
+        Ok(report) => checks.push(AcceptanceCheck::fail(
+            "baseline-runner",
+            format!(
+                "got {} outcome(s) for {expected} pinned target(s)",
+                report.outcomes.len()
+            ),
+        )),
+        Err(e) => checks.push(AcceptanceCheck::fail(
+            "baseline-runner",
+            format!("run failed: {e}"),
+        )),
+    }
+
+    // 3. Team runner: exactly one graded outcome per pinned target.
+    match execute_run(VERIFY_PUBLISHED_MODEL, Strategy::Team, &scenario) {
+        Ok(report) if report.outcomes.len() == expected && expected > 0 => {
+            checks.push(AcceptanceCheck::pass(
+                "team-runner",
+                format!(
+                    "{} outcome(s) for {expected} pinned target(s)",
+                    report.outcomes.len()
+                ),
+            ));
+        }
+        Ok(report) => checks.push(AcceptanceCheck::fail(
+            "team-runner",
+            format!(
+                "got {} outcome(s) for {expected} pinned target(s)",
+                report.outcomes.len()
+            ),
+        )),
+        Err(e) => checks.push(AcceptanceCheck::fail(
+            "team-runner",
+            format!("run failed: {e}"),
+        )),
+    }
+
+    // 4. Scorer: bounded reach/precision, per-family split, histogram accounts
+    //    for every outcome.
+    match &baseline {
+        Ok(report) => {
+            let score = score_run(report);
+            let reach = score.overall.reach_pct();
+            let precision = score.overall.precision_pct();
+            let bounded = (0.0..=100.0).contains(&reach) && (0.0..=100.0).contains(&precision);
+            let hist_total = score.histogram.total();
+            let families = score.by_family.len();
+            if bounded && families >= 2 && hist_total == report.outcomes.len() {
+                checks.push(AcceptanceCheck::pass(
+                    "scorer",
+                    format!(
+                        "reach {reach:.1}% / precision {precision:.1}%; \
+                         {families} family split; histogram covers {hist_total}/{} outcome(s)",
+                        report.outcomes.len()
+                    ),
+                ));
+            } else {
+                checks.push(AcceptanceCheck::fail(
+                    "scorer",
+                    format!(
+                        "reach={reach:.1} precision={precision:.1} families={families} \
+                         histogram_total={hist_total} outcomes={}",
+                        report.outcomes.len()
+                    ),
+                ));
+            }
+        }
+        Err(_) => checks.push(AcceptanceCheck::fail(
+            "scorer",
+            "skipped: baseline run unavailable",
+        )),
+    }
+
+    // 5. Leaderboard comparator: the published model diffs against its row.
+    match &baseline {
+        Ok(report) => {
+            let score = score_run(report);
+            match compare_to_leaderboard(&score) {
+                Some(cmp) => checks.push(AcceptanceCheck::pass(
+                    "leaderboard-comparator",
+                    format!(
+                        "compared vs published '{}' (reach Δ {:+.1} pts, material-deviation={})",
+                        cmp.published_model, cmp.reach_delta_pct, cmp.material_deviation
+                    ),
+                )),
+                None => checks.push(AcceptanceCheck::fail(
+                    "leaderboard-comparator",
+                    format!("model '{VERIFY_PUBLISHED_MODEL}' unexpectedly absent from the published leaderboard"),
+                )),
+            }
+        }
+        Err(_) => checks.push(AcceptanceCheck::fail(
+            "leaderboard-comparator",
+            "skipped: baseline run unavailable",
+        )),
+    }
+
+    // 6. Self-improvement loop: held-out reach must not regress (keep-iff-improves
+    //    else roll back) and durable tactic memory must never shrink.
+    match &baseline {
+        Ok(report) => {
+            let persisted = PersistedRun {
+                report: report.clone(),
+                targets: scenario.targets.clone(),
+                offline: scenario.offline_scaffold(),
+            };
+            match run_self_improvement(mem_home, "coin-gym-verify", &persisted) {
+                Ok(rep) => {
+                    let non_regress =
+                        rep.holdout_reach_after_pct >= rep.holdout_reach_before_pct - f64::EPSILON;
+                    let durable = rep.memory_after >= rep.memory_before;
+                    if non_regress && durable {
+                        checks.push(AcceptanceCheck::pass(
+                            "self-improvement-loop",
+                            format!(
+                                "held-out reach {:.1}% → {:.1}% (kept {}, rolled back {}); \
+                                 memory {} → {} tactic(s)",
+                                rep.holdout_reach_before_pct,
+                                rep.holdout_reach_after_pct,
+                                rep.kept,
+                                rep.rolled_back,
+                                rep.memory_before,
+                                rep.memory_after
+                            ),
+                        ));
+                    } else {
+                        checks.push(AcceptanceCheck::fail(
+                            "self-improvement-loop",
+                            format!(
+                                "non_regress={non_regress} durable={durable} \
+                                 (reach {:.1}%→{:.1}%, memory {}→{})",
+                                rep.holdout_reach_before_pct,
+                                rep.holdout_reach_after_pct,
+                                rep.memory_before,
+                                rep.memory_after
+                            ),
+                        ));
+                    }
+                }
+                Err(e) => checks.push(AcceptanceCheck::fail(
+                    "self-improvement-loop",
+                    format!("loop failed: {e}"),
+                )),
+            }
+        }
+        Err(_) => checks.push(AcceptanceCheck::fail(
+            "self-improvement-loop",
+            "skipped: baseline run unavailable",
+        )),
+    }
+
+    // 7. Contract wiring.
+    checks.push(contract_wiring_check());
+
+    AcceptanceReport { checks }
+}
+
+/// Run the LOCAL harness acceptance self-check and print a PASS/FAIL matrix.
+/// Exits non-zero (via `Err`) when any criterion fails, so `coin-gym verify`
+/// is a measurable, CI-friendly done-gate for the LOCAL COIN Gym goal.
+fn cmd_verify(rest: &[String]) -> CoinGymResult<()> {
+    let _parsed = parse_args(rest, &[])?;
+    let tmp = tempfile::tempdir()
+        .map_err(|e| CoinGymError::Io(format!("verify: cannot create temp home: {e}")))?;
+    let report = run_acceptance_checks(tmp.path());
+
+    println!("coin-gym verify — LOCAL harness acceptance self-check");
+    println!("snapshot: built-in sample (offline mock oracle)");
+    for c in &report.checks {
+        println!(
+            "  [{}] {:<24} {}",
+            if c.passed { "PASS" } else { "FAIL" },
+            c.criterion,
+            c.detail
+        );
+    }
+    println!(
+        "result: {}/{} criteria passed",
+        report.passed_count(),
+        report.total()
+    );
+    println!("scope: {LOCAL_ACCEPTANCE_SCOPE_NOTE}");
+
+    if report.all_passed() {
+        Ok(())
+    } else {
+        Err(CoinGymError::Usage(format!(
+            "{} of {} LOCAL acceptance criteria failed; see the FAIL rows above",
+            report.total() - report.passed_count(),
+            report.total()
+        )))
+    }
 }
 
 // ── profiles ─────────────────────────────────────────────────────────────────

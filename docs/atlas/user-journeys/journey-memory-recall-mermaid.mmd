@@ -1,0 +1,28 @@
+sequenceDiagram
+  autonumber
+  participant Cycle as ooda_loop::cycle
+  participant Prep as memory_consolidation::preparation
+  participant Ops as CognitiveMemoryOps
+  participant Client as RemoteCognitiveMemory
+  participant Server as memory_ipc::server
+  participant Store as LibraryCognitiveMemory lbug
+  participant Prompt as OODA prompt context
+
+  Cycle->>Cycle: build_objective_probe(active goals)
+  Cycle->>Prep: preparation_memory_operations_with_active_slugs_phased(objective, active_slugs, observe weights)
+  Prep->>Ops: recall_facts_ranked(fragment, 10, 0.0, weights)
+  Ops->>Client: MemoryRequest via trait implementation when remote
+  Client->>Server: framed JSON request over Unix socket
+  Server->>Store: dispatch to lbug-backed memory
+  Store-->>Prep: ranked CognitiveFact candidates
+  Prep->>Prep: filter goal-board:snapshot and round-robin fragments
+  Prep->>Ops: search_facts(goal-store:record, limit, 0.0)
+  Store-->>Prep: latest goal records by slug
+  Prep->>Ops: check_triggers(objective)
+  Prep->>Prep: tokenize_objective(objective)
+  Prep->>Ops: recall_procedure(token, 5) per token
+  Prep->>Ops: recall_episodes_ranked(tokens, 5, weights)
+  Store-->>Prep: facts + prospects + procedures + episodes
+  Prep->>Ops: push_working(context-summary)
+  Prep-->>Cycle: PreparedContext
+  Cycle->>Prompt: store context for orient/decide/act prompts

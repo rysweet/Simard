@@ -1,0 +1,127 @@
+name: reasoner-comment-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  JSON envelope carrying a JAVASCRIPT-STYLE COMMENT (a `// …` line comment or a
+  `/* … */` block comment outside a string value — the "JSONC" annotation shape)
+  instead of silently discarding the model's whole structured decision — a
+  reasoner-reliability axis of the standing cognition-improvement goal (extends
+  the trailing-comma #2658, unescaped-control-character #4424, and
+  invalid-backslash-escape #4434 recoveries).
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM. A
+  model narrating its structured decision routinely annotates a field with a
+  comment — `"confidence": 0.8 // high`, `/* rationale below */` — the JSONC shape
+  it has seen throughout its training data. `serde_json` is spec-strict: the JSON
+  grammar has no comment production, so the stray `/` survives into the extracted
+  payload and fails a strict parse (`expected value` / `trailing characters`).
+  Before this change every reasoner site parsed strictly
+  (`extract_json_payload(text)?` -> `serde_json::from_str(..).ok()?`), so one
+  interleaved comment dropped the entire decision and the phase fell back to its
+  deterministic default — a PARSE-FAILURE default, not a real model decision.
+
+  Recovery is composed by `recover_json_view`, which FIRST strips any `//`/`/*`
+  comment outside a string literal, THEN doubles any invalid backslash escape
+  inside a string literal, THEN escapes any unescaped control byte inside a string
+  literal, THEN strips trailing commas. The comment view runs before the two
+  string-aware views on purpose: a `"` byte INSIDE a comment (`// see "foo"`,
+  `/* "x */`) is comment text, not a string delimiter, so removing whole comment
+  spans before any `in_string` scan keeps every downstream string-tracking view
+  aligned with the real string boundaries. On a comment-free payload the comment
+  view borrows unchanged, so the pre-existing three-view recovery and its ordering
+  are preserved exactly. All reasoner sites route through the one shared chokepoint
+  `recipe_output::extract_and_parse_json`, which retries the strict parse on the
+  recovered view — but ONLY when a view actually rewrote the payload (the
+  `Cow::Owned` arm). Each sub-view is a provable no-op (`Cow::Borrowed`) on valid
+  JSON — valid JSON has no `/` outside a string — so any OTHER malformed shape
+  (unquoted key, elided element, missing value, a lone non-comment `/`) still
+  returns `None`: leniency never widens beyond the four named defects and a
+  genuine parse error is never masked. A `//`/`/*`/`*/` that is legitimate string
+  content (a URL, a glob) is preserved because the scan is string-literal aware.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+  `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the `strip_json_comments` view: borrows valid JSON unchanged (including a
+      `/`, `//`, `/*`, `*/` INSIDE a string); strips a `// …` line comment (incl.
+      at end of input) and a `/* … */` block comment (incl. multi-line); leaves a
+      `//` inside a URL string untouched; respects an escaped quote before a `//`;
+      treats a lone `/` outside a string as NOT a comment; preserves multibyte
+      UTF-8; drops an unterminated block comment without panic;
+    - the composed `recover_json_view`: recovers a comment alone, strips the
+      comment BEFORE the string-aware views so a `"` inside a comment cannot
+      desync their string tracking, and composes all four defects;
+    - the shared `extract_and_parse_json` helper end-to-end: recovers a line
+      comment alone, a block comment through banner + ANSI + log noise, and all
+      four defects together, while a `//` inside a URL string is preserved and a
+      genuinely malformed (non-target) envelope stays a loud parse miss.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Recovery views: comment stripping (borrow on valid incl. `/` / `//` / `/*` /
+  # `*/` inside a string; strip line + block + multi-line comments; leave a URL's
+  # `//` and out-of-string lone `/` untouched; escaped-quote and multibyte
+  # preserved; unterminated block no panic) and the composed recover_json_view
+  # (recovers a comment alone; comment-before-string-views keeps tracking aligned;
+  # composes all four defects).
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output::extract::tests::strip_comments recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Shared chokepoint end-to-end: a comment envelope now parses to the correct
+  # typed decision (line comment alone, block comment through banner+ANSI+log
+  # noise, and composed with the other three defects); a URL `//` is preserved and
+  # a non-target-malformed body / no object still returns None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict/trailing-comma/
+  # control-char/invalid-escape behaviour is unregressed by composing the comment
+  # view ahead of the string-aware views.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

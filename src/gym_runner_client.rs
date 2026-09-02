@@ -381,20 +381,36 @@ mod tests {
 
     /// RAII guard that sets/clears `SIMARD_SKIP_GYM` and restores the previous
     /// value on drop (including during unwind from a failed assertion), so the
-    /// `#[serial]` env-var tests never leak state into one another.
+    /// env-var tests never leak state into one another.
+    ///
+    /// Every test that uses this guard MUST carry
+    /// `#[serial_test::serial(cognitive_memory)]` — NOT the bare `#[serial]`.
+    /// This guard's `set_var`/`remove_var` can `realloc(environ)` and free the
+    /// array a concurrent `getenv` (e.g. `cost_tracking::ledger_path`'s read of
+    /// `HOME` inside a meeting-turn cost write) is mid-read; the bare `#[serial]`
+    /// uses an INDEPENDENT lock, so it would let these env writers run
+    /// concurrently with `cognitive_memory` tests that read the environment,
+    /// tearing that read (the #2360/#2375 race class). Sharing the one
+    /// `cognitive_memory` key keeps every env mutation off-limits during any
+    /// concurrent env read. The serial-guard meta-test recognises
+    /// `SkipGuard::set`/`clear` as an env mutation and fails the build if a
+    /// caller drops the key (see
+    /// `docs/testing/cognitive-memory-serial-isolation.md`).
     struct SkipGuard(Option<String>);
 
     impl SkipGuard {
         fn set(value: &str) -> Self {
             let prev = std::env::var("SIMARD_SKIP_GYM").ok();
-            // SAFETY: test-only; serialised via #[serial].
+            // SAFETY: serialised via #[serial(cognitive_memory)], so no other
+            // thread reads/writes the environment concurrently.
             unsafe { std::env::set_var("SIMARD_SKIP_GYM", value) };
             SkipGuard(prev)
         }
 
         fn clear() -> Self {
             let prev = std::env::var("SIMARD_SKIP_GYM").ok();
-            // SAFETY: test-only; serialised via #[serial].
+            // SAFETY: serialised via #[serial(cognitive_memory)], so no other
+            // thread reads/writes the environment concurrently.
             unsafe { std::env::remove_var("SIMARD_SKIP_GYM") };
             SkipGuard(prev)
         }
@@ -403,7 +419,7 @@ mod tests {
     impl Drop for SkipGuard {
         fn drop(&mut self) {
             match &self.0 {
-                // SAFETY: test-only; serialised via #[serial].
+                // SAFETY: serialised via #[serial(cognitive_memory)].
                 Some(value) => unsafe { std::env::set_var("SIMARD_SKIP_GYM", value) },
                 None => unsafe { std::env::remove_var("SIMARD_SKIP_GYM") },
             }
@@ -508,7 +524,7 @@ mod tests {
     // ── Identity / path-traversal validation (SEC-2 / SEC-3) ──────────────
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_rejects_path_traversal() {
         let _g = SkipGuard::clear();
         let transport = make_transport();
@@ -529,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_suite_rejects_path_traversal() {
         // The library's run_suite does `output_dir.join(suite_id)` with NO
         // traversal check; the client must reject it itself.
@@ -548,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_suite_rejects_dot_segment() {
         // A bare ".." matches the `[A-Za-z0-9._-]` allowlist (because `.` is
         // allowed); the explicit dot-segment guard is what rejects it.
@@ -560,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_empty_id_is_transport_error() {
         // Empty scenario_id is the ONLY hard transport error (error envelope).
         let _g = SkipGuard::clear();
@@ -577,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_missing_id_is_transport_error() {
         // A wholly absent scenario_id is treated like an empty one.
         let _g = SkipGuard::clear();
@@ -590,10 +606,10 @@ mod tests {
         assert_eq!(err.code, RPC_ERROR_INTERNAL);
     }
 
-    // ── SIMARD_SKIP_GYM fast path (five #[serial] env-var tests) ──────────
+    // ── SIMARD_SKIP_GYM fast path (five serial(cognitive_memory) env-var tests) ──
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_skip_gym_returns_synthetic_success() {
         let _g = SkipGuard::set("1");
         let transport = make_transport();
@@ -615,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_suite_skip_gym_returns_synthetic_success() {
         let _g = SkipGuard::set("1");
         let transport = make_transport();
@@ -636,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_skip_gym_dimensions_present_and_zero() {
         let _g = SkipGuard::set("1");
         let transport = make_transport();
@@ -652,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_skip_gym_bypasses_engine_for_any_valid_id() {
         // Under SIMARD_SKIP_GYM the engine is never consulted, so even an id
         // the engine does not know still returns synthetic success.
@@ -667,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_suite_skip_gym_reports_zero_scenarios() {
         let _g = SkipGuard::set("1");
         let transport = make_transport();
@@ -687,7 +703,7 @@ mod tests {
     // ── Engine-backed behavioral contract (deterministic, CI-safe) ────────
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn list_scenarios_returns_library_ids() {
         let _g = SkipGuard::clear();
         let transport = make_transport();
@@ -713,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_echoes_requested_id() {
         // The engine reformats a successful result's id to the compact "L1";
         // the adapter must override it with the caller's requested id.
@@ -732,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn run_scenario_engine_error_maps_to_failure() {
         // A well-formed but unknown id reaches the engine, which returns an
         // EvalError. Per Pillar 11 the adapter maps that to a structured
@@ -762,7 +778,7 @@ mod tests {
     // ── Wire stability (INV-6): handler JSON ↔ unchanged client types ─────
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn skip_result_deserializes_as_gym_scenario_result() {
         let _g = SkipGuard::set("1");
         let transport = make_transport();
@@ -783,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(cognitive_memory)]
     fn skip_suite_result_deserializes_as_gym_suite_result() {
         let _g = SkipGuard::set("1");
         let transport = make_transport();

@@ -1,0 +1,7 @@
+flowchart LR
+  Commit["merged target commit"] --> Prep["GitSourcePreparer"] --> Checkout["fetch if missing\ncheckout detached"] --> Build["build_self_deploy_candidate"]
+  Build --> Pretest["run_pretest"] --> Baseline["open memory\ncapture fact baseline"] --> Backup["protective backup"]
+  Backup --> Drain["drain engineers"] --> Reap["reap old-binary orphans"] --> Swap["atomic_install"] --> Restart["systemd or exec restart"] --> Health["self health probe"]
+  Health -->|healthy| Outcome["SelfDeployOutcome"]
+  Restart -->|failure| Rollback["do_rollback"]
+  Health -->|unhealthy| Rollback

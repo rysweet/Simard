@@ -1,0 +1,51 @@
+digraph compile_deps_external_runtime {
+    graph [rankdir=LR, labelloc="t", label="Simard direct runtime dependencies", fontsize=20];
+    node [shape=box, style="rounded,filled", fillcolor="#fffaf0", color="#b36b00", fontname="Arial"];
+    edge [color="#586069", fontname="Arial"];
+
+    simard [label="simard"];
+
+    amplihack_memory [label="amplihack-memory\ngit c266e15 persistent"];
+    rustyclawd_core [label="rustyclawd-core\ngit dcccad8"];
+    rustyclawd_tools [label="rustyclawd-tools\ngit dcccad8"];
+    amplihack_agent_eval [label="amplihack-agent-eval\ngit 14dc30b"];
+    lbug [label="lbug\ngit 5a2c107"];
+
+    rusqlite [label="rusqlite =0.31.0\nbackup bundled"];
+    serde [label="serde =1.0.228\nderive"];
+    serde_json [label="serde_json =1.0.149"];
+    semver [label="semver =1.0.28"];
+    ureq [label="ureq =3.3.0"];
+    toml [label="toml =1.1.2"];
+    tokio [label="tokio =1.52.1\nrt process net macros sync"];
+    axum [label="axum =0.8.9\nws"];
+    tower_http [label="tower-http =0.6.8\ncors auth"];
+    uuid [label="uuid =1.23.1\nv4 v7"];
+    chrono [label="chrono =0.4.44"];
+    chrono_tz [label="chrono-tz =0.10.4"];
+    dirs [label="dirs =6.0.0"];
+    crc32fast [label="crc32fast =1.5.0"];
+    sha2 [label="sha2 =0.10.9"];
+    tracing [label="tracing =0.1.44"];
+    tracing_subscriber [label="tracing-subscriber =0.3.23\njson env-filter"];
+    ctrlc [label="ctrlc =3.5.2\ntermination"];
+    nix [label="nix =0.29.0\nsignal fs"];
+    opentelemetry [label="opentelemetry =0.27.1"];
+    opentelemetry_otlp [label="opentelemetry-otlp =0.27.0"];
+    tracing_opentelemetry [label="tracing-opentelemetry =0.28.0"];
+    opentelemetry_sdk [label="opentelemetry_sdk =0.27.1\nrt-tokio"];
+    tempfile [label="tempfile =3.27.0"];
+    ratatui [label="ratatui =0.29.0"];
+    crossterm [label="crossterm =0.28.1"];
+    headless_chrome [label="headless_chrome =1.0.21\noptional"];
+    regex [label="regex =1.12.3\noptional"];
+    url [label="url =2.5.8\noptional"];
+    base64 [label="base64 =0.22.1"];
+    rustls [label="rustls =0.23.38\nring"];
+    rustls_native_certs [label="rustls-native-certs =0.8.3"];
+    webpki_roots [label="webpki-roots =1.0.7"];
+    libc [label="libc =0.2.185\nunix target"];
+
+    simard -> {amplihack_memory rustyclawd_core rustyclawd_tools amplihack_agent_eval lbug rusqlite serde serde_json semver ureq toml tokio axum tower_http uuid chrono chrono_tz dirs crc32fast sha2 tracing tracing_subscriber ctrlc nix opentelemetry opentelemetry_otlp tracing_opentelemetry opentelemetry_sdk tempfile ratatui crossterm headless_chrome regex url base64 rustls rustls_native_certs webpki_roots libc};
+    amplihack_memory -> lbug [label="persistent GraphStore backend"];
+}

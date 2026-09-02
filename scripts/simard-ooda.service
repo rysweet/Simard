@@ -5,6 +5,9 @@ Documentation=https://github.com/rysweet/Simard
 
 [Service]
 Type=simple
+# Preserve spawned engineer children across daemon restart; they finish on the
+# old inode while the new daemon takes over dispatch.
+KillMode=process
 ExecStart=/home/azureuser/.simard/bin/simard ooda run
 WorkingDirectory=/home/azureuser/.simard
 Restart=always

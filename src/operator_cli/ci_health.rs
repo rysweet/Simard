@@ -9,7 +9,8 @@
 //! See `docs/reference/ci-health-sweep.md`.
 
 use crate::ci_health::{
-    RealGhWorkflowClient, file_issues_for_report, render_human, report_to_json, sweep_fixture,
+    RealCiIssueResolver, RealGhRunDiagnostics, RealGhWorkflowClient, file_issues_for_report,
+    render_human, report_to_json, resolve_issues_for_report, sweep_fixture,
     sweep_live_with_options,
 };
 use crate::stewardship::{RealGhClient, StewardshipOutcome};
@@ -17,7 +18,7 @@ use crate::stewardship::{RealGhClient, StewardshipOutcome};
 pub(super) const CI_HEALTH_HELP: &str = "\
 Simard ci-health subcommand
 
-Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path>]
+Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--exit-zero] [--from-json <path>]
 
   --json               Emit the FleetReport as JSON (default: human table).
   --no-cache           Force a full re-collection of every repo, ignoring the
@@ -26,8 +27,30 @@ Usage: simard ci-health [--json] [--no-cache] [--file-issues] [--from-json <path
   --file-issues        For each distinct actionable failure, file a deduplicated
                        tracking issue in the failing repo (dedupes against any
                        open issue already carrying the same
-                       stewardship-signature). Read-only by default; this flag
-                       opts in to the write. Rejected with --from-json.
+                       stewardship-signature). New issues embed a root-cause
+                       block naming the failing job(s)/step(s). Conversely, any
+                       open tracking issue whose workflow is GREEN again this
+                       sweep is closed with a green-evidence comment, keeping
+                       one open issue per *still-broken* workflow. Read-only by
+                       default; this flag opts in to the writes. A failing repo
+                       the run's token cannot write (a governed sibling when the
+                       STEWARD_GH_TOKEN secret is absent) is reported as an
+                       unauthorized skip and does NOT abort the sweep — every
+                       writable repo is still reconciled and the scheduled run
+                       stays green. Rejected with --from-json.
+  --exit-zero          Exit 0 even when the fleet has actionable failures, as
+                       long as the sweep (and any --file-issues stewardship)
+                       itself completed without an operational error. This is
+                       for the recurring, unattended scheduled sweep
+                       (.github/workflows/ci-health.yml): there the *alarm* for
+                       a broken fleet is the deduplicated tracking issue filed
+                       by --file-issues, not a red workflow run — and letting
+                       the scheduled run go red on a sibling's failure would
+                       make Simard's own ci-health run a fresh actionable
+                       failure the next sweep re-detects (a self-referential
+                       loop). A genuine `gh`/parse error still propagates as a
+                       non-zero exit; only the fleet-not-green verdict is
+                       suppressed.
   --from-json <path>   Classify an offline snapshot fixture instead of calling
                        `gh` (the fixture shape mirrors the live snapshot).
 
@@ -46,10 +69,20 @@ instead of being re-collected. Use --no-cache to force a full sweep.
 With --file-issues, each distinct actionable failure (one per broken
 repo+workflow) is converted into a deduplicated GitHub issue in the failing
 repo, reusing the stewardship-signature dedup contract so an already-tracked
-broken workflow is never re-filed.
+broken workflow is never re-filed. Each newly-filed issue embeds a root-cause
+block pinpointing which job(s) and step(s) of the failing run failed (read from
+`gh run view --json jobs`) and the concrete error text for each failing job (its
+GitHub check-run failure annotations) so a fixer sees what broke without hunting
+through the run, and links the run for the failing logs; a diagnosis that cannot
+be fetched is recorded as unavailable rather than omitted. The same pass also
+*resolves* the other direction: any open tracking issue whose workflow's latest
+default-branch run is now green is closed with a green-evidence comment, so the
+fleet keeps exactly one open issue per still-broken workflow and none for
+already-recovered ones.
 
 Exit code: 0 when the fleet is green; non-zero when any actionable failure
-exists.
+exists (unless --exit-zero, which suppresses that non-zero verdict for the
+unattended scheduled sweep — see above).
 ";
 
 /// Parsed `ci-health` flags.
@@ -57,6 +90,7 @@ struct Flags {
     json: bool,
     no_cache: bool,
     file_issues: bool,
+    exit_zero: bool,
     from_json: Option<String>,
 }
 
@@ -64,6 +98,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
     let mut json = false;
     let mut no_cache = false;
     let mut file_issues = false;
+    let mut exit_zero = false;
     let mut from_json = None;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -71,6 +106,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
             "--json" => json = true,
             "--no-cache" | "--refresh" => no_cache = true,
             "--file-issues" => file_issues = true,
+            "--exit-zero" => exit_zero = true,
             "--from-json" => {
                 let path = args
                     .next()
@@ -100,13 +136,42 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, Box<dyn std:
         json,
         no_cache,
         file_issues,
+        exit_zero,
         from_json,
     })
 }
 
+/// Map a completed sweep's fleet verdict to the process exit result.
+///
+/// The default contract is fail-loud: a fleet with any actionable failure is an
+/// `Err` (non-zero exit), matching the `self-health` convention so a human or a
+/// PR gate sees the failure. `exit_zero` overrides only *that* verdict — it
+/// returns `Ok(())` for a red fleet — and is meant solely for the unattended
+/// scheduled sweep, where the alarm is the filed tracking issue (`--file-issues`)
+/// and a red run would itself become an actionable failure the next sweep
+/// re-detects. Operational errors (a failed `gh`/parse) are surfaced by the
+/// caller *before* this decision, so `exit_zero` never masks a broken sweep —
+/// only a truthfully-reported red fleet.
+fn exit_result(
+    green: bool,
+    actionable_failures: usize,
+    exit_zero: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if green || exit_zero {
+        Ok(())
+    } else {
+        Err(format!(
+            "ci-health: {actionable_failures} actionable failure(s) across the governed fleet"
+        )
+        .into())
+    }
+}
+
 /// Dispatch `simard ci-health`. Returns `Ok(())` when the fleet is green and an
 /// `Err` (non-zero exit) when any actionable failure exists, matching the
-/// `self-health` convention.
+/// `self-health` convention. With `--exit-zero`, a red fleet still returns
+/// `Ok(())` (the tracking issue is the alarm); operational errors always
+/// propagate. See [`exit_result`].
 pub(super) fn dispatch_ci_health_command(
     args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -128,51 +193,271 @@ pub(super) fn dispatch_ci_health_command(
     }
 
     if flags.file_issues {
-        file_actionable_issues(&report)?;
+        steward_issues(&report, flags.json)?;
     }
 
-    if report.green {
-        Ok(())
-    } else {
-        Err(format!(
-            "ci-health: {} actionable failure(s) across the governed fleet",
+    if !report.green && flags.exit_zero {
+        eprintln!(
+            "ci-health: {} actionable failure(s) across the governed fleet; \
+             exit suppressed by --exit-zero (the tracking issue is the alarm).",
             report.actionable_failures.len()
-        )
-        .into())
+        );
     }
+    exit_result(
+        report.green,
+        report.actionable_failures.len(),
+        flags.exit_zero,
+    )
 }
 
-/// File a deduplicated tracking issue for each distinct actionable failure and
-/// print the outcomes to stderr (so `--json` stdout stays pure report JSON). A
-/// green fleet is a no-op. Any `gh` failure propagates so the caller sees a
-/// non-zero exit (never a silent partial filing).
-fn file_actionable_issues(
+/// Reconcile the fleet's tracking issues with the sweep: file a deduplicated
+/// tracking issue for each distinct actionable failure, and close any open
+/// tracking issue whose workflow is green again. Outcomes print to stderr (so
+/// `--json` stdout stays pure report JSON).
+///
+/// Filing runs first (the correctness-critical path — a genuinely-broken
+/// workflow must get a tracking issue), then resolution, so a resolution error
+/// can never starve filing. Resolution runs even when the fleet is green — a
+/// green fleet can still carry stale tracking issues from a since-recovered
+/// failure. A genuine `gh` failure (a transient outage, a parse error)
+/// propagates so the caller sees a non-zero exit (never a silent partial
+/// reconciliation). A cross-repo **authorization** denial — the token cannot
+/// write a governed sibling repo (no `STEWARD_GH_TOKEN`) — is instead reported
+/// loudly as a skip and does not abort the sweep, so one unwritable repo never
+/// starves reconciliation for the rest of the fleet nor turns the scheduled run
+/// red (the self-referential failure the `--exit-zero` contract avoids).
+///
+/// `stdout_is_json` tells the reporter whether stdout currently holds the pure
+/// report JSON (i.e. `--json`), so the GitHub Actions `::warning::` annotation —
+/// which the runner only parses from **stdout** — is suppressed in that mode to
+/// keep the JSON contract intact (the skip is still printed loudly to stderr).
+fn steward_issues(
     report: &crate::ci_health::FleetReport,
+    stdout_is_json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if report.green {
         eprintln!("ci-health: fleet green; no actionable failures to file.");
-        return Ok(());
+    } else {
+        let filing =
+            file_issues_for_report(report, &RealGhClient::new(), &RealGhRunDiagnostics::new())?;
+        eprintln!(
+            "ci-health: filed/matched {} deduplicated tracking issue(s):",
+            filing.outcomes.len()
+        );
+        for outcome in &filing.outcomes {
+            match outcome {
+                StewardshipOutcome::FiledNew {
+                    repo,
+                    issue_number,
+                    url,
+                    signature,
+                } => eprintln!("  filed   {repo}#{issue_number} [{signature}] {url}"),
+                StewardshipOutcome::MatchedExisting {
+                    repo,
+                    issue_number,
+                    url,
+                    signature,
+                } => eprintln!("  matched {repo}#{issue_number} [{signature}] {url}"),
+            }
+        }
+        report_unauthorized_skips(
+            &filing.skipped_unauthorized,
+            "could not file tracking issue(s) — token lacks write access to the failing repo",
+            stdout_is_json,
+        );
     }
-    let outcomes = file_issues_for_report(report, &RealGhClient::new())?;
-    eprintln!(
-        "ci-health: filed/matched {} deduplicated tracking issue(s):",
-        outcomes.len()
-    );
-    for outcome in &outcomes {
-        match outcome {
-            StewardshipOutcome::FiledNew {
-                repo,
-                issue_number,
-                url,
-                signature,
-            } => eprintln!("  filed   {repo}#{issue_number} [{signature}] {url}"),
-            StewardshipOutcome::MatchedExisting {
-                repo,
-                issue_number,
-                url,
-                signature,
-            } => eprintln!("  matched {repo}#{issue_number} [{signature}] {url}"),
+
+    // Resolution runs after filing so a resolution `gh` error can never starve
+    // the correctness-critical filing path above.
+    let resolution = resolve_issues_for_report(report, &RealCiIssueResolver::new())?;
+    if resolution.closed.is_empty() {
+        eprintln!("ci-health: no recovered workflows with an open tracking issue to close.");
+    } else {
+        eprintln!(
+            "ci-health: closed {} tracking issue(s) for now-green workflow(s):",
+            resolution.closed.len()
+        );
+        for outcome in &resolution.closed {
+            eprintln!(
+                "  closed  {repo}#{num} [{workflow}] {url}",
+                repo = outcome.repo,
+                num = outcome.issue_number,
+                workflow = outcome.workflow,
+                url = outcome.url,
+            );
         }
     }
+    report_unauthorized_skips(
+        &resolution.skipped_unauthorized,
+        "could not resolve tracking issue(s) — token lacks access to the repo",
+        stdout_is_json,
+    );
     Ok(())
+}
+
+/// Print any cross-repo authorization skips loudly to stderr. A skip means the
+/// sweep detected a repo it could not reconcile (an unwritable governed sibling
+/// when `STEWARD_GH_TOKEN` is absent); surfacing it here keeps the failure
+/// visible — fail-safe, not fail-open — even though it no longer crashes the
+/// scheduled run. The failing repo/workflow is *also* present in the printed
+/// FleetReport, so the underlying red CI is never hidden.
+///
+/// When running under GitHub Actions (`GITHUB_ACTIONS=true`) and stdout is *not*
+/// carrying report JSON, each skip is *additionally* emitted as a `::warning::`
+/// workflow annotation. This is the durable alarm: because the sweep now stays
+/// green through a skip, a permanently-unwritable repo would otherwise be visible
+/// only to someone who opens a *successful* run's raw logs. A warning annotation
+/// surfaces on the run summary and the Actions UI even for a green run, so a
+/// standing missing-token misconfiguration cannot hide indefinitely. The
+/// annotation is suppressed in `--json` mode because the runner parses workflow
+/// commands only from stdout, which must stay pure report JSON there.
+fn report_unauthorized_skips(
+    skips: &[crate::ci_health::UnauthorizedSkip],
+    headline: &str,
+    stdout_is_json: bool,
+) {
+    if skips.is_empty() {
+        return;
+    }
+    eprintln!("ci-health: {} {headline}:", skips.len());
+    for skip in skips {
+        match &skip.workflow {
+            Some(workflow) => {
+                eprintln!(
+                    "  skipped {repo} [{workflow}]: {reason}",
+                    repo = skip.repo,
+                    reason = skip.reason
+                )
+            }
+            None => eprintln!(
+                "  skipped {repo}: {reason}",
+                repo = skip.repo,
+                reason = skip.reason
+            ),
+        }
+    }
+    eprintln!(
+        "  hint: configure the STEWARD_GH_TOKEN secret with fleet-wide issues:write \
+         to file/close these cross-repo tracking issues."
+    );
+    emit_actions_skip_annotations(skips, headline, stdout_is_json);
+}
+
+/// Emit a `::warning::` GitHub Actions annotation per skip, but only when
+/// actually running under Actions (`GITHUB_ACTIONS=true`) *and* stdout is not
+/// pure report JSON (`--json`). The annotation is written to stdout — the only
+/// stream the runner scans for workflow commands — as a single line (newlines
+/// escaped per the workflow-command format) so it renders as one durable warning
+/// on the run. In `--json` mode it is skipped so stdout stays valid JSON (the
+/// skip is still surfaced loudly on stderr).
+fn emit_actions_skip_annotations(
+    skips: &[crate::ci_health::UnauthorizedSkip],
+    headline: &str,
+    stdout_is_json: bool,
+) {
+    if stdout_is_json || std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true") {
+        return;
+    }
+    for skip in skips {
+        let target = match &skip.workflow {
+            Some(workflow) => format!("{repo} [{workflow}]", repo = skip.repo),
+            None => skip.repo.clone(),
+        };
+        let message = format!(
+            "ci-health {headline}: {target}: {reason}. Configure STEWARD_GH_TOKEN \
+             (fleet-wide issues:write) to reconcile this cross-repo tracking issue.",
+            reason = skip.reason
+        );
+        println!(
+            "::warning title=ci-health steward skip::{}",
+            escape_annotation(&message)
+        );
+    }
+}
+
+/// Escape a message for a GitHub Actions workflow-command annotation: literal
+/// `%`, carriage-return and newline must be percent-encoded so a multi-line `gh`
+/// error collapses into one well-formed annotation instead of truncating at the
+/// first newline (or being misparsed).
+fn escape_annotation(message: &str) -> String {
+    message
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Flags, exit_result, parse_flags};
+
+    fn parse(args: &[&str]) -> Result<Flags, String> {
+        parse_flags(args.iter().map(|s| s.to_string())).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn exit_zero_flag_parses_and_defaults_false() {
+        let default = parse(&[]).expect("empty args parse");
+        assert!(!default.exit_zero, "--exit-zero defaults off");
+
+        let set = parse(&["--exit-zero"]).expect("--exit-zero parses");
+        assert!(set.exit_zero);
+        // Orthogonal to the other flags — none are implied.
+        assert!(!set.json && !set.no_cache && !set.file_issues && set.from_json.is_none());
+    }
+
+    #[test]
+    fn exit_zero_composes_with_file_issues_and_no_cache() {
+        let f = parse(&["--no-cache", "--file-issues", "--exit-zero"]).expect("compose parses");
+        assert!(f.no_cache && f.file_issues && f.exit_zero);
+    }
+
+    #[test]
+    fn unknown_flag_still_rejected_alongside_exit_zero() {
+        let err = match parse(&["--exit-zero", "--bogus"]) {
+            Ok(_) => panic!("unknown flag must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("--bogus"),
+            "error names the offending flag: {err}"
+        );
+    }
+
+    #[test]
+    fn green_fleet_exits_zero_regardless_of_exit_zero() {
+        assert!(exit_result(true, 0, false).is_ok());
+        assert!(exit_result(true, 0, true).is_ok());
+    }
+
+    #[test]
+    fn red_fleet_errors_by_default_but_exit_zero_suppresses_it() {
+        // Default fail-loud: a red fleet is a non-zero exit whose message counts
+        // the failures (so a human/PR gate sees it).
+        let err = exit_result(false, 3, false).expect_err("red fleet errors by default");
+        assert!(
+            err.to_string().contains("3 actionable failure"),
+            "error reports the failure count: {err}"
+        );
+        // --exit-zero suppresses only that verdict — the scheduled sweep stays
+        // green so its own run never becomes a self-referential failure.
+        assert!(
+            exit_result(false, 3, true).is_ok(),
+            "--exit-zero makes a red fleet exit 0"
+        );
+    }
+
+    #[test]
+    fn escape_annotation_encodes_newlines_and_percent_for_a_single_line_warning() {
+        // A multi-line `gh` error must collapse into one well-formed Actions
+        // annotation: literal %, CR and LF are percent-encoded so the runner does
+        // not truncate the warning at the first newline (or misparse it).
+        let raw = "line one\r\nline two 100% done";
+        let escaped = super::escape_annotation(raw);
+        assert_eq!(escaped, "line one%0D%0Aline two 100%25 done");
+        assert!(
+            !escaped.contains('\n'),
+            "no raw newline survives: {escaped}"
+        );
+        assert!(!escaped.contains('\r'), "no raw CR survives: {escaped}");
+    }
 }

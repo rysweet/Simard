@@ -14,6 +14,14 @@ use crate::memory_cognitive::{
 };
 use crate::session::SessionId;
 
+/// Maximum number of ranked declarative facts carried into a
+/// [`PreparedContext`]. Shared across every fragment of a compound objective;
+/// the round-robin merge in
+/// [`preparation_memory_operations_with_active_slugs_phased`] distributes this
+/// budget fairly so no single fragment monopolizes it. Matches the historical
+/// per-query recall limit.
+const RELEVANT_FACT_CAP: usize = 10;
+
 /// Context assembled during the preparation phase for use during execution.
 ///
 /// Contains the relevant facts, triggered prospective memories, recalled
@@ -191,26 +199,52 @@ pub fn preparation_memory_operations_with_active_slugs_phased(
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let declarative_start = std::time::Instant::now();
+    // Issue #2329: gather candidate facts via ranked recall (relevance +
+    // recency + confidence + …, phase-weighted) instead of a plain
+    // confidence-sorted keyword `search_facts`. Facts come back in descending
+    // score order per fragment; superseded snapshot revisions are excluded.
+    //
+    // Cross-fragment fairness: a compound objective ("A; B; C") is recalled
+    // fragment-by-fragment, but the results share a single `RELEVANT_FACT_CAP`
+    // budget. Concatenating the per-fragment lists and truncating drained the
+    // first fragment fully before the second was consulted, so a high-recall
+    // leading fragment could crowd every later fragment off the capped list
+    // entirely (e.g. an objective whose first fragment alone yields ≥10 facts
+    // surfaced NOTHING for its remaining fragments). Instead, interleave the
+    // per-fragment lists round-robin: take each fragment's rank-0 fact, then
+    // every fragment's rank-1 fact, and so on. Because each list is already in
+    // descending score order, this admits every fragment's strongest facts
+    // before any fragment's weaker tail, so the cap is shared fairly across the
+    // objective's fragments while per-fragment ranking is preserved.
+    let mut per_fragment_ranked: Vec<Vec<CognitiveFact>> = Vec::with_capacity(fragments.len());
     for fragment in &fragments {
-        // Issue #2329: gather candidate facts via ranked recall (relevance +
-        // recency + confidence + …, phase-weighted) instead of a plain
-        // confidence-sorted keyword `search_facts`. Facts come back in
-        // descending score order; superseded snapshot revisions are excluded.
-        let per_fragment = memory.recall_facts_ranked(fragment, 10, 0.0, weights)?;
-        for fact in per_fragment {
-            // PR-A filter 1: drop goal-board:snapshot revisions even
-            // when they surface from a per-fragment match. The live
-            // board is already injected by `advance.rs`.
-            if fact.concept == GOAL_BOARD_SNAPSHOT_CONCEPT {
-                continue;
-            }
-            if seen_ids.insert(fact.node_id.clone()) {
-                relevant_facts.push(fact);
+        let recalled = memory.recall_facts_ranked(fragment, 10, 0.0, weights)?;
+        // PR-A filter 1: drop goal-board:snapshot revisions even when they
+        // surface from a per-fragment match. The live board is already injected
+        // by `advance.rs`.
+        let filtered: Vec<CognitiveFact> = recalled
+            .into_iter()
+            .filter(|fact| fact.concept != GOAL_BOARD_SNAPSHOT_CONCEPT)
+            .collect();
+        per_fragment_ranked.push(filtered);
+    }
+
+    // Round-robin merge, deduping by node_id, capped at 10 to match the original
+    // per-query limit. A single-fragment objective degenerates to taking that
+    // one fragment's facts in score order — identical to the prior behavior.
+    let max_rank = per_fragment_ranked.iter().map(Vec::len).max().unwrap_or(0);
+    'merge: for rank in 0..max_rank {
+        for fragment_facts in &per_fragment_ranked {
+            if let Some(fact) = fragment_facts.get(rank)
+                && seen_ids.insert(fact.node_id.clone())
+            {
+                relevant_facts.push(fact.clone());
+                if relevant_facts.len() >= RELEVANT_FACT_CAP {
+                    break 'merge;
+                }
             }
         }
     }
-    // Cap total results at 10 to match the original per-query limit.
-    relevant_facts.truncate(10);
     tracing::debug!(
         target: "simard::memory_consolidation::prepare_context",
         step = "recall_facts_ranked",

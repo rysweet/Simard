@@ -183,3 +183,34 @@ fn dispatch_operator_probe_review_run_missing_args() {
     let err = dispatch_operator_probe(args(&["review-run"])).unwrap_err();
     assert!(err.to_string().contains("expected base type"));
 }
+
+// --- dispatch_operator_probe: coin-gym-verify (LOCAL harness done-gate) ---
+
+#[test]
+fn dispatch_operator_probe_coin_gym_verify_runs_and_passes() {
+    // The LOCAL COIN harness done-gate is hermetic and offline, so dispatching
+    // it through the operator probe must succeed on the built-in sample.
+    dispatch_operator_probe(args(&["coin-gym-verify"])).expect("coin-gym-verify probe should pass");
+}
+
+#[test]
+fn dispatch_operator_probe_coin_gym_verify_rejects_trailing_args() {
+    // The done-gate takes no arguments; trailing tokens are an operator error.
+    let err = dispatch_operator_probe(args(&["coin-gym-verify", "extra"])).unwrap_err();
+    assert!(err.to_string().contains("unexpected trailing arguments"));
+    assert!(err.to_string().contains("extra"));
+}
+
+#[test]
+fn dispatch_probe_with_context_supports_coin_gym_verify() {
+    use super::command_context::CommandContext;
+
+    // The context-based dispatcher must expose the same repo-grounded done-gate
+    // as the positional dispatcher.
+    let ctx = CommandContext::builder()
+        .topology("single-process")
+        .build()
+        .expect("context builds");
+    dispatch_probe_with_context("coin-gym-verify", &ctx)
+        .expect("context dispatch of coin-gym-verify should pass");
+}

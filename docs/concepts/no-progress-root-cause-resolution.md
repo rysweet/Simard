@@ -150,6 +150,23 @@ a goal has already burned its one guided retry and stalled again. Even then the
 concrete cause and the artifacts, never a bare "needs human review". See the
 [block-reason contract](../reference/no-progress-root-cause-resolution-api.md#block-reason-contract).
 
+**Escalation links the filed tracking issue back to the goal.** The escalation
+files a `gh` tracking issue *and* records it on the goal as an `issue`
+`wip_ref` (label-prefixed `[no-progress-tracking] `). This is what finally makes
+an `UNCLEAR-CRITERIA` goal's done-criteria *measurable*: the reason those
+synthetic `simard-identity-*` goals stalled was literally "no tracked PR/issue
+the done-gate can verify", and without the back-link the breaker filed a
+tracking issue but **orphaned** it — the goal's `wip_refs` stayed empty, so
+[`has_derivable_signal`](../reference/completion-evidence-gate-api.md) stayed
+`false` and the done-gate still had nothing to check. With the link the done-gate
+can observe the tracking issue as `CLOSED` (and a human/dashboard can navigate
+goal → issue). The link is **idempotent**: a goal already carrying its
+breaker-authored tracking issue is never re-filed, so a re-stall can never spam
+duplicate `ooda-stuck` issues. The shared side effect is
+`escalate_with_tracking_issue` in `src/ooda_loop/no_progress.rs`, used by every
+escalation path (on-transition, re-investigation, and the bounded
+surfaced-failure escalation).
+
 ## Re-investigating already-blocked goals (issue #17)
 
 The ladder above investigates a stall **only at the cycle the goal crosses the
@@ -207,7 +224,21 @@ signals the daemon can gather without the brain:
 | done-gate verdict | [`verify_stuck_goal`](../reference/no-progress-breaker-api.md#noprogressresolution) over the [completion-evidence gate](../reference/completion-evidence-gate-api.md) | `ALREADY-COMPLETE` / `OBSOLETE` |
 | governed repo present? | `EvidenceSource::repo_present` | `MISSING-PRECONDITION` |
 | dependency goal / PR state | `EvidenceSource::dependency_goal_state` | `UPSTREAM-DEPENDENCY` |
-| none of the above | — | `UNCLEAR-CRITERIA` / `GENUINELY-STUCK` |
+| no tracked PR/issue the done-gate can ever check | — | `UNCLEAR-CRITERIA` (done-criteria structurally unmeasurable) |
+| open work still referenced, none of the above | — | `GENUINELY-STUCK` (evidence = the open artifacts) |
+
+The last two rows are the **terminal rung**, split by whether the goal still
+references any artifact the done-gate could ever verify. A stall with **no**
+tracked PR/issue — the synthetic `simard-identity-*` goals — has done-criteria
+that are *structurally unmeasurable*, so it classifies as `UNCLEAR-CRITERIA`
+with concrete evidence naming that missing criterion; a stall that still
+references open work stays `GENUINELY-STUCK` with those artifacts as evidence.
+**Invariant:** the deterministic reasoner never returns an empty-evidence WHY,
+so the breaker can never author a bare `evidence=[(none)]` block (the
+live-daemon defect that stranded the `simard-identity-*` / coverage / parity
+goals with a generic, evidence-free stamp). Both terminal classes route to the
+same rung (one guided engineer, then a WHY-bearing human block), so the split
+sharpens the *diagnosis and evidence* without changing the action taken.
 
 This mirrors the sibling **brain-failure** safeguard, which is likewise "a
 deterministic safeguard enforced by simard, NOT a brain decision — the brain is

@@ -8,6 +8,7 @@ status: reference
 related:
   - ./stewardship-mode.md
   - ./deploy-aware-done-gate.md
+  - ./gap-scan-backoff-dedup.md
   - ../reference/cross-repo-merge-authority.md
   - ../reference/pr-finalization-pipeline.md
   - ../reference/goal-decomposition.md
@@ -145,6 +146,7 @@ human-wait, never these:
 | **Merge-judge verdict gate** | A prompt-driven judge must independently confirm the evidence criteria are satisfied. | `merge_judge`, `prompt_assets/simard/merge_readiness_judge.md` |
 | **rysweet-author priority gate** | Author-priority ordering in the OODA decide path is unchanged. | OODA decide path |
 | **Destructive-op safety floor** | Force-push, hard reset, and protected-repo writes stay hard-blocked. | `git_guardrails`, `ado_acl_guard` |
+| **Gap-scan duplicate-suppression rail** | The in-process backoff gate only ever *reduces* actions; it can never authorize a launch, merge, or issue write, so backlog noise falls without weakening any gate. | `guardrails::BackoffGate` — see [gap-scan dedup & backoff](./gap-scan-backoff-dedup.md) |
 
 ## Relationship to the goal-board cap
 
@@ -221,6 +223,9 @@ not an ungated shortcut. See the
   does not remove the gate.
 - [ADO ACL self-escalation guard](../reference/ado-acl-self-escalation-guard.md)
   — the security floor behind HIGH-RISK item #4.
+- [Gap-scan dedup & backoff](./gap-scan-backoff-dedup.md) — the duplicate-
+  suppression rail that reduces Overseer backlog noise without weakening any
+  autonomy gate (a suppression can only ever *not take* an action).
 - [Goal decomposition](../reference/goal-decomposition.md) and
   [maximum safe parallelism](../reference/maximum-safe-parallelism.md) — how the
   raised goal-board cap and the AIMD concurrency cap interact.

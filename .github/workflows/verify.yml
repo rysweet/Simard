@@ -3,6 +3,12 @@ name: verify
 on:
   push:
   pull_request:
+  # Merge-queue live-lock remediation (issue #1050): run the same required
+  # contexts against the queued, freshly-merged result so strict
+  # up-to-date-before-merge can be relaxed to merge-queue semantics. This is
+  # ADDITIVE — the existing push/pull_request triggers and every required job
+  # are preserved so no required status-check context is renamed or dropped.
+  merge_group:
 
 permissions: {}
 
@@ -37,6 +43,13 @@ jobs:
 
       - name: Rust-only gate (no new .py / .js / .ts)
         run: scripts/check-rust-only-gate.sh
+
+      # Locks in the idempotent release-publish fix: hermetic (bundles its own
+      # mock `gh`, no network/cargo), so it runs early and fast. Guards against a
+      # regression to the non-idempotent "Create release" step that raced on an
+      # unbumped version and reddened otherwise-green release runs.
+      - name: Release-create idempotency gate
+        run: scripts/qa-release-create-idempotent.sh
 
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
@@ -146,6 +159,17 @@ jobs:
             -- --skip install_packages_runs_and_self_installs \
             2>&1 | tee target/ci-logs/cargo-test.log
 
+      - name: Self-deploy canary regression target (issue #4622)
+        # Proves the EXACT target name + feature the self-deploy UnitTest canary
+        # gate invokes (`cargo test --test self_deploy_canary --features
+        # canary-tests`, see src/self_relaunch/gates.rs::build_unit_test_command)
+        # stays valid on every push/PR. A rename or typo in the curated
+        # hermetic canary suite fails CI HERE — before it can redden the live
+        # self-deploy canary and wedge running_commit. The suite is
+        # hermetic-by-construction (owns its HOME/tempdir, #[serial], no network),
+        # so it is fast and deterministic.
+        run: cargo test --test self_deploy_canary --features canary-tests
+
       - name: Run full clippy gate (--all-targets --all-features --locked)
         # Runs AFTER cargo test on purpose: test compiles the entire crate
         # graph (test profile) into target/debug/deps. Clippy on `--all-targets`
@@ -171,6 +195,17 @@ jobs:
         # (~10s with hot cache) and lets install-real + e2e-dashboard skip
         # their own from-scratch builds entirely.
         run: cargo build --bin simard --locked
+
+      - name: coin-gym verify (LOCAL COIN Gym done-gate, issue #2713)
+        # Machine-checkable done-gate for the LOCAL COIN Gym goal
+        # (build-a-local-coin-benchmark-harness-and-a-self-improvement-loop).
+        # `coin-gym verify` runs the offline LOCAL harness acceptance self-check
+        # and exits non-zero if any criterion regresses, so the goal's
+        # done-criteria ("coin-gym verify exits 0") is expressed as a tracked,
+        # always-green CI gate the done-gate can rely on — not just prose. See
+        # docs/howto/run-the-coin-gym-harness.md ("Done-criteria for the LOCAL
+        # goal"). Incremental (~10s) — the crate is already compiled above.
+        run: cargo run --bin coin-gym --locked -- verify
 
       - name: Upload simard binary artifact
         # The real gates above (fmt, clippy, cargo test, the minimal-feature and
@@ -340,6 +375,29 @@ jobs:
         # Fails the build on any HIGH or CRITICAL advisory in the committed
         # package-lock.json (checked against the GitHub Advisory Database).
         run: npm audit --audit-level=high
+
+  scripts-tests:
+    # Unit tests for the CI helper scripts under .github/scripts (issue #4231):
+    # the resilient coverage-comment poster (retry/backoff on transient GitHub
+    # 5xx/429/network errors + non-fatal tolerance of a persistent outage, so a
+    # failed comment post never fails the required `coverage` check). Pure Node
+    # (node:test), no dependencies, lockfile-independent.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Run .github/scripts unit tests
+        run: node --test .github/scripts/*.test.mjs
 
   install-real:
     runs-on: ubuntu-latest

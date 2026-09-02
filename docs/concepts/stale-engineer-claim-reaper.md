@@ -17,6 +17,7 @@ doc_type: explanation
 status: implemented
 related:
   - ./engineer-claim-liveness-lease.md
+  - ./investigate-stale-engineer-before-reap.md
   - ../reference/claim-reaper-api.md
   - ../reference/engineer-claim-release-api.md
   - ../reference/engineer-worktree-sweep-safety.md
@@ -161,6 +162,8 @@ Overseer tick cadence.
 
 - [Engineer-Claim Liveness Lease](./engineer-claim-liveness-lease.md) — the
   release-on-termination + collision-reclaim lease this reaper complements.
+- [Investigate-Before-Reap](./investigate-stale-engineer-before-reap.md) — how the
+  `HeartbeatStale` branch now investigates + preserves evidence before any reclaim.
 - [Claim-Reaper API](../reference/claim-reaper-api.md) — the sweep function,
   liveness probe seam, cleanup seam, and config resolvers.
 - [Engineer-Claim Release & Reclaim API](../reference/engineer-claim-release-api.md)

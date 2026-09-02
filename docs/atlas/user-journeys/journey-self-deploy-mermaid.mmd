@@ -1,0 +1,34 @@
+sequenceDiagram
+  autonumber
+  participant Trigger as merged PR / target commit
+  participant Orchestrator as SelfDeployOrchestrator
+  participant Source as GitSourcePreparer
+  participant Build as self_relaunch::canary
+  participant Safe as safe_update
+  participant Memory as LibraryCognitiveMemory
+  participant Restart as DaemonRestarter
+  participant Health as self_deploy::health
+
+  Trigger->>Orchestrator: run(target_commit)
+  Orchestrator->>Source: prepare(target_commit)
+  Source->>Source: validate full SHA and origin transport
+  Source->>Source: fetch commit if missing
+  Source->>Source: git checkout --detach target_commit
+  Source-->>Orchestrator: prepared source repo
+  Orchestrator->>Build: build_self_deploy_candidate(repo, warm target dir)
+  Build-->>Orchestrator: candidate binary path
+  Orchestrator->>Safe: run_pretest(candidate)
+  Orchestrator->>Memory: open live store and capture baseline facts
+  Orchestrator->>Safe: take protective backup(memory + binary)
+  Orchestrator->>Safe: drain_to_quiescence()
+  Orchestrator->>Safe: find/reap engineer orphans
+  Orchestrator->>Safe: atomic_install(candidate, install_path)
+  Orchestrator->>Restart: restart(systemd or exec handover)
+  Orchestrator->>Health: run_self_health_probe(target_commit, baseline)
+  alt healthy
+    Health-->>Orchestrator: SelfHealthReport healthy
+    Orchestrator-->>Trigger: SelfDeployOutcome
+  else unhealthy or restart failure
+    Orchestrator->>Safe: do_rollback(reason)
+    Safe-->>Orchestrator: RolledBack or RollbackFailed
+  end

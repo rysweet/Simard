@@ -1,0 +1,72 @@
+graph TD
+    Overseer["overseer meta OODA"]
+    OverseerCaps["overseer::capabilities"]
+    OverseerWiring["overseer::wiring"]
+    OverseerMerge["overseer::merge_ops"]
+    OverseerLaunch["overseer::launch"]
+    Stewardship["stewardship"]
+    EngineerLoop["engineer_loop"]
+    AgentSpawn["engineer_loop::agent_spawn"]
+    EngineerWorktree["engineer_worktree"]
+    GoalAssignments["agent_goal_assignment"]
+    BaseTypes["base_types"]
+    SessionBuilder["session_builder"]
+    Copilot["base_type_copilot"]
+    RustyClawd["base_type_rustyclawd"]
+    PendingSdk["base_type_pending_sdk"]
+    Gym["gym"]
+    CoinGym["coin_gym"]
+    GymScoring["gym_scoring"]
+    GymHistory["gym_history"]
+    SelfImprove["self_improve"]
+    SelfImproveExec["self_improve_executor"]
+    SelfDeploy["self_deploy"]
+    SelfRelaunch["self_relaunch"]
+    SafeUpdate["safe_update"]
+    BuildLock["build_lock"]
+    Review["review / review_pipeline"]
+    SupplyChain["supply_chain_steward"]
+    GoalCuration["goal_curation"]
+    MemoryIpc["memory_ipc"]
+    CognitiveMemory["cognitive_memory"]
+    Telemetry["self_metrics / telemetry"]
+
+    Overseer --> OverseerCaps
+    Overseer --> OverseerWiring
+    OverseerWiring --> OverseerLaunch
+    OverseerWiring --> OverseerMerge
+    OverseerWiring --> Stewardship
+    OverseerWiring --> GoalCuration
+    OverseerWiring --> CognitiveMemory
+    OverseerWiring --> SelfDeploy
+    OverseerWiring --> Telemetry
+
+    EngineerLoop --> AgentSpawn
+    EngineerLoop --> GoalAssignments
+    EngineerLoop --> MemoryIpc
+    EngineerLoop --> GoalCuration
+    EngineerLoop --> EngineerWorktree
+    AgentSpawn --> SessionBuilder
+    SessionBuilder --> BaseTypes
+    BaseTypes --> Copilot
+    BaseTypes --> RustyClawd
+    BaseTypes --> PendingSdk
+    AgentSpawn --> Review
+
+    Gym --> GymScoring
+    Gym --> GymHistory
+    CoinGym --> GymScoring
+    CoinGym --> GymHistory
+    SelfImprove --> Gym
+    SelfImprove --> GymScoring
+    SelfImprove --> Review
+    SelfImproveExec --> SelfImprove
+    SelfImproveExec --> EngineerLoop
+    SelfDeploy --> SafeUpdate
+    SelfDeploy --> SelfRelaunch
+    SelfDeploy --> BuildLock
+    SelfDeploy --> EngineerWorktree
+    SupplyChain --> Stewardship
+    SupplyChain --> Review
+    Review --> CognitiveMemory
+    SelfImprove --> CognitiveMemory

@@ -450,6 +450,15 @@ mod tests {
             })
         }
 
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
+            Ok(crate::ooda_brain::PerGoalAction::Continue {
+                reason: "stub".into(),
+            })
+        }
+
         fn decide_idea_dedup(&self, _ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
             self.dedup_calls.fetch_add(1, Ordering::Relaxed);
             match &self.dedup {

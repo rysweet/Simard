@@ -37,7 +37,7 @@ pub use operations::{
 pub use types::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalEdge,
     GoalEdgeType, GoalNode, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX, WipRef,
-    description_marks_standing,
+    description_marks_research, description_marks_standing,
 };
 
 pub use decompose::{
@@ -59,9 +59,12 @@ pub use completion_gate::{
 
 pub use no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
-    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_bare_no_progress_block,
-    is_no_progress_marker, no_progress_blocked_reason, no_progress_blocked_reason_with_why,
-    obsolescence_reason, resolution_for_why, resolve_no_progress, verify_stuck_goal,
+    NO_PROGRESS_QUARANTINE_MARKER_KIND, NO_PROGRESS_QUARANTINE_MARKER_REF_ID, NoProgressResolution,
+    NoProgressTracker, SURFACED_INVESTIGATION_FAILURE_LIMIT, StuckGoalDisposition,
+    humanize_block_reason, is_bare_no_progress_block, is_no_progress_marker, is_quarantine_ref,
+    is_quarantined, no_progress_blocked_reason, no_progress_blocked_reason_with_why,
+    obsolescence_reason, quarantine_marker, resolution_for_why, resolve_no_progress,
+    verify_stuck_goal,
 };
 
 pub use no_progress_why::{Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner};
@@ -88,6 +91,12 @@ mod tests_no_progress_breaker;
 // WHY-aware block-reason renderer, and the class -> resolution map).
 #[cfg(test)]
 mod tests_no_progress_why;
+// process_health (TDD): pure-policy tests for the OODA breaker terminal-quarantine
+// rung that ends the UNCLEAR-CRITERIA churn — the additive `surfaced_failures`
+// argument on `resolution_for_why`, the `QuarantineTerminal` variant, and the
+// durable injection-safe quarantine marker helpers.
+#[cfg(test)]
+mod tests_quarantine;
 // Issue #17 (TDD): pure primitives of the already-blocked re-investigation pass
 // — the `is_bare_no_progress_block` deterministic rail and the
 // `NoProgressTracker` persisted `reinvestigated` dedupe set (lifecycle + serde).

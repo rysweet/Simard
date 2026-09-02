@@ -1,0 +1,42 @@
+// Simard metacognitive atlas — Diagram 5: representative data flow (metacognition).
+//
+// Code-first canonical path for one thread. Symbols:
+//   - RECIPE const .............. src/cognitive_threads/threads/metacognition.rs
+//                                 `pub const RECIPE = "metacognition-appraise"`
+//   - RecipeRunnerInvoker ....... src/cognitive_threads/recipe_rail.rs
+//   - policy() (cadence) ........ SchedulePolicy::Interval, metacognition.rs
+//   - run_reflective_thread() ... src/cognitive_threads/recipe_rail.rs
+//   - ThreadReasoningRecord ..... src/ooda_brain/thread_reasoning_record.rs
+//                                 (schema `thread-reasoning/v1`)
+//   - ThreadOutcome.summary ..... src/cognitive_threads/thread.rs
+//
+// Render (optional, CI-safe): dot -Tsvg metacognition-flow.dot -o metacognition-flow.svg
+digraph simard_metacognition_flow {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", shape=box, style=rounded];
+    edge [fontname="Helvetica"];
+    labelloc="t";
+    label="Representative data flow — metacognition thread: recipe → record → rail → ThreadOutcome.summary";
+
+    recipe   [label="RECIPE const\n\"metacognition-appraise\"\nthreads/metacognition.rs",
+              color="#5E81AC", penwidth=2];
+    yaml     [label="prompt_assets/simard/recipes/\nmetacognition-appraise.yaml",
+              shape=folder];
+    policy   [label="policy()\nSchedulePolicy::Interval\n(cadence)"];
+    invoker  [label="RecipeRunnerInvoker\nrecipe_rail.rs"];
+    run      [label="run_reflective_thread(RECIPE)\nrecipe_rail.rs"];
+    record   [label="ThreadReasoningRecord\nschema thread-reasoning/v1\n(0o600, identity-bound)\nooda_brain/thread_reasoning_record.rs",
+              shape=note, color="#EBCB8B", style="filled,rounded", fillcolor="#FFF6D6"];
+    rail     [label="thin Rust rail\nread_verified_thread_reasoning()\n(fail-closed R1–R7)"];
+    outcome  [label="ThreadOutcome.summary\n(daemon log = reasoning, never \"<recipe>: ok\")\nthread.rs",
+              color="#A3BE8C", style="filled,rounded", fillcolor="#E8F0DE"];
+
+    recipe -> yaml    [label="backed by", style=dashed];
+    policy -> run     [label="due? Interval cadence"];
+    recipe -> run     [label="names recipe"];
+    run -> invoker    [label="invokes"];
+    invoker -> record [label="recipe ACTS: writes typed record"];
+    record -> rail    [label="reader verifies"];
+    rail -> outcome   [label="surfaces reasoning_summary"];
+}

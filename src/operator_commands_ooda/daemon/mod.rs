@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
@@ -27,6 +27,9 @@ mod brains;
 
 mod config;
 pub use config::DaemonDashboardConfig;
+
+mod signal_embed;
+use signal_embed::spawn_embedded_signal_channel;
 
 /// Seed the durable, brain-relative OODA cycle counter for a starting daemon
 /// (issue #1).
@@ -55,6 +58,64 @@ fn seed_cycle_count(persistent_cycle_count: u32, state_root: &std::path::Path) -
     } else {
         0
     }
+}
+
+fn clear_stale_draining_flag_at_boot(state_root: &std::path::Path) {
+    // Engineer dispatch checks safe_update::default_state_dir(), which is
+    // `<state_root>/state` for the default daemon root; clear that canonical
+    // gate even when the daemon was booted with a different state_root override.
+    let state_dir = crate::safe_update::default_state_dir();
+    clear_stale_draining_flag_at_boot_in(&state_dir, state_root);
+}
+
+fn clear_stale_draining_flag_at_boot_in(state_dir: &std::path::Path, log_root: &std::path::Path) {
+    let should_clear = match crate::safe_update::state::read_status(state_dir) {
+        Ok(None) => true,
+        Ok(Some(status)) => status.phase != crate::safe_update::state::UpgradePhase::ExecHandover,
+        Err(e) => {
+            daemon_log(
+                log_root,
+                &format!(
+                    "[simard] boot: could not read upgrade status; preserving draining.flag: {e}"
+                ),
+            );
+            false
+        }
+    };
+    if !should_clear {
+        return;
+    }
+
+    let flag = crate::safe_update::draining_flag_path(state_dir);
+    if !flag.exists() {
+        return;
+    }
+    match crate::safe_update::drain::unmark_draining(state_dir) {
+        Ok(()) => daemon_log(
+            log_root,
+            "[simard] boot: cleared stale draining.flag (no ExecHandover upgrade in flight) — resuming engineer dispatch",
+        ),
+        Err(e) => daemon_log(
+            log_root,
+            &format!("[simard] boot: failed to clear stale draining.flag; continuing boot: {e}"),
+        ),
+    }
+}
+
+fn purge_actor_sessions_on_startup(
+    state_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    let ledger_parent = ledger_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("typed-OODA ledger path has no parent directory"))?;
+    std::fs::create_dir_all(ledger_parent)?;
+    let handler = crate::typed_ooda::CapabilityHandler::open(
+        &ledger_path,
+        crate::typed_ooda::CapabilityPolicy::new("daemon-startup"),
+    )?;
+    handler.purge_actor_sessions()?;
+    Ok(())
 }
 
 /// Resolve the identity-scoped cognition (#3125) for the daemon from the
@@ -167,6 +228,45 @@ fn fail_closed_identity_cognition(identity_name: &str) -> crate::ooda_loop::Iden
 ///
 /// If no LLM adapter is available (e.g. no API key, no Copilot SDK),
 /// the daemon exits with an error — no silent degradation to memory-only mode.
+/// Interval between off-path cognitive-memory statistics-snapshot refreshes
+/// (issue #4756). Short enough to keep the rpc-health canary's reading current,
+/// long enough to be negligible load (`try_lock` + a cheap fold).
+const STATS_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Spawn a lightweight background thread that periodically refreshes the
+/// cognitive-memory statistics snapshot OFF the heavy read lock (issue #4756).
+///
+/// [`CognitiveMemoryOps::refresh_stats_snapshot`] recomputes via `try_lock`, so
+/// this thread never blocks on `inner` and can never reintroduce the
+/// lock-starvation that timed out the rpc-health gate; it merely bounds how
+/// stale the snapshot `get_statistics` serves can get between reads. Holds a
+/// [`Weak`] handle so the thread exits on its own once the daemon drops its
+/// memory (no lifetime leak in tests or on shutdown). A spawn failure is traced
+/// and tolerated: the snapshot is still primed and `get_statistics` refreshes
+/// inline on every read, so the canary path stays correct.
+fn spawn_stats_snapshot_refresher(memory: std::sync::Weak<dyn CognitiveMemoryOps>) {
+    let spawned = std::thread::Builder::new()
+        .name("stats-snapshot-refresher".to_string())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(STATS_SNAPSHOT_REFRESH_INTERVAL);
+                let Some(memory) = memory.upgrade() else {
+                    // Daemon dropped its memory handle — nothing left to refresh.
+                    break;
+                };
+                memory.refresh_stats_snapshot();
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(
+            target: "simard::memory",
+            error = %e,
+            "failed to spawn stats-snapshot refresher (snapshot still primed; \
+             get_statistics refreshes inline on read)",
+        );
+    }
+}
+
 pub fn run_ooda_daemon(
     max_cycles: u32,
     state_root_override: Option<PathBuf>,
@@ -197,6 +297,8 @@ pub fn run_ooda_daemon(
     let state_root = state_root_override.unwrap_or_else(memory_ipc::default_state_root);
 
     std::fs::create_dir_all(&state_root)?;
+    purge_actor_sessions_on_startup(&state_root)?;
+    clear_stale_draining_flag_at_boot(&state_root);
 
     // Freshness gate at daemon startup (issue #439): belt-and-suspenders run of
     // `amplihack update` under the same cross-process lock and TTL the per-spawn
@@ -255,6 +357,16 @@ pub fn run_ooda_daemon(
     // fell through to a read-only handle when both IPC and direct open
     // failed (issue #1590 follow-up).
     memory_ipc::register_in_process_writer(state_root.clone(), Arc::clone(&shared_mem));
+
+    // Issue #4756: prime the cognitive-memory statistics snapshot synchronously
+    // BEFORE the memory IPC socket starts accepting, so the very first canary
+    // `memory stats` RPC is served from a populated, in-well-under-a-second
+    // snapshot rather than the heavy `inner` lock that starved the rpc-health
+    // probe past its 30s window and reddened every self-deploy canary. Then run
+    // a lightweight refresher that recomputes the snapshot off the read path
+    // (via `try_lock`, never blocking) so its staleness stays bounded.
+    shared_mem.refresh_stats_snapshot();
+    spawn_stats_snapshot_refresher(Arc::downgrade(&shared_mem));
 
     // Spawn the memory IPC server so meetings and other clients can share
     // this live DB handle without their own locks conflicting. The socket
@@ -563,7 +675,14 @@ pub fn run_ooda_daemon(
     // the highest persisted `cycle_<N>.json` for a brain upgraded from a build
     // that never persisted the field, so it never dips to #1 for one deploy.
     state.cycle_count = seed_cycle_count(persistent.cycle_count, &state_root);
-    let config = OodaConfig::default();
+    // The daemon is the live production OODA loop, so it opts in to proactive
+    // resource cleanup (disk/process reclamation). This side effect walks the
+    // real filesystem and must never run under cargo-test, hence it is off in
+    // `OodaConfig::default()` and enabled explicitly here. See `OodaConfig`.
+    let config = OodaConfig {
+        run_resource_cleanup: true,
+        ..OodaConfig::default()
+    };
 
     // Issue #1197: sweep orphaned engineer worktrees from prior crashed
     // daemons before starting the loop, so disk pressure doesn't accumulate.
@@ -630,6 +749,17 @@ pub fn run_ooda_daemon(
             "[simard] OODA daemon: dashboard disabled (use --no-dashboard to suppress)",
         );
     }
+    // -----------------------------------------------------------------------
+
+    // --- embedded Signal operator channel ----------------------------------
+    // Fold the Signal channel into THIS daemon instead of a separate
+    // `simard-signal.service` process (converge-to-single-daemon). It runs on a
+    // dedicated background thread with a supervised reconnect-with-backoff loop,
+    // panic-isolated so it can never crash or stall the authoritative OODA
+    // cycle. DEFAULT-ON (opt-out via SIMARD_SIGNAL_ENABLED); dormant until a
+    // usable `[signal]` config is present. The guard is kept alive for the
+    // daemon's lifetime; the thread reads the shared `shutdown` flag.
+    let _embedded_signal = spawn_embedded_signal_channel(&state_root, Arc::clone(&shutdown));
     // -----------------------------------------------------------------------
 
     // Capture the binary mtime at startup so we can detect in-place upgrades.
@@ -778,17 +908,21 @@ pub fn run_ooda_daemon(
     // cadence and side-effects are byte-for-byte preserved; the scheduler is
     // invoked only AFTER the inline cycle and never gates it.
     //
-    // Two INDEPENDENT gates share the one runtime:
-    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-OFF) owns the maintenance +
-    //     engineer-log threads — their gating and timing stay unchanged.
+    // Two INDEPENDENT gates share the one runtime (issue #4845 — both default-ON
+    // opt-out now):
+    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-ON, opt-out) owns the
+    //     maintenance + engineer-log + ten reflective threads. It is enabled
+    //     UNLESS set to an explicit falsy token (0/false/no/off).
     //   * SIMARD_CREATIVE_IDEAS_ENABLED (default-ON, opt-out) owns the Creative
     //     Ideas generator (issue #2647), consistent with the default-ON
     //     Overseer/Journal threads — so it runs on a stock deployment WITHOUT
     //     the generic master switch.
-    let cognitive_threads_enabled = std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
-        .ok()
-        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false);
+    let cognitive_threads_enabled = crate::cognitive_threads::recipe_rail::env_gate_open(
+        std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
+            .ok()
+            .as_deref(),
+        None,
+    );
     let creative_ideas_cfg = crate::creative_ideas::CreativeIdeasConfig::from_env();
     let creative_ideas_enabled = creative_ideas_cfg.enabled();
     let cognitive_repo_root = memories.repo_root.clone();
@@ -813,8 +947,11 @@ pub fn run_ooda_daemon(
     };
     let mut mind = crate::cognitive_threads::Mind::new();
     if cognitive_runtime.is_some() {
-        // Maintenance + engineer-log stay behind the generic master switch so
-        // their default-OFF gating and timing are unchanged.
+        // Maintenance + engineer-log + the ten reflective threads register under
+        // the DEFAULT-ON master gate (issue #4845). Each thread's own per-thread
+        // gate (default-ON opt-out) decides whether it actually ticks; the
+        // scheduler skips any that report `!enabled()`, so registration is safe
+        // and observable even when a thread is individually opted out.
         if cognitive_threads_enabled {
             mind.register(Box::new(
                 crate::cognitive_threads::MaintenanceThread::from_env(),
@@ -822,6 +959,14 @@ pub fn run_ooda_daemon(
             mind.register(Box::new(
                 crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
             ));
+            // Issue #5 + #4845: the ten reflective threads. Additive and now
+            // ENABLED by default behind each thread's own opt-out gate. Recipes
+            // over new plumbing.
+            crate::cognitive_threads::threads::register_reflective_threads(
+                &mut mind,
+                &cognitive_repo_root,
+                &state_root,
+            );
         }
         // Creative Ideas generator thread (issue #2647): a divergent
         // idea-generation background thread, default-ON opt-out via
@@ -845,6 +990,29 @@ pub fn run_ooda_daemon(
                 mind.len()
             ),
         );
+        // Per-thread startup roster (issue #4845): one line per registered
+        // thread so `ooda.log` shows exactly which threads are ENABLED (with
+        // their cadence) or DISABLED (operator opt-out) — no thread is invisible.
+        for h in mind.health() {
+            let line = if h.enabled {
+                match h.cadence_secs {
+                    Some(secs) => format!(
+                        "[simard] OODA daemon: cognitive thread '{}' ENABLED (interval={}s)",
+                        h.id, secs
+                    ),
+                    None => format!(
+                        "[simard] OODA daemon: cognitive thread '{}' ENABLED (reactive)",
+                        h.id
+                    ),
+                }
+            } else {
+                format!(
+                    "[simard] OODA daemon: cognitive thread '{}' DISABLED (operator opt-out)",
+                    h.id
+                )
+            };
+            daemon_log(&state_root, &line);
+        }
     }
     // Creative-ideas startup line (mirrors the Journal thread) — logged
     // unconditionally so the operator can confirm the gate from journalctl.
@@ -883,6 +1051,14 @@ pub fn run_ooda_daemon(
     let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
+    // #893: running count of CONSECUTIVE transient (self-healable) cycle
+    // failures, owned by the daemon across ticks (each tick rebuilds the
+    // Overseer on a fresh thread). Reset to 0 on any completed tick; incremented
+    // on a transient failure; left unchanged on a fatal one. Bounded by
+    // `overseer_transient_ceiling` — beyond it the meta-thread escalates from
+    // "backoff" to "erroring" so a hard-down dependency can't hide forever.
+    let overseer_consecutive_transient = Arc::new(AtomicU32::new(0));
+    let overseer_transient_ceiling = crate::overseer::config::overseer_transient_backoff_ceiling();
     let overseer_repo_root = memories.repo_root.clone();
     daemon_log(
         &state_root,
@@ -927,6 +1103,20 @@ pub fn run_ooda_daemon(
             }
         ),
     );
+
+    // ── Cognitive-thread pass overlap guard (issue #5) ──────────────────
+    // The reflective threads invoke agentic recipes via `recipe-runner-rs`,
+    // which are minutes-long and BLOCKING (`Command::output`). Running the
+    // scheduler pass inline on this loop thread would delay the NEXT
+    // authoritative OODA cycle by the full recipe duration — the exact stall the
+    // Overseer and Journal threads deliberately avoid. So the cognitive pass
+    // runs on a background thread (below) AFTER the authoritative OODA cycle, and
+    // this guard drops a tick if the previous pass is still running. `Mind` is
+    // shared behind a mutex so the background pass can mutate its scheduler
+    // bookkeeping while the main loop only ever `try_lock`s it for a read-only,
+    // never-blocking health snapshot.
+    let mind = Arc::new(std::sync::Mutex::new(mind));
+    let cognitive_pass_running = Arc::new(AtomicBool::new(false));
 
     let mut cycles_run = 0u32;
 
@@ -1021,18 +1211,18 @@ pub fn run_ooda_daemon(
                     ),
                 );
             }
-            // Tier 2: recipe-based LLM cleanup (moderate pressure, nuanced decisions)
+            // Tier 2: agentic disk-health recipe (moderate pressure). The recipe
+            // now *acts* through the `simard disk` tool (which enforces the
+            // disk-safety heuristic internally) and prints no envelope — this is
+            // a thin exit-status trigger (issue #4722). We log success/failure by
+            // the recipe's exit status; there is no report to parse.
             match crate::disk_health::run_disk_health_check(&memories.repo_root, &state_root, None)
             {
-                Ok(report) => {
-                    daemon_log(&state_root, &format!("[simard] {}", report.summary()));
-                    if report.cleanup_performed() {
-                        daemon_log(
-                            &state_root,
-                            &format!("[simard] disk cleanup actions: {:?}", report.actions_taken),
-                        );
-                    }
-                }
+                Ok(true) => daemon_log(&state_root, "[simard] disk health recipe: OK"),
+                Ok(false) => daemon_log(
+                    &state_root,
+                    "[simard] WARN: disk health recipe reported failure (non-zero exit)",
+                ),
                 Err(e) => {
                     daemon_log(
                         &state_root,
@@ -1260,6 +1450,39 @@ pub fn run_ooda_daemon(
                     &format!("[simard] OODA cycle: memory cache sync failed: {e}"),
                 );
             }
+            // Issue #4232: reap any in-flight engineer whose goal was
+            // removed/completed (tombstoned) since the last cycle. Tombstone-
+            // gated, never a wall-clock timeout — a healthy engineer whose goal
+            // is still on the board is never touched. Reuses `kill_subordinate`
+            // (SIGTERM) + the existing worktree/claim cleanup chokepoint. Runs
+            // here, inside the block where `cycle_tombstones` is in scope, so it
+            // reuses the already-loaded tombstone set. The registry disk-read +
+            // JSON parse is gated behind a cheap in-memory check so the common
+            // steady-state cycle (nothing tombstoned) pays no extra I/O.
+            let reaped_goal_ids = if crate::ooda_actions::advance_goal::has_tombstoned_engineer(
+                &state,
+                &cycle_tombstones,
+            ) {
+                let subagent_registry = crate::subagent_sessions::load();
+                crate::ooda_actions::advance_goal::reap_engineers_for_tombstoned_goals(
+                    &mut state,
+                    &cycle_tombstones,
+                    &subagent_registry,
+                )
+            } else {
+                Vec::new()
+            };
+            if !reaped_goal_ids.is_empty() {
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] OODA cycle: reaped {} in-flight engineer(s) for \
+                         tombstoned goal(s): {}",
+                        reaped_goal_ids.len(),
+                        reaped_goal_ids.join(", "),
+                    ),
+                );
+            }
         }
         // Snapshot the pre-cycle active ids so the post-cycle commit can
         // tombstone any goal that left the board (archived / dropped / done).
@@ -1287,6 +1510,10 @@ pub fn run_ooda_daemon(
                 "cycle_number": state.cycle_count + 1,
                 "status": "running",
                 "cycle_phase": state.current_phase.to_string(),
+                // Additive, observability-only (issue #4929): stamp the daemon's
+                // own PID so `simard status` can sample /proc/<pid> RSS + CPU
+                // instead of rendering "daemon CPU / RSS absent".
+                "main_pid": std::process::id(),
                 "cycle_start_epoch": cycle_start_epoch,
                 "interval_secs": interval_secs,
                 "actions_taken": format!("Starting cycle #{}", state.cycle_count + 1),
@@ -1413,6 +1640,9 @@ pub fn run_ooda_daemon(
                         "cycle_number": state.cycle_count,
                         "status": "healthy",
                         "cycle_phase": "sleep",
+                        // Additive, observability-only (issue #4929): see the
+                        // cycle-start heartbeat above.
+                        "main_pid": std::process::id(),
                         "cycle_start_epoch": cycle_start_epoch,
                         "cycle_duration_secs": cycle_elapsed.as_secs(),
                         "interval_secs": interval_secs,
@@ -1430,6 +1660,35 @@ pub fn run_ooda_daemon(
                 // Collect self-improvement metrics at end of each cycle.
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
+                }
+
+                // Bounded WAL-retention cadence (issue #4929): checkpoint the
+                // cognitive store every N cycles so the LadybugDB WAL is
+                // compacted into the main file regularly instead of growing for
+                // the daemon's whole uptime (which inflates replay work and the
+                // `cognitive.wal.corrupt` rotation surface). Adapter-scoped —
+                // `amplihack-memory-lib` is untouched. Failures are surfaced via
+                // structured tracing, never silently swallowed.
+                {
+                    const WAL_CHECKPOINT_EVERY_CYCLES: u32 = 20;
+                    if state.cycle_count > 0
+                        && state
+                            .cycle_count
+                            .is_multiple_of(WAL_CHECKPOINT_EVERY_CYCLES)
+                    {
+                        match shared_mem.checkpoint() {
+                            Ok(()) => tracing::debug!(
+                                cycle = state.cycle_count,
+                                cadence = WAL_CHECKPOINT_EVERY_CYCLES,
+                                "cognitive-store WAL checkpoint (bounded retention cadence)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                cycle = state.cycle_count,
+                                error = %e,
+                                "cognitive-store WAL checkpoint failed; WAL retention not compacted this cadence"
+                            ),
+                        }
+                    }
                 }
 
                 // Issue #2528: emit unified cycle telemetry (OTel + in-process
@@ -1498,6 +1757,18 @@ pub fn run_ooda_daemon(
                             g.supersedes_edges as i64,
                             &[(names::ATTR_TYPE, "SUPERSEDES")],
                         );
+                        // Emit the durable graph-memory grounding-coverage
+                        // self-metric from the SAME snapshot (no extra store
+                        // read): fraction of semantic facts connected into the
+                        // DERIVES_FROM provenance graph. Turns a grounding
+                        // regression — facts entering semantic memory without a
+                        // provenance edge — into a comparable, regressable
+                        // `metrics.jsonl` series instead of only raw edge-count
+                        // gauges. Best-effort; no-op on an empty store.
+                        crate::cognitive_memory::metrics::record_provenance_coverage_metric(
+                            g.facts_with_provenance,
+                            g.facts_total,
+                        );
                     }
                     // Flush the metrics snapshot with the per-cycle enrichment
                     // rollup section attached (issue #2942) so the dashboard's
@@ -1527,35 +1798,81 @@ pub fn run_ooda_daemon(
 
         cycles_run += 1;
 
-        // ── Cognitive-thread scheduler tick (issue #2419) ───────────────
-        // Runs AFTER the authoritative OODA cycle so OODA is never starved.
-        // Background threads (maintenance, engineer-log analysis) run on their
-        // own cadence under the `Mind`'s priority/failure-isolation budget; a
-        // thread erroring or panicking is caught and backed off, never taking
-        // down the daemon or the OODA loop. No-op unless explicitly enabled.
-        if let Some(ref rt) = cognitive_runtime {
+        // ── Cognitive-thread scheduler tick (issue #2419 / #5) ──────────
+        // Runs AFTER the authoritative OODA cycle so OODA is never starved, and
+        // on a BACKGROUND thread — never inline — because the reflective threads
+        // invoke minutes-long blocking agentic recipes; running them on this loop
+        // thread would delay the next OODA cycle by the full recipe duration. An
+        // overlap guard drops this tick if the previous cognitive pass is still
+        // running, so passes never stack. A thread erroring or panicking is
+        // caught and backed off inside `run_due`, never taking down the daemon or
+        // the OODA loop. No-op unless explicitly enabled.
+        if let Some(ref rt) = cognitive_runtime
+            && cognitive_pass_running
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
             let now_epoch = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let mut ctx = crate::cognitive_threads::ThreadContext {
-                state_root: &state_root,
-                repo_root: &cognitive_repo_root,
-                memory: shared_mem.as_ref(),
-                runtime: rt.handle().clone(),
-                shutdown: &shutdown,
-                now_epoch,
-                dry_run: false,
-            };
-            for outcome in mind.run_due(&mut ctx) {
-                if outcome.ran {
-                    daemon_log(
-                        &state_root,
-                        &format!("[simard] cognitive-thread: {}", outcome.summary),
-                    );
-                }
+            let running = Arc::clone(&cognitive_pass_running);
+            let mind_for_pass = Arc::clone(&mind);
+            let state_root_for_pass = state_root.clone();
+            let repo_root_for_pass = cognitive_repo_root.clone();
+            let mem_for_pass = Arc::clone(&shared_mem);
+            let shutdown_for_pass = Arc::clone(&shutdown);
+            let rt_handle = rt.handle().clone();
+            let spawn = std::thread::Builder::new()
+                .name("cognitive-threads".to_string())
+                .spawn(move || {
+                    // Always clear the overlap guard, even on panic.
+                    struct ClearOnDrop(Arc<AtomicBool>);
+                    impl Drop for ClearOnDrop {
+                        fn drop(&mut self) {
+                            self.0.store(false, Ordering::SeqCst);
+                        }
+                    }
+                    let _clear = ClearOnDrop(running);
+
+                    // Build the context from owned/Arc'd data so it outlives
+                    // the pass on this thread (the references point at these
+                    // locals). OODA (Critical) is NOT a Mind thread here — it
+                    // runs on the authoritative inline cycle above — so every
+                    // thread on this Mind is non-critical background work.
+                    let mut ctx = crate::cognitive_threads::ThreadContext {
+                        state_root: &state_root_for_pass,
+                        repo_root: &repo_root_for_pass,
+                        memory: mem_for_pass.as_ref(),
+                        runtime: rt_handle,
+                        shutdown: &shutdown_for_pass,
+                        now_epoch,
+                        dry_run: false,
+                    };
+                    // A poisoned lock means a prior pass panicked OUTSIDE
+                    // run_due's per-thread catch_unwind (rare); skip this pass
+                    // rather than propagate — the next tick retries.
+                    let outcomes = match mind_for_pass.lock() {
+                        Ok(mut m) => m.run_due(&mut ctx),
+                        Err(_) => Vec::new(),
+                    };
+                    for outcome in outcomes {
+                        if outcome.ran {
+                            daemon_log(
+                                &state_root_for_pass,
+                                &format!("[simard] cognitive-thread: {}", outcome.summary),
+                            );
+                        }
+                    }
+                });
+            if spawn.is_err() {
+                // Could not spawn the pass thread; clear the guard so the next
+                // tick can retry (the ClearOnDrop guard never armed).
+                cognitive_pass_running.store(false, Ordering::SeqCst);
             }
         }
+        // else: previous cognitive pass still running — drop this tick so the
+        // OODA loop never waits on a long recipe.
 
         // ── Acting Overseer meta-OODA tick (issue #2539 wiring) ─────────
         // DEFAULT-ON. Fires on its own cadence, AFTER the authoritative OODA
@@ -1573,6 +1890,8 @@ pub fn run_ooda_daemon(
                     .is_ok()
             {
                 let running = Arc::clone(&overseer_tick_running);
+                let consecutive_transient_counter = Arc::clone(&overseer_consecutive_transient);
+                let transient_ceiling = overseer_transient_ceiling;
                 let mem_for_tick = Arc::clone(&shared_mem);
                 let repo_root_for_tick = overseer_repo_root.clone();
                 let state_root_for_tick = state_root.clone();
@@ -1586,8 +1905,10 @@ pub fn run_ooda_daemon(
                 // Capture the cognitive-thread heartbeats + feed context on the
                 // main loop thread (before the tick spawns) so the Overseer
                 // activity feed (#2419) lists every operator/steward thread, not
-                // just the Overseer meta-thread. Cheap, additive, read-only.
-                let thread_healths = mind.health();
+                // just the Overseer meta-thread. `try_lock` so a long in-flight
+                // cognitive pass never blocks this loop — the feed simply omits
+                // cognitive heartbeats for that tick (advisory, read-only).
+                let thread_healths = mind.try_lock().map(|m| m.health()).unwrap_or_default();
                 let feed_cadence_secs = crate::overseer::config::overseer_interval_secs();
                 let feed_author_login = crate::overseer::config::overseer_author_login();
                 let spawn = std::thread::Builder::new()
@@ -1609,7 +1930,14 @@ pub fn run_ooda_daemon(
                             repo_root_for_tick,
                             state_root_for_tick.clone(),
                         );
-                        let mut overseer = overseer.with_gap_scan_enabled(gap_scan_due);
+                        let mut overseer = overseer
+                            .with_gap_scan_enabled(gap_scan_due)
+                            // Cognitive-thread oversight (#4786): inject this
+                            // tick's single-source-of-truth thread registry
+                            // (name + purpose + cadence) captured from
+                            // `Mind::health()` above, so the deterministic
+                            // oversight pass can reason about each thread.
+                            .with_thread_registry(thread_healths.clone());
                         let (report, problem_entries) =
                             crate::overseer::run_overseer_tick_isolated_detailed(&mut overseer);
                         daemon_log(
@@ -1620,7 +1948,8 @@ pub fn run_ooda_daemon(
                                  held={} goals_unblocked={} goals_escalated={} \
                                  memory_recalls={} memory_writes={} memory_errors={} \
                                  workstream_gaps_detected={} workstream_gaps_suppressed={} \
-                                 errors={} panicked={} ({}ms)",
+                                 workstream_gaps_reused_existing={} \
+                                 errors={} panicked={} cycle_failed={} ({}ms)",
                                 report.problems,
                                 report.issues_filed,
                                 report.recipes_launched,
@@ -1635,8 +1964,10 @@ pub fn run_ooda_daemon(
                                 report.memory_errors,
                                 report.workstream_gaps_detected,
                                 report.workstream_gaps_suppressed,
+                                report.workstream_gaps_reused_existing,
                                 report.errors,
                                 report.panicked,
+                                report.cycle_failed,
                                 report.duration_ms,
                             ),
                         );
@@ -1650,10 +1981,26 @@ pub fn run_ooda_daemon(
                         // the tick already completed — so it is logged and the
                         // daemon continues.
                         let mut feed_threads = Vec::with_capacity(thread_healths.len() + 1);
+                        // #893: update the consecutive-transient self-heal
+                        // counter from this tick, then derive the meta-thread's
+                        // health. Reset on a completed tick; increment on a
+                        // transient failure (count INCLUDES this tick); leave
+                        // unchanged on a fatal failure.
+                        let cycle_failed = report.panicked || report.cycle_failed;
+                        let consecutive_transient = if !cycle_failed {
+                            consecutive_transient_counter.store(0, Ordering::SeqCst);
+                            0
+                        } else if report.transient_cycle_failure {
+                            consecutive_transient_counter.fetch_add(1, Ordering::SeqCst) + 1
+                        } else {
+                            consecutive_transient_counter.load(Ordering::SeqCst)
+                        };
                         feed_threads.push(
                             crate::overseer::activity::OverseerThreadStatus::overseer_meta(
                                 feed_cadence_secs,
-                                !report.panicked && report.errors == 0,
+                                &report,
+                                consecutive_transient,
+                                transient_ceiling,
                             ),
                         );
                         for h in &thread_healths {
@@ -1762,6 +2109,50 @@ pub fn run_ooda_daemon(
                             Err(_) => daemon_log(
                                 &state_root_for_journal,
                                 "[simard] WARN: journal tick panicked (isolated; loop continues)",
+                            ),
+                        }
+
+                        // ── Past-day merged-PR reconciliation (#4225) ───────
+                        // Once a day passes its entry freezes, so a PR that
+                        // merged after the day's final tick — or an entry that
+                        // froze before the #4140 merged-PR wiring shipped —
+                        // leaves the dashboard reporting `merged: 0` forever.
+                        // Fold each recent past day's REAL merges back into its
+                        // frozen entry through a deliberately merged-only seam
+                        // (so a backfill can never graft today's still-open PRs
+                        // onto a historical day). Panic-isolated like the tick;
+                        // a `gh` blip degrades honestly per day rather than
+                        // failing. Today is never touched — that stays the live
+                        // tick's job above.
+                        let recon = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let merged_src = crate::journal::GhMergedPrSource::new(&gh, repo);
+                            crate::journal::reconcile_recent_days(
+                                mem_for_journal.as_ref(),
+                                &merged_src,
+                                chrono::Utc::now().date_naive(),
+                                crate::journal::reconcile_lookback_days(),
+                            )
+                        }));
+                        match recon {
+                            Ok(Ok(rep)) if rep.days_updated > 0 || rep.days_degraded > 0 => {
+                                daemon_log(
+                                    &state_root_for_journal,
+                                    &format!(
+                                        "[simard] journal: reconciled past days (examined={}, updated={}, degraded={})",
+                                        rep.days_examined, rep.days_updated, rep.days_degraded
+                                    ),
+                                )
+                            }
+                            // Nothing to backfill — stay quiet so the daemon log
+                            // is not spammed on every cadence.
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => daemon_log(
+                                &state_root_for_journal,
+                                &format!("[simard] WARN: journal reconciliation failed: {e}"),
+                            ),
+                            Err(_) => daemon_log(
+                                &state_root_for_journal,
+                                "[simard] WARN: journal reconciliation panicked (isolated; loop continues)",
                             ),
                         }
                     });
@@ -1983,6 +2374,103 @@ mod tests {
             outcome_verify_brain: None,
             live_signals: None,
         }
+    }
+
+    #[test]
+    fn boot_clear_removes_stale_draining_flag_without_exec_handover() {
+        let state = tempfile::tempdir().unwrap();
+        let log_root = tempfile::tempdir().unwrap();
+        crate::safe_update::drain::mark_draining(state.path()).unwrap();
+
+        clear_stale_draining_flag_at_boot_in(state.path(), log_root.path());
+
+        assert!(!crate::safe_update::draining_flag_path(state.path()).exists());
+    }
+
+    #[test]
+    fn boot_clear_preserves_draining_flag_during_exec_handover() {
+        let state = tempfile::tempdir().unwrap();
+        let log_root = tempfile::tempdir().unwrap();
+        crate::safe_update::drain::mark_draining(state.path()).unwrap();
+        let status = crate::safe_update::state::UpgradeStatus::exec_handover(
+            Some("new".into()),
+            Some("old".into()),
+            1,
+            60,
+        );
+        crate::safe_update::state::write_status(state.path(), &status).unwrap();
+
+        clear_stale_draining_flag_at_boot_in(state.path(), log_root.path());
+
+        assert!(crate::safe_update::draining_flag_path(state.path()).exists());
+    }
+
+    #[test]
+    fn startup_purge_removes_stale_actor_session_but_preserves_live_scope_guard() {
+        use crate::typed_ooda::{
+            ActionKind, AuthenticatedToolContext, CapabilityErrorCode, CapabilityGrant,
+            CapabilityHandler, CapabilityPolicy, RepositoryRef,
+        };
+
+        let state = tempfile::tempdir().expect("state root");
+        let ledger_path = crate::typed_ooda::ledger_path(state.path());
+        std::fs::create_dir_all(ledger_path.parent().expect("ledger parent"))
+            .expect("create ledger directory");
+        let actor = |cycle_id: &str, observe_only: bool| {
+            AuthenticatedToolContext::new(
+                "goal-session-actor",
+                "ooda-stable-goal-session",
+                [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+            )
+            .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+            .bound_to_cycle_goal(cycle_id, "goal-perpetual")
+            .with_engineer_permissions(["repo_read"])
+            .with_observe_only(observe_only)
+        };
+        let lease = Duration::from_secs(30 * 24 * 60 * 60);
+
+        let prior_process =
+            CapabilityHandler::open(&ledger_path, CapabilityPolicy::new("policy-v1"))
+                .expect("open prior-process ledger");
+        prior_process
+            .register_actor_session(
+                &actor("cycle-before-restart", false),
+                "request-before-restart",
+                "cycle-before-restart",
+                "goal-perpetual",
+                lease,
+            )
+            .expect("persist future-dated prior-process lease");
+        drop(prior_process);
+
+        purge_actor_sessions_on_startup(state.path()).expect("startup purge must succeed");
+
+        let current_process =
+            CapabilityHandler::open(&ledger_path, CapabilityPolicy::new("policy-v1"))
+                .expect("reopen ledger after startup purge");
+        current_process
+            .register_actor_session(
+                &actor("cycle-after-restart", true),
+                "request-after-restart",
+                "cycle-after-restart",
+                "goal-perpetual",
+                lease,
+            )
+            .expect("startup purge must allow the stable session under its new scope");
+
+        let error = current_process
+            .register_actor_session(
+                &actor("cycle-live-scope-change", false),
+                "request-live-scope-change",
+                "cycle-live-scope-change",
+                "goal-perpetual",
+                lease,
+            )
+            .expect_err("a live scope change must still be rejected");
+        assert_eq!(
+            error.code(),
+            CapabilityErrorCode::AuthorizationScopeViolation
+        );
     }
 
     // ── shutdown_daemon ─────────────────────────────────────────────

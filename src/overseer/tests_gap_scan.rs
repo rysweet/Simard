@@ -61,6 +61,14 @@ use crate::overseer::wiring::{
 };
 use crate::overseer::{ActOutcome, Capabilities, Overseer, decide, orient};
 
+// Durable GitHub-side dedup (issue #4717): the gap-scan Act path queries GitHub
+// for an OPEN issue carrying the gap's `stewardship-signature` marker BEFORE it
+// files a new one, so a recurring gap is filed at most once even across a
+// process restart (which resets the in-process `WhisperGate`). These pull in the
+// reused, argv-safe `gh` seam and the crate error type the seam speaks.
+use crate::error::{SimardError, SimardResult};
+use crate::stewardship::gh_client::{GhClient, GhIssue};
+
 // ─────────────────────────── sample gap helpers ────────────────────────────
 
 /// A representative "uncovered high-priority goal" gap.
@@ -429,6 +437,42 @@ fn delegates_blocked_goals_to_goal_health_and_never_reflags_them() {
 }
 
 #[test]
+fn exempts_standing_goals_from_the_gap_scan_even_when_uncovered() {
+    // A standing/perpetual goal is a permanent duty advanced by the OODA goal
+    // loop, not a one-shot uncovered gap. It has no terminal done-state and a
+    // merged PR gives it no coverage, so flagging it would re-notify forever
+    // (goal:steward-ci-github-actions-health-…e06d9e64 regression). It must be
+    // exempted exactly like a Blocked goal — even at p1/p2 with no assignee and
+    // no wip_ref.
+    let standing = ActiveGoal::new(
+        "g-standing",
+        "Steward CI/GitHub-Actions health across all governed repos. Standing goal.",
+        1,
+    );
+    assert!(
+        standing.is_perpetual(),
+        "the description marker must make this goal perpetual"
+    );
+    // A non-standing p1 sibling with the same coverage shape stays a gap — the
+    // exemption is scoped to the standing marker, not a blanket mute.
+    let one_shot = ActiveGoal::new("g-oneshot", "p1 one-shot with no workstream", 1);
+
+    let mut board = GoalBoard::new();
+    board.active = vec![standing, one_shot];
+
+    let gaps = detect_workstream_gaps(&board, &[], &[], &[]);
+    assert_eq!(
+        gaps.len(),
+        1,
+        "only the non-standing p1 goal is a gap; the standing goal is exempt: {gaps:?}"
+    );
+    assert_eq!(
+        gaps[0].signature, "goal:g-oneshot",
+        "the standing goal is never flagged; only the one-shot goal is: {gaps:?}"
+    );
+}
+
+#[test]
 fn flags_high_signal_uncovered_issue_ignores_low_signal_and_covered() {
     let high = SurveyedIssue {
         repo: "rysweet/Simard".to_string(),
@@ -565,12 +609,14 @@ fn workstream_gaps_flagged_outcome_carries_batch_counts() {
     let outcome = ActOutcome::WorkstreamGapsFlagged {
         flagged: 2,
         suppressed: 1,
+        reused_existing: 0,
     };
     assert_eq!(
         outcome,
         ActOutcome::WorkstreamGapsFlagged {
             flagged: 2,
             suppressed: 1,
+            reused_existing: 0,
         }
     );
 }
@@ -935,5 +981,594 @@ fn a_coverage_gap_decides_to_a_terminal_closing_edge() {
         ),
         "a coverage gap decides to a terminal closing edge (launch/file) so the gap \
          gets covered and stops recurring — not a notify-only action: {iv:?}"
+    );
+}
+
+// ═══════════════════ 4. BackoffGate dedup on the coverage launch ═════════════
+//
+// TDD (RED) contract for wiring the new `guardrails::BackoffGate` into the
+// `WorkstreamCoverage` `LaunchRecipe` path (Problem 1 / issue #4186; meta bugs
+// #4255, #4126). The pre-existing in-flight guard only holds a duplicate WHILE
+// the covering workstream is still running; once it COMPLETES, an unchanged,
+// still-recurring gap would re-launch every tick — the exact hole that spawned
+// duplicate backlog issues #4186/#4190/#4191/#4198/#4201/#4203/#4206.
+//
+// The BackoffGate closes it: keyed by the same `recipe_dedup_key` the in-flight
+// rail uses, it SUPPRESSES a relaunch of an equivalent coverage within the
+// (exponentially growing) backoff window even after the prior workstream has
+// completed — yet always re-admits once the window elapses (never permanent
+// silence). The window clock is INJECTED via `Overseer::with_clock` so these
+// tests drive a deterministic virtual clock.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// A `RecipeLauncher` whose launched workstreams COMPLETE immediately (poll ⇒
+/// `ProducedPr`), so the in-flight dedup slot is freed on the next tick and the
+/// BackoffGate becomes the ONLY thing that can hold a relaunch. Counts launches.
+struct CompletingRecipes {
+    launched: Arc<Mutex<usize>>,
+}
+impl RecipeLauncher for CompletingRecipes {
+    fn launch(&self, _b: &RecipeBrief) -> Result<WorkstreamHandle, OverseerError> {
+        *self.launched.lock().unwrap() += 1;
+        Ok(WorkstreamHandle {
+            id: "ws-cover".to_string(),
+        })
+    }
+    fn poll(&self, _h: &WorkstreamHandle) -> Result<WorkstreamStatus, OverseerError> {
+        // Already delivered a PR ⇒ terminal, so reconcile frees the in-flight slot.
+        Ok(WorkstreamStatus::ProducedPr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 1,
+        })
+    }
+}
+
+/// A goal-store fake whose gap survey can be SWAPPED between ticks, so a test
+/// can present a different (distinct-signature) gap set on a later tick.
+struct SwappableGapStore {
+    gaps: Arc<Mutex<Vec<GapItem>>>,
+}
+impl GoalCurator for SwappableGapStore {
+    fn propose(&self, _g: &GoalBrief) -> Result<(), OverseerError> {
+        Ok(())
+    }
+    fn in_flight(&self) -> Result<Vec<InFlightItem>, OverseerError> {
+        Ok(vec![])
+    }
+    fn blocked_goals(&self) -> Result<Vec<BlockedGoal>, OverseerError> {
+        Ok(vec![])
+    }
+    fn workstream_gaps(&self, _anomalies: &[String]) -> Result<Vec<GapItem>, OverseerError> {
+        Ok(self.gaps.lock().unwrap().clone())
+    }
+}
+
+/// Capabilities around a swappable gap survey + immediately-completing recipes,
+/// returning the shared launch counter and the shared swappable gap handle.
+type CapsWithSwappableGaps = (Capabilities, Arc<Mutex<usize>>, Arc<Mutex<Vec<GapItem>>>);
+fn caps_completing_swappable(initial: Vec<GapItem>) -> CapsWithSwappableGaps {
+    let launched = Arc::new(Mutex::new(0usize));
+    let gaps = Arc::new(Mutex::new(initial));
+    let caps = Capabilities {
+        status: Box::new(FakeStatus(ObservedState::default())),
+        recipes: Box::new(CompletingRecipes {
+            launched: launched.clone(),
+        }),
+        prs: Box::new(FakePrs),
+        deployer: Box::new(FakeDeployer),
+        meetings: Box::new(FakeMeetings),
+        issues: Box::new(RecordingIssues {
+            filed: Arc::new(Mutex::new(Vec::new())),
+        }),
+        goals: Box::new(SwappableGapStore { gaps: gaps.clone() }),
+        auditor: Box::new(FakeAuditor),
+        memory: Box::new(crate::overseer::capabilities::InertMemoryRecall),
+    };
+    (caps, launched, gaps)
+}
+
+/// A virtual clock the test advances; injected via `Overseer::with_clock`.
+fn virtual_clock() -> (Arc<AtomicI64>, Box<dyn Fn() -> i64 + Send + Sync>) {
+    let now = Arc::new(AtomicI64::new(0));
+    let handle = now.clone();
+    (now, Box::new(move || handle.load(Ordering::SeqCst)))
+}
+
+#[test]
+fn coverage_relaunch_is_suppressed_within_the_backoff_window_after_completion() {
+    // The gap recurs unchanged; the covering workstream completes immediately.
+    let (caps, launched, _gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    // Tick 1 at t=0: launches the covering workstream (arms the backoff window).
+    now.store(0, Ordering::SeqCst);
+    let first = overseer_tick(&mut ov);
+    assert_eq!(
+        first.recipes_launched, 1,
+        "the recurring gap is covered by exactly one launched workstream: {first:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 1);
+
+    // Tick 2 at t=300 (< 900s base window). The prior workstream COMPLETED, so
+    // the in-flight guard no longer holds it — only the BackoffGate can. The
+    // equivalent coverage must NOT re-launch.
+    now.store(300, Ordering::SeqCst);
+    let second = overseer_tick(&mut ov);
+    assert_eq!(
+        second.recipes_launched, 0,
+        "an equivalent coverage is NOT relaunched within the backoff window even \
+         though its prior workstream already completed: {second:?}"
+    );
+    assert!(
+        second.held >= 1,
+        "the duplicate coverage relaunch is HELD by the backoff gate: {second:?}"
+    );
+    assert_eq!(
+        *launched.lock().unwrap(),
+        1,
+        "still exactly one launch — no duplicate backlog workstream was spawned"
+    );
+}
+
+#[test]
+fn coverage_relaunch_is_admitted_once_the_backoff_window_elapses() {
+    // Suppression is bounded: past the window the still-recurring gap surfaces
+    // again so a genuinely-uncovered gap is never permanently silenced.
+    let (caps, launched, _gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    now.store(0, Ordering::SeqCst);
+    assert_eq!(overseer_tick(&mut ov).recipes_launched, 1);
+
+    // Past the 900s base window the equivalent coverage may relaunch.
+    now.store(901, Ordering::SeqCst);
+    let later = overseer_tick(&mut ov);
+    assert_eq!(
+        later.recipes_launched, 1,
+        "past the backoff window the still-recurring gap is covered again \
+         (bounded suppression, never permanent silence): {later:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+}
+
+#[test]
+fn a_distinct_gap_signature_is_not_suppressed_by_another_keys_backoff() {
+    // One noisy coverage key must not starve an unrelated gap. Swapping to a
+    // DIFFERENT gap set (distinct signature ⇒ distinct recipe_dedup_key) still
+    // launches while the first key is inside its backoff window.
+    let (caps, launched, gaps) = caps_completing_swappable(vec![sample_goal_gap()]);
+    let (now, clock) = virtual_clock();
+
+    let mut ov = Overseer::new(caps)
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_clock(clock);
+
+    // Tick 1 at t=0 covers the goal gap (arms backoff for key-A).
+    now.store(0, Ordering::SeqCst);
+    assert_eq!(overseer_tick(&mut ov).recipes_launched, 1);
+
+    // Swap to a DIFFERENT gap (distinct signature) and tick at t=300, still
+    // inside key-A's window. Key-B is unrelated ⇒ it must launch.
+    *gaps.lock().unwrap() = vec![sample_anomaly_gap()];
+    now.store(300, Ordering::SeqCst);
+    let second = overseer_tick(&mut ov);
+    assert_eq!(
+        second.recipes_launched, 1,
+        "a distinct gap signature is unaffected by another key's backoff: {second:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+
+    // Swap BACK to the original goal gap, still inside key-A's window ⇒ suppressed.
+    *gaps.lock().unwrap() = vec![sample_goal_gap()];
+    now.store(400, Ordering::SeqCst);
+    let third = overseer_tick(&mut ov);
+    assert_eq!(
+        third.recipes_launched, 0,
+        "the original key is still within its own backoff window: {third:?}"
+    );
+    assert_eq!(*launched.lock().unwrap(), 2);
+}
+// ═══════════ 9. issue #4717: durable GitHub-side gap-filing dedup (RED) ══════
+//
+// Problem #1 (process_health): the Overseer's stewardship gap-filing has no
+// DURABLE dedup, so a recurring gap is re-filed on every process restart — the
+// in-process `WhisperGate` (900 s window) resets to empty on boot and cannot
+// remember an issue filed by a prior process. The observed symptom was bursts of
+// near-identical `[stewardship] workstream_gap:*` issues.
+//
+// The fix (scoped by #4717) is a GitHub-side open-issue check keyed on a stable
+// per-gap signature, run BEFORE any `gh issue create`:
+//   * FiledNew      — no open issue carries the marker ⇒ file exactly one.
+//   * MatchedExisting — an open issue already carries the marker ⇒ skip creation
+//                       (durable: works even from a fresh process / empty gate).
+//   * gh search error ⇒ FAIL LOUD, create nothing (never a blind create).
+//
+// These tests are written FIRST and MUST FAIL until:
+//   1. `GapItem::dedup_key(&self) -> String` lands (the stable, shell-safe
+//      `workstream-gap:<signature>` marker key), and
+//   2. `Overseer::with_gap_issue_client(Box<dyn GhClient>)` wires a durable
+//      GitHub-side dedup seam into `act_flag_workstream_gaps`, and
+//   3. `ActOutcome::WorkstreamGapsFlagged` gains a `reused_existing: usize`
+//      counter distinguishing a durable-skip from a fresh file.
+//
+// They exercise `act_flag_workstream_gaps` directly (via the
+// `FlagWorkstreamGaps` intervention) with an injected fake `gh` seam — no
+// network, no real `gh`, no clock dependence.
+
+/// A hermetic `gh` seam: it returns a preset OPEN-issue list from `search_issues`
+/// (so `find_existing` can match a durable marker) and RECORDS every
+/// `create_issue` call so a test can prove exactly one — or zero — issues were
+/// filed. Optionally fails the search leg to pin the fail-loud contract.
+///
+/// The recorded call log is `(repo, title, body)` per `create_issue`, shared
+/// with the test via [`CreatedIssues`] so an assertion can inspect it.
+type CreatedIssues = Arc<Mutex<Vec<(String, String, String)>>>;
+
+struct FakeGhClient {
+    /// The open issues `search_issues` surfaces (the durable GitHub state).
+    open_issues: Vec<GhIssue>,
+    /// Every `create_issue(repo, title, body)` call, in order.
+    created: CreatedIssues,
+    /// When set, `search_issues` returns an error (degraded `gh`): the Act path
+    /// must fail loud and create nothing.
+    search_fails: bool,
+}
+
+impl FakeGhClient {
+    fn new(open_issues: Vec<GhIssue>) -> (Self, CreatedIssues) {
+        let created = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                open_issues,
+                created: created.clone(),
+                search_fails: false,
+            },
+            created,
+        )
+    }
+
+    fn failing() -> (Self, CreatedIssues) {
+        let created = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                open_issues: Vec::new(),
+                created: created.clone(),
+                search_fails: true,
+            },
+            created,
+        )
+    }
+}
+
+impl GhClient for FakeGhClient {
+    fn search_issues(&self, _repo: &str, _signature: &str) -> SimardResult<Vec<GhIssue>> {
+        if self.search_fails {
+            return Err(SimardError::StewardshipGhCommandFailed {
+                reason: "injected `gh issue list` failure".to_string(),
+            });
+        }
+        // Return the whole open-issue list; the Act path applies the
+        // signature-marker match (`find_existing`) itself, exactly as the
+        // production seam does over the union of search + RecentOpen hits.
+        Ok(self.open_issues.clone())
+    }
+
+    fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
+        let mut created = self.created.lock().unwrap();
+        created.push((repo.to_string(), title.to_string(), body.to_string()));
+        let number = created.len() as u64;
+        Ok(GhIssue {
+            number,
+            url: format!("https://github.com/rysweet/Simard/issues/{number}"),
+            title: title.to_string(),
+            body: body.to_string(),
+        })
+    }
+}
+
+/// Build an OPEN issue whose body carries the durable `stewardship-signature:`
+/// marker for `dedup_key`, as a prior Overseer process would have filed it.
+fn open_issue_marked(dedup_key: &str, number: u64) -> GhIssue {
+    GhIssue {
+        number,
+        url: format!("https://github.com/rysweet/Simard/issues/{number}"),
+        title: format!("[overseer] uncovered workstream: {dedup_key}"),
+        // The marker is on its OWN line — the durable match must be line-bounded,
+        // never a bare substring `contains` (see the prefix-collision test).
+        body: format!(
+            "Auto-filed by the Overseer gap-scan.\n\nstewardship-signature: {dedup_key}\n"
+        ),
+    }
+}
+
+// ── 9a. `GapItem::dedup_key` — the stable, shell-safe marker key ─────────────
+
+/// The dedup key is the `workstream-gap:<signature>` marker, deterministic across
+/// calls, so the same gap always resolves to the same open-issue query.
+#[test]
+fn gap_dedup_key_is_the_stable_workstream_gap_marker() {
+    let gap = sample_goal_gap();
+    assert_eq!(
+        gap.dedup_key(),
+        format!("workstream-gap:{}", gap.signature),
+        "dedup_key is the `workstream-gap:<signature>` marker"
+    );
+    // Deterministic: identical input ⇒ identical key (a moving key would defeat
+    // the durable open-issue lookup entirely).
+    assert_eq!(gap.dedup_key(), gap.dedup_key());
+}
+
+/// The dedup key is fed to `gh issue list --search` and embedded in an issue
+/// body, so it MUST be a restricted, shell-safe slug even if a gap's signature
+/// somehow carried metacharacters (defense in depth over the detector's slug
+/// guarantee): no whitespace, no shell/expansion metacharacters, no newlines.
+#[test]
+fn gap_dedup_key_is_a_shell_safe_slug_even_for_a_hostile_signature() {
+    let hostile = GapItem {
+        category: GapCategory::IssueUncovered,
+        ref_id: "evil".to_string(),
+        title: "evil".to_string(),
+        why_it_matters: "evil".to_string(),
+        // A signature laden with shell/expansion metacharacters and a newline.
+        signature: "issue:foo; rm -rf / `whoami` $(id) | evil\n#{p}".to_string(),
+    };
+    let key = hostile.dedup_key();
+    for bad in [
+        ' ', '\n', '\t', ';', '`', '$', '|', '&', '(', ')', '<', '>', '"', '\'', '\\', '{', '}',
+        '!',
+    ] {
+        assert!(
+            !key.contains(bad),
+            "dedup_key must be a shell-safe slug; found {bad:?} in {key:?}"
+        );
+    }
+    assert!(
+        key.starts_with("workstream-gap:"),
+        "even sanitized, the key keeps the marker prefix: {key:?}"
+    );
+}
+
+// ── 9b. durable filing: file once, then skip forever ────────────────────────
+
+/// Wire the Overseer with identity + notifier + a durable `gh` seam, all around
+/// a single preset gap. Returns `(overseer, created_calls_log)`.
+fn durable_overseer(gap: GapItem, open_issues: Vec<GhIssue>) -> (Overseer, CreatedIssues) {
+    let filed = Arc::new(Mutex::new(Vec::new()));
+    let (notifier, _e, _s) = dual_recording_notifier();
+    let (gh, created) = FakeGhClient::new(open_issues);
+    let ov = Overseer::new(caps_for_gaps(vec![gap], filed))
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_operator_notifier(Box::new(notifier))
+        .with_gap_issue_client(Box::new(gh));
+    (ov, created)
+}
+
+/// A genuinely-new gap (no open issue carries its marker) is filed EXACTLY ONCE,
+/// and the created issue body embeds the `stewardship-signature:` marker keyed on
+/// the gap's `dedup_key` so a later sweep can find it.
+#[test]
+fn durable_dedup_files_a_genuinely_new_gap_once() {
+    let gap = sample_goal_gap();
+    let key = gap.dedup_key();
+    let (mut ov, created) = durable_overseer(gap.clone(), vec![]);
+
+    let outcome = ov
+        .act(&Intervention::FlagWorkstreamGaps {
+            gaps: vec![gap.clone()],
+        })
+        .expect("a new gap with a durable seam files without error");
+
+    assert_eq!(
+        outcome,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged: 1,
+            suppressed: 0,
+            reused_existing: 0,
+        },
+        "no open issue ⇒ file exactly one fresh issue: {outcome:?}"
+    );
+
+    let calls = created.lock().unwrap();
+    assert_eq!(calls.len(), 1, "exactly one `gh issue create`: {calls:?}");
+    let (_repo, _title, body) = &calls[0];
+    assert!(
+        body.contains(&format!("stewardship-signature: {key}")),
+        "the filed issue body embeds the durable marker so a later sweep dedups: {body:?}"
+    );
+}
+
+/// When an OPEN issue already carries the gap's marker, the Act path SKIPS
+/// creation (durable dedup) and reports it as `reused_existing` — never a fresh
+/// file, never a duplicate.
+#[test]
+fn durable_dedup_skips_when_an_open_issue_already_carries_the_marker() {
+    let gap = sample_goal_gap();
+    let existing = open_issue_marked(&gap.dedup_key(), 4726);
+    let (mut ov, created) = durable_overseer(gap.clone(), vec![existing]);
+
+    let outcome = ov
+        .act(&Intervention::FlagWorkstreamGaps {
+            gaps: vec![gap.clone()],
+        })
+        .expect("a matched-existing gap resolves without error");
+
+    assert_eq!(
+        outcome,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged: 0,
+            suppressed: 0,
+            reused_existing: 1,
+        },
+        "an open marked issue ⇒ reuse, do not re-file: {outcome:?}"
+    );
+    assert!(
+        created.lock().unwrap().is_empty(),
+        "a durable open-issue match files NOTHING: {:?}",
+        created.lock().unwrap()
+    );
+}
+
+/// THE core #4717 property: durability across a RESTART. A brand-new Overseer
+/// (its `WhisperGate` empty, exactly like a freshly-booted process) that observes
+/// the SAME gap while its issue is still open must STILL skip creation — the
+/// in-process gate cannot remember the prior file, so only the GitHub-side check
+/// prevents the duplicate.
+#[test]
+fn durable_dedup_survives_a_process_restart() {
+    let gap = sample_goal_gap();
+    let existing = open_issue_marked(&gap.dedup_key(), 4726);
+
+    // "Restarted" process: a fresh Overseer with an empty gate, but the prior
+    // process's issue is still open on GitHub.
+    let (mut restarted, created) = durable_overseer(gap.clone(), vec![existing]);
+
+    let outcome = restarted
+        .act(&Intervention::FlagWorkstreamGaps {
+            gaps: vec![gap.clone()],
+        })
+        .expect("the restarted process resolves the gap without error");
+
+    assert_eq!(
+        outcome,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged: 0,
+            suppressed: 0,
+            reused_existing: 1,
+        },
+        "a fresh gate still dedups against the open GitHub issue: {outcome:?}"
+    );
+    assert!(
+        created.lock().unwrap().is_empty(),
+        "no duplicate is filed after a restart: {:?}",
+        created.lock().unwrap()
+    );
+}
+
+// ── 9c. correctness guards ──────────────────────────────────────────────────
+
+/// The durable match must be LINE-BOUNDED on the exact key, not a bare substring
+/// `contains`: a distinct, LONGER gap key (`…g-hot-extra`) whose marker embeds
+/// this gap's key as a prefix must NOT be mistaken for a match — otherwise a new
+/// gap would be silently swallowed by an unrelated issue.
+#[test]
+fn durable_dedup_does_not_match_a_prefix_collision() {
+    let gap = sample_goal_gap(); // dedup_key == "workstream-gap:goal:g-hot"
+    // An open issue for a DIFFERENT, longer-keyed gap.
+    let colliding_key = format!("{}-extra", gap.dedup_key());
+    let colliding = open_issue_marked(&colliding_key, 4700);
+    let (mut ov, created) = durable_overseer(gap.clone(), vec![colliding]);
+
+    let outcome = ov
+        .act(&Intervention::FlagWorkstreamGaps {
+            gaps: vec![gap.clone()],
+        })
+        .expect("resolves without error");
+
+    assert_eq!(
+        outcome,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged: 1,
+            suppressed: 0,
+            reused_existing: 0,
+        },
+        "a prefix-only marker is NOT a match; the genuine gap is filed: {outcome:?}"
+    );
+    assert_eq!(
+        created.lock().unwrap().len(),
+        1,
+        "the new gap is filed despite the prefix-colliding open issue"
+    );
+}
+
+/// FAIL LOUD: when the `gh` search leg errors (degraded `gh`, auth loss, rate
+/// limit), the Act path must propagate the error and create NOTHING — a blind
+/// create on a failed dedup lookup is exactly the burst regression #4717 fixes.
+#[test]
+fn durable_dedup_fails_closed_when_the_gh_search_errors() {
+    let gap = sample_goal_gap();
+    let filed = Arc::new(Mutex::new(Vec::new()));
+    let (notifier, _e, _s) = dual_recording_notifier();
+    let (gh, created) = FakeGhClient::failing();
+    let mut ov = Overseer::new(caps_for_gaps(vec![gap.clone()], filed))
+        .with_identity(overseer_identity())
+        .with_gap_scan_enabled(true)
+        .with_operator_notifier(Box::new(notifier))
+        .with_gap_issue_client(Box::new(gh));
+
+    let result = ov.act(&Intervention::FlagWorkstreamGaps {
+        gaps: vec![gap.clone()],
+    });
+
+    assert!(
+        result.is_err(),
+        "a degraded `gh` search must fail loud, never silently file: {result:?}"
+    );
+    assert!(
+        created.lock().unwrap().is_empty(),
+        "nothing is created when the dedup lookup fails: {:?}",
+        created.lock().unwrap()
+    );
+}
+
+// ── 9d. in-process burst pre-filter still holds (belt-and-suspenders) ────────
+
+/// The durable GitHub check does NOT replace the in-process `WhisperGate`: within
+/// one process, a recurring gap seen again inside the dedup window is suppressed
+/// BEFORE any `gh` call, so a fast cadence cannot storm GitHub with search/create
+/// calls. First Act files once; an immediate second Act on the same gap is
+/// suppressed and files nothing more.
+#[test]
+fn in_process_gate_suppresses_a_same_cycle_burst_before_any_gh_call() {
+    let gap = sample_goal_gap();
+    let (mut ov, created) = durable_overseer(gap.clone(), vec![]);
+
+    let first = ov
+        .act(&Intervention::FlagWorkstreamGaps {
+            gaps: vec![gap.clone()],
+        })
+        .expect("first sighting files");
+    assert_eq!(
+        first,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged: 1,
+            suppressed: 0,
+            reused_existing: 0,
+        },
+        "first sighting files exactly once: {first:?}"
+    );
+
+    let second = ov
+        .act(&Intervention::FlagWorkstreamGaps {
+            gaps: vec![gap.clone()],
+        })
+        .expect("second sighting is suppressed, not an error");
+    assert_eq!(
+        second,
+        ActOutcome::WorkstreamGapsFlagged {
+            flagged: 0,
+            suppressed: 1,
+            reused_existing: 0,
+        },
+        "a same-window repeat is suppressed in-process, no gh churn: {second:?}"
+    );
+
+    assert_eq!(
+        created.lock().unwrap().len(),
+        1,
+        "the burst produced exactly one file total: {:?}",
+        created.lock().unwrap()
     );
 }

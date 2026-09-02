@@ -1,0 +1,71 @@
+name: knowledge-context-plural-folding-relevance
+app_type: cli
+description: |
+  Outside-in proof that planning-context knowledge-pack relevance scoring
+  (`knowledge_context::relevance_score`) folds regular singular/plural
+  inflections, so a genuinely relevant pack is no longer missed when the
+  objective and the pack name/description differ only by a regular inflection —
+  a recall-quality axis of the standing cognition-improvement goal.
+
+  Before this change the scorer required an EXACT whole-word match. A relevant
+  pack whose keywords appeared only in the other number — `container` vs
+  `containers`, `image` vs `images`, `library` vs `libraries`,
+  `category` vs `categories` — scored below its true relevance (often zero),
+  so it could be crowded out of the top-N (`MAX_PACKS_PER_OBJECTIVE`) cut and
+  its knowledge never reached the planning prompt, degrading recall and thus
+  reasoner reliability.
+
+  Folding is deliberately conservative and additive over the whole-word rule it
+  extends (the fix that removed raw-substring over-matching): only the regular
+  plural (`-s`/`-es`) and `-y`↔`-ies` variants are considered, each requires the
+  counterpart to ACTUALLY exist in the pack's word set, and non-plural words
+  that merely end in `s`/`es`/`y` (`class`, `focus`, `status`, `hierarchy`) are
+  never mangled onto an unrelated pack word.
+
+  This scenario drives the hermetic, in-process `knowledge_context` unit tests
+  that pin the corrected contract:
+    - regular plural folds both directions (`container`↔`containers`,
+      `image`↔`images`);
+    - `-y`↔`-ies` folds (`library`↔`libraries`, `category`↔`categories`);
+    - non-plural `s`/`es`/`y`-ending words still match themselves and do NOT
+      fold onto unrelated pack words;
+    - the whole-word rule is preserved — a token embedded in an unrelated pack
+      word still does not match, even with folding enabled;
+    - the pre-existing pack-selection / distinct-token / empty-context / cap
+      behaviours are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The relevance-scoring contract, including the new plural-folding tests and
+  # the pre-existing whole-word / distinct-token / pack-selection behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_context"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader base-type turn suite proves no regression in the planning-context
+  # preparation path that consumes `enrich_planning_context`.
+  - action: run
+    params:
+      command: "cargo test --locked --lib base_type_turn"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -930,6 +930,84 @@ fn preparation_caps_split_results_at_ten() {
 }
 
 #[test]
+fn preparation_shares_cap_fairly_across_fragments() {
+    // Regression guard for cross-fragment recall fairness: when two fragments of
+    // a compound objective together exceed the 10-fact cap, the round-robin merge
+    // must give BOTH fragments representation rather than letting the leading
+    // fragment monopolize the budget (the prior concatenate-then-truncate drained
+    // fragment A fully first, leaving fragment B with only 2 of its 6 facts).
+    let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut facts_map = std::collections::HashMap::new();
+
+    // Fragment "goal A" returns 8 unique facts (a0..a7).
+    let mut goal_a_facts = Vec::new();
+    for i in 0..8 {
+        goal_a_facts.push(json!({
+            "node_id": format!("a{i}"), "concept": format!("ca{i}"),
+            "content": format!("fact a{i}"), "confidence": 0.9,
+            "source_id": "src", "tags": []
+        }));
+    }
+    facts_map.insert("goal A".to_string(), goal_a_facts);
+
+    // Fragment "goal B" returns 6 unique facts (b0..b5, no overlap with A).
+    let mut goal_b_facts = Vec::new();
+    for i in 0..6 {
+        goal_b_facts.push(json!({
+            "node_id": format!("b{i}"), "concept": format!("cb{i}"),
+            "content": format!("fact b{i}"), "confidence": 0.8,
+            "source_id": "src", "tags": []
+        }));
+    }
+    facts_map.insert("goal B".to_string(), goal_b_facts);
+
+    let memory = compound_objective_memory(queries, facts_map);
+    let ctx = preparation_memory_operations("goal A; goal B", &test_session_id(), &memory).unwrap();
+
+    assert_eq!(
+        ctx.relevant_facts.len(),
+        10,
+        "the merged, capped set must hold exactly 10 facts, got {}",
+        ctx.relevant_facts.len()
+    );
+
+    let from_a = ctx
+        .relevant_facts
+        .iter()
+        .filter(|f| f.node_id.starts_with('a'))
+        .count();
+    let from_b = ctx
+        .relevant_facts
+        .iter()
+        .filter(|f| f.node_id.starts_with('b'))
+        .count();
+
+    // Round-robin over two fragments splits the 10-slot budget evenly.
+    assert_eq!(
+        from_a, 5,
+        "fragment A must contribute 5 facts under round-robin, got {from_a}"
+    );
+    assert_eq!(
+        from_b, 5,
+        "fragment B must be fairly represented (5 facts), not crowded out; got {from_b}"
+    );
+
+    // Each fragment's TOP-ranked facts must survive — round-robin admits rank-0
+    // of every fragment before any fragment's rank-5 tail.
+    let ids: std::collections::HashSet<&str> = ctx
+        .relevant_facts
+        .iter()
+        .map(|f| f.node_id.as_str())
+        .collect();
+    for id in ["a0", "a1", "a2", "a3", "a4", "b0", "b1", "b2", "b3", "b4"] {
+        assert!(
+            ids.contains(id),
+            "expected top-ranked fact {id} to survive the cap"
+        );
+    }
+}
+
+#[test]
 fn preparation_skips_empty_fragments_from_splitting() {
     let queries = Arc::new(std::sync::Mutex::new(Vec::new()));
     let memory = compound_objective_memory(queries.clone(), std::collections::HashMap::new());

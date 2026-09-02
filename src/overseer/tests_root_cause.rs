@@ -753,10 +753,13 @@ fn humanize_tick_surfaces_symptom_mitigation_count() {
 // Section D — operator notification + memory accumulation
 // ════════════════════════════════════════════════════════════════════════════
 
-/// The blocked-goal escalation notification carries the WHY in its body, so the
-/// operator receives the root-cause analysis (not just the bare symptom).
+/// The blocked-goal escalation now hands off to the AGENTIC triage recipe (issue
+/// #4276): `act` LAUNCHES the triage workstream (the recipe owns the
+/// escalate-vs-course-correct decision) and, in parallel, notifies the operator
+/// in PLAIN ENGLISH — the body carries the human-readable problem + recommended
+/// next step, never the raw machine marker or the internal `why=` diagnostic.
 #[test]
-fn escalate_blocked_goal_notification_carries_the_why() {
+fn escalate_blocked_goal_notifies_operator_in_plain_english() {
     let (store, _log) = FakeGoalStore::new(vec![]);
     let (notifier, email_log, signal_log) = dual_recording_notifier();
     let mut ov = Overseer::new(caps_with(ObservedState::default(), Box::new(store)))
@@ -764,30 +767,45 @@ fn escalate_blocked_goal_notification_carries_the_why() {
         .with_goal_health_enabled(true)
         .with_operator_notifier(Box::new(notifier));
 
-    let why = "brain-failure safeguard tripped 3× — upstream reasoner regression in advance_goal";
     let out = ov.act(&Intervention::EscalateBlockedGoal {
         goal_id: "feature-x".to_string(),
         reason: brain_failure_reason(3),
-        why: why.to_string(),
+        why: "brain-failure safeguard tripped 3× — upstream reasoner regression".to_string(),
+        problem:
+            "Goal \"feature-x\" is stuck: Simard can't automatically tell when it is finished."
+                .to_string(),
+        next_step:
+            "Give the goal a checkable finish line, or close it if a merged PR delivered it."
+                .to_string(),
+        link: Some("https://github.com/rysweet/Simard/issues/4001".to_string()),
     });
     assert!(
-        matches!(out, Ok(ActOutcome::GoalEscalated { .. })),
-        "the escalation is dispatched: {out:?}"
+        matches!(out, Ok(ActOutcome::Launched(_))),
+        "the escalation launches the agentic triage workstream: {out:?}"
     );
 
     for (chan, log) in [("email", &email_log), ("signal", &signal_log)] {
         let seen = log.lock().unwrap();
         assert_eq!(seen.len(), 1, "the {chan} channel received the escalation");
         let n = &seen[0];
+        let body = n.plain_text();
         assert!(
-            n.problem.contains(why),
-            "the {chan} notification body carries the WHY: {:?}",
-            n.problem
+            !body.contains("Problem solved:"),
+            "the {chan} escalation must not claim the problem is solved: {body:?}"
         );
         assert!(
-            n.problem.to_lowercase().contains("why"),
-            "the {chan} notification labels the root-cause line: {:?}",
+            n.problem.contains("stuck"),
+            "the {chan} notification body carries the plain-English problem: {:?}",
             n.problem
+        );
+        assert_eq!(
+            n.next_step,
+            "Give the goal a checkable finish line, or close it if a merged PR delivered it.",
+            "the {chan} notification carries the recommended next step"
+        );
+        assert!(
+            !body.contains("why="),
+            "the {chan} notification never surfaces the raw diagnostic marker: {body:?}"
         );
     }
 }

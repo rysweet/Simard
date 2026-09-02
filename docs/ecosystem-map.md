@@ -25,6 +25,16 @@ infrastructure.
 
 ## Repository Inventory
 
+> **Stewarded roster source of truth.** The ~10 repositories Simard's Overseer
+> actively observes are Simard's **identity-curated** `stewarded_repos` collection —
+> deploy-durable state at `<state_root>/identity-state/simard/stewarded_repos.toml`
+> (the single source of truth) that survives self-deploys and that she curates
+> agentically. On first use it is seeded from the committed identity data
+> [`prompt_assets/simard/identity/stewarded_repos.seed.toml`](../prompt_assets/simard/identity/stewarded_repos.seed.toml)
+> and scanned by the live agentic
+> [ecosystem-observe chain](./design/ecosystem-observe.md). The inventory below is
+> the broader human-readable map; the durable roster is what the recipe reads.
+
 ### Active Repositories
 
 | Repository | Description | Primary Language | Role | Updated |
@@ -270,6 +280,11 @@ packs provide structured GraphRAG context — Simard can install packs covering
 its own codebase, the amplihack framework internals, or external domain
 knowledge to enrich its orient/decide phases with grounded facts rather than
 relying solely on LLM training data.
+
+Simard's **native Rust reimplementation** of the knowledge-pack client
+("kgpacks-rs", `src/native_knowledge.rs` + `src/knowledge_client.rs`) is tracked to full parity
+with the Python agent-kgpacks contract by a measurable criteria checklist at
+`Specs/agent-kgpacks-rs-parity.md`.
 
 ### amplihack-rs ↔ amplihack-xpia-defender
 

@@ -1,0 +1,103 @@
+digraph simard_api_contracts {
+  graph [rankdir=TB, compound=true, fontsize=12, labelloc=t, label="Simard API contracts and command surfaces"];
+  node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#475569", fontname="Helvetica"];
+  edge [color="#475569", fontname="Helvetica", fontsize=10];
+
+  subgraph cluster_dashboard {
+    label="operator dashboard HTTP / WebSocket surface";
+    color="#60a5fa";
+    dashboard_router [label="build_router()\nAxum Router", shape=component, fillcolor="#dbeafe"];
+    dashboard_auth [label="require_auth middleware\n/login and /api/login bypass", fillcolor="#fee2e2"];
+    dash_system [label="status / issues / metrics / costs / budget", fillcolor="#dbeafe"];
+    dash_goals [label="goals / workboard / current work", fillcolor="#dbeafe"];
+    dash_memory [label="memory / cognition / enrichment", fillcolor="#dbeafe"];
+    dash_runtime [label="logs / processes / activity / traces / ooda cycles / overseer", fillcolor="#dbeafe"];
+    dash_prs [label="PRs / merge judge / merge readiness", fillcolor="#dbeafe"];
+    dash_journal [label="journal dates/search/entry/render", fillcolor="#dbeafe"];
+    dash_creative [label="creative ideas pool/search/run/promote/prune", fillcolor="#dbeafe"];
+    dash_feedback [label="feedback submit/status", fillcolor="#dbeafe"];
+    dash_ws [label="WebSockets: chat, agent log, tmux attach", fillcolor="#dbeafe"];
+  }
+
+  subgraph cluster_cli {
+    label="operator CLI surface";
+    color="#f59e0b";
+    cli_dispatch [label="dispatch_operator_cli()", shape=component, fillcolor="#fef3c7"];
+    cli_engineer [label="engineer commands", fillcolor="#fef3c7"];
+    cli_meeting [label="meeting run/read/repl/resume", fillcolor="#fef3c7"];
+    cli_goal [label="goal list/add/demote/status/unblock/remove", fillcolor="#fef3c7"];
+    cli_ooda [label="ooda run/outcomes/terminal/approvals/fixture", fillcolor="#fef3c7"];
+    cli_ops [label="status, dashboard, signal, memory, spawn, merge-pr", fillcolor="#fef3c7"];
+    cli_maintenance [label="worktree-gc, disk-reclaim, update, self-test, self-health, ci-health, self-deploy, safe-update", fillcolor="#fef3c7"];
+  }
+
+  subgraph cluster_signal {
+    label="Signal conversation command surface";
+    color="#22c55e";
+    signal_transport [label="JsonRpcTransport\nnewline JSON-RPC TCP", shape=component, fillcolor="#dcfce7"];
+    signal_lifecycle [label="/help, /new, /reset, /close", fillcolor="#dcfce7"];
+    signal_low [label="status, pause, approve", fillcolor="#dcfce7"];
+    signal_high [label="deploy, merge #NNNN\npending sign-off", fillcolor="#fecaca"];
+    signal_conversation [label="ordinary text\nmeeting backend turn", fillcolor="#dcfce7"];
+    signal_guards [label="allowlist + identity binding + risk gate", fillcolor="#fecaca"];
+  }
+
+  subgraph cluster_memory_ipc {
+    label="memory IPC request/response protocol";
+    color="#a78bfa";
+    mem_client [label="RemoteCognitiveMemory::call", shape=component, fillcolor="#ede9fe"];
+    mem_requests [label="MemoryRequest\nserde tag op", fillcolor="#ede9fe"];
+    mem_server [label="server::dispatch", fillcolor="#ede9fe"];
+    mem_responses [label="MemoryResponse\nserde tag ok/value", fillcolor="#ede9fe"];
+    mem_guards [label="0600 socket + MAX_FRAME + gated fact/procedure provenance", fillcolor="#fecaca"];
+  }
+
+  subgraph cluster_meeting {
+    label="meeting REPL slash-command surface";
+    color="#14b8a6";
+    repl [label="run_meeting_repl()", shape=component, fillcolor="#ccfbf1"];
+    repl_control [label="/help /close /done /status /export /recap /preview /state", fillcolor="#ccfbf1"];
+    repl_capture [label="/decision /action /question /risk /disagree /theme /owner /goal", fillcolor="#ccfbf1"];
+    repl_template [label="/template [standup|1on1|retro|planning]", fillcolor="#ccfbf1"];
+    repl_natural [label="ordinary text\nMeetingCommand::Conversation", fillcolor="#ccfbf1"];
+  }
+
+  dashboard_router -> dashboard_auth [label="layer"];
+  dashboard_auth -> dash_system;
+  dashboard_auth -> dash_goals;
+  dashboard_auth -> dash_memory;
+  dashboard_auth -> dash_runtime;
+  dashboard_auth -> dash_prs;
+  dashboard_auth -> dash_journal;
+  dashboard_auth -> dash_creative;
+  dashboard_auth -> dash_feedback;
+  dashboard_auth -> dash_ws;
+
+  cli_dispatch -> cli_engineer;
+  cli_dispatch -> cli_meeting;
+  cli_dispatch -> cli_goal;
+  cli_dispatch -> cli_ooda;
+  cli_dispatch -> cli_ops;
+  cli_dispatch -> cli_maintenance;
+  cli_ooda -> mem_client [label="state root memory access"];
+  cli_ops -> dashboard_router [label="dashboard serve"];
+  cli_ops -> signal_transport [label="signal run"];
+  cli_meeting -> repl [label="meeting repl"];
+
+  signal_transport -> signal_guards [label="parse inbound"];
+  signal_guards -> signal_lifecycle;
+  signal_guards -> signal_low;
+  signal_guards -> signal_high;
+  signal_guards -> signal_conversation;
+  signal_conversation -> repl_natural [label="shared meeting backend"];
+
+  mem_client -> mem_requests [label="write_frame JSON"];
+  mem_requests -> mem_server [label="Unix socket"];
+  mem_server -> mem_responses [label="serde response"];
+  mem_server -> mem_guards [label="enforces"];
+
+  repl -> repl_control;
+  repl -> repl_capture;
+  repl -> repl_template;
+  repl -> repl_natural;
+}

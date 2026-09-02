@@ -323,6 +323,19 @@ pub struct OodaConfig {
     /// Issues #2441/#2458. `1` would distil one-off failures (not recommended).
     #[serde(default = "default_lesson_recurrence_threshold")]
     pub lesson_recurrence_threshold: u32,
+    /// When `true`, [`run_ooda_cycle`](super::run_ooda_cycle) performs proactive
+    /// resource cleanup (disk/process reclamation) at the start of every cycle.
+    ///
+    /// This walks the real filesystem (`/tmp/simard-*-target`,
+    /// `~/.cargo-targets/`, each tens of GB) and can kill orphaned cargo
+    /// processes, so it is a **production-only** side effect. It defaults to
+    /// `false` so cargo-test never runs the expensive, non-hermetic cleanup —
+    /// which under a shared CI/dev host would walk hundreds of GB (parallel
+    /// OODA-cycle tests then thrash disk and hang) and could delete sibling
+    /// worktrees' target dirs or kill the test's own cargo. The daemon (the
+    /// live OODA loop) opts in explicitly.
+    #[serde(default)]
+    pub run_resource_cleanup: bool,
     /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
     /// Skipped during (de)serialization — reconstructed from env on boot.
     #[serde(skip)]
@@ -401,6 +414,9 @@ impl Default for OodaConfig {
                 crate::memory_consolidation::reflection_lessons::LESSON_RECURRENCE_THRESHOLD_ENV,
                 default_lesson_recurrence_threshold(),
             ),
+            // Off by default so cargo-test never runs the non-hermetic,
+            // filesystem-walking cleanup. The daemon opts in explicitly.
+            run_resource_cleanup: false,
             scaler,
         }
     }

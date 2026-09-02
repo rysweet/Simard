@@ -1,0 +1,65 @@
+name: engineer-session-checkpoint-resume
+app_type: cli
+description: |
+  Validates first-class engineer session CHECKPOINT + RESUME: an engineer that
+  is interrupted mid-session (crash, restart, or deploy binary-swap) can be
+  resumed by a FRESH engineer process from its last checkpoint instead of
+  re-running the goal from scratch. The critical guarantee is idempotency — a
+  completed agent session is never spawned again (no double-PR, no duplicate
+  work) — and resume is scoped to the matching goal so a stale checkpoint from a
+  different goal never contaminates the run. Complements the deploy-drain
+  goal-requeue: requeue keeps the GOAL safe, this keeps the in-progress SESSION
+  safe.
+agents:
+  - name: cargo-test-runner
+    type: cli
+    command: cargo
+
+steps:
+  # Decision logic: only the matching objective at a resumable phase resumes.
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_resume::should_resume"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Idempotency primitive: reuse a completed execution only when action +
+  # verification were both recorded (else re-run — no completed work to dup).
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_resume::resumable_execution_requires_recorded_action_and_verification -- --exact"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # End-to-end: an Execution checkpoint makes the loop resume past Execution and
+  # COMPLETE without spawning an agent (no LLM/amplihack configured, so a fresh
+  # run would fail at agent-spawn — success proves the agent was reused).
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_resume::resume_from_execution_checkpoint_skips_agent_spawn -- --exact"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # Resume is safe to run repeatedly across dispatches (idempotent completion).
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_resume::resume_is_idempotent_across_repeated_dispatch -- --exact"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"
+
+  # The save/load/clear checkpoint primitives that resume builds on stay green.
+  - action: run
+    command: "cargo test --lib engineer_loop::tests_checkpoint"
+    timeout: 240s
+  - action: expect_exit_code
+    code: 0
+  - action: expect_stdout
+    contains: "test result: ok"

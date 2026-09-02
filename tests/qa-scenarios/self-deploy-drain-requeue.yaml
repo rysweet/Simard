@@ -1,0 +1,151 @@
+name: self-deploy-drain-requeue
+app_type: cli
+description: |
+  Validates the redesigned self-deploy drain (fix: self-deploy so Simard can
+  deploy her latest merged code even while busy running engineers):
+  - The drain NEVER fails on a wall-clock timeout with engineers in flight.
+  - The drain NEVER kills a producing engineer (worktree left intact).
+  - drain_by_requeue marks draining and invokes requeue for every in-flight
+    engineer, and never aborts when a single requeue fails.
+  - The production requeue LEAVES a still-live engineer's claim sentinel intact
+    (so a restarted binary does not duplicate a producing engineer's goal) and
+    only releases a dead/missing claim.
+  - draining.flag is reopened after a deploy: the new binary clears a stale
+    flag at boot when no ExecHandover upgrade is in flight (and preserves it
+    when one is), and any post-drain abort reopens dispatch before returning.
+  Behavior is proven by the hermetic tempdir unit tests this scenario drives
+  (no destructive action against the live host). The CLI runner rejects any
+  non-zero exit, so a failing test fails the scenario. The first invocation may
+  compile the test binary; subsequent filters reuse it.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Drain never fails / never kills when an engineer is still in flight.
+  - action: run
+    params:
+      command: "cargo test --locked --lib safe_update::drain::tests::drain_never_fails_with_a_fake_engineer_still_in_flight"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # drain_by_requeue marks draining and invokes requeue for all in-flight engineers.
+  - action: run
+    params:
+      command: "cargo test --locked --lib safe_update::drain::tests::drain_by_requeue_marks_draining_and_invokes_requeue_for_all"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # A single requeue failure never aborts the deploy.
+  - action: run
+    params:
+      command: "cargo test --locked --lib safe_update::drain::tests::drain_by_requeue_never_aborts_when_a_requeue_fails"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Production requeue LEAVES a live claim sentinel intact (no duplicate dispatch).
+  - action: run
+    params:
+      command: "cargo test --locked --lib self_deploy::requeue::tests::requeue_leaves_live_claim_sentinel_without_touching_the_worktree"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Production requeue releases a DEAD claim sentinel so the goal can be picked up.
+  - action: run
+    params:
+      command: "cargo test --locked --lib self_deploy::requeue::tests::requeue_releases_dead_claim_sentinel_without_touching_the_worktree"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Grace-only drain (download rail) also never fails and keeps the flag set.
+  - action: run
+    params:
+      command: "cargo test --locked --lib safe_update::tests_orchestrator::drain_grace_never_fails_and_keeps_flag_in_place"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # BLOCKER FIX: any post-drain abort reopens engineer dispatch before returning.
+  - action: run
+    params:
+      command: "cargo test --locked --lib self_deploy::tests_orchestrator::fake_sequence::failure_after_drain_reopens_dispatch_before_returning"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # BLOCKER FIX: new binary clears a stale draining.flag at boot when no
+  # ExecHandover upgrade is in flight (success/restart path reopens dispatch).
+  - action: run
+    params:
+      command: "cargo test --locked --lib operator_commands_ooda::daemon::tests::boot_clear_removes_stale_draining_flag_without_exec_handover"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # BLOCKER FIX guard: boot clear PRESERVES the flag during a legitimate
+  # ExecHandover upgrade (must not clobber the classic safe-update rail).
+  - action: run
+    params:
+      command: "cargo test --locked --lib operator_commands_ooda::daemon::tests::boot_clear_preserves_draining_flag_during_exec_handover"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -186,6 +186,7 @@ impl CognitiveMemoryOps for CountingMemoryOps {
                 source_label: "external".to_string(),
                 temporal_index: i as i64,
                 compressed: false,
+                created_at: None,
             })
             .collect();
         Ok(episodes)

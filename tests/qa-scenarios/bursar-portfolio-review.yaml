@@ -1,0 +1,42 @@
+name: bursar-portfolio-review
+app_type: cli
+description: |
+  Outside-in coverage for the Bursar EXAMPLE investment-portfolio identity: a
+  DATA-ONLY package (investment portfolio research & advisory, research/advisory
+  only — NEVER order execution) that must be discovered by the data-driven
+  example_loader and drive its portfolio-review loop entirely from recipes and
+  prompts, with ZERO Rust in `src/`.
+
+  Verified end to end by `tests/bursar_assets_valid.rs`:
+  - the pluggable `bursar` example identity card loads via the real
+    `simard::identity::load_example_identity` rail (NOT `BuiltinIdentityLoader`)
+    in curator mode with a read-only write-authority posture and all six phase
+    prompts (system + allocate + backtest + risk + rebalance + report);
+  - `bursar` is provably NOT a compiled-in builtin identity;
+  - the goal-session recipe `recipes/bursar-portfolio-review.yaml` drives the
+    five-stage loop (allocate -> backtest -> risk -> rebalance -> report),
+    references its domain tooling (pandas / backtrader / QuantLib), treats the
+    portfolio + mandate as untrusted data, and carries the advisory-only /
+    no-order-execution contract (the rebalance stage refuses execution and emits
+    a reviewable plan);
+  - the package is data-only: no `.rs` files anywhere under it.
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so the
+  suite runs under a single `bash -lc` wrapper that exits zero only when the
+  `cargo test` for the bursar assets reports success.
+metadata:
+  tags:
+    - cli
+    - bursar
+    - identity
+    - example
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --test bursar_assets_valid 2>&1 | tee /tmp/bursar-qa.log | grep -q \"test result: ok\"'"
+    timeout: 600000
