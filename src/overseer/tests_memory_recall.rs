@@ -54,7 +54,8 @@ use crate::overseer::config::{
 };
 use crate::overseer::signal::{Priority, Signal, signals_from};
 use crate::overseer::wiring::{
-    MemoryRecallOps, overseer_identity, overseer_tick, run_overseer_tick_isolated,
+    MemoryRecallOps, overseer_identity, overseer_tick, overseer_tick_detailed,
+    run_overseer_tick_isolated,
 };
 use crate::overseer::{Capabilities, Overseer, orient};
 
@@ -847,6 +848,102 @@ fn write_back_persists_again_for_a_distinct_signature() {
         "a distinct observation is recorded too"
     );
     assert_eq!(recorded.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn superseded_after_final_action_skips_observation_write_back() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Cooperative supersession (#4981) noticed AFTER the action loop — the case
+    // the loop-top check alone cannot catch. `observed_with_process_health`
+    // derives exactly one admitted action (the launch, per
+    // `run_cycle_plans_a_launch_for_process_health`) AND a write-back-worthy
+    // problem. The predicate is FALSE for the single loop-top consultation (so
+    // that only in-flight action is allowed to start and fully return) and TRUE
+    // only afterwards — modelling the watchdog reclaiming the slot as the last
+    // action finishes. Because the loop-top check saw `false`, ONLY the
+    // post-loop re-check can flag the tick and gate the write-back. Delete that
+    // post-loop check and this test regresses: the stale worker would record its
+    // outdated observation (memory_writes == 1) exactly the race the fix closes.
+    let mem = FakeMemoryRecall::new();
+    let recorded = mem.recorded();
+
+    let checks = Arc::new(AtomicUsize::new(0));
+    let checks_in_predicate = Arc::clone(&checks);
+    let mut ov = overseer_with(observed_with_process_health(), mem, true)
+        // 0th check (loop-top, before the only action) → false; every later
+        // check (the post-loop write-back gate) → true.
+        .with_cancel_check(Box::new(move || {
+            checks_in_predicate.fetch_add(1, Ordering::SeqCst) >= 1
+        }));
+
+    let (report, entries) = overseer_tick_detailed(&mut ov);
+
+    assert!(
+        report.superseded,
+        "supersession noticed after the final action must flag the report"
+    );
+    // The single admitted action DID run (loop-top saw `false`), proving the
+    // loop-top check did NOT short-circuit — the post-loop check is what fired.
+    assert_eq!(
+        report.recipes_launched, 1,
+        "the only planned action ran before supersession was noticed"
+    );
+    assert!(
+        checks.load(Ordering::SeqCst) >= 2,
+        "both the loop-top check and the required post-loop check were consulted"
+    );
+    // The heart of the fix: a superseded tick with an observed problem performs
+    // ZERO observation write-backs — no counter bump and no backend call.
+    assert_eq!(
+        report.memory_writes, 0,
+        "a superseded tick writes back NO observation"
+    );
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "the memory backend saw no observation write from a superseded worker"
+    );
+    // Recall still happened (supersession is post-Observe), and the per-problem
+    // feed rows are still handed back — the daemon's generation check, not this
+    // path, blocks their publication for a stale worker.
+    assert_eq!(
+        report.memory_recalls, 1,
+        "the Observe-pass recall still ran"
+    );
+    assert!(
+        !entries.is_empty(),
+        "problem entries are still returned for the daemon to gate on generation"
+    );
+}
+
+#[test]
+fn superseded_before_the_action_loop_also_skips_write_back() {
+    // Companion to the post-loop case: when supersession is ALREADY true at the
+    // first (loop-top) check, the tick takes no actions AND still writes back no
+    // observation. Proves the write-back skip holds however supersession is
+    // first noticed, not only via the post-loop re-check.
+    let mem = FakeMemoryRecall::new();
+    let recorded = mem.recorded();
+    let mut ov = overseer_with(observed_with_process_health(), mem, true)
+        .with_cancel_check(Box::new(|| true));
+
+    let report = overseer_tick(&mut ov);
+
+    assert!(
+        report.superseded,
+        "an already-superseded tick reports superseded"
+    );
+    assert_eq!(
+        report.recipes_launched, 0,
+        "a tick superseded before the loop takes no actions"
+    );
+    assert_eq!(
+        report.memory_writes, 0,
+        "a superseded tick writes back NO observation"
+    );
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "no observation reached the backend from a superseded worker"
+    );
 }
 
 // ══════════════ MemoryRecallOps adapter over the shared handle ══════════════
