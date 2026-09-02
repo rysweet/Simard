@@ -8,7 +8,7 @@ description: >
   line, and the legacy python-bridge "Suite progressive failed" traceback — to
   their root cause, current status, and remediation so a naive `grep ERROR`
   telemetry alert can be triaged quickly.
-last_updated: 2026-07-27
+last_updated: 2026-09-02
 review_schedule: as-needed
 owner: simard
 doc_type: how-to
@@ -121,6 +121,10 @@ left on device
 
 ## Signature 3 — nested "recipe_runner_rs::runner ... check-and-clean failed"
 
+This embedded child-`ERROR` form is historical. Current builds do not copy the
+child stderr into the daemon log; a non-zero recipe exit is reported by the
+separate live warning described below.
+
 ```
 [simard] WARN: disk health check failed: base type 'disk-health-check' failed
 during invocation: recipe exited with exit status: 1: …
@@ -137,27 +141,31 @@ failed: … agent step failed: amplihack copilot failed (exit 1)
   **not** a daemon error — this is the most common trigger for a false-positive
   "recent ERROR in ooda.log" telemetry alert.
 - **Root cause of the underlying failure:** the disk-health-check recipe's
-  single `check-and-clean` **agent step failed** — the `amplihack copilot`
-  agent binary itself exited `1` during that run (an agent/CLI invocation
-  failure), so `recipe-runner-rs` reported the step as failed and the recipe
-  exited non-zero.
+  single `check-and-clean` **agent step failed** — the configured agent binary
+  exited `1` during that run (an agent/CLI invocation failure), so
+  `recipe-runner-rs` reported the step as failed and the recipe exited
+  non-zero.
 - **Impact:** **minimal and self-limiting.** The disk-health check is
   best-effort and runs every cycle; a single failed run skips one cleanup
   opportunity and never aborts the OODA cycle. The very next cycle re-runs it.
   Disk reclaim also runs independently.
-- **Current status:** transient. The current daemon logs `disk health recipe:
-  OK` on healthy runs, and the reworked trigger (issue #4722) records the recipe
-  by **exit status alone** without scraping/embedding child stdout — reducing
-  the log-pollution that fed the false alert.
+- **Current status:** the reworked trigger (issue #4722) records the recipe by
+  **exit status alone** without scraping or embedding child stdout. Current
+  builds emit one of three daemon lines: `disk health recipe: OK`,
+  `WARN: disk health recipe reported failure (non-zero exit)`, or
+  `WARN: disk health check failed: ...` when the recipe could not be invoked.
 - **Remediation / triage:**
   ```bash
-  grep -E "disk health recipe:|disk health check failed" ~/.simard/ooda.log | tail -10
+  grep -E "disk health recipe|disk health check failed" ~/.simard/ooda.log | tail -10
   ```
   If `disk health recipe: OK` dominates the recent tail, the earlier failure was
-  transient — no action. If `check-and-clean` fails **repeatedly**, treat it as
-  an agent-invocation problem (run `amplihack copilot` health check, confirm the
-  agent binary/config, review the recipe under
-  `prompt_assets/simard/recipes/disk-health-check.yaml`), not as a disk fault.
+  transient — no action. A recent `disk health recipe reported failure
+  (non-zero exit)` means the agent step failed and should be investigated. If
+  it fails **repeatedly**, health-check the configured agent binary
+  (`AMPLIHACK_AGENT_BINARY`; the recipe uses `agent: default`), confirm its
+  configuration, and review the recipe under
+  `prompt_assets/simard/recipes/disk-health-check.yaml`. Treat this as an
+  agent-invocation problem, not as a disk fault.
   For telemetry: match daemon-emitted severity at line start (e.g. lines whose
   `[simard]` tag carries `ERROR:`) rather than a bare `ERROR` substring, so
   embedded child-process log lines do not trip the alert.
@@ -177,8 +185,8 @@ BrokenPipeError: [Errno 32] Broken pipe
 ```
 
 - **Emitter:** the legacy **python** `simard_gym_bridge` / `bridge_server`
-  process. `state/ooda.log` has not been written since a daemon shutdown in
-  mid-May; these lines are old.
+  process. Confirm that `state/ooda.log` is historical from its modification
+  time before treating these lines as stale.
 - **Root cause:** a **`BrokenPipeError`** — the bridge tried to `print` /
   `sys.stdout.flush()` a progressive-suite result to a stdout pipe whose reader
   (the parent that spawned the bridge) had already gone away. The suite result
@@ -206,8 +214,9 @@ BrokenPipeError: [Errno 32] Broken pipe
    warning, not a daemon error.
 4. **Live DB-backup health?** `grep "verified backup OK"` — recent successes
    mean Signatures 1–2 are historical.
-5. **Live disk-health?** `grep "disk health recipe:"` — recent `OK` means
-   Signature 3 was transient.
+5. **Live disk-health?** `grep -E "disk health recipe"` — recent `OK` means
+   Signature 3 was transient; recent `reported failure (non-zero exit)` means
+   investigate the configured agent and recipe.
 
 Only escalate when a signature is **recent** (after the last restart) **and
 recurring** across multiple cycles.
