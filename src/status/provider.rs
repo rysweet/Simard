@@ -6,9 +6,15 @@
 //! failing source degrades one section, never the whole report, and never
 //! panics.
 //!
-//! Sources that require the live memory/goal IPC socket or `gh` (memory, goals,
+//! Sources that require the live memory/goal IPC socket or `gh` (memory,
 //! workstreams, completed work, self-improvement) are wired incrementally; until
 //! then they report `unavailable` with an honest note rather than inventing data.
+//!
+//! The goal-board section IS wired ([`assemble_goals`], issue #4196): it reads
+//! the durable `goal-board:snapshot` through the same process-agnostic reader
+//! client that backs the dashboard `/api/goals` panel and the TUI goal board, so
+//! the unified Status snapshot surfaces active-goal state (active / blocked +
+//! why / not-started) instead of a bare `unavailable`.
 
 use std::path::PathBuf;
 
@@ -29,6 +35,11 @@ pub struct AssembleOptions {
     pub service_unit: String,
     /// Optional allowlist of section names to assemble; `None` = all.
     pub sections: Option<Vec<String>>,
+    /// Override for the `daemon_health.json` heartbeat path used when the
+    /// systemd unit is not loaded. `None` resolves the real process-global
+    /// path (`data_local_dir()/simard/daemon_health.json`). Tests inject a
+    /// hermetic path so they never read the host's live daemon heartbeat.
+    pub daemon_health_path: Option<PathBuf>,
 }
 
 impl Default for AssembleOptions {
@@ -37,6 +48,7 @@ impl Default for AssembleOptions {
             state_root: crate::state_root::simard_state_root(),
             service_unit: "simard.service".to_string(),
             sections: None,
+            daemon_health_path: None,
         }
     }
 }
@@ -52,7 +64,11 @@ impl AssembleOptions {
 }
 
 /// Age (seconds) beyond which the telemetry snapshot is considered `stale`.
-const SNAPSHOT_FRESHNESS_SECS: i64 = 300;
+///
+/// Single-sourced from [`crate::telemetry::snapshot::FRESHNESS_SECS`] so the
+/// dashboard's `GET /api/enrichment` — which classifies the SAME once-per-cycle
+/// snapshot — and this status provider always agree on `live`/`stale`.
+const SNAPSHOT_FRESHNESS_SECS: i64 = crate::telemetry::snapshot::FRESHNESS_SECS;
 
 /// Assemble the full snapshot. Never panics; degraded sources become
 /// `unavailable`/`absent` sections.
@@ -76,7 +92,7 @@ pub fn assemble(opts: &AssembleOptions) -> StatusSnapshot {
         resources: assemble_resources(main_pid, &opts.state_root),
         memory: assemble_memory(metrics.as_ref(), &opts.state_root),
         gym: assemble_gym(gym_skipped),
-        goals: SectionEnvelope::absent("goal board read deferred (see dashboard/TUI goal board)"),
+        goals: assemble_goals(&opts.state_root),
         workstreams: SectionEnvelope::absent("engineer registry not read in this context"),
         completed: SectionEnvelope::absent("gh: not queried in this context"),
         self_improvement: SectionEnvelope::absent("gh: not queried in this context"),
@@ -97,7 +113,26 @@ fn llm_over_budget(llm: &SectionEnvelope<LlmUsage>) -> Option<bool> {
 
 // ── daemon ──────────────────────────────────────────────────────────────────
 
+/// Age (seconds) beyond which the `daemon_health.json` heartbeat is considered
+/// `stale`. Matches the `/api/status` threshold (`routes.rs`): cycle interval
+/// (300s) + max cycle runtime (~600s). With the heartbeat stamped at cycle
+/// start, a healthy daemon's heartbeat stays well under this.
+const DAEMON_HEARTBEAT_STALE_SECS: i64 = 900;
+
 fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
+    // Prefer systemd when a unit is actually loaded; otherwise fall back to the
+    // durable `daemon_health.json` heartbeat so the snapshot stays
+    // process-agnostic in non-systemd deployments (dev / worktree / container).
+    match assemble_daemon_from_systemctl(opts) {
+        Some(env) => env,
+        None => assemble_daemon_from_heartbeat(opts),
+    }
+}
+
+/// Assemble the daemon section from `systemctl show`. Returns `Some(..)` only
+/// when the unit is genuinely loaded; `None` (unavailable / not-found /
+/// not-loaded) signals the caller to fall back to the durable heartbeat.
+fn assemble_daemon_from_systemctl(opts: &AssembleOptions) -> Option<SectionEnvelope<Daemon>> {
     let output = std::process::Command::new("systemctl")
         .args([
             "show",
@@ -108,8 +143,8 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
 
     let output = match output {
         Ok(o) if o.status.success() => o,
-        Ok(_) => return SectionEnvelope::absent("systemctl: unit not found"),
-        Err(_) => return SectionEnvelope::absent("systemctl: unavailable"),
+        // systemctl ran but errored, or is unavailable — try the heartbeat.
+        Ok(_) | Err(_) => return None,
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -121,11 +156,11 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
     }
 
     // `systemctl show` exits 0 even for an unknown unit (reporting
-    // `LoadState=not-found`); treat anything not actually loaded as absent
-    // rather than rendering a phantom daemon.
+    // `LoadState=not-found`); treat anything not actually loaded as "no unit"
+    // and fall back to the heartbeat rather than rendering a phantom daemon.
     match props.get("LoadState").map(String::as_str) {
         Some("loaded") => {}
-        _ => return SectionEnvelope::absent("systemctl: unit not loaded"),
+        _ => return None,
     }
 
     let active = props.get("ActiveState").cloned().unwrap_or_default();
@@ -151,7 +186,116 @@ fn assemble_daemon(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
             .cloned(),
         n_restarts: props.get("NRestarts").and_then(|v| v.parse().ok()),
     };
-    SectionEnvelope::live(daemon, None)
+    Some(SectionEnvelope::live(daemon, None))
+}
+
+/// Path to the durable OODA heartbeat the daemon flushes each cycle
+/// (`dirs::data_local_dir()/simard/daemon_health.json`). This is the same file
+/// `/api/status`, `/api/activity`, and `/api/workboard` read, and — unlike the
+/// telemetry snapshot — it is *not* under `SIMARD_STATE_ROOT`, so it is resolved
+/// from the OS data-local dir rather than `opts.state_root`.
+fn daemon_health_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/var/tmp"))
+        .join("simard")
+        .join("daemon_health.json")
+}
+
+/// Assemble the daemon section from the durable `daemon_health.json` heartbeat.
+/// Fail-visible: a missing / unreadable / unparseable heartbeat degrades this
+/// one section to `absent` with the honest `systemctl: unit not loaded` note
+/// (never panics, never fabricates a running daemon).
+///
+/// The heartbeat path comes from `opts.daemon_health_path` when set (hermetic
+/// tests inject a path), otherwise the real process-global [`daemon_health_path`].
+fn assemble_daemon_from_heartbeat(opts: &AssembleOptions) -> SectionEnvelope<Daemon> {
+    let path = opts
+        .daemon_health_path
+        .clone()
+        .unwrap_or_else(daemon_health_path);
+    read_daemon_heartbeat(&path, chrono::Utc::now())
+}
+
+/// Read + map the heartbeat at `path` as of `now`. Split from
+/// [`assemble_daemon_from_heartbeat`] so tests can inject a temp path without
+/// mutating process-global `HOME` / `XDG_DATA_HOME`.
+fn read_daemon_heartbeat(
+    path: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SectionEnvelope<Daemon> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return SectionEnvelope::absent("systemctl: unit not loaded"),
+    };
+    let health: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return SectionEnvelope::absent("systemctl: unit not loaded"),
+    };
+    daemon_from_heartbeat(&health, now)
+}
+
+/// Pure mapping from a parsed `daemon_health.json` heartbeat to the daemon
+/// section, given `now` (so it is deterministically testable). The heartbeat's
+/// `timestamp` drives freshness against [`DAEMON_HEARTBEAT_STALE_SECS`]:
+/// - fresh  → `state = "running (<phase>)"`, `freshness = live`
+/// - stale  → `state = "stale (<phase>)"`,   `freshness = stale`
+/// - no/invalid timestamp → `state = "unknown"`, `freshness = stale`
+///
+/// `as_of` is the heartbeat `timestamp`. `main_pid` is read defensively from
+/// the heartbeat when present (issue #4929) so `assemble_resources` can sample
+/// `/proc/<pid>` RSS + CPU; a missing or malformed value degrades to `None`
+/// (honest empty metric, never a guessed PID). `n_restarts` is not recorded in
+/// the heartbeat, so it stays `None`.
+fn daemon_from_heartbeat(
+    health: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SectionEnvelope<Daemon> {
+    let timestamp = health.get("timestamp").and_then(|t| t.as_str());
+    let phase = health
+        .get("cycle_phase")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .trim();
+
+    // Defensive parse: `as_u64` yields `None` for strings, negatives, and
+    // non-numbers, so a malformed `main_pid` never panics or fabricates a PID.
+    let main_pid = health
+        .get("main_pid")
+        .and_then(|v| v.as_u64())
+        .and_then(|p| u32::try_from(p).ok());
+
+    let fresh = timestamp
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|ts| now.signed_duration_since(ts.with_timezone(&chrono::Utc)))
+        .map(|age| age.num_seconds() < DAEMON_HEARTBEAT_STALE_SECS);
+
+    let base = match fresh {
+        Some(true) => "running",
+        Some(false) => "stale",
+        None => "unknown",
+    };
+    let state = if phase.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} ({phase})")
+    };
+
+    let daemon = Daemon {
+        state,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        main_pid,
+        deployed_commit: None,
+        instance_uptime: None,
+        running_since: None,
+        n_restarts: None,
+    };
+
+    let as_of = timestamp.map(|s| s.to_string());
+    if fresh == Some(true) {
+        SectionEnvelope::live(daemon, as_of)
+    } else {
+        SectionEnvelope::stale(daemon, as_of)
+    }
 }
 
 // ── resources ───────────────────────────────────────────────────────────────
@@ -182,7 +326,7 @@ fn assemble_resources(
     }
 
     let resources = Resources {
-        cpu_pct: None,
+        cpu_pct: daemon_pid.and_then(read_process_cpu_pct),
         rss_bytes,
         cgroup_mem_peak_bytes: None,
         load_1,
@@ -208,6 +352,78 @@ fn read_process_rss_bytes(pid: u32) -> Option<u64> {
         }
     }
     None
+}
+
+/// Read the daemon's CPU utilisation as a percentage (issue #4756).
+///
+/// Reports the process's **lifetime-average** %CPU (matching `ps aux` %CPU):
+/// total CPU seconds consumed divided by wall-clock seconds alive. This is a
+/// single, NON-BLOCKING `/proc` read — no sampling sleep — so it never delays a
+/// `simard status` render, and it replaces the former hardcoded `cpu_pct: None`
+/// that rendered daemon CPU as `absent` (the same telemetry gap the rpc-health
+/// timeout exposed).
+///
+/// Defensive: every step degrades to `None` on any malformed / missing input
+/// and NEVER panics — a transient `/proc` read must not crash status.
+fn read_process_cpu_pct(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let cpu_ticks = parse_proc_stat_cpu_ticks(&stat)?;
+    let start_ticks = parse_proc_stat_starttime_ticks(&stat)?;
+    let clk_tck = clock_ticks_per_sec()?;
+    let uptime_secs = read_system_uptime_secs()?;
+    let start_secs = start_ticks as f64 / clk_tck;
+    let elapsed_secs = uptime_secs - start_secs;
+    // A not-yet-warm or clock-skewed sample can yield a non-positive elapsed
+    // time; degrade to None rather than emit a meaningless or infinite ratio.
+    if elapsed_secs <= 0.0 {
+        return None;
+    }
+    let cpu_secs = cpu_ticks as f64 / clk_tck;
+    let pct = cpu_secs / elapsed_secs * 100.0;
+    (pct.is_finite() && pct >= 0.0).then_some(pct)
+}
+
+/// Sum `utime` (field 14) + `stime` (field 15) cumulative CPU ticks out of a
+/// `/proc/<pid>/stat` line.
+///
+/// The `comm` (field 2) is parenthesized and may itself contain spaces and
+/// parentheses, so offsets are counted from the LAST `)` — the classic
+/// `/proc/<pid>/stat` pitfall a naive whitespace/first-`)` split gets wrong.
+/// Returns `None` on any malformed / truncated / non-numeric input.
+fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // Post-`)` field 0 is `state` (field 3); utime (field 14) is post-index 11
+    // and stime (field 15) is post-index 12.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    utime.checked_add(stime)
+}
+
+/// Read `starttime` (field 22, in clock ticks since boot) out of a
+/// `/proc/<pid>/stat` line, counting fields from the LAST `)` for the same
+/// parenthesized-`comm` safety as [`parse_proc_stat_cpu_ticks`]. `None` on any
+/// malformed / truncated / non-numeric input.
+fn parse_proc_stat_starttime_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    // Post-`)` index 19 is starttime (field 22).
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Clock ticks per second (`_SC_CLK_TCK`, typically 100 on Linux), used to
+/// convert `/proc/<pid>/stat` ticks to seconds. `None` if the query fails.
+fn clock_ticks_per_sec() -> Option<f64> {
+    // SAFETY: `sysconf` is a pure libc configuration query with no memory
+    // effects; a non-positive result (query failed) degrades to None below.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks > 0).then_some(ticks as f64)
+}
+
+/// System uptime in seconds from `/proc/uptime` (first field). `None` when
+/// `/proc` is unavailable or the value is unparseable.
+fn read_system_uptime_secs() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/uptime").ok()?;
+    text.split_whitespace().next()?.parse().ok()
 }
 
 /// Resolve and stat the operator's home mount for the disk row.
@@ -441,6 +657,25 @@ fn assemble_memory(
     let store_path = state_root.join("cognitive");
     let store_size_bytes = std::fs::metadata(&store_path).ok().map(|meta| meta.len());
 
+    // Distillation health from the published `simard.distill.runs{result="ok"}`
+    // counter — the same telemetry source the Telemetry section reads for
+    // `distill_fail_pct`. Previously `cognitive_processes` was hard-coded to
+    // `CognitiveHealth::default()`, so the Overview "cognitive" line rendered
+    // `distillation absent` even while distillation was demonstrably running
+    // (the counter was flushed and `distill_fail_pct` was live). Read it here so
+    // the line reflects reality. Fail-closed to `None` (→ "absent") until the
+    // daemon has flushed the counter — never a fabricated zero. (`parse_fail`
+    // was removed in #2679; `ok` is the sole `result` value.)
+    let distillation = m
+        .counter(names::DISTILL_RUNS, &[(names::ATTR_RESULT, "ok")])
+        .map(|runs| {
+            if runs == 0 {
+                "idle".to_string()
+            } else {
+                format!("{runs} runs")
+            }
+        });
+
     let memory = MemoryBrain {
         store_path: store_path.display().to_string(),
         store_size_bytes,
@@ -448,7 +683,13 @@ fn assemble_memory(
         nodes_total,
         nodes,
         edges,
-        cognitive_processes: super::CognitiveHealth::default(),
+        cognitive_processes: super::CognitiveHealth {
+            distillation,
+            // Consolidation and introspection have no published telemetry
+            // counter yet, so they remain honestly `absent` (a separate
+            // instrumentation change would surface them the same way).
+            ..super::CognitiveHealth::default()
+        },
         brains_llm_backed: None,
         brain_fallbacks: m.counter(names::BRAIN_ESCALATIONS, &[]),
         decide_ladder_exhausted: m.counter(names::BRAIN_LADDER_EXHAUSTED, &[]),
@@ -473,6 +714,85 @@ fn assemble_gym(skip_gym: bool) -> SectionEnvelope<Gym> {
         },
         None,
     )
+}
+
+// ── goals ────────────────────────────────────────────────────────────────────
+
+/// Max characters of a goal's summary surfaced in the status snapshot. Keeps the
+/// GOAL BOARD terminal row compact (the renderer left-pads the summary to 42
+/// columns) while giving JSON consumers a meaningful first line.
+const GOAL_SUMMARY_CAP: usize = 80;
+
+/// Assemble the GOAL BOARD section from the durable `goal-board:snapshot`
+/// (issue #4196).
+///
+/// Reads through [`open_reader_client`](crate::memory_ipc::open_reader_client)
+/// — the exact process-agnostic ladder (in-process daemon Arc → daemon socket →
+/// direct on-disk open) that backs the dashboard `/api/goals` panel and the TUI
+/// goal board — then maps each active [`ActiveGoal`](crate::goal_curation::ActiveGoal)
+/// into a [`GoalItem`](super::GoalItem): the trailing-hash `short_id`, a
+/// `p{priority}` label, the [`GoalProgress`](crate::goal_curation::GoalProgress)
+/// `Display` (which carries the blocked reason as `blocked: …`), and a
+/// first-line-capped summary.
+///
+/// **Fail-visible** (mirrors [`assemble_overseer`] and the dashboard's
+/// fail-closed goal read, #2896): a reader-open or board-read fault degrades
+/// THIS one section to `error` with an honest note — it never panics and never
+/// fabricates goals. An empty-but-readable board reads back as a present, live,
+/// empty list, which is distinct from `unavailable`.
+fn assemble_goals(state_root: &std::path::Path) -> SectionEnvelope<super::GoalBoard> {
+    use crate::goal_curation::load_goal_board;
+    use crate::memory_ipc::open_reader_client;
+
+    let reader = match open_reader_client(state_root) {
+        Ok(r) => r,
+        Err(e) => return SectionEnvelope::error(format!("goal board reader unavailable: {e}")),
+    };
+    let board = match load_goal_board(reader.ops()) {
+        Ok(b) => b,
+        Err(e) => return SectionEnvelope::error(format!("goal board read failed: {e}")),
+    };
+
+    let active = board
+        .active
+        .iter()
+        .map(|g| super::GoalItem {
+            short_id: goal_short_id(&g.id),
+            priority: format!("p{}", g.priority),
+            status: g.status.to_string(),
+            summary: first_line_capped(&g.description, GOAL_SUMMARY_CAP),
+        })
+        .collect();
+
+    SectionEnvelope::live(super::GoalBoard { active }, None)
+}
+
+/// Derive a compact, stable handle for a goal id. Goal ids carry a trailing
+/// 8-hex disambiguator (e.g. `advance-…-parity-f29bb15c`); when present that
+/// suffix is the shortest unambiguous handle and is what operators recognise.
+/// Falls back to a char-capped first line for ids without such a suffix.
+fn goal_short_id(id: &str) -> String {
+    if let Some((_, tail)) = id.rsplit_once('-')
+        && (6..=12).contains(&tail.len())
+        && tail.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return tail.to_string();
+    }
+    first_line_capped(id, 16)
+}
+
+/// First non-empty logical line of `s`, trimmed and capped to `max` Unicode
+/// chars with a trailing `…` when truncated. Used for the goal summary so a
+/// multi-paragraph goal description renders as one compact board row.
+fn first_line_capped(s: &str, max: usize) -> String {
+    let first = s.lines().next().unwrap_or("").trim();
+    let mut chars = first.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 // ── telemetry / anomalies (derived from the metrics snapshot) ────────────────
@@ -795,11 +1115,42 @@ mod pure_helper_tests {
     }
 
     #[test]
+    fn goal_short_id_prefers_trailing_hex_suffix() {
+        assert_eq!(
+            goal_short_id("advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c"),
+            "f29bb15c"
+        );
+        // Non-hex trailing segment falls back to the char-capped id.
+        assert_eq!(goal_short_id("do-the-thing"), "do-the-thing");
+        // A too-long id is capped with an ellipsis.
+        assert_eq!(
+            goal_short_id("a-very-long-goal-id-with-no-hash-suffix"),
+            "a-very-long-goal…"
+        );
+        // A short bare id passes through unchanged.
+        assert_eq!(goal_short_id("g1"), "g1");
+    }
+
+    #[test]
+    fn first_line_capped_takes_first_line_and_caps() {
+        assert_eq!(first_line_capped("hello\nworld", 80), "hello");
+        assert_eq!(first_line_capped("  padded  \nnext", 80), "padded");
+        assert_eq!(first_line_capped("abcdef", 3), "abc…");
+        assert_eq!(first_line_capped("", 10), "");
+    }
+
+    #[test]
     fn snapshot_is_stale_uses_freshness_window() {
         assert!(!snapshot_is_stale(&snapshot::now_rfc3339()));
         let old = (chrono::Utc::now() - chrono::Duration::seconds(SNAPSHOT_FRESHNESS_SECS + 60))
             .to_rfc3339();
         assert!(snapshot_is_stale(&old));
+        // A once-per-cycle-aged snapshot (600s: cycle runtime + inter-cycle
+        // sleep) is NOT stale — the window matches the daemon-liveness bound so
+        // the status view never contradicts a `running` daemon. Regression guard
+        // for the historical 300s threshold that fired every healthy cycle.
+        let one_cycle_old = (chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339();
+        assert!(!snapshot_is_stale(&one_cycle_old));
         // Tolerant: an unparseable timestamp is treated as fresh, not stale.
         assert!(!snapshot_is_stale("not-a-timestamp"));
     }
@@ -859,6 +1210,73 @@ mod pure_helper_tests {
     }
 
     #[test]
+    fn assemble_memory_populates_distillation_from_distill_runs() {
+        // A published `simard.distill.runs{result="ok"}` counter must surface on
+        // the cognitive line instead of the permanent "absent" the hard-coded
+        // default produced.
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.gauges.push(snapshot::GaugeSeries {
+            name: names::MEMORY_NODES.to_string(),
+            attrs: vec![(names::ATTR_TYPE.to_string(), "episodic".to_string())],
+            value: 5,
+        });
+        m.counters.push(snapshot::CounterSeries {
+            name: names::DISTILL_RUNS.to_string(),
+            attrs: vec![(names::ATTR_RESULT.to_string(), "ok".to_string())],
+            value: 12,
+        });
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        assert!(env.is_present());
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(
+            data.cognitive_processes.distillation.as_deref(),
+            Some("12 runs")
+        );
+        // No consolidation/introspection telemetry → honestly absent.
+        assert_eq!(data.cognitive_processes.consolidation, None);
+        assert_eq!(data.cognitive_processes.introspection, None);
+    }
+
+    #[test]
+    fn assemble_memory_distillation_absent_without_distill_counter() {
+        // Node gauges present but no distill counter flushed yet → the cognitive
+        // line stays honestly "absent" rather than a fabricated zero/idle.
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.gauges.push(snapshot::GaugeSeries {
+            name: names::MEMORY_NODES.to_string(),
+            attrs: vec![(names::ATTR_TYPE.to_string(), "episodic".to_string())],
+            value: 5,
+        });
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        assert!(env.is_present());
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(data.cognitive_processes.distillation, None);
+    }
+
+    #[test]
+    fn assemble_memory_distillation_idle_when_counter_zero() {
+        // A flushed-but-zero counter is a real signal (distillation configured,
+        // no run yet) — surfaced as "idle", distinct from "absent".
+        let mut m = snapshot::MetricsSnapshot::empty();
+        m.gauges.push(snapshot::GaugeSeries {
+            name: names::MEMORY_NODES.to_string(),
+            attrs: vec![(names::ATTR_TYPE.to_string(), "episodic".to_string())],
+            value: 5,
+        });
+        m.counters.push(snapshot::CounterSeries {
+            name: names::DISTILL_RUNS.to_string(),
+            attrs: vec![(names::ATTR_RESULT.to_string(), "ok".to_string())],
+            value: 0,
+        });
+        let env = assemble_memory(Some(&m), std::path::Path::new("/nonexistent-simard-state"));
+        let data = env.data.as_ref().unwrap();
+        assert_eq!(
+            data.cognitive_processes.distillation.as_deref(),
+            Some("idle")
+        );
+    }
+
+    #[test]
     fn assemble_telemetry_absent_without_metrics() {
         assert!(!assemble_telemetry(None, false, None, None).is_present());
     }
@@ -903,8 +1321,17 @@ mod pure_helper_tests {
 
         assert_eq!(snap.schema_version, SCHEMA_VERSION);
         assert!(!snap.generated_at.is_empty());
+        // The goal board IS wired (#4196): a readable-but-empty board is a
+        // PRESENT live section (empty active list), distinct from `unavailable`.
+        assert!(
+            snap.goals.is_present(),
+            "goal board is wired and reads back present even when empty"
+        );
+        assert!(
+            snap.goals.data.as_ref().unwrap().active.is_empty(),
+            "a fresh state root has no active goals"
+        );
         // Sources not wired in this process context degrade to absent, never panic.
-        assert!(!snap.goals.is_present());
         assert!(!snap.completed.is_present());
         assert!(!snap.self_improvement.is_present());
     }
@@ -916,5 +1343,383 @@ mod pure_helper_tests {
         assert_eq!(opts.state_root, root);
         assert_eq!(opts.service_unit, "simard.service");
         assert!(opts.sections.is_none());
+    }
+
+    // ── daemon heartbeat fallback (#4215) ─────────────────────────────
+    // In non-systemd deployments (dev / worktree / container) `systemctl show`
+    // reports no loaded unit, so `assemble_daemon` falls back to the durable
+    // `daemon_health.json` heartbeat instead of marking the daemon absent.
+
+    /// A fresh heartbeat renders the daemon as running (with phase) and live.
+    #[test]
+    fn daemon_from_heartbeat_fresh_is_running_live() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": (now - chrono::Duration::seconds(30)).to_rfc3339(),
+            "status": "running",
+            "cycle_phase": "sleep",
+            "cycle_number": 1723,
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        let d = env.data.as_ref().expect("running daemon carries data");
+        assert_eq!(d.state, "running (sleep)");
+        assert!(env.as_of.is_some(), "as_of carries the heartbeat timestamp");
+        // Fields the heartbeat does not record stay honestly None.
+        assert!(d.main_pid.is_none());
+        assert!(d.n_restarts.is_none());
+    }
+
+    /// A heartbeat older than the staleness window renders as stale, not absent.
+    #[test]
+    fn daemon_from_heartbeat_old_is_stale() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": (now
+                - chrono::Duration::seconds(DAEMON_HEARTBEAT_STALE_SECS + 60))
+            .to_rfc3339(),
+            "cycle_phase": "orient",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Stale);
+        assert_eq!(env.data.as_ref().unwrap().state, "stale (orient)");
+    }
+
+    /// No `cycle_phase` yields a bare state without an empty `( )` suffix.
+    #[test]
+    fn daemon_from_heartbeat_without_phase_has_no_suffix() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.data.as_ref().unwrap().state, "running");
+    }
+
+    /// A missing / invalid timestamp is "unknown" and stale — never fabricated
+    /// as running.
+    #[test]
+    fn daemon_from_heartbeat_missing_timestamp_is_unknown_stale() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({ "cycle_phase": "decide" });
+        let env = daemon_from_heartbeat(&health, now);
+        assert_eq!(env.freshness, Freshness::Stale);
+        assert_eq!(env.data.as_ref().unwrap().state, "unknown (decide)");
+        assert!(env.as_of.is_none());
+    }
+
+    /// Fail-visible: a missing heartbeat file degrades this one section to
+    /// absent with the honest systemctl note (never panics, never fabricates).
+    #[test]
+    fn read_daemon_heartbeat_missing_file_is_absent() {
+        let missing = std::env::temp_dir().join(format!(
+            "simard-status-nohealth-{}-{}.json",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let env = read_daemon_heartbeat(&missing, chrono::Utc::now());
+        assert_eq!(env.availability, Availability::Unavailable);
+        assert_eq!(env.freshness, Freshness::Absent);
+        assert_eq!(env.note.as_deref(), Some("systemctl: unit not loaded"));
+    }
+
+    /// A readable, fresh heartbeat file reads back as a running/live daemon.
+    #[test]
+    fn read_daemon_heartbeat_reads_fresh_file_as_running() {
+        let now = chrono::Utc::now();
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-health-{}-{}",
+            std::process::id(),
+            now.timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon_health.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "timestamp": now.to_rfc3339(),
+                "status": "running",
+                "cycle_phase": "act",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let env = read_daemon_heartbeat(&path, now);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        assert_eq!(env.data.as_ref().unwrap().state, "running (act)");
+    }
+
+    /// A corrupt (non-JSON) heartbeat also degrades to the honest absent note.
+    #[test]
+    fn read_daemon_heartbeat_corrupt_file_is_absent() {
+        let now = chrono::Utc::now();
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-badhealth-{}-{}",
+            std::process::id(),
+            now.timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("daemon_health.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let env = read_daemon_heartbeat(&path, now);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(env.availability, Availability::Unavailable);
+        assert_eq!(env.note.as_deref(), Some("systemctl: unit not loaded"));
+    }
+
+    // ── F5 (#4929): heartbeat `main_pid` unblocks `simard status` RSS/CPU ──
+    // The daemon now stamps its own PID into `daemon_health.json`; the provider
+    // must read it so `assemble_resources` can sample `/proc/<pid>` RSS + CPU.
+    // Before the fix, `daemon_from_heartbeat` hardcoded `main_pid: None`, so
+    // status rendered daemon CPU/RSS as "absent" even with a fresh heartbeat.
+
+    /// A heartbeat carrying `main_pid` must surface it on the daemon section
+    /// (defensive `as_u64`), so status can sample the live process.
+    #[test]
+    fn daemon_from_heartbeat_reads_main_pid_when_present() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "status": "running",
+            "cycle_phase": "orient",
+            "main_pid": 81234,
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        let d = env.data.as_ref().expect("fresh heartbeat carries data");
+        assert_eq!(
+            d.main_pid,
+            Some(81234),
+            "a heartbeat main_pid must flow to the daemon section for RSS/CPU sampling"
+        );
+    }
+
+    /// A heartbeat with no `main_pid` stays honestly `None` (observability-only,
+    /// never fabricated). This must keep holding after the fix.
+    #[test]
+    fn daemon_from_heartbeat_missing_main_pid_stays_none() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "cycle_phase": "sleep",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert!(
+            env.data.as_ref().unwrap().main_pid.is_none(),
+            "absent main_pid degrades to None (empty metric), never a guess"
+        );
+    }
+
+    /// Defensive parse: a non-numeric / malformed `main_pid` degrades to `None`
+    /// (a total function — no panic, no silent bad-PID action).
+    #[test]
+    fn daemon_from_heartbeat_ignores_non_numeric_main_pid() {
+        let now = chrono::Utc::now();
+        let health = serde_json::json!({
+            "timestamp": now.to_rfc3339(),
+            "cycle_phase": "act",
+            "main_pid": "not-a-pid",
+        });
+        let env = daemon_from_heartbeat(&health, now);
+        assert!(
+            env.data.as_ref().unwrap().main_pid.is_none(),
+            "a malformed main_pid must be ignored, not panic or fabricate a PID"
+        );
+    }
+
+    /// Wiring guard for the F5 end goal: given a real, live PID,
+    /// `assemble_resources` samples a non-empty RSS from `/proc/<pid>/status`.
+    /// This is the value the heartbeat `main_pid` feeds once it is read — the
+    /// reason plumbing the PID through makes `simard status` show RSS instead
+    /// of "absent".
+    #[test]
+    fn assemble_resources_reports_rss_for_a_live_pid() {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-rss-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The test's own PID is guaranteed live and readable under /proc.
+        let resources = assemble_resources(Some(std::process::id()), &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let data = resources
+            .data
+            .expect("resources section is live on a host with /proc");
+        assert!(
+            data.rss_bytes.is_some(),
+            "a live daemon PID must yield a VmRSS reading (not 'absent')"
+        );
+    }
+}
+
+#[cfg(test)]
+mod goal_board_tests {
+    use super::*;
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress, save_goal_board};
+    use crate::memory_ipc::launch_writer_client;
+    use crate::status::{Availability, Freshness};
+
+    /// A unique, isolated on-disk state root per test invocation. The tier-2
+    /// cognitive store is cached per canonical root, so a fresh root gives a
+    /// hermetic board without touching the daemon or process-global writer
+    /// registration.
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-status-goals-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn assemble_goals_maps_active_board_to_present_live_section() {
+        let root = temp_root("map");
+
+        // Persist a board with a blocked and a not-started goal through the same
+        // writer path production uses, then read it back via the wired provider.
+        let mut board = GoalBoard::new();
+        let mut blocked = ActiveGoal::new(
+            "audit-simard-s-test-coverage-and-raise-it-4d27c91a",
+            "Audit Simard's test coverage and raise it to >70%\nsecond paragraph ignored",
+            2,
+        );
+        blocked.status = GoalProgress::Blocked("typed blocker recorded in outcome 019f".into());
+        board.active.push(blocked);
+        board
+            .active
+            .push(ActiveGoal::new("plain-goal", "Do the plain thing", 5));
+
+        {
+            let writer = launch_writer_client(&root).expect("open writer");
+            save_goal_board(&board, writer.ops()).expect("persist board");
+        }
+
+        let env = assemble_goals(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        assert!(env.note.is_none(), "a healthy read carries no error note");
+
+        let data = env.data.expect("present board carries data");
+        assert_eq!(data.active.len(), 2);
+
+        let g0 = &data.active[0];
+        assert_eq!(g0.short_id, "4d27c91a", "trailing hex suffix is the handle");
+        assert_eq!(g0.priority, "p2");
+        assert_eq!(g0.status, "blocked: typed blocker recorded in outcome 019f");
+        assert_eq!(
+            g0.summary, "Audit Simard's test coverage and raise it to >70%",
+            "summary is the first line only"
+        );
+
+        let g1 = &data.active[1];
+        assert_eq!(g1.priority, "p5");
+        assert_eq!(g1.status, "not-started");
+        assert_eq!(g1.summary, "Do the plain thing");
+    }
+
+    #[test]
+    fn assemble_goals_empty_board_is_present_not_unavailable() {
+        let root = temp_root("empty");
+        // No writes: a readable-but-empty board must read back PRESENT + live.
+        let env = assemble_goals(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(env.availability, Availability::Ok);
+        assert_eq!(env.freshness, Freshness::Live);
+        assert!(
+            env.data
+                .expect("empty board still carries data")
+                .active
+                .is_empty(),
+            "an empty board is an empty active list, not `unavailable`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_cpu_sampling_4756 {
+    //! TDD (issue #4756 — self-deploy failure loop). `simard status` renders
+    //! daemon CPU as `absent` because `assemble_resources` hardcodes
+    //! `cpu_pct: None` (provider.rs). Once the memory-stats RPC responds again,
+    //! Brick D replaces that hardcode with defensive `/proc/<pid>/stat` sampling.
+    //!
+    //! The load-bearing, error-prone part is parsing the cumulative CPU ticks out
+    //! of a `stat` line whose `comm` (field 2) is parenthesized and may itself
+    //! contain spaces and parentheses — the classic `/proc/<pid>/stat` pitfall.
+    //! These tests are RED until the seam exists:
+    //!
+    //!   fn parse_proc_stat_cpu_ticks(stat: &str) -> Option<u64>
+    //!
+    //! Contract: sum utime (field 14) + stime (field 15), counting fields from
+    //! the LAST `)`; return `None` on ANY malformed/missing input (degrade to
+    //! `None`, never panic).
+    use super::*;
+
+    // Canonical `/proc/<pid>/stat`: utime (field 14) = 111, stime (field 15) =
+    // 222, so the parser must return Some(333).
+    const STAT_UTIME_111_STIME_222: &str =
+        "4242 (simard) R 1 4242 4242 0 -1 4194304 100 0 0 0 111 222 0 0 20 0 1 0 5000 12345 678";
+
+    #[test]
+    fn parses_utime_plus_stime_from_a_well_formed_stat() {
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(STAT_UTIME_111_STIME_222),
+            Some(333),
+            "cpu ticks must be utime(111) + stime(222)"
+        );
+    }
+
+    #[test]
+    fn handles_comm_containing_spaces_and_parentheses() {
+        // `comm` is arbitrary and parenthesized; offsets MUST be counted from the
+        // LAST ')'. A naive split on the first ')' or on whitespace shifts every
+        // field and silently reads the wrong CPU numbers.
+        let stat =
+            "4242 (weird ) (name) R 1 4242 4242 0 -1 4194304 100 0 0 0 111 222 0 0 20 0 1 0 5000";
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(stat),
+            Some(333),
+            "a comm with spaces/parens must not shift the utime/stime offsets"
+        );
+    }
+
+    #[test]
+    fn truncated_stat_missing_cpu_fields_is_none() {
+        // Fields stop at ppid — utime/stime absent → None, never a panic or a 0.
+        assert_eq!(parse_proc_stat_cpu_ticks("4242 (simard) R 1"), None);
+    }
+
+    #[test]
+    fn non_numeric_cpu_fields_are_none() {
+        let stat = "4242 (simard) R 1 4242 4242 0 -1 4194304 100 0 0 0 xxx 222 0 0 20 0 1 0 5000";
+        assert_eq!(
+            parse_proc_stat_cpu_ticks(stat),
+            None,
+            "a non-numeric utime must degrade to None, not panic"
+        );
+    }
+
+    #[test]
+    fn empty_and_unparenthesized_inputs_are_none() {
+        assert_eq!(parse_proc_stat_cpu_ticks(""), None, "empty input → None");
+        assert_eq!(
+            parse_proc_stat_cpu_ticks("4242 simard R 1 2 3"),
+            None,
+            "a stat line with no parenthesized comm is malformed → None"
+        );
     }
 }

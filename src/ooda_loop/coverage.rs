@@ -173,6 +173,7 @@ mod tests {
 
     fn goal(id: &str, priority: u32, status: GoalProgress, assigned: Option<&str>) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -491,6 +492,60 @@ mod tests {
         assert_eq!(
             report.log_line(),
             "covered 3/3 incomplete goals, deferred 0 due to cap"
+        );
+    }
+
+    // ── Issue #2935: raised per-cycle coverage ceiling (up to 24) ───────────
+
+    #[test]
+    fn covers_up_to_24_uncovered_incomplete_goals_at_cap_24() {
+        // With the raised ceiling and no resource pressure / no overlap, a full
+        // cycle must cover up to 24 genuinely-independent uncovered goals — the
+        // headline behavior the ceiling raise unlocks (was effectively ~6).
+        let goals: Vec<ActiveGoal> = (0..24)
+            .map(|i| goal(&format!("g{i:02}"), i, GoalProgress::NotStarted, None))
+            .collect();
+        let state = state_with(goals);
+        let mut planned: Vec<PlannedAction> = vec![];
+
+        let report = ensure_goal_coverage(&state, &mut planned, 24);
+
+        assert_eq!(
+            advance_goal_ids(&planned).len(),
+            24,
+            "all 24 uncovered incomplete goals must be covered when cap == 24"
+        );
+        assert!(planned.len() <= 24, "cap is a hard ceiling");
+        assert_eq!(report.incomplete, 24);
+        assert_eq!(report.covered, 24);
+        assert_eq!(
+            report.deferred, 0,
+            "nothing is deferred when the cap fits every goal"
+        );
+    }
+
+    #[test]
+    fn clamps_to_cap_24_when_more_than_24_goals_await_coverage() {
+        // 24 is a CEILING, not a guarantee: with 30 uncovered goals, exactly 24
+        // are covered this cycle and the 6 lowest-priority spill to the next.
+        let goals: Vec<ActiveGoal> = (0..30)
+            .map(|i| goal(&format!("g{i:02}"), i, GoalProgress::NotStarted, None))
+            .collect();
+        let state = state_with(goals);
+        let mut planned: Vec<PlannedAction> = vec![];
+
+        let report = ensure_goal_coverage(&state, &mut planned, 24);
+
+        assert_eq!(
+            planned.len(),
+            24,
+            "cap 24 is a hard ceiling on planned actions"
+        );
+        assert_eq!(report.incomplete, 30);
+        assert_eq!(report.covered, 24);
+        assert_eq!(
+            report.deferred, 6,
+            "the 6 lowest-priority goals spill to the next cycle"
         );
     }
 }

@@ -1,0 +1,105 @@
+flowchart LR
+    Lib["src/lib.rs public crate facade"]
+    Main["src/main.rs main()"]
+    Cli["operator_cli::dispatch_operator_cli"]
+    Daemon["operator_commands_ooda::daemon"]
+
+    OodaLoop["ooda_loop module"]
+    RunCycle["run_ooda_cycle()"]
+    OodaState["OodaState / OodaConfig / OodaClients"]
+    PlannedAction["PlannedAction / ActionKind / ActionOutcome"]
+    OodaBrain["OodaBrain trait"]
+    DecideBrain["OodaDecideBrain trait"]
+    OrientBrain["OodaOrientBrain trait"]
+    RecipeBrain["RecipeBrain"]
+    BrainJudgment["BrainJudgmentRecord / BrainPhase"]
+    OodaActions["ooda_actions::dispatch_actions_bounded()"]
+    TypedOoda["typed_ooda ledger types"]
+    TypedAction["typed_ooda::Action"]
+    CapabilityHandler["CapabilityHandler / CapabilityPolicy"]
+
+    CognitiveMemoryOps["CognitiveMemoryOps trait"]
+    LibraryMemory["LibraryCognitiveMemory"]
+    RemoteMemory["RemoteCognitiveMemory"]
+    MemoryIpc["MemoryRequest / MemoryResponse"]
+    RecallWeights["RecallWeightSet"]
+    MemoryStore["MemoryStore trait"]
+
+    GoalCuration["goal_curation module"]
+    GoalBoard["GoalBoard / ActiveGoal / GoalProgress"]
+    GoalStore["GoalStore / GoalRecord"]
+    PersistentGoalState["goal_board_store::PersistentGoalState"]
+
+    Overseer["overseer module"]
+    ObservedState["ObservedState"]
+    OverseerCaps["StatusReader / RecipeLauncher / PrOps / GoalCurator / MemoryRecall"]
+    Sensor["OverseerSensorThread / run_observer_cycle"]
+
+    BaseTypes["base_types module"]
+    BaseFactory["BaseTypeFactory trait"]
+    BaseSession["BaseTypeSession trait"]
+    TurnInput["BaseTypeTurnInput / BaseTypeOutcome"]
+    CopilotAdapter["CopilotSdkAdapter"]
+    RustyAdapter["RustyClawdAdapter"]
+    PendingAdapter["PendingSdkAdapter"]
+    SessionBuilder["SessionBuilder / LlmProvider"]
+
+    Lib -->|"pub mod / pub use"| OodaLoop
+    Lib -->|"pub use"| CognitiveMemoryOps
+    Lib -->|"pub use"| GoalBoard
+    Lib -->|"pub mod / pub use"| BaseTypes
+    Lib -->|"pub mod"| Overseer
+    Main -->|"calls"| Cli
+    Cli -->|"dispatches subcommands"| Daemon
+    Daemon -->|"builds clients and loop state"| OodaState
+    Daemon -->|"calls"| RunCycle
+
+    OodaLoop -->|"re-exports"| RunCycle
+    OodaLoop -->|"owns"| OodaState
+    OodaLoop -->|"plans"| PlannedAction
+    RunCycle -->|"uses"| CognitiveMemoryOps
+    RunCycle -->|"loads/persists"| GoalBoard
+    RunCycle -->|"weights recall"| RecallWeights
+    RunCycle -->|"records judgments"| BrainJudgment
+    RunCycle -->|"delegates act phase"| OodaActions
+    OodaState -->|"holds"| OodaBrain
+    OodaState -->|"optional"| DecideBrain
+    OodaState -->|"optional"| OrientBrain
+
+    OodaBrain -->|"implemented by"| RecipeBrain
+    DecideBrain -->|"implemented by"| RecipeBrain
+    OrientBrain -->|"implemented by"| RecipeBrain
+    RecipeBrain -->|"emits"| BrainJudgment
+    OodaActions -->|"consumes"| PlannedAction
+    OodaActions -->|"goal-session rail"| TypedOoda
+    TypedOoda -->|"records"| TypedAction
+    TypedOdaAlias["typed_ooda::GoalSessionExecutor"] -->|"uses"| CapabilityHandler
+    TypedOoda -->|"exports"| TypedOdaAlias
+
+    CognitiveMemoryOps -->|"implemented by"| LibraryMemory
+    CognitiveMemoryOps -->|"implemented by"| RemoteMemory
+    MemoryIpc -->|"mirrors trait methods"| CognitiveMemoryOps
+    RemoteMemory -->|"sends"| MemoryIpc
+    LibraryMemory -->|"backs"| GoalStore
+    MemoryStore -->|"legacy/session memory facade"| LibraryMemory
+
+    GoalCuration -->|"exports"| GoalBoard
+    GoalCuration -->|"uses"| GoalStore
+    PersistentGoalState -->|"wraps durable"| GoalBoard
+    Daemon -->|"load_or_migrate/commit_cycle"| PersistentGoalState
+
+    Overseer -->|"exports"| ObservedState
+    Overseer -->|"exports capability seam"| OverseerCaps
+    Sensor -->|"implements"| OodaThreadIface["CognitiveThread trait"]
+    OverseerCaps -->|"reads"| CognitiveMemoryOps
+    OverseerCaps -->|"curates"| GoalBoard
+    OverseerCaps -->|"launches recipes"| SessionBuilder
+
+    BaseTypes -->|"exports"| BaseFactory
+    BaseTypes -->|"exports"| BaseSession
+    BaseSession -->|"turn contract"| TurnInput
+    BaseFactory -->|"implemented by"| CopilotAdapter
+    BaseFactory -->|"implemented by"| RustyAdapter
+    BaseFactory -->|"implemented by"| PendingAdapter
+    SessionBuilder -->|"selects"| CopilotAdapter
+    SessionBuilder -->|"selects"| RustyAdapter

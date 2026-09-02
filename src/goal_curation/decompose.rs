@@ -146,6 +146,19 @@ pub fn decompose_goal(
         )));
     }
 
+    // Sub-goals inherit the parent's full label set (so a child of a
+    // `source:creative-ideas` goal stays discoverable as creative-ideas-
+    // originated) and additionally carry `source:decomposition` recording how
+    // the child itself came to exist (issue #2743). Identical for every child.
+    let child_labels = {
+        let mut l = parent.labels.clone();
+        crate::goal_curation::labels::add_label(
+            &mut l,
+            crate::goal_curation::labels::SOURCE_DECOMPOSITION,
+        );
+        l
+    };
+
     // 3) Assign deterministic child ids (stable so a re-run dedups its edges).
     let child_ids: Vec<String> = (1..=proposals.len())
         .map(|i| format!("{goal_id}-c{i}"))
@@ -184,6 +197,7 @@ pub fn decompose_goal(
         parent.id.clone(),
         parent.description.clone(),
         None::<String>,
+        parent.labels.clone(),
     );
     write_node(mem, &parent_node)?;
     for (idx, child_id) in child_ids.iter().enumerate() {
@@ -194,6 +208,7 @@ pub fn decompose_goal(
                 child_id.clone(),
                 proposal.description.clone(),
                 Some(proposal.done_criterion.clone()),
+                child_labels.clone(),
             ),
         )?;
         write_edge(
@@ -246,6 +261,7 @@ pub fn decompose_goal(
                     )
                     .with_repo(parent.repo.clone())
                     .with_parent(Some(goal_id.to_string()))
+                    .with_labels(child_labels.clone())
                 })
                 .collect();
             let signals = sibling_dependency_signals(&child_ids, &proposals);

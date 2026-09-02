@@ -1,0 +1,85 @@
+name: kgpacks-rs-hybrid-ranking
+app_type: cli
+description: |
+  Outside-in proof for parity criterion **KGP-Q10** of the kgpacks-rs port
+  (`Specs/agent-kgpacks-rs-parity.md`): the native knowledge handler answers a
+  `knowledge.query` by **blending the vector-semantic, graph, and keyword
+  signals into one fused ranking** — the same ranker the original agent-kgpacks
+  performs — rather than selecting a single retrieval path.
+
+  Per the operator directive (issue #4321, 2026-07-20) — "No keyword search is
+  not good enough. It needs to be the same" — retrieval parity requires the
+  original's GraphRAG method, of which hybrid fusion is the last REQUIRED row
+  (multi-hop graph KGP-Q5 and vector semantic search KGP-Q9 are already DONE).
+  Each retrieval function now has a *scored* core — `query_articles_scored`
+  (keyword-coverage score), `query_vector_scored` (cosine score), and
+  `query_graph_scored` (a `1/(1+hop)` breadth-first rank score). A new
+  `query_hybrid` gathers each signal's scored candidates (beyond `limit`, so
+  fusion can promote a candidate that ranks past one signal's cut), and
+  `fuse_signal` min-max-normalizes each signal to `[0, 1]` and accumulates a
+  weighted score per `(title, section)` candidate. The blend weights encode the
+  directive that literal keyword overlap alone is not parity: the vector (0.5)
+  and graph (0.3) weights sit ABOVE the keyword weight (0.2). Two consequences
+  fall out and are the acceptance criteria: (1) a candidate supported by
+  MULTIPLE signals is boosted above one with a higher single-signal score, and
+  (2) a semantically/structurally-relevant candidate outranks one that only
+  shares a literal keyword. `query_open_pack` now routes through `query_hybrid`,
+  preferring the graph-grounded relationship answer when the graph signal fired
+  and otherwise synthesizing from the fused sources; it emits the graceful "no
+  relevant information" answer only when NO signal matched.
+
+  This scenario drives the hermetic, in-process `native_knowledge` unit tests
+  that pin the corrected contract:
+    - `query_hybrid_fuses_semantic_over_literal_keyword` — the decisive one: on
+      a three-article fixture isolating the vector-only, keyword-only, and
+      both-signal cases, the both-signal article ranks first (fusion boost) and
+      the semantic-only article outranks the keyword-only one (semantic
+      outweighs literal keyword overlap) — an order no single signal produces;
+    - `native_knowledge_transport_query_hybrid_blends_signals` — the same fused
+      order and candidate set appear in the wire response end-to-end through the
+      native RPC transport;
+    - `query_hybrid_answer_stays_grounded_when_graph_is_truncated_out` — the
+      answer/source grounding guarantee (KGP-Q1) under fusion: when the graph
+      signal fires but its entity is outranked and truncated out of the returned
+      citations, the answer is synthesized from the cited sources instead of
+      describing graph entities absent from the citation list.
+  The same run re-asserts the pre-existing KGP-Q1/Q4/Q5/Q8/Q9/T3 citation,
+  parameterized-search, GraphRAG, ranking, vector, and connection-reuse
+  behaviour is unregressed. No network, no live host mutation. The CLI runner
+  rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The native knowledge query contract, including the new KGP-Q10 hybrid
+  # ranking tests and the pre-existing citation / GraphRAG / vector / ranking /
+  # parameterized-search / connection-reuse behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib native_knowledge"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Transport-level knowledge client suite proves the fused query path is
+  # exercised end-to-end through the native RPC surface without regression.
+  - action: run
+    params:
+      command: "cargo test --locked --lib knowledge_client"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

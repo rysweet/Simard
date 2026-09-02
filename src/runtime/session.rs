@@ -50,11 +50,11 @@ impl RuntimeKernel {
         let mut pending = PendingWrites::new();
 
         // --- Memory consolidation: intake at session start ---
-        if let Some(bridge) = &self.cognitive_bridge {
+        if let Some(memory) = &self.cognitive_memory {
             if let Err(e) = crate::memory_consolidation::intake_memory_operations(
                 &session.objective,
                 &session.id,
-                &**bridge,
+                &**memory,
             ) {
                 eprintln!("[simard] session consolidation: intake failed: {e}");
             }
@@ -62,7 +62,7 @@ impl RuntimeKernel {
             match crate::memory_consolidation::consolidation_intake(
                 &session.id,
                 &session.objective,
-                &**bridge,
+                &**memory,
             ) {
                 Ok(n) if n > 0 => {
                     eprintln!("[simard] session consolidation: hydrated {n} prior-session facts");
@@ -86,22 +86,22 @@ impl RuntimeKernel {
 
         // --- Memory consolidation: persistence at session end ---
 
-        // Flush any pending bridge writes before final persistence so that
+        // Flush any pending memory writes before final persistence so that
         // records that fell back to the local file store get one last retry.
         let synced = self.ports.memory_store.flush_pending();
         if synced > 0 {
             eprintln!("[simard] session teardown: flushed {synced} pending memory records");
         }
 
-        if let Some(bridge) = &self.cognitive_bridge {
+        if let Some(memory) = &self.cognitive_memory {
             // Flush working memory to episodes before final persistence.
-            crate::memory_consolidation::consolidation_persistence(&session.id, &**bridge)?;
-            crate::memory_consolidation::persistence_memory_operations(&session.id, &**bridge)?;
+            crate::memory_consolidation::consolidation_persistence(&session.id, &**memory)?;
+            crate::memory_consolidation::persistence_memory_operations(&session.id, &**memory)?;
 
             // Save a cognitive memory snapshot and prune to 10 most recent.
             if let Some(dir) = crate::memory_snapshot::snapshot_dir(None) {
                 let path = crate::memory_snapshot::save_session_snapshot(
-                    &**bridge,
+                    &**memory,
                     &self.request.manifest.name,
                     &dir,
                 )?;

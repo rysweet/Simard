@@ -15,7 +15,7 @@ struct MockStore {
     procedures: Vec<CognitiveProcedure>,
 }
 
-fn mock_bridge() -> CognitiveMemoryClient {
+fn mock_memory() -> CognitiveMemoryClient {
     let store: &'static Mutex<MockStore> = Box::leak(Box::new(Mutex::new(MockStore {
         facts: vec![],
         procedures: vec![],
@@ -133,11 +133,11 @@ fn backup_and_verify_round_trip() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge
+    let memory = mock_memory();
+    memory
         .store_fact("rust", "fast lang", 0.9, &[], "ep1")
         .unwrap();
-    bridge
+    memory
         .store_procedure("build", &["compile".into()], &[])
         .unwrap();
 
@@ -145,7 +145,7 @@ fn backup_and_verify_round_trip() {
     file_store.put(make_record("rec1")).unwrap();
     file_store.put(make_record("rec2")).unwrap();
 
-    let manifest = backup_memory(&bridge, &file_store, "test-agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "test-agent", &config).unwrap();
     assert_eq!(manifest.cognitive_facts_count, 1);
     assert_eq!(manifest.cognitive_procedures_count, 1);
     assert_eq!(manifest.memory_records_count, 2);
@@ -172,10 +172,10 @@ fn verify_detects_corrupted_checksum() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
 
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
 
     // Tamper with the snapshot file.
     fs::write(&manifest.cognitive_snapshot_path, b"tampered").unwrap();
@@ -191,10 +191,10 @@ fn verify_detects_missing_files() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
 
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
 
     // Remove one backup file.
     fs::remove_file(&manifest.memory_records_path).unwrap();
@@ -210,20 +210,20 @@ fn restore_from_valid_backup() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge.store_fact("rust", "systems", 0.9, &[], "").unwrap();
+    let memory = mock_memory();
+    memory.store_fact("rust", "systems", 0.9, &[], "").unwrap();
 
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
     file_store.put(make_record("r1")).unwrap();
 
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
 
     // Restore into fresh targets.
-    let target_bridge = mock_bridge();
+    let target_memory = mock_memory();
     let target_store_path = tmp.path().join("restored.json");
     let target_store = FileBackedMemoryStore::try_new(&target_store_path).unwrap();
 
-    let count = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+    let count = restore_from_backup(&target_memory, &target_store, &manifest.backup_dir).unwrap();
     assert_eq!(count, 2); // 1 fact + 1 record
     assert_eq!(target_store.list_all().unwrap().len(), 1);
 }
@@ -235,16 +235,16 @@ fn restore_rejects_corrupted_backup() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
 
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
     fs::write(&manifest.cognitive_snapshot_path, b"bad").unwrap();
 
-    let target_bridge = mock_bridge();
+    let target_memory = mock_memory();
     let target_store = FileBackedMemoryStore::try_new(tmp.path().join("t.json")).unwrap();
 
-    let err = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir);
+    let err = restore_from_backup(&target_memory, &target_store, &manifest.backup_dir);
     assert!(err.is_err());
 }
 
@@ -265,13 +265,13 @@ fn prune_old_backups_respects_min_keep() {
     config.retention_days = 0;
     config.min_backups_to_keep = 1;
 
-    let bridge = mock_bridge();
+    let memory = mock_memory();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
 
     // Create two backups with distinct timestamp directories.
-    backup_memory(&bridge, &file_store, "a", &config).unwrap();
+    backup_memory(&memory, &file_store, "a", &config).unwrap();
     std::thread::sleep(std::time::Duration::from_secs(1));
-    backup_memory(&bridge, &file_store, "a", &config).unwrap();
+    backup_memory(&memory, &file_store, "a", &config).unwrap();
 
     let before = list_backups(&config).unwrap().len();
     assert_eq!(before, 2);
@@ -305,14 +305,14 @@ fn backup_restore_round_trip_searchable() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge
+    let memory = mock_memory();
+    memory
         .store_fact("algorithms", "sorting and searching", 0.85, &[], "ep1")
         .unwrap();
-    bridge
+    memory
         .store_fact("databases", "relational storage", 0.9, &[], "ep2")
         .unwrap();
-    bridge
+    memory
         .store_procedure(
             "deploy",
             &["build".into(), "test".into(), "ship".into()],
@@ -321,24 +321,24 @@ fn backup_restore_round_trip_searchable() {
         .unwrap();
 
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
-    let manifest = backup_memory(&bridge, &file_store, "test-agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "test-agent", &config).unwrap();
     assert_eq!(manifest.cognitive_facts_count, 2);
     assert_eq!(manifest.cognitive_procedures_count, 1);
 
-    // Restore into a fresh bridge and verify searchability.
-    let target_bridge = mock_bridge();
+    // Restore into a fresh memory and verify searchability.
+    let target_memory = mock_memory();
     let target_store_path = tmp.path().join("restored.json");
     let target_store = FileBackedMemoryStore::try_new(&target_store_path).unwrap();
 
-    let count = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+    let count = restore_from_backup(&target_memory, &target_store, &manifest.backup_dir).unwrap();
     assert!(count >= 3, "should restore at least 2 facts + 1 procedure");
 
     // Verify facts are searchable.
-    let facts = target_bridge.search_facts("algorithms", 10, 0.0).unwrap();
+    let facts = target_memory.search_facts("algorithms", 10, 0.0).unwrap();
     assert!(!facts.is_empty(), "restored facts should be searchable");
 
     // Verify procedures are recallable.
-    let procs = target_bridge.recall_procedure("deploy", 5).unwrap();
+    let procs = target_memory.recall_procedure("deploy", 5).unwrap();
     assert!(
         !procs.is_empty(),
         "restored procedures should be recallable"
@@ -362,9 +362,9 @@ fn backup_with_known_counts(tmp: &Path) -> (PathBuf, usize) {
     let store_path = tmp.join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
-    bridge
+    let memory = mock_memory();
+    memory.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    memory
         .store_procedure("build", &["compile".into()], &[])
         .unwrap();
 
@@ -372,7 +372,7 @@ fn backup_with_known_counts(tmp: &Path) -> (PathBuf, usize) {
     file_store.put(make_record("rec1")).unwrap();
     file_store.put(make_record("rec2")).unwrap();
 
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
     // 1 fact + 1 procedure + 2 records.
     (manifest.backup_dir, 4)
 }
@@ -410,13 +410,13 @@ fn backup_memory_verified_returns_valid_manifest() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    let memory = mock_memory();
+    memory.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
     file_store.put(make_record("rec1")).unwrap();
 
     let manifest =
-        backup_memory_verified(&bridge, &file_store, "agent", &config).expect("verified backup");
+        backup_memory_verified(&memory, &file_store, "agent", &config).expect("verified backup");
     assert_eq!(manifest.cognitive_facts_count, 1);
     assert_eq!(manifest.memory_records_count, 1);
 
@@ -436,9 +436,9 @@ fn backup_memory_verified_round_trips_count() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
-    bridge
+    let memory = mock_memory();
+    memory.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    memory
         .store_procedure("build", &["compile".into()], &[])
         .unwrap();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
@@ -446,12 +446,12 @@ fn backup_memory_verified_round_trips_count() {
     file_store.put(make_record("rec2")).unwrap();
 
     let manifest =
-        backup_memory_verified(&bridge, &file_store, "agent", &config).expect("verified backup");
+        backup_memory_verified(&memory, &file_store, "agent", &config).expect("verified backup");
 
-    let target_bridge = mock_bridge();
+    let target_memory = mock_memory();
     let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
     let restored =
-        restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir).unwrap();
+        restore_from_backup(&target_memory, &target_store, &manifest.backup_dir).unwrap();
 
     // 1 fact + 1 procedure + 2 records.
     assert_eq!(
@@ -464,7 +464,7 @@ fn backup_memory_verified_round_trips_count() {
 /// export cap** (1000 facts) must round-trip the full memory count. This is the
 /// exact regression behind the broken backups — the live store grew past the
 /// fixed export cap, so a backup silently captured only the first 1000
-/// memories. The mock bridge ignores `limit`, so this must use the real library
+/// memories. The mock memory ignores `limit`, so this must use the real library
 /// backend (`in_memory` for speed; durability is irrelevant to the cap fix).
 #[test]
 fn verified_backup_round_trips_store_larger_than_export_cap() {
@@ -537,11 +537,11 @@ fn verify_and_restore_use_backup_dir_not_manifest_paths() {
     let store_path = tmp.path().join("memory.json");
     let config = test_config(&backup_root);
 
-    let bridge = mock_bridge();
-    bridge.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
+    let memory = mock_memory();
+    memory.store_fact("rust", "fast", 0.9, &[], "ep1").unwrap();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
     file_store.put(make_record("r1")).unwrap();
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
 
     // Relocate the backup to a new directory, then destroy the original so the
     // manifest's stored absolute paths dangle.
@@ -559,9 +559,9 @@ fn verify_and_restore_use_backup_dir_not_manifest_paths() {
         v.status
     );
 
-    let target_bridge = mock_bridge();
+    let target_memory = mock_memory();
     let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
-    let count = restore_from_backup(&target_bridge, &target_store, &moved).unwrap();
+    let count = restore_from_backup(&target_memory, &target_store, &moved).unwrap();
     assert_eq!(
         count, 2,
         "restore must read the relocated files (1 fact + 1 record)"
@@ -580,10 +580,10 @@ fn restore_does_not_read_manifest_paths_outside_backup_dir() {
     let config = test_config(&backup_root);
 
     // Legitimate backup with a single benign fact.
-    let bridge = mock_bridge();
-    bridge.store_fact("benign", "ok", 0.9, &[], "ep1").unwrap();
+    let memory = mock_memory();
+    memory.store_fact("benign", "ok", 0.9, &[], "ep1").unwrap();
     let file_store = FileBackedMemoryStore::try_new(&store_path).unwrap();
-    let manifest = backup_memory(&bridge, &file_store, "agent", &config).unwrap();
+    let manifest = backup_memory(&memory, &file_store, "agent", &config).unwrap();
 
     // Attacker writes data files OUTSIDE the backup dir and crafts a manifest
     // pointing at them, with a self-consistent checksum and counts.
@@ -592,12 +592,12 @@ fn restore_does_not_read_manifest_paths_outside_backup_dir() {
     let evil_snapshot_path = evil_dir.join("snapshot.json");
     let evil_records_path = evil_dir.join("records.json");
 
-    let evil_bridge = mock_bridge();
-    evil_bridge
+    let evil_memory = mock_memory();
+    evil_memory
         .store_fact("attacker-injected", "pwn", 0.9, &[], "x")
         .unwrap();
     let evil_snapshot =
-        crate::remote_transfer::export_full_memory_snapshot(&evil_bridge, "agent").unwrap();
+        crate::remote_transfer::export_full_memory_snapshot(&evil_memory, "agent").unwrap();
     let evil_snapshot_bytes = serde_json::to_vec_pretty(&evil_snapshot).unwrap();
     fs::write(&evil_snapshot_path, &evil_snapshot_bytes).unwrap();
     let evil_records: Vec<MemoryRecord> = Vec::new();
@@ -620,11 +620,11 @@ fn restore_does_not_read_manifest_paths_outside_backup_dir() {
     // Restore from the (legit) backup dir; the crafted external paths must be
     // ignored. Whether the result is Ok or a verification Err, the attacker's
     // fact must never be ingested.
-    let target_bridge = mock_bridge();
+    let target_memory = mock_memory();
     let target_store = FileBackedMemoryStore::try_new(tmp.path().join("restored.json")).unwrap();
-    let _ = restore_from_backup(&target_bridge, &target_store, &manifest.backup_dir);
+    let _ = restore_from_backup(&target_memory, &target_store, &manifest.backup_dir);
 
-    let facts = target_bridge
+    let facts = target_memory
         .search_facts("attacker-injected", 10, 0.0)
         .unwrap();
     assert!(

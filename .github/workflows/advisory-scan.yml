@@ -1,0 +1,75 @@
+# Scheduled advisory scan (issue #2741).
+#
+# Decoupled from PR gating: this job tracks the RUSTSEC advisory-DB HEAD against
+# the DEFAULT BRANCH and, on a NEW lockfile-affecting vulnerability, proactively
+# files a tracking issue and — per the deterministic remediation rail in
+# src/supply_chain_steward/ — opens a minimal-bump PR (fix exists) or an
+# issue-only escalation / justified+tracked ignore (no fix). It is the source of
+# truth for "is there a new advisory?", so a freshly-published advisory is fixed
+# here BEFORE it could ever block unrelated PRs (the PR gate is pinned + offline;
+# see .github/advisory-db.sha and .github/workflows/verify.yml).
+#
+# See docs/reference/supply-chain-advisory-stewardship.md § The scheduled advisory scan.
+name: advisory-scan
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch: {} # manual trigger for testing / on-demand sweeps
+
+permissions:
+  contents: write # push deny.toml / Cargo.lock remediation branches
+  issues: write # file tracking issues
+  pull-requests: write # open remediation PRs
+
+# Never let two daily runs race on the same branches/issues.
+concurrency:
+  group: advisory-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out default branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Prepare Rust runner (free disk, swap, mold, rust)
+        uses: ./.github/actions/rust-runner-prep
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Read-only: the scheduled scan must never poison the shared PR/verify
+          # build cache with its default-branch build artifacts.
+          save-if: "false"
+
+      - name: Install cargo-audit
+        # SHA-pins the reachable `v2` release + selects the tool via `tool:` (a
+        # diverged per-tool tag commit breaks Dependabot's github_actions updater).
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-audit
+
+      - name: Install cargo-deny
+        # SHA-pins the reachable `v2` release; `tool:` pins the cargo-deny version.
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-deny@0.19.9
+
+      - name: Run supply-chain steward (scan DB HEAD, remediate)
+        env:
+          # Bot token so remediation PRs actually trigger the required CI. A PR
+          # opened with the default GITHUB_TOKEN does NOT trigger workflows, so
+          # its CI would never run — and a PR whose CI never runs must never
+          # self-merge. When this secret is ABSENT the steward still files the
+          # tracking issue and opens the PR, labels it `needs-CI-trigger`, and
+          # NEVER self-merges (fail-safe, not fail-open).
+          STEWARD_GH_TOKEN: ${{ secrets.STEWARD_GH_TOKEN }}
+          # `gh` (used by the steward's execution layer) reads GH_TOKEN; prefer
+          # the dedicated bot token, falling back to the default so issue/PR
+          # filing still works without self-merge.
+          GH_TOKEN: ${{ secrets.STEWARD_GH_TOKEN || github.token }}
+          STEWARD_REPO: ${{ github.repository }}
+        run: cargo run --locked --bin supply-chain-steward -- scan

@@ -1,0 +1,19 @@
+digraph JourneySignalReply {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+  operator [label="operator sends Signal message"];
+  signal_cli [label="signal-cli JSON-RPC daemon"];
+  transport [label="JsonRpcTransport recv_line"];
+  parse [label="parse_incoming"];
+  guards [label="self/sync/echo guards"];
+  allowlist [label="allowlist + command gate"];
+  inbound [label="authorized conversation turn"];
+  active [label="active_session_for / set_active_session"];
+  load [label="load_session_at + restore history"];
+  backend [label="MeetingBackend.send_message"];
+  append [label="append user + assistant turns"];
+  send [label="SignalConversation::send -> send_line"];
+  reply [label="operator receives reply"];
+  operator -> signal_cli -> transport -> parse -> guards -> allowlist -> inbound -> active -> load -> backend -> append -> send -> signal_cli -> reply;
+}

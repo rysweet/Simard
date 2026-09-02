@@ -1,7 +1,9 @@
 //! Deterministic lifecycle brain — preserves today's behaviour bit-for-bit
 //! when no LLM is configured (no API key, subprocess unavailable, etc.).
 
-use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{
+    EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain, PerGoalAction, PerGoalCycleCtx,
+};
 use crate::error::SimardResult;
 
 /// Always returns `ContinueSkipping`. This is exactly what the unconditional
@@ -19,11 +21,23 @@ impl OodaBrain for DeterministicLifecycleBrain {
             rationale: "deterministic-brain: no LLM configured".to_string(),
         })
     }
+
+    /// The no-LLM floor for the per-goal, per-cycle decision (issue #4453):
+    /// always `Continue`. This preserves today's no-LLM behaviour — the
+    /// fallback NEVER rolls the cycle and NEVER reaps, so the deterministic
+    /// path cannot re-introduce the idle→reset loop. No threshold or alarming
+    /// signal (standing-idle, stale-claim, effect-board-miss) may push it into a
+    /// destructive action; those are inputs a REASONER weighs, not the floor.
+    fn decide_per_goal_cycle(&self, _ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        Ok(PerGoalAction::Continue {
+            reason: "deterministic-brain: no LLM configured; leave the goal untouched".to_string(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Inline tests (issue #1979 — per-source-file coverage of the fallback brain
-// that consumers depend on when the LLM bridge returns unparseable JSON or
+// that consumers depend on when the LLM brain returns unparseable JSON or
 // otherwise errors. Sibling tests cover the end-to-end behaviour; these pin
 // the per-file public contract so coverage tools see #[test]s in this file.)
 // ---------------------------------------------------------------------------
@@ -70,7 +84,7 @@ mod tests {
         // Pin the documented contract: the fallback brain never panics and
         // never returns anything other than ContinueSkipping, regardless of
         // context (the consumer relies on this exact shape after a
-        // JSON-parse failure in the LLM bridge).
+        // JSON-parse failure in the LLM brain).
         let brain = DeterministicLifecycleBrain;
         let contexts = [
             EngineerLifecycleCtx {

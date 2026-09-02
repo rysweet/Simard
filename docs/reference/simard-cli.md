@@ -1,7 +1,7 @@
 ---
 title: Simard CLI reference
-description: Reference for the shipped `simard` command tree, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
-last_updated: 2026-04-03
+description: Reference for the shipped `simard` command tree, the installer-based deployment path, the shared-state-root client between terminal sessions and the repo-grounded engineer loop, the `engineer read` audit companion, the shipped bounded `engineer copilot-submit` contract, and the legacy compatibility binaries that still expose selected older runtime behaviors.
+last_updated: 2026-07-16
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -71,8 +71,10 @@ simard
 |- act-on-decisions
 |- spawn <agent-name> <goal> <worktree-path>
 |- handover [--canary-dir=PATH]
+|- disk-reclaim [--apply] [--report-json] [--target-pct=N]
+|  `- exec --candidates <json|@file|@-> [--apply] [--report-json]
 |- update
-`- install
+`- install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]  # planned
 ```
 
 Bare `simard` prints this operator surface directly.
@@ -90,20 +92,92 @@ same snapshot.
 
 ### `simard goal list`
 
+```text
+simard goal list [--tag <tag>]...
+```
+
 Print the persisted goal board to stdout. Output is a header line plus
 one tab-separated row per active goal, then a one-line backlog summary
-followed (when non-empty) by tab-separated backlog rows:
+followed (when non-empty) by tab-separated backlog rows. Each active-goal
+row ends with a trailing `LABELS` column (the goal's tags, comma-joined),
+appended **after** the existing columns so scripts that parse the first
+five fields keep working:
 
 ```text
 active goals: 5 / 5
-ID	PRIORITY	STATUS	ASSIGNED	DESCRIPTION
-enhance-simard-meeting-experience	p1	blocked: 🔒 [OODA-SAFEGUARD] OODA brain failing for 3 consecutive cycles; needs human review	-	enhance simard meeting experience
+ID	PRIORITY	STATUS	ASSIGNED	DESCRIPTION	LABELS
+enhance-simard-meeting-experience	p1	blocked: 🔒 [OODA-SAFEGUARD] OODA brain failing for 3 consecutive cycles; needs human review	-	enhance simard meeting experience	source:meeting
 …
 backlog: 0 item(s)
 ```
 
-Exits non-zero on client-open / persistence errors. An empty board prints
-`(none)` and exits zero.
+`--tag <tag>` (optional, **repeatable**) filters the active board to goals
+that carry the tag. Repeated `--tag` flags combine with **AND** — a goal must
+carry **all** requested tags to be listed. Matching is exact and
+case-sensitive. When any `--tag` is present the header annotates the filtered
+count, e.g. `active goals: 2 / 7 (filtered by tag)`:
+
+```bash
+# All goals promoted from creative ideas:
+simard goal list --tag source:creative-ideas
+
+# Creative-ideas goals that are ALSO tagged area:dashboard (AND):
+simard goal list --tag source:creative-ideas --tag area:dashboard
+```
+
+See [Goal labels / tags](./goal-labels.md) (issue
+[#2743](https://github.com/rysweet/Simard/issues/2743)) for the label model,
+the automatic `source:*` provenance tags, and the dashboard / TUI surfaces.
+
+Exits non-zero on client-open / persistence errors. An empty board (or an
+empty filter result) prints `(none)` and exits zero.
+
+### `simard goal label`
+
+```text
+simard goal label <goal-id> add <tag>
+simard goal label <goal-id> remove <tag>
+simard goal label <goal-id> list
+```
+
+Deterministic CRUD for a goal's free-form labels (tags). The `<goal-id>`
+follows the `label` verb, matching the `simard goal unblock <goal-id>` /
+`simard goal remove <goal-id>` style. Labels are short, free-form tags
+(`area:dashboard`, `research`, `security`) plus the automatic `source:*`
+provenance tag stamped at creation; they are matched by exact, case-sensitive
+string equality.
+
+- **`add <tag>`** — normalizes the tag (trims surrounding whitespace; an
+  empty-after-trim tag is rejected with a clear stderr message and a non-zero
+  exit), then adds it. **Idempotent** and order-preserving: re-adding an
+  existing tag is a successful no-op.
+- **`remove <tag>`** — removes the tag if present. Removing an absent tag is a
+  **no-op that still exits `0`** (with a short stderr note), so the command is
+  safe to rerun.
+- **`list`** — prints the goal's tags to **stdout**, one per line, or `(none)`
+  when the goal has no labels.
+
+Mutations persist through the same flock-guarded goal-board store as
+`simard goal add` / `simard goal remove`, so the operator never needs to pause
+the daemon and concurrent unrelated writers are preserved. An unknown
+`<goal-id>` exits non-zero; a short audit line is logged to stderr in the
+established pattern (no goal payloads on stdout). See
+[Goal labels / tags](./goal-labels.md) for the full contract and
+[How to label, categorize, and filter goals](../howto/label-and-filter-goals.md)
+for a walkthrough.
+
+```bash
+# Tag a goal, confirm the round-trip:
+simard goal label enhance-simard-meeting-experience add area:meeting
+simard goal label enhance-simard-meeting-experience list          # -> area:meeting
+
+# Remove is idempotent:
+simard goal label enhance-simard-meeting-experience remove area:meeting
+simard goal label enhance-simard-meeting-experience remove area:meeting   # no-op, exit 0
+```
+
+Exits non-zero on unknown goal id, an empty `add` tag, or client-open /
+persistence failure.
 
 ### `simard goal add`
 
@@ -341,17 +415,49 @@ metric catalog behind it.
 
 ### `simard update`
 
-Self-update the binary to the latest GitHub release. Downloads the release asset matching the current platform and replaces the running binary.
+Self-update the binary to the latest GitHub release. Today this downloads the
+release asset matching the current platform and replaces the running binary.
+The planned installer integration is for `simard update` to hand the verified
+release binary and matching prompt assets to the same staging, backup, and
+systemd activation flow as `simard install`.
 
 ### `simard install`
 
-Install the Simard binary to `~/.simard/bin`. Used by the npx wrapper (`npx github:rysweet/Simard install`) to persist the binary for direct CLI use.
+Canonical host deployment rail. This command installs the currently executing
+Simard binary to `$SIMARD_HOME/bin/simard`, installs matching prompt assets to
+`$SIMARD_HOME/prompt_assets`, writes the user systemd units
+`simard-ooda.service` and `simard-signal.service`, preserves the previous live
+binary under `$SIMARD_HOME/.install-backups/`, restarts both services via
+`systemctl --user`, and **owns the `simard` PATH entrypoint** — it repairs
+`~/.local/bin/simard` to a symlink at `$SIMARD_HOME/bin/simard` and prunes
+verified-ours stale orphans (e.g. `~/.cargo/bin/simard`) so a deploy never
+leaves a version-skewed `simard` shadowing the fresh one on PATH. See the
+[installer reference](./simard-installer.md#path-entrypoint-ownership-guarantee).
+
+```text
+simard install [--simard-home PATH] [--dry-run] [--systemd-user-dir PATH] [--systemctl PATH]
+               [--entrypoint-dir PATH] [--orphan-dir PATH ...]
+```
+
+`SIMARD_HOME` defaults to `~/.simard`; `--simard-home` overrides it for this
+install. The generated unit `WorkingDirectory` is the resolved
+`SIMARD_HOME`, never a source checkout, `target/`, or `worktrees/main`. The live
+binary is replaced by staging then atomic rename, not by copying over a running
+file.
+
+Use `--dry-run` to validate and print the plan without mutating live files or
+invoking systemd. Use `--systemd-user-dir` and `--systemctl` only for isolated
+hosts and hermetic tests.
+
+Contract: [Simard installer reference](./simard-installer.md).
 
 ### `simard self-health [--json] [--pre-deploy-facts=N]`
 
 Run the post-deploy health probe against the live store and print a report. The
-five probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
-`brains_llm_backed`, and `no_quarantine`; the report is healthy only when every
+six probes are `version_advanced`, `memory_intact`, `goal_board_intact`,
+`brains_llm_backed`, `no_quarantine`, and `entrypoint_parity` (the PATH-resolved
+`simard --version` matches the installed binary — no stale entrypoint or foreign
+shadow); the report is healthy only when every
 probe is. `--json` emits the structured `SelfHealthReport`; `--pre-deploy-facts=N`
 supplies the memory baseline the self-deploy orchestrator captures before the
 swap. Exit code is `0` when healthy, non-zero otherwise. See the
@@ -376,6 +482,43 @@ source repo. See
 [run self-deploy from any directory](../howto/run-self-deploy-from-any-directory.md),
 [self-deploy source-prep](self-deploy-source-prep.md), and
 [verify and roll back a self-deploy](../howto/verify-and-roll-back-a-self-deploy.md).
+
+## Disk reclamation command
+
+### `simard disk-reclaim [--apply] [--report-json] [--target-pct=N]`
+
+Run the agentic disk-reclamation capability: an analysis-only agent proposes
+reclaimable candidates (worktrees mapped to merged/closed PRs, orphaned
+de-registered dirs, stale build caches) and a deterministic Rust executor
+disposes of them behind non-bypassable safety rails, largest-first, until the
+home partition is under the target `%-used`.
+
+**Dry-run is the default** — with no flags it performs the full analysis and
+guard vetting but makes **zero** destructive changes, printing a would-remove
+report plus the human-review list. `--apply` performs the guarded reclamation;
+`--report-json` emits the `ReclaimReport` as JSON; `--target-pct=N` overrides
+`SIMARD_DISK_RECLAIM_PCT` for the run (clamped `1..=99`).
+
+Safety rails (deterministic, cannot be bypassed by the agent): never removes
+`worktrees/main` or a daemon `WorkingDirectory`, a path referenced by a live
+PID, a worktree with uncommitted/unpushed work not in a merged/closed PR, or an
+active recipe/engineer worktree. Anything a rail refuses is reported for human
+review, never deleted. `--apply` is refused when `geteuid() == 0`. No `--admin`
+/ `--no-verify` is ever passed to git.
+
+Exit codes: `0` success / already under threshold; `1` failure; `2` refused
+(e.g. `--apply` as root).
+
+### `simard disk-reclaim exec --candidates <json|@file|@-> [--apply] [--report-json]`
+
+The Rust-gated executor entry point that the `disk-reclaim.yaml` recipe calls
+internally, also usable directly. Reads a candidate list (inline JSON, `@file`,
+or `@-` for stdin) and feeds it to the guarded executor. **Every path is
+re-validated through the protected-path guard** regardless of what the JSON
+claims — a hand-edited candidate list cannot make it delete a protected path.
+
+See [Configure disk reclamation](../howto/configure-disk-reclamation.md) and the
+[Disk reclaim API reference](disk-reclaim-api.md).
 
 ## Compatibility mapping
 

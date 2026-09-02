@@ -1,0 +1,88 @@
+name: episodic-recall-word-boundary-relevance
+app_type: cli
+description: |
+  Outside-in proof that the ranked episodic-recall relevance gate
+  (`LibraryCognitiveMemory::recall_episodes_ranked`) admits episodes by
+  WORD-BOUNDARY keyword match instead of the earlier raw-substring scan — a
+  recall-quality axis of the standing cognition-improvement goal.
+
+  The substring gate (`content.to_lowercase().contains(kw)`) mis-fired whenever a
+  query token was merely *embedded* in the interior or suffix of an unrelated
+  episode word — `act` inside "reactor" / "contract", `test` inside "latest",
+  `own` inside "download". Those spurious matches floated off-topic episodes into
+  the OODA cycle's working context (ranked episodic recall feeds
+  `memory_consolidation::prepare_context`), degrading recall precision and,
+  downstream, reasoner reliability.
+
+  The gate now tokenizes the query on non-alphanumeric runs (so punctuation
+  attached to a token folds onto its bare word) and admits an episode only when a
+  query token is a PREFIX of a whole word in the episode content — anchoring the
+  match to a word boundary. This drops the interior/suffix noise while PRESERVING
+  the inflectional recall the live path depends on (`deploy` still recalls
+  "deployed" / "deploys"), which a stricter whole-word equality gate would have
+  lost. The flat `search_episodes_by_keywords` scan is intentionally left with
+  its exact-substring semantics (its exact-marker callers depend on it).
+
+  This scenario drives the hermetic, in-process unit tests that pin the corrected
+  contract against the live lbug-backed `LibraryCognitiveMemory` adapter:
+    - an interior/suffix-embedded token (`act` vs "reactor"/"contract") does NOT
+      surface the episode; the same token DOES surface a word-boundary match;
+    - a query stem still recalls its inflected form (`deploy` -> "deployed");
+    - punctuation attached to a query token still matches;
+    - the compressed-source UNION backfill uses the same word-boundary gate;
+    - the pure word-boundary helpers (`tokenize_words` / `shares_word_prefix`)
+      reject interior/suffix embeddings and accept boundary matches;
+    - existing ranked-episodic ordering / compressed-backfill / reinforcement
+      behaviours are unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The ranked-episodic-recall contract, including the new word-boundary gate
+  # integration tests and the pre-existing ordering / backfill / reinforcement
+  # behaviours.
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::tests_ranked_episodic"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The pure word-boundary gate helpers (tokenize_words / shares_word_prefix).
+  - action: run
+    params:
+      command: "cargo test --locked --lib cognitive_memory::library_adapter::word_boundary_gate_tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader consolidation suite proves no regression in the preparation path
+  # (`prepare_context`) that consumes ranked episodic recall, including the
+  # reinforce-on-use seam that recalls "deploy" against "deployed" content.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

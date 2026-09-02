@@ -1,0 +1,10 @@
+{
+  "name": "Two-shelf bookcase",
+  "kind": "bookcase",
+  "dimensions_mm": { "width": 800, "depth": 300, "height": 1000 },
+  "material": { "name": "Birch plywood", "thickness_mm": 18, "cost_per_sheet": 55.0, "grain": true },
+  "parameters": { "shelves": 2, "back_panel": true },
+  "hardware": [ { "name": "Confirmat screw", "qty": 24, "unit_cost": 0.15 } ],
+  "finish": "clear matte lacquer",
+  "budget": 120.0
+}

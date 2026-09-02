@@ -1,7 +1,9 @@
 //! Self-improvement metrics collection and reporting.
 //!
 //! Tracks bugs fixed, PRs merged, test count, and cycle duration over time.
-//! Metrics are stored as newline-delimited JSON in `~/.simard/metrics/metrics.jsonl`.
+//! Metrics are stored as newline-delimited JSON in `<state_root>/metrics/metrics.jsonl`,
+//! where `<state_root>` follows [`crate::state_root::simard_state_root`]
+//! (`SIMARD_STATE_ROOT` when set, else `$HOME/.simard`).
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -20,12 +22,30 @@ pub struct MetricEntry {
     pub context: String,
 }
 
-/// Return the directory where metrics are stored: `~/.simard/metrics/`.
+/// Return the directory where metrics are stored: `<state_root>/metrics/`.
+///
+/// Routes through [`crate::state_root::simard_state_root`] so the metrics
+/// *writer* honors the same precedence ladder (`SIMARD_STATE_ROOT` →
+/// `$HOME/.simard`) as every other state-root-aware caller, including the
+/// dashboard *reader* (`/api/brain-failures`, `/api/costs`, `/api/metrics`),
+/// which resolves `metrics/metrics.jsonl` under `simard_state_root()`.
+///
+/// Before this routed through the shared resolver it hardcoded
+/// `$HOME/.simard/metrics`, which diverged from the reader in two ways
+/// (issue: metrics writer ignored `SIMARD_STATE_ROOT`):
+///   1. Operators who relocated their state root via `SIMARD_STATE_ROOT` had
+///      metrics written to `$HOME/.simard/metrics` while the dashboard read
+///      from `$SIMARD_STATE_ROOT/metrics` — so costs / brain-failures /
+///      metrics tabs showed stale or empty data.
+///   2. Hermetic tests (which set `SIMARD_STATE_ROOT` to a temp dir) still
+///      appended fixture metrics to the operator's real
+///      `~/.simard/metrics/metrics.jsonl`, permanently polluting the live
+///      dashboard's lifetime counters with unit-test noise.
+///
+/// Production behavior is unchanged when `SIMARD_STATE_ROOT` is unset, since
+/// `simard_state_root()` then resolves to `$HOME/.simard`.
 fn metrics_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/local"));
-    home.join(".simard").join("metrics")
+    crate::state_root::simard_state_root().join("metrics")
 }
 
 /// Return the path to the metrics JSONL file.
@@ -100,9 +120,19 @@ pub fn query_metrics(
     Ok(results)
 }
 
+/// The reporting window, in hours, shared by [`daily_report`] and the
+/// activity collectors ([`collect_prs_merged`], [`collect_bugs_fixed`]) so
+/// that the counters they record match the period the report claims to cover.
+pub const REPORT_WINDOW_HOURS: i64 = 24;
+
+/// Start of the current reporting window (`now - REPORT_WINDOW_HOURS`).
+fn report_window_start() -> DateTime<Utc> {
+    Utc::now() - chrono::Duration::hours(REPORT_WINDOW_HOURS)
+}
+
 /// Generate a daily summary report of all metrics recorded in the last 24 hours.
 pub fn daily_report() -> Result<DailyReport, Box<dyn std::error::Error>> {
-    let since = Utc::now() - chrono::Duration::hours(24);
+    let since = Utc::now() - chrono::Duration::hours(REPORT_WINDOW_HOURS);
     let path = metrics_file_path();
     if !path.exists() {
         return Ok(DailyReport::default());
@@ -143,7 +173,7 @@ pub fn daily_report() -> Result<DailyReport, Box<dyn std::error::Error>> {
     };
 
     Ok(DailyReport {
-        period_hours: 24,
+        period_hours: REPORT_WINDOW_HOURS as u32,
         bugs_fixed: latest("bugs_fixed"),
         prs_merged: latest("prs_merged"),
         test_count: latest("test_count"),
@@ -167,8 +197,48 @@ pub struct DailyReport {
 // Metric collection helpers — gather values from external tools
 // ---------------------------------------------------------------------------
 
-/// Count recently closed bug issues via `gh issue list`.
+/// Upper bound on the number of `gh` records we ask for when counting activity
+/// in the reporting window. The `gh --search "…>=<date>"` qualifiers below bound
+/// the result set to the window server-side, so this is only a safety ceiling;
+/// [`report_window_start`] and [`count_entries_since`] — not the request size —
+/// determine the reported count.
+const GH_LIST_LIMIT: &str = "500";
+
+/// Count entries in a `gh ... --json` array whose RFC3339 timestamp in `field`
+/// falls at or after `since`.
+///
+/// This is the pure, unit-testable core of [`collect_prs_merged`] and
+/// [`collect_bugs_fixed`]. It exists because the historical implementation
+/// counted `gh ... --limit 5` rows with **no** time filter, so both metrics
+/// were structurally pinned at a constant `5.0` and never reflected the 24-hour
+/// window the daily report claims to cover (issue #4256: dashboard daily report
+/// under-reports PRs merged / bugs fixed). Entries missing or with an
+/// unparseable timestamp are skipped rather than counted.
+pub(crate) fn count_entries_since(raw: &str, since: DateTime<Utc>, field: &str) -> f64 {
+    serde_json::from_str::<Vec<serde_json::Value>>(raw)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    item.get(field)
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|t| t.with_timezone(&Utc) >= since)
+                        .unwrap_or(false)
+                })
+                .count() as f64
+        })
+        .unwrap_or(0.0)
+}
+
+/// Count bug issues closed within the reporting window via `gh issue list`.
+///
+/// The `closed:>=<date>` search qualifier is a coarse (day-granularity)
+/// server-side pre-filter that bounds the result set to the window; the precise
+/// sub-day cutoff is applied by [`count_entries_since`] on `closedAt`.
 pub fn collect_bugs_fixed() -> f64 {
+    let since = report_window_start();
+    let search = format!("closed:>={} sort:updated-desc", since.format("%Y-%m-%d"));
     let output = std::process::Command::new("gh")
         .args([
             "issue",
@@ -178,37 +248,45 @@ pub fn collect_bugs_fixed() -> f64 {
             "--label",
             "bug",
             "--search",
-            "sort:updated-desc",
+            &search,
             "--limit",
-            "5",
+            GH_LIST_LIMIT,
             "--json",
-            "number",
+            "number,closedAt",
         ])
         .output();
     match output {
         Ok(o) if o.status.success() => {
-            let raw = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<Vec<serde_json::Value>>(&raw)
-                .map(|v| v.len() as f64)
-                .unwrap_or(0.0)
+            count_entries_since(&String::from_utf8_lossy(&o.stdout), since, "closedAt")
         }
         _ => 0.0,
     }
 }
 
-/// Count recently merged PRs via `gh pr list`.
+/// Count PRs merged within the reporting window via `gh pr list`.
+///
+/// The `is:merged merged:>=<date>` search qualifier bounds the result set to the
+/// window server-side — so a PR authored long ago but merged today is counted
+/// regardless of how many newer PRs exist — and [`count_entries_since`] applies
+/// the precise sub-day cutoff on `mergedAt`.
 pub fn collect_prs_merged() -> f64 {
+    let since = report_window_start();
+    let search = format!("is:merged merged:>={}", since.format("%Y-%m-%d"));
     let output = std::process::Command::new("gh")
         .args([
-            "pr", "list", "--state", "merged", "--limit", "5", "--json", "number",
+            "pr",
+            "list",
+            "--search",
+            &search,
+            "--limit",
+            GH_LIST_LIMIT,
+            "--json",
+            "number,mergedAt",
         ])
         .output();
     match output {
         Ok(o) if o.status.success() => {
-            let raw = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<Vec<serde_json::Value>>(&raw)
-                .map(|v| v.len() as f64)
-                .unwrap_or(0.0)
+            count_entries_since(&String::from_utf8_lossy(&o.stdout), since, "mergedAt")
         }
         _ => 0.0,
     }
@@ -232,10 +310,10 @@ pub fn collect_test_count() -> f64 {
 /// `cycle_duration` is the elapsed wall-clock time for the OODA cycle.
 pub fn collect_and_record_all(cycle_duration: Duration) -> Result<(), Box<dyn std::error::Error>> {
     let bugs = collect_bugs_fixed();
-    record_metric("bugs_fixed", bugs, "closed issues with bug label (last 5)")?;
+    record_metric("bugs_fixed", bugs, "bug-labeled issues closed in last 24h")?;
 
     let prs = collect_prs_merged();
-    record_metric("prs_merged", prs, "recently merged PRs (last 5)")?;
+    record_metric("prs_merged", prs, "PRs merged in last 24h")?;
 
     let tests = collect_test_count();
     record_metric("test_count", tests, "count of #[test] in src/")?;

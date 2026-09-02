@@ -57,7 +57,7 @@ fn test_install_rejects_extra_args() {
         result
             .unwrap_err()
             .to_string()
-            .contains("unexpected trailing arguments")
+            .contains("unexpected argument")
     );
 }
 
@@ -483,4 +483,352 @@ fn test_all_subcommands_accept_help_flag() {
             );
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #4721 (WS-2): `simard merge record-verdict` — the agent-facing gated
+// write tool the merge-readiness recipe calls to durably record its typed
+// verdict (replacing the forbidden JSON-emit→scrape pattern).
+//
+// TDD contract for the NOT-YET-IMPLEMENTED tool in `operator_cli::merge`
+// (design C1 / resolved-requirements A7/A8):
+//
+//   merge::parse_record_verdict_args(Vec<String>)
+//        -> Result<merge::RecordVerdictArgs, String>
+//   merge::run_record_verdict(Vec<String>) -> i32   // 0 ok / 2 usage / 3 IO
+//
+//   RecordVerdictArgs { pr: u32, repo: String, verdict: VerdictKind,
+//                       reason: String, run_token: String,
+//                       state_root: Option<PathBuf> }
+//
+// Flags: --pr <u32> --repo <owner/name> --verdict merge|hold
+//        --reason "<text>" --run-token <str> [--state-root <path>]
+// Both `--flag value` and `--flag=value` forms are accepted.
+//
+// These are expected to FAIL TO COMPILE until C1 lands (TDD red).
+#[cfg(test)]
+mod issue_4721_record_verdict_tests {
+    use std::path::PathBuf;
+
+    use crate::operator_cli::merge::{parse_record_verdict_args, run_record_verdict};
+    use crate::stewardship::merge_verdict_store::{ReadOutcome, VerdictKind, read_verified};
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn temp_state_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "simard-recordverdict-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // ── parse: happy paths ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_valid_merge_verdict() {
+        let parsed = parse_record_verdict_args(args(&[
+            "--pr",
+            "1500",
+            "--repo",
+            "rysweet/Simard",
+            "--verdict",
+            "merge",
+            "--reason",
+            "crusty passed; CI green",
+            "--run-token",
+            "tok-abc",
+        ]))
+        .expect("valid merge invocation");
+        assert_eq!(parsed.pr, 1500);
+        assert_eq!(parsed.repo, "rysweet/Simard");
+        assert_eq!(parsed.verdict, VerdictKind::Merge);
+        assert_eq!(parsed.reason, "crusty passed; CI green");
+        assert_eq!(parsed.run_token, "tok-abc");
+    }
+
+    #[test]
+    fn parse_valid_hold_verdict_with_equals_form() {
+        let parsed = parse_record_verdict_args(args(&[
+            "--pr=42",
+            "--repo=o/r",
+            "--verdict=hold",
+            "--reason=needs more tests",
+            "--run-token=tok",
+        ]))
+        .expect("valid hold invocation, equals form");
+        assert_eq!(parsed.pr, 42);
+        assert_eq!(parsed.verdict, VerdictKind::Hold);
+    }
+
+    #[test]
+    fn parse_accepts_state_root_override() {
+        let parsed = parse_record_verdict_args(args(&[
+            "--pr",
+            "1",
+            "--repo",
+            "o/r",
+            "--verdict",
+            "merge",
+            "--reason",
+            "x",
+            "--run-token",
+            "t",
+            "--state-root",
+            "/tmp/some-root",
+        ]))
+        .expect("state-root override accepted");
+        assert_eq!(parsed.state_root, Some(PathBuf::from("/tmp/some-root")));
+    }
+
+    // ── parse: validation errors (exit 2) ───────────────────────────────────
+
+    #[test]
+    fn parse_rejects_invalid_verdict_word() {
+        for bad in ["yes", "ready", "MERGE", "Hold", ""] {
+            let r = parse_record_verdict_args(args(&[
+                "--pr",
+                "1",
+                "--repo",
+                "o/r",
+                "--verdict",
+                bad,
+                "--reason",
+                "x",
+                "--run-token",
+                "t",
+            ]));
+            assert!(
+                r.is_err(),
+                "verdict {bad:?} must be rejected (only lowercase merge|hold)"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_non_numeric_pr() {
+        let r = parse_record_verdict_args(args(&[
+            "--pr",
+            "abc",
+            "--repo",
+            "o/r",
+            "--verdict",
+            "merge",
+            "--reason",
+            "x",
+            "--run-token",
+            "t",
+        ]));
+        assert!(r.is_err(), "non-numeric --pr must be rejected");
+    }
+
+    #[test]
+    fn parse_rejects_empty_reason() {
+        let r = parse_record_verdict_args(args(&[
+            "--pr",
+            "1",
+            "--repo",
+            "o/r",
+            "--verdict",
+            "merge",
+            "--reason",
+            "",
+            "--run-token",
+            "t",
+        ]));
+        assert!(r.is_err(), "empty --reason must be rejected");
+    }
+
+    #[test]
+    fn parse_rejects_each_missing_required_flag() {
+        // Every one of these omits exactly one required flag.
+        let cases: &[&[&str]] = &[
+            &[
+                "--repo",
+                "o/r",
+                "--verdict",
+                "merge",
+                "--reason",
+                "x",
+                "--run-token",
+                "t",
+            ], // no --pr
+            &[
+                "--pr",
+                "1",
+                "--verdict",
+                "merge",
+                "--reason",
+                "x",
+                "--run-token",
+                "t",
+            ], // no --repo
+            &[
+                "--pr",
+                "1",
+                "--repo",
+                "o/r",
+                "--reason",
+                "x",
+                "--run-token",
+                "t",
+            ], // no --verdict
+            &[
+                "--pr",
+                "1",
+                "--repo",
+                "o/r",
+                "--verdict",
+                "merge",
+                "--run-token",
+                "t",
+            ], // no --reason
+            &[
+                "--pr",
+                "1",
+                "--repo",
+                "o/r",
+                "--verdict",
+                "merge",
+                "--reason",
+                "x",
+            ], // no --run-token
+        ];
+        for c in cases {
+            assert!(
+                parse_record_verdict_args(args(c)).is_err(),
+                "invocation missing a required flag must be rejected: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_malformed_repo() {
+        for bad in ["no-slash", "a/b/c", "/abs", "owner/", "../evil"] {
+            let r = parse_record_verdict_args(args(&[
+                "--pr",
+                "1",
+                "--repo",
+                bad,
+                "--verdict",
+                "merge",
+                "--reason",
+                "x",
+                "--run-token",
+                "t",
+            ]));
+            assert!(r.is_err(), "malformed --repo {bad:?} must be rejected");
+        }
+    }
+
+    // ── run: exit codes + durable write readable by the rail ────────────────
+
+    #[test]
+    fn run_records_merge_and_rail_reads_it_back() {
+        let root = temp_state_root("run-merge");
+        let code = run_record_verdict(args(&[
+            "--pr",
+            "77",
+            "--repo",
+            "rysweet/Simard",
+            "--verdict",
+            "merge",
+            "--reason",
+            "crusty passed",
+            "--run-token",
+            "run-xyz",
+            "--state-root",
+            root.to_str().unwrap(),
+        ]));
+        assert_eq!(code, 0, "a valid record write must exit 0");
+
+        // The exact record the deterministic rail will consume (design R1↔R3).
+        match read_verified(&root, "rysweet/Simard", 77, "run-xyz") {
+            ReadOutcome::Found(rec) => {
+                assert_eq!(rec.verdict, VerdictKind::Merge);
+                assert_eq!(rec.reason, "crusty passed");
+                assert_eq!(rec.run_token, "run-xyz");
+            }
+            other => panic!("rail must read back the tool's record, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_usage_error_exits_2() {
+        let root = temp_state_root("run-usage");
+        let code = run_record_verdict(args(&[
+            "--pr",
+            "notanumber",
+            "--repo",
+            "o/r",
+            "--verdict",
+            "merge",
+            "--reason",
+            "x",
+            "--run-token",
+            "t",
+            "--state-root",
+            root.to_str().unwrap(),
+        ]));
+        assert_eq!(code, 2, "a usage/validation error must exit 2");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_overwrites_prior_record_for_same_pr() {
+        let root = temp_state_root("run-overwrite");
+        let first = args(&[
+            "--pr",
+            "5",
+            "--repo",
+            "o/r",
+            "--verdict",
+            "hold",
+            "--reason",
+            "old",
+            "--run-token",
+            "t1",
+            "--state-root",
+            root.to_str().unwrap(),
+        ]);
+        assert_eq!(run_record_verdict(first), 0);
+        let second = args(&[
+            "--pr",
+            "5",
+            "--repo",
+            "o/r",
+            "--verdict",
+            "merge",
+            "--reason",
+            "new",
+            "--run-token",
+            "t2",
+            "--state-root",
+            root.to_str().unwrap(),
+        ]);
+        assert_eq!(run_record_verdict(second), 0);
+
+        match read_verified(&root, "o/r", 5, "t2") {
+            ReadOutcome::Found(rec) => assert_eq!(rec.verdict, VerdictKind::Merge),
+            other => panic!("second write must win, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[test]
+fn issue_4721_help_advertises_merge_record_verdict() {
+    let help = operator_cli_help();
+    assert!(
+        help.contains("record-verdict"),
+        "operator help must advertise the `merge record-verdict` tool"
+    );
 }

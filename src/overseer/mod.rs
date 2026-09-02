@@ -48,30 +48,50 @@
 pub mod activity;
 pub mod audit;
 pub mod capabilities;
+pub mod claim_reaper;
 pub mod config;
 pub mod conflict;
 pub mod deploy;
+pub mod deploy_trigger;
 pub mod diagnosis;
+pub mod doc_pr_reconcile;
+pub mod ecosystem_observe;
 pub mod failure_sink;
 pub mod guardrails;
+pub mod health_review;
 pub mod intervention;
+pub mod issue_cooldown;
 pub mod launch;
 pub mod meeting_ops;
 pub mod merge_ops;
+pub mod merge_queue_observe;
 pub mod notify;
 pub mod observer;
 pub mod pr_verify;
+pub mod rework_loop;
 pub mod root_cause;
 pub mod sensor;
 pub mod signal;
+pub mod signal_liaison;
+pub mod thread_oversight;
 pub mod tuning;
 pub mod whisper_ops;
 pub mod wiring;
 
 #[cfg(test)]
+mod tests_config_liaison_rework;
+#[cfg(test)]
+mod tests_deploy_drift;
+#[cfg(test)]
+mod tests_diagnosis;
+#[cfg(test)]
+mod tests_escalation_triage;
+#[cfg(test)]
 mod tests_gap_scan;
 #[cfg(test)]
 mod tests_goal_health;
+#[cfg(test)]
+mod tests_intervention_rework;
 #[cfg(test)]
 mod tests_m1;
 #[cfg(test)]
@@ -79,25 +99,54 @@ mod tests_m2;
 #[cfg(test)]
 mod tests_memory_recall;
 #[cfg(test)]
+mod tests_merge_queue_reasoning;
+#[cfg(test)]
+mod tests_rework_loop;
+#[cfg(test)]
 mod tests_root_cause;
+// process_health (TDD): reblock-issue signature stabilization — two re-block
+// observations of the same cause that differ only by a volatile goal id must
+// dedup to ONE stewardship signature (`fold_volatile_goal_ids`).
+#[cfg(test)]
+mod tests_reblock_signature;
+// goal_hygiene (TDD): the auto-generated documentation-PR reconciliation pass —
+// composite fail-closed identity gate, single-open canonical selection, and the
+// by-number close executor.
+#[cfg(test)]
+mod tests_doc_pr_reconcile;
+#[cfg(test)]
+mod tests_self_healing;
+#[cfg(test)]
+mod tests_selfmerge_fix;
 #[cfg(test)]
 mod tests_whisper;
+// Issue #4786: TDD contract for the deterministic thread-oversight rail.
+#[cfg(test)]
+mod tests_signal_liaison;
+#[cfg(test)]
+mod tests_thread_oversight;
+// Issue #4930: contract tests for the durable issue-cooldown ledger that stops
+// the OODA-core auto-issue storm.
+#[cfg(test)]
+mod tests_issue_cooldown;
 
 pub use capabilities::{
-    Auditor, BlockedGoal, Deployer, GoalCurator, IssueFiler, MeetingHost, MemoryRecall,
-    MemorySnapshot, ObservationEpisode, ObservedState, OrchestratorRunBrief, OverseerError, PrOps,
-    RecallBudget, RecallKeys, RecalledEpisode, RecalledFact, RecalledProcedure,
-    RecalledProspective, RecipeBrief, RecipeLauncher, RecordOutcome, StatusReader,
+    Auditor, BlockedGoal, Deployer, GoalCurator, HealthReviewStatus, IssueFiler, IssuePriority,
+    IssueReadiness, MeetingHost, MemoryRecall, MemorySnapshot, MergeReasoningStatus,
+    ObservationEpisode, ObservedState, OrchestratorRunBrief, OverseerError, PrDisposition, PrOps,
+    PrRef, ReasonedPr, RecallBudget, RecallKeys, RecalledEpisode, RecalledFact, RecalledProcedure,
+    RecalledProspective, RecipeBrief, RecipeLauncher, RecordOutcome, StatusReader, TriagedIssue,
     sanitize_recalled,
 };
 pub use config::{
     daily_budget_usd, gap_scan_enabled, gap_scan_every_n, goal_health_enabled,
-    memory_recall_enabled, overseer_acting_enabled, overseer_author_login, overseer_enabled,
+    health_review_enabled, health_review_service_unit, memory_recall_enabled,
+    overseer_acting_enabled, overseer_author_login, overseer_enabled,
 };
 pub use diagnosis::{FailureCause, FailureDiagnosis, classify_terminal_failure};
 pub use guardrails::{
-    AutonomyGate, BudgetGate, ConflictSequencer, RecursionGuard, RiskClass, Subject,
-    WhisperDecision, WhisperGate, classify,
+    AutonomyGate, BackoffDecision, BackoffGate, BudgetGate, ConflictSequencer, RecursionGuard,
+    RiskClass, Subject, WhisperDecision, WhisperGate, classify,
 };
 pub use intervention::{Intervention, PlannedIntervention, Remediation, RemediationClass};
 pub use observer::{StewardshipIssueFiler, decide_read_only, is_m1_permitted};
@@ -124,11 +173,18 @@ pub use activity::ProblemEntry;
 pub use root_cause::{PriorOccurrence, RECURRENCE_ESCALATION_THRESHOLD, root_cause_signature};
 
 use crate::cognitive_memory::CognitiveMemoryOps;
+use crate::cognitive_threads::ThreadHealth;
 use crate::goal_curation::no_progress_breaker::{
     NO_PROGRESS_BREAKER_THRESHOLD, is_no_progress_marker,
 };
 use crate::overseer::notify::{OperatorNotification, OperatorNotifier};
-use capabilities::{DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle};
+use crate::stewardship::PrSnapshot;
+use crate::stewardship::gh_client::{GhClient, GhIssue};
+use crate::stewardship::merge_authority::evaluate_objective_gates;
+use capabilities::{
+    DeployReport, GoalBrief, InFlightItem, IssueOutcome, WorkstreamHandle, WorkstreamStatus,
+};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -197,6 +253,14 @@ pub struct Overseer {
     /// distinct from `blocked_goal_gate` so goal-health and gap-scan dedup never
     /// interfere.
     gap_gate: WhisperGate,
+    /// Durable GitHub-side dedup seam for the gap-scan's issue filing (issue
+    /// #4717). Before filing a fresh gap the Act path queries GitHub for an OPEN
+    /// issue carrying the gap's `stewardship-signature` marker and skips creation
+    /// on a match, so a recurring gap is filed at most once EVEN ACROSS A PROCESS
+    /// RESTART — the in-process `gap_gate` resets to empty on boot and cannot
+    /// remember a prior process's file. `None` until wired: the Act path then only
+    /// notifies the operator (never files), exactly as before this seam existed.
+    gap_issue_client: Option<Box<dyn GhClient>>,
     /// The cognitive-memory handle (amplihack-memory-lib, G2) the root-cause
     /// analysis recalls prior occurrences from and records new ones into. `None`
     /// until wired: the analysis then degrades gracefully to telemetry-only WHYs
@@ -205,6 +269,170 @@ pub struct Overseer {
     /// memory-recall capability (`caps.memory`): this is the occurrence-signature
     /// recall/store seam that drives recurrence-based root-cause escalation.
     memory: Option<Arc<dyn CognitiveMemoryOps>>,
+    /// In-flight recipe-investigation dedup set (live defect 2026-07-15): keyed by
+    /// each launched investigation's [`recipe_dedup_key`], holding the workstream
+    /// handle so the set can self-reconcile. A goal / recurring-signature that
+    /// already has a recipe-runner investigation RUNNING is never launched a
+    /// second time — the concrete defect was two recipe-runner PIDs (1074394 and
+    /// 1095553) investigating the identical `overseer-obs:goal:blocked:…`
+    /// signature at once. Populated in [`Overseer::act`] on a successful launch
+    /// and reconciled at the top of [`Overseer::run_cycle`] (a workstream that is
+    /// no longer `Running` frees its slot), so the guard is "at most one IN
+    /// FLIGHT", never a permanent one-shot.
+    inflight_investigations: HashMap<String, WorkstreamHandle>,
+    /// Whether the periodic stale-engineer-claim reaper (issue #4099) is enabled
+    /// (config opt-out via `SIMARD_CLAIM_REAP_ENABLED`). ON by default in the
+    /// daemon; OFF in the bare constructor. When off, the sweep is a no-op.
+    claim_reap_enabled: bool,
+    /// Idle-staleness threshold (seconds) the reaper applies to a worktree's
+    /// newest-file age. Generous (default 1800s) so a long-but-alive engineer is
+    /// never reaped (no wall-clock kill).
+    claim_reap_stale_secs: u64,
+    /// The reaper's three injected seams: the ledger it sweeps + reclaims through
+    /// (the shared release chokepoint), the liveness probe, and the orphan
+    /// worktree cleanup. `None` until wired by `build_overseer`; when absent the
+    /// tick simply skips the sweep.
+    claim_reaper: Option<ClaimReaperSeams>,
+    /// Self-improvement interventions the stale-engineer reaper's investigations
+    /// surfaced this tick (issue #4400), staged for dispatch through the SAME
+    /// gated Act path health-review uses. Populated by `reap_stale_engineer_claims`
+    /// at the top of the tick and drained into the plan after `health_review`, so
+    /// a stale engineer's investigation feeds self-improvement rather than a
+    /// silent reclaim. Empty between ticks.
+    pending_reaper_interventions: Vec<Intervention>,
+    /// The live agentic ecosystem-observe rail (issue #2419): the thin
+    /// [`ecosystem_observe::EcosystemObserver`] seam that invokes the
+    /// `ecosystem-observe` recipe on the Overseer cadence and forwards its
+    /// OPAQUE semantic brief into the gated launch machinery. `None` until wired
+    /// by `build_overseer`; when absent (bare constructor / tests) the pass is
+    /// skipped and the Overseer behaves exactly as before. This REPLACES the
+    /// retired single-repo Rust gap-scan survey as the cross-repo observation
+    /// SOURCE — Rust never queries or parses a repo; the observation lives in the
+    /// agent's reasoning and is handed forward as an opaque string.
+    ecosystem_observer: Option<Box<dyn ecosystem_observe::EcosystemObserver>>,
+    /// The stewarded roster (validated `owner/name` slugs) handed to the
+    /// ecosystem-observe recipe. Loaded once by `build_overseer` from the
+    /// identity-curated `stewarded_repos` collection; empty (and the pass
+    /// skipped) until wired.
+    ecosystem_roster: Vec<String>,
+    /// Every-N cadence for the ecosystem-observe pass (reuses the gap-scan
+    /// cadence knob). Clamped to a floor of 1 by [`ecosystem_observe::should_observe`].
+    ecosystem_every_n: u64,
+    /// Monotonic tick counter driving the ecosystem-observe every-N cadence.
+    ecosystem_tick: u64,
+    /// Injected wall-clock seam (Unix seconds) the gap-scan dedup backoff reads.
+    /// The daemon uses real wall-clock ([`now_secs`]); tests inject a virtual
+    /// clock via [`Overseer::with_clock`] so the backoff window is deterministic.
+    clock: Box<dyn Fn() -> i64 + Send + Sync>,
+    /// Exponential-backoff dedup gate on the `WorkstreamCoverage` launch path
+    /// (Problem 1 / issue #4186). The in-flight guard only holds a duplicate
+    /// WHILE the covering workstream runs; once it COMPLETES, an unchanged,
+    /// still-recurring gap would re-launch every tick. This gate suppresses an
+    /// equivalent relaunch (keyed by the same [`recipe_dedup_key`]) within a
+    /// growing, bounded window even after completion — never permanently.
+    coverage_backoff: BackoffGate,
+    /// The agentic observe/orient merge-queue reasoner rail (#4097). When wired
+    /// (`build_overseer` with a resolved recipe-runner), each due tick invokes the
+    /// `observe-merge-queue` recipe — an AGENT surveys open PRs + issues across the
+    /// governed roster and REASONS to a bounded brief — and the rail parses it
+    /// FAIL-CLOSED into `ObservedState.reasoned_prs` / `triaged_issues`. Absent by
+    /// default (bare constructor / tests) so the pass is skipped and the Overseer
+    /// behaves exactly as before. The reasoning is BROAD; merge AUTHORIZATION stays
+    /// narrow behind [`project_ready_prs`] + the downstream merge-authority gate.
+    merge_queue_reasoner: Option<Box<dyn merge_queue_observe::MergeQueueReasoner>>,
+    /// The governed reasoning roster (validated `owner/name` slugs) handed to the
+    /// `observe-merge-queue` recipe as the DEFAULT scope. Loaded once by
+    /// `build_overseer` from the identity-curated `stewarded_repos` collection;
+    /// the resolved scope ([`config::merge_reasoning_scope`]) is default-ON over
+    /// this roster and only an EXPLICIT operator disable turns it off (loud).
+    /// Empty (pass skipped) until wired.
+    merge_queue_roster: Vec<String>,
+    /// Every-N cadence for the merge-queue observe pass (reuses the gap-scan
+    /// cadence knob, like the ecosystem pass). Clamped to a floor of 1.
+    merge_queue_every_n: u64,
+    /// Monotonic tick counter driving the merge-queue observe every-N cadence.
+    merge_queue_tick: u64,
+    /// One-time latch for the R3 "merge reasoning DISABLED" operator notification
+    /// (#4097): an EXPLICIT operator disable is surfaced LOUD once (WARN log +
+    /// status field + a single dual-channel NotifyOperator), never re-sent every
+    /// tick while it stays disabled.
+    merge_reasoning_disabled_notified: bool,
+    /// The `gh` client for the additive **auto-doc PR reconciliation** pass
+    /// (goal_hygiene): each due tick it lists open PRs across the governed
+    /// [`merge_queue_roster`](Self::merge_queue_roster) and closes stale /
+    /// superseded auto-generated `"Update documentation with …"` drafts so at
+    /// most one stays open ([`doc_pr_reconcile::run_doc_pr_reconcile`]). `None`
+    /// by default (bare constructor / tests) so the pass is skipped and the
+    /// Overseer performs NO `gh` I/O — existing `run_cycle` tests are unaffected;
+    /// `build_overseer` wires the production [`crate::stewardship::RealPrGhClient`].
+    doc_pr_reconcile_gh: Option<Box<dyn crate::stewardship::merge_authority::PrGhClient>>,
+    /// Monotonic tick counter driving the auto-doc PR reconciliation every-N
+    /// cadence (reuses the shared gap-scan cadence knob).
+    doc_pr_reconcile_tick: u64,
+    /// The agentic **health-review** rail ([standing]): the thin
+    /// [`health_review::HealthReviewer`] seam that invokes the
+    /// `overseer-health-review` recipe on the Overseer cadence — an AGENT reads
+    /// the OODA journal + `simard status` + `simard goal list`, detects
+    /// crash-loops / shared failure signatures, and reasons to typed remediation
+    /// DECISIONS — and routes each into the SAME gated `LaunchRecipe` /
+    /// `EscalateBlockedGoal` path every other action uses. `None` until wired by
+    /// `build_overseer`; when absent (bare constructor / tests) the pass is
+    /// skipped and the Overseer behaves exactly as before. Rust never reads the
+    /// journal, counts a failure, or encodes a threshold — the observation and
+    /// the remediation judgment live entirely in the agent's reasoning.
+    health_reviewer: Option<Box<dyn health_review::HealthReviewer>>,
+    /// Whether the agentic health-review rail is enabled (dedicated config
+    /// opt-out `SIMARD_OVERSEER_HEALTH_REVIEW`, on top of the shared
+    /// `SIMARD_OVERSEER_GAP_SCAN` scan throttle). Off in the bare constructor;
+    /// `build_overseer` sets it from [`config::health_review_enabled`].
+    health_review_enabled: bool,
+    /// Every-N cadence for the health-review pass (reuses the gap-scan cadence
+    /// knob, like the ecosystem/merge-queue passes). Clamped to a floor of 1 by
+    /// [`ecosystem_observe::should_observe`].
+    health_review_every_n: u64,
+    /// Monotonic tick counter driving the health-review every-N cadence.
+    health_review_tick: u64,
+    /// The autonomous self-deploy drift sensor (issue #2590). `None` in the bare
+    /// constructor and in tests that do not exercise the rail; `build_overseer`
+    /// wires the production [`deploy_trigger::GitDeployDriftObserver`]. When
+    /// present AND autonomous deploy is enabled AND the process-global throttle
+    /// admits this tick, `run_cycle` observes drift (fail-safe) and surfaces a
+    /// `Signal::DeployDriftDetected` so Decide can emit a guarded deploy.
+    deploy_drift_observer: Option<Box<dyn deploy_trigger::DeployDriftObserver>>,
+    /// The daemon state root (`~/.simard`), used by the cognitive-thread
+    /// oversight pass (#4786) to locate `telemetry/metrics_snapshot.json` and
+    /// `ooda.log`. `None` in the bare constructor / tests (the pass is then a
+    /// no-op); `build_overseer` sets it.
+    state_root: Option<PathBuf>,
+    /// The single-source-of-truth cognitive-thread registry (name + ORIGINAL
+    /// PURPOSE + cadence), captured from `Mind::health()` by the daemon each tick
+    /// and injected via [`Overseer::with_thread_registry`]. Empty in the bare
+    /// constructor / tests, so thread oversight is skipped. Drives R5 oversight
+    /// without a hand-maintained duplicate thread list.
+    thread_registry: Vec<ThreadHealth>,
+    /// The operator-liaison external-I/O seam (issue #4911, D1). `None` (inert)
+    /// until `build_overseer` wires the production port; when present AND
+    /// `SIMARD_OVERSEER_SIGNAL_LIAISON` is enabled, `run_cycle` drains new
+    /// operator-group messages, runs the liaison recipe, reads the typed decision
+    /// fail-closed, posts any reply, and gates any directed intervention. All
+    /// deterministic logic lives in the tested `signal_liaison` pure functions.
+    liaison_port: Option<Box<dyn signal_liaison::LiaisonPort>>,
+    /// The PR-rework external-I/O seam (issue #4911, D2). `None` (inert) until
+    /// `build_overseer` wires the production port; when present AND
+    /// `SIMARD_OVERSEER_REWORK` is enabled, `run_cycle` evaluates each held
+    /// candidate PR via the tested `rework_loop::poll_rework` fail-closed rail and
+    /// gates the resulting rework/escalation.
+    rework_port: Option<Box<dyn rework_loop::ReworkPort>>,
+}
+
+/// The reaper's injected dependencies, bundled so the `Overseer` carries one
+/// optional field. Wired in `build_overseer`; faked in tests via the pure
+/// [`claim_reaper::reap_stale_claims`] entry point.
+struct ClaimReaperSeams {
+    ledger: Box<dyn claim_reaper::ClaimLedger>,
+    probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
+    cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+    investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
 }
 
 /// The result of one meta-OODA turn. Side-effect free: it reports what was
@@ -261,13 +489,38 @@ pub enum ActOutcome {
     /// The recurring backlog-coverage gap-scan flagged (and/or suppressed)
     /// backlog gaps this act. `flagged` gaps got the consolidated operator
     /// notification + one deduped issue each; `suppressed` gaps were within the
-    /// per-gap dedup window (a recurring gap, not re-notified/re-filed). Feeds the
-    /// DEDICATED tick counters — never the generic `issues_filed`/`escalations`.
+    /// per-gap dedup window (a recurring gap, not re-notified/re-filed);
+    /// `reused_existing` gaps already had a matching OPEN GitHub issue carrying
+    /// their durable `stewardship-signature` marker (issue #4717), so filing was
+    /// skipped even across a process restart. Feeds the DEDICATED tick counters —
+    /// never the generic `issues_filed`/`escalations`.
     WorkstreamGapsFlagged {
         flagged: usize,
         suppressed: usize,
+        reused_existing: usize,
+    },
+    /// An open PR judged STALE by the agentic merge-queue reasoner (#4097) was
+    /// flagged with a `gh pr comment` (never a merge/close).
+    StalePrFlagged {
+        repo: String,
+        pr: u32,
+    },
+    /// An open PR judged a DUPLICATE by the agentic reasoner (#4097) was closed
+    /// with `gh pr close`, referencing the original.
+    DuplicatePrClosed {
+        repo: String,
+        pr: u32,
+        duplicate_of: u32,
     },
 }
+
+/// The `target_repo` marker attached to ecosystem-observe launches. The
+/// AUTHORITATIVE repo for each surfaced Problem is named in the agent's brief
+/// prose (per `observe.md` / `problem_to_brief.md`); this stable
+/// observation-origin slug only feeds the launcher's dedup signature and hint,
+/// never a `cd`/clone. Keeping it constant lets `recipe_dedup_key` dedup off the
+/// brief content rather than a churning per-repo target.
+const ECOSYSTEM_OBSERVE_TARGET: &str = "rysweet/Simard";
 
 impl Overseer {
     /// Construct with default guardrails (HIGH-RISK gated, default daily budget).
@@ -284,10 +537,14 @@ impl Overseer {
             whisper_gate: WhisperGate::new(900, 5),
             whisper_enabled: false,
             notifier: None,
-            // 15-minute dedup window so a persistent blocked goal is self-healed
-            // / escalated once per window (never in a per-tick loop); a generous
-            // per-hour cap covers many distinct goals without flooding.
-            blocked_goal_gate: WhisperGate::new(900, 20),
+            // Blocked-goal escalation uses EXPONENTIAL BACKOFF (issue #4255): a
+            // persistently-blocked goal is escalated once, then its per-goal
+            // signature is suppressed for a window that DOUBLES each re-fire
+            // (15m → 30m → 1h → … capped at 4h) instead of re-escalating every
+            // ~15-minute tick. A change in the blocked-goal SET presents as a new
+            // per-goal signature that fires immediately. A generous per-hour cap
+            // covers many distinct goals without flooding.
+            blocked_goal_gate: WhisperGate::with_backoff(900, 14_400, 20),
             goal_health_enabled: false,
             // Off by default in the bare constructor; the daemon enables it from
             // `config::memory_recall_enabled`. 15-minute dedup window so a
@@ -300,7 +557,39 @@ impl Overseer {
             // window; a generous per-hour cap covers a maxed-out tick's distinct
             // gaps (bounded by `sensor::MAX_GAPS_PER_TICK`) without flooding.
             gap_gate: WhisperGate::new(900, 200),
+            gap_issue_client: None,
             memory: None,
+            inflight_investigations: HashMap::new(),
+            claim_reap_enabled: false,
+            claim_reap_stale_secs: config::DEFAULT_CLAIM_REAP_STALE_SECS,
+            claim_reaper: None,
+            pending_reaper_interventions: Vec::new(),
+            ecosystem_observer: None,
+            ecosystem_roster: Vec::new(),
+            ecosystem_every_n: 1,
+            ecosystem_tick: 0,
+            clock: Box::new(now_secs),
+            coverage_backoff: BackoffGate::new(
+                config::overseer_backoff_base_secs(),
+                config::overseer_backoff_multiplier(),
+                config::overseer_backoff_max_secs(),
+            ),
+            merge_queue_reasoner: None,
+            merge_queue_roster: Vec::new(),
+            merge_queue_every_n: 1,
+            merge_queue_tick: 0,
+            merge_reasoning_disabled_notified: false,
+            doc_pr_reconcile_gh: None,
+            doc_pr_reconcile_tick: 0,
+            health_reviewer: None,
+            health_review_enabled: false,
+            health_review_every_n: 1,
+            health_review_tick: 0,
+            deploy_drift_observer: None,
+            state_root: None,
+            thread_registry: Vec::new(),
+            liaison_port: None,
+            rework_port: None,
         }
     }
 
@@ -340,10 +629,165 @@ impl Overseer {
         self
     }
 
+    /// Wire the durable GitHub-side dedup seam for gap-scan issue filing (issue
+    /// #4717). With it wired, the gap-scan files ONE deduped issue per genuinely-
+    /// new gap and skips any gap that already has a matching OPEN issue on GitHub
+    /// — the durable check that survives a process restart. `None` (unwired)
+    /// preserves the prior notify-only behavior (no issues filed).
+    pub fn with_gap_issue_client(mut self, client: Box<dyn GhClient>) -> Self {
+        self.gap_issue_client = Some(client);
+        self
+    }
+
+    /// Wire the live agentic ecosystem-observe rail (issue #2419): the stewarded
+    /// `roster` the OBSERVE agent scans, the [`ecosystem_observe::EcosystemObserver`]
+    /// seam that invokes the recipe, and the every-N cadence. Absent by default;
+    /// `build_overseer` wires it with the committed roster + a production
+    /// recipe-runner. Gated by [`Self::with_gap_scan_enabled`] — it REPLACES the
+    /// retired single-repo gap-scan survey as the observation source, so the same
+    /// `SIMARD_OVERSEER_GAP_SCAN` opt-out disables it and the same
+    /// `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` sets its cadence.
+    pub fn with_ecosystem_observer(
+        mut self,
+        roster: Vec<String>,
+        observer: Box<dyn ecosystem_observe::EcosystemObserver>,
+        every_n: u64,
+    ) -> Self {
+        self.ecosystem_roster = roster;
+        self.ecosystem_observer = Some(observer);
+        self.ecosystem_every_n = every_n;
+        self
+    }
+
+    /// Wire the operator-liaison external-I/O seam (issue #4911, D1). Absent by
+    /// default (the pass is inert); `build_overseer` wires the production Signal
+    /// receive/send + recipe-runner port. Gated at run time by
+    /// `SIMARD_OVERSEER_SIGNAL_LIAISON` (default off).
+    pub fn with_liaison_port(mut self, port: Box<dyn signal_liaison::LiaisonPort>) -> Self {
+        self.liaison_port = Some(port);
+        self
+    }
+
+    /// Wire the PR-rework external-I/O seam (issue #4911, D2). Absent by default
+    /// (the pass is inert); `build_overseer` wires the production candidate-lister
+    /// port. Gated at run time by `SIMARD_OVERSEER_REWORK` (default off).
+    pub fn with_rework_port(mut self, port: Box<dyn rework_loop::ReworkPort>) -> Self {
+        self.rework_port = Some(port);
+        self
+    }
+
+    /// Wire the live agentic observe/orient merge-queue reasoner rail (#4097):
+    /// the governed `roster` the reasoning agent surveys, the
+    /// [`merge_queue_observe::MergeQueueReasoner`] seam that invokes the
+    /// `observe-merge-queue` recipe, and the every-N cadence. Absent by default;
+    /// `build_overseer` wires it with the committed roster + a production
+    /// recipe-runner. Gated by [`Self::with_gap_scan_enabled`] (the same opt-out
+    /// family as the ecosystem pass); the resolved reasoning SCOPE is default-ON
+    /// over the roster and only an EXPLICIT `SIMARD_MERGE_REASONING_SCOPE` disable
+    /// turns it off (loud).
+    pub fn with_merge_queue_reasoner(
+        mut self,
+        roster: Vec<String>,
+        reasoner: Box<dyn merge_queue_observe::MergeQueueReasoner>,
+        every_n: u64,
+    ) -> Self {
+        self.merge_queue_roster = roster;
+        self.merge_queue_reasoner = Some(reasoner);
+        self.merge_queue_every_n = every_n;
+        self
+    }
+
+    /// Wire the `gh` client for the additive auto-doc PR reconciliation pass
+    /// (goal_hygiene). Absent by default (the pass is skipped and NO `gh` I/O is
+    /// performed); `build_overseer` wires the production
+    /// [`crate::stewardship::RealPrGhClient`]. The reconciliation scope is the
+    /// governed [`merge_queue_roster`](Self::merge_queue_roster). Gated at run
+    /// time by [`Self::with_gap_scan_enabled`] (the shared scan opt-out) and an
+    /// every-N cadence.
+    pub fn with_doc_pr_reconcile_client(
+        mut self,
+        gh: Box<dyn crate::stewardship::merge_authority::PrGhClient>,
+    ) -> Self {
+        self.doc_pr_reconcile_gh = Some(gh);
+        self
+    }
+
+    /// Reconcile stale/superseded auto-generated documentation PRs across the
+    /// governed roster so at most one stays open (goal_hygiene). Additive and
+    /// fully **fail-closed**: skipped entirely unless a `gh` client is wired
+    /// AND the shared gap-scan opt-out is enabled AND the every-N cadence is due;
+    /// a per-repo listing/close error is logged and contained — it never aborts
+    /// the cycle or changes any merge/verify decision. Mirrors the gating of the
+    /// merge-queue observe pass.
+    fn reconcile_auto_doc_prs(&mut self) {
+        let tick = self.doc_pr_reconcile_tick;
+        self.doc_pr_reconcile_tick = self.doc_pr_reconcile_tick.wrapping_add(1);
+
+        let Some(gh) = self.doc_pr_reconcile_gh.as_ref() else {
+            return;
+        };
+        if !self.gap_scan_enabled || self.merge_queue_roster.is_empty() {
+            return;
+        }
+        if !ecosystem_observe::should_observe(true, self.merge_queue_every_n, tick) {
+            return;
+        }
+
+        for repo in &self.merge_queue_roster {
+            match doc_pr_reconcile::run_doc_pr_reconcile(repo, gh.as_ref()) {
+                Ok(report) => {
+                    tracing::info!(
+                        target: "simard::overseer",
+                        repo = %repo,
+                        canonical = report.canonical.map(|n| n as i64).unwrap_or(-1),
+                        closed = report.closed.len(),
+                        skipped = report.skipped,
+                        errors = report.errors.len(),
+                        "auto-doc PR reconciliation pass complete for repo",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "simard::overseer",
+                        repo = %repo,
+                        error = %e,
+                        "auto-doc PR reconciliation skipped for repo (list failed) — \
+                         fail-closed, no PRs closed this cycle",
+                    );
+                }
+            }
+        }
+    }
+
     /// Enable/disable the whisperer (config opt-out). Off by default; the daemon
     /// sets this from [`config::whisper_enabled`].
     pub fn with_whisper_enabled(mut self, enabled: bool) -> Self {
         self.whisper_enabled = enabled;
+        self
+    }
+
+    /// Wire the live agentic health-review rail ([standing]): the thin
+    /// [`health_review::HealthReviewer`] seam that invokes the
+    /// `overseer-health-review` recipe and the every-N cadence. Absent by
+    /// default; `build_overseer` wires it with a production recipe-runner. Gated
+    /// by both the dedicated [`Self::with_health_review_enabled`] opt-out and the
+    /// shared [`Self::with_gap_scan_enabled`] scan throttle.
+    pub fn with_health_reviewer(
+        mut self,
+        reviewer: Box<dyn health_review::HealthReviewer>,
+        every_n: u64,
+    ) -> Self {
+        self.health_reviewer = Some(reviewer);
+        self.health_review_every_n = every_n;
+        self
+    }
+
+    /// Enable/disable the agentic health-review rail (dedicated config opt-out
+    /// `SIMARD_OVERSEER_HEALTH_REVIEW`). Off by default; the daemon sets this from
+    /// [`config::health_review_enabled`]. When off, the pass is skipped even while
+    /// the shared gap-scan throttle is on.
+    pub fn with_health_review_enabled(mut self, enabled: bool) -> Self {
+        self.health_review_enabled = enabled;
         self
     }
 
@@ -368,6 +812,14 @@ impl Overseer {
         self
     }
 
+    /// Inject the wall-clock seam (Unix seconds) the gap-scan dedup backoff reads
+    /// (Problem 1 / issue #4186). Defaults to real wall-clock; tests inject a
+    /// deterministic virtual clock so the exponential backoff window is testable.
+    pub fn with_clock(mut self, clock: Box<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Wire the cognitive-memory handle (amplihack-memory-lib, G2) used by the
     /// root-cause analysis to recall prior occurrences of a problem's root cause
     /// and record new ones. `None` until wired: the analysis degrades gracefully
@@ -377,9 +829,145 @@ impl Overseer {
         self
     }
 
+    /// Wire the periodic stale-engineer-claim reaper (issue #4099): the ledger it
+    /// sweeps + reclaims through (the shared release chokepoint), the liveness
+    /// probe (worktree presence + newest-file mtime), the orphan-worktree
+    /// cleanup, and the resolved config (enabled + staleness threshold). Absent
+    /// by default; `build_overseer` wires the production seams. When wired,
+    /// [`Overseer::run_cycle`] sweeps every `engineer_claims` row each tick and
+    /// reclaims those whose engineer is provably dead — INDEPENDENT of per-goal
+    /// polling — closing the within-incarnation claim leak.
+    pub fn with_claim_reaper(
+        mut self,
+        ledger: Box<dyn claim_reaper::ClaimLedger>,
+        probe: Box<dyn claim_reaper::ClaimLivenessProbe>,
+        cleanup: Box<dyn claim_reaper::OrphanWorktreeCleanup>,
+        investigator: Box<dyn claim_reaper::StaleEngineerInvestigator>,
+        enabled: bool,
+        stale_secs: u64,
+    ) -> Self {
+        self.claim_reap_enabled = enabled;
+        self.claim_reap_stale_secs = stale_secs;
+        self.claim_reaper = Some(ClaimReaperSeams {
+            ledger,
+            probe,
+            cleanup,
+            investigator,
+        });
+        self
+    }
+
+    /// Wire the autonomous self-deploy drift sensor (issue #2590). `build_overseer`
+    /// injects the production [`deploy_trigger::GitDeployDriftObserver`]; tests
+    /// inject a fake so the OBSERVE→DECIDE→ACT rail can be exercised without a
+    /// live git checkout. Absent by default (the rail is inert, exactly as before
+    /// the wiring).
+    pub fn with_deploy_drift_observer(
+        mut self,
+        observer: Box<dyn deploy_trigger::DeployDriftObserver>,
+    ) -> Self {
+        self.deploy_drift_observer = Some(observer);
+        self
+    }
+
+    /// Set the daemon state root used by the cognitive-thread oversight pass
+    /// (#4786) to locate `telemetry/metrics_snapshot.json` and `ooda.log`.
+    /// `build_overseer` calls this; without it the oversight pass is skipped.
+    pub fn with_state_root(mut self, state_root: PathBuf) -> Self {
+        self.state_root = Some(state_root);
+        self
+    }
+
+    /// Inject the single-source-of-truth cognitive-thread registry (name +
+    /// purpose + cadence) the oversight pass enumerates (#4786), captured from
+    /// `Mind::health()`. Empty (the default) skips thread oversight.
+    pub fn with_thread_registry(mut self, registry: Vec<ThreadHealth>) -> Self {
+        self.thread_registry = registry;
+        self
+    }
+
+    /// OBSERVE the autonomous self-deploy drift signal (issue #2590), enriching
+    /// `observed.deploy_drift` when the running binary is behind merged `main`.
+    ///
+    /// This is the thin deterministic OBSERVE rail that connects the already-built
+    /// drift detector to the already-built guarded deployer. It is layered with
+    /// four fail-closed guards, in order:
+    ///
+    ///   1. The documented opt-OUT env (`SIMARD_OVERSEER_AUTONOMOUS_DEPLOY=0`)
+    ///      lets an operator PIN the daemon.
+    ///   2. The rail is inert unless a [`DeployDriftObserver`] is wired.
+    ///   3. The PROCESS-GLOBAL anti-thrash throttle admits at most one deploy
+    ///      attempt per min-interval — essential because the daemon rebuilds this
+    ///      `Overseer` every tick, so a drift re-observed each tick (until the
+    ///      swap lands, or forever if the gate keeps refusing) can never redeploy
+    ///      or re-notify every cycle.
+    ///   4. A LIVE crash-loop guard: never deploy into a restart storm. Reuses the
+    ///      observed restart churn and the SAME threshold the deploy gate uses.
+    ///
+    /// Fail-SAFE throughout: the observer maps any git/source error to "no drift",
+    /// so an error surfaces no signal (never a panic, never a blind deploy).
+    ///
+    /// [`DeployDriftObserver`]: deploy_trigger::DeployDriftObserver
+    fn observe_deploy_drift(&mut self, observed: &mut ObservedState) {
+        // 1) Operator opt-out pins the daemon.
+        if !deploy_trigger::autonomous_deploy_enabled() {
+            return;
+        }
+        // 2) Inert until the sensor is wired.
+        let Some(observer) = self.deploy_drift_observer.as_ref() else {
+            return;
+        };
+        // 3) Anti-thrash: at most one probe+attempt per min-interval, process
+        //    -global so the per-tick-rebuilt Overseer cannot reset it.
+        let now = crate::self_quality_audit::now_epoch_secs();
+        if !deploy_trigger::global_deploy_throttle_allow(
+            now,
+            deploy_trigger::deploy_min_interval_secs(),
+        ) {
+            return;
+        }
+        // 4) LIVE crash-loop guard: deploying into an unstable, churning process
+        //    makes it worse (Bainbridge's irony). Skip when restart churn is at or
+        //    above the deploy gate's crash-loop threshold.
+        if let Some(churn) = observed.restart_churn
+            && churn >= deploy::CRASH_LOOP_CHURN_THRESHOLD
+        {
+            return;
+        }
+        // Fail-safe drift probe: `None` on current / unresolved / any git error.
+        if let Some(drift) = observer.observe() {
+            observed.deploy_drift = Some(drift);
+        }
+    }
+
     /// Run one meta-OODA turn. Observe → Orient → Decide → plan+gate. Does NOT
     /// execute side effects; returns the plan for M2+ Act to run.
     pub fn run_cycle(&mut self) -> Result<CycleReport, OverseerError> {
+        // Reconcile the in-flight investigation dedup set FIRST: poll each
+        // launched recipe-runner investigation and free the slot of any that is
+        // no longer `Running`, so a genuinely-new recurrence can be investigated
+        // later. A poll error leaves the entry in place (fail closed: better to
+        // skip a duplicate launch than to double-launch on a transient error) —
+        // exactly the "two PIDs on one signature" defect this guard closes.
+        self.reconcile_inflight_investigations();
+
+        // The conflict sequencer serialises the coverage/sweep launches PLANNED
+        // within THIS cycle (analogous to the per-cycle `launches` cap reset
+        // below). Reset it here so a `sequence_group` admitted in a prior cycle
+        // does not permanently lock out later coverage of that group — cross
+        // -cycle dedup of an identical recurring launch is the in-flight guard's
+        // and the coverage backoff's job, not the sequencer's.
+        self.sequencer.reset();
+
+        // Periodic stale-engineer-claim reaper (issue #4099): a synchronous,
+        // thread-less sweep alongside the reconcile above. Reclaims every
+        // `engineer_claims` row whose engineer is provably dead (no worktree, or
+        // an idle worktree stale beyond the threshold), INDEPENDENT of whether
+        // that goal is being advanced — the gap PR #4095's per-collision /
+        // per-goal reclaim paths never close. Fail-closed, fail-visible; a
+        // per-claim error is contained so it can never abort the tick.
+        self.reap_stale_engineer_claims();
+
         // Observe.
         let mut observed = self.caps.status.snapshot()?;
         // Enrich with goal-board health AND the in-flight dedup set from a
@@ -402,6 +990,42 @@ impl Overseer {
             .workstream_gaps(&observed.anomalies)
             .unwrap_or_default();
 
+        // Enrich with the autonomous-self-merge candidate survey (#4097): the
+        // thin deterministic sensor rail that LISTS Simard's OWN green +
+        // MERGEABLE PRs in the explicit `SIMARD_AUTOMERGE_REPOS` allowlist. This
+        // is the dead-wire fix — populating `ready_prs` re-activates the already
+        // -built `PrReadyToMerge`/`VerifyAndMergePr` merge machinery. The
+        // allowlist is EMPTY by default => no candidates => autonomous merge
+        // stays OFF until an operator canary-enables one repo. The rail only
+        // LISTS candidates; the authoritative six-criteria gate stays downstream
+        // in `merge_authority`. A survey failure degrades to empty inside the
+        // ops layer (fail-visible), never aborts the cycle.
+        observed.ready_prs = self.caps.prs.survey_ready_prs(&config::automerge_repos());
+
+        // Agentic observe/orient merge-queue + issue reasoning (#4097). This is
+        // the fix for the dead-wire allowlist above: the imperative
+        // `survey_ready_prs` rail is EMPTY when `SIMARD_AUTOMERGE_*` are unset, so
+        // it reasoned about ZERO open PRs. This pass instead REASONS agentically
+        // over the governed roster (default-ON) each due tick — surveying open
+        // PRs (CI/mergeable/review/staleness/duplication) and issues (priority/
+        // readiness/next-action) — and populates `reasoned_prs` / `triaged_issues`
+        // + a re-narrowed `ready_prs` projection. Reasoning is BROAD; merge
+        // AUTHORIZATION stays narrow behind `project_ready_prs` + the downstream
+        // merge-authority gate. Placed BEFORE `signals_from` so the reasoned state
+        // flows through the SAME signals → orient → decide → gate pipeline every
+        // other observation uses. Fail-closed: an unwired rail / off cadence /
+        // empty scope / degraded recipe leaves the observation unchanged.
+        self.observe_merge_queue(&mut observed, &in_flight);
+
+        // Additive auto-doc PR reconciliation (goal_hygiene): enforce the
+        // single-open invariant for auto-generated `"Update documentation with …"`
+        // PRs by closing stale / superseded drafts. Fully fail-closed and inert
+        // unless a `gh` client is wired (production only) — see
+        // [`reconcile_auto_doc_prs`]. Placed alongside the merge-queue observe
+        // pass (the PR/merge reconciliation surface); it changes no merge/verify
+        // decision.
+        self.reconcile_auto_doc_prs();
+
         // Drain diagnosed step failures (#2640, PART 2) from the process-global
         // failure sink into this Observe pass, so a caught decision-cycle /
         // engineer / terminal-shell failure surfaces as a corrective
@@ -410,6 +1034,41 @@ impl Overseer {
         // `observed_from_snapshot` projection) keeps that projection side-effect
         // free; the sink is bounded so this is O(capacity).
         observed.recent_step_failures = failure_sink::drain_recent();
+
+        // Cognitive-thread oversight (#4786): enumerate the single-source-of-
+        // truth thread registry (name + purpose + cadence from `Mind::health()`),
+        // read each thread's telemetry series from the metrics snapshot + a
+        // bounded `ooda.log` tail, and surface stalled / failing / erroring
+        // threads as anomalies. These flow through `observed.anomalies` →
+        // `Signal::Anomaly` (the SAME fan-out every other observation uses — no
+        // new scrape path). PURE + fail-closed: no registry / no snapshot / no
+        // log degrades to zero anomalies and never aborts the cycle.
+        if !self.thread_registry.is_empty()
+            && let Some(state_root) = self.state_root.as_ref()
+        {
+            let snap = crate::telemetry::snapshot::read(
+                &crate::telemetry::snapshot::snapshot_path(state_root),
+            )
+            .unwrap_or_else(crate::telemetry::snapshot::MetricsSnapshot::empty);
+            let ooda_tail =
+                thread_oversight::read_ooda_tail(state_root, thread_oversight::OODA_TAIL_MAX_BYTES);
+            let now = (self.clock)().max(0) as u64;
+            let mut thread_anomalies = thread_oversight::detect_thread_anomalies(
+                &snap,
+                &self.thread_registry,
+                &ooda_tail,
+                now,
+            );
+            observed.anomalies.append(&mut thread_anomalies);
+        }
+
+        // Autonomous self-deploy OBSERVE rail (issue #2590): when the running
+        // binary is behind merged `main`, enrich `observed.deploy_drift` so
+        // `signals_from` raises a `Signal::DeployDriftDetected` that Decide maps
+        // to a guarded `Intervention::Deploy`. Opt-out, anti-thrash-throttled,
+        // crash-loop-guarded, and fail-safe (see `observe_deploy_drift`); inert
+        // until `build_overseer` wires the production drift sensor.
+        self.observe_deploy_drift(&mut observed);
 
         // Cognitive-memory recall (#2628) — the USE step. Key off the pre-recall
         // signals/problems (never a full-graph scan), then run ONE whole-pass,
@@ -477,6 +1136,43 @@ impl Overseer {
             plan.push(planned);
         }
 
+        // Live agentic ecosystem-observe (issue #2419): on the Overseer cadence,
+        // the thin rail invokes the `ecosystem-observe` recipe — an AGENT scans
+        // the stewarded roster with `gh` and REASONS to a prioritized, deduped
+        // Problem list, then briefs each into a `smart-orchestrator`
+        // task_description. Rust never queries or parses a repo; it only schedules
+        // the recipe and routes the agent's OPAQUE semantic brief into the SAME
+        // gated launch path every fix uses. Replaces the retired single-repo Rust
+        // gap-scan survey as the cross-repo observation SOURCE.
+        self.observe_ecosystem(&observed, &in_flight, &mut launches, &mut plan);
+
+        // Live agentic health-review ([standing]): on the Overseer cadence, the
+        // thin rail invokes the `overseer-health-review` recipe — an AGENT reads
+        // the OODA journal + `simard status` + `simard goal list`, detects
+        // crash-loops / shared failure signatures (systemic-vs-per-goal root
+        // cause), and REASONS to typed remediation DECISIONS. Rust never reads the
+        // journal, counts a failure, or encodes a threshold; it only schedules the
+        // recipe and routes each parsed `LaunchRecipe` / `EscalateBlockedGoal`
+        // through the SAME gate every other action uses.
+        self.health_review(&mut observed, &mut launches, &mut plan);
+
+        // Drain the stale-engineer reaper's staged investigation interventions
+        // (issue #4400) into the SAME gated plan — a stale engineer's death feeds
+        // self-improvement (issue/escalation/fix) instead of a silent reclaim.
+        self.dispatch_reaper_interventions(&observed, &mut launches, &mut plan);
+
+        // Operator-liaison receive pass (issue #4911, D1): drain new operator
+        // -group messages, run the liaison recipe, read its typed decision fail
+        // -closed, post any reply, and gate any directed intervention. Inert
+        // until the port is wired AND the flag is enabled (both default off).
+        self.observe_operator_liaison(&observed, &mut launches, &mut plan);
+
+        // PR-rework pass (issue #4911, D2): evaluate each held candidate PR via
+        // the fail-closed `poll_rework` rail and gate any rework/escalation.
+        // Inert until the port is wired AND the flag is enabled (both default
+        // off).
+        self.observe_rework_candidates(&observed, &mut launches, &mut plan);
+
         Ok(CycleReport {
             observed,
             signals,
@@ -486,7 +1182,582 @@ impl Overseer {
         })
     }
 
-    /// Run ONE whole-pass, fail-closed cognitive-memory recall (issue #2628):
+    /// One live agentic ecosystem-observe pass (issue #2419), appended to the
+    /// cycle plan when the rail is wired and due on the cadence.
+    ///
+    /// The observation itself is entirely agentic: the thin rail invokes the
+    /// `ecosystem-observe` recipe, whose OBSERVE agent runs `gh` across the
+    /// stewarded roster and REASONS to a deduped Problem list, and whose BRIEF
+    /// agent turns each Problem into a `smart-orchestrator` `task_description`.
+    /// Rust never queries or parses a repo — it receives only the agent's OPAQUE
+    /// semantic brief and routes it VERBATIM into a gated [`Intervention::LaunchRecipe`]
+    /// (the SAME budget / launch-cap / sequencer / in-flight-dedup / recursion
+    /// guard as every other launch).
+    ///
+    /// Fail-closed: an unwired observer, an off cadence, an empty roster, or a
+    /// "nothing actionable" / failed recipe run all leave the plan unchanged —
+    /// never a fabricated launch.
+    fn observe_ecosystem(
+        &mut self,
+        observed: &ObservedState,
+        in_flight: &[InFlightItem],
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if self.ecosystem_observer.is_none() {
+            return;
+        }
+        // Cadence: reuse the gap-scan enable + every-N gate (this pass replaced
+        // the gap-scan survey as the observation source). Advance the tick FIRST
+        // so a disabled/held pass still keeps the counter monotonic.
+        let tick = self.ecosystem_tick;
+        self.ecosystem_tick = self.ecosystem_tick.wrapping_add(1);
+        if !ecosystem_observe::should_observe(self.gap_scan_enabled, self.ecosystem_every_n, tick) {
+            return;
+        }
+        // Flatten Simard's in-flight OODA refs so the agent dedups against work
+        // an engineer already owns and never duplicates her OODA.
+        let inflight_refs: Vec<String> = in_flight
+            .iter()
+            .flat_map(|item| item.refs.iter().cloned())
+            .collect();
+        // Borrow the observer only for the call; the returned brief is owned, so
+        // the immutable borrow of `self` ends before the mutable `gate` below.
+        let outcome = {
+            let observer = self
+                .ecosystem_observer
+                .as_ref()
+                .expect("ecosystem_observer presence checked above");
+            observer.observe(&self.ecosystem_roster, &inflight_refs)
+        };
+        let brief = match outcome {
+            Ok(Some(brief)) => brief,
+            Ok(None) => return, // nothing actionable this pass — fabricate nothing
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::ecosystem_observe",
+                    error = %e,
+                    "ecosystem-observe pass failed — degrading to no observation (no problems fabricated)"
+                );
+                return;
+            }
+        };
+        // Route the agent's OPAQUE brief into the SAME gated launch path. The
+        // brief prose names its own target repo (per `observe.md`); the
+        // launcher's `target_repo` stays the stable observation-origin marker,
+        // and per-launch dedup keys off the brief content via `recipe_dedup_key`.
+        let iv = Intervention::LaunchRecipe {
+            brief: RecipeBrief {
+                task_description: brief,
+                target_repo: ECOSYSTEM_OBSERVE_TARGET.to_string(),
+                sequence_group: None,
+            },
+        };
+        let planned = self.gate(&iv, observed, launches);
+        plan.push(planned);
+    }
+
+    /// The operator-liaison receive pass (issue #4911, D1). A THIN rail: it makes
+    /// no judgment. For each new operator-group message the wired port surfaces,
+    /// it applies the tested pure acceptance filter (operator ∧ group ∧ not-echo ∧
+    /// above the durable high-water-mark), hands the body to the `operator
+    /// -liaison` recipe via a ContextFile (never argv), reads the recipe's typed
+    /// decision FAIL-CLOSED, posts any plain-English reply back to the group, and
+    /// routes any directed intervention through the SAME gate every other action
+    /// uses. The high-water-mark advances once per handled message (dedup).
+    ///
+    /// Fail-closed and inert-by-default: an unwired port, the flag off (default),
+    /// an unconfigured operator number / group id, or a missing state root all
+    /// leave the plan unchanged. A per-message I/O or recipe error is contained
+    /// (logged, message skipped) so it can never abort the tick.
+    fn observe_operator_liaison(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if !config::signal_liaison_enabled() || self.liaison_port.is_none() {
+            return;
+        }
+        // Both identities must be configured; the port's `authorized` projection
+        // enforces the operator number, but an unconfigured deploy never acts.
+        let Some(group_id) = config::signal_group_id() else {
+            return;
+        };
+        if config::signal_operator_number().is_none() {
+            return;
+        }
+        let Some(state_root) = self.state_root.clone() else {
+            return;
+        };
+
+        // Do ALL external I/O behind the immutable port borrow, collecting the
+        // directed interventions; then release the borrow before gating (which
+        // needs `&mut self`), exactly as `observe_ecosystem` does.
+        let interventions: Vec<Intervention> = {
+            let port = self
+                .liaison_port
+                .as_ref()
+                .expect("liaison_port presence checked above");
+            let mut out = Vec::new();
+            for msg in port.receive() {
+                let above = signal_liaison::is_above_high_water_mark(
+                    &state_root,
+                    &group_id,
+                    msg.message_id,
+                );
+                if !signal_liaison::liaison_should_accept(
+                    msg.authorized,
+                    msg.group_id.as_deref(),
+                    &group_id,
+                    msg.is_echo,
+                    above,
+                ) {
+                    continue;
+                }
+                let message_key = msg.message_id.to_string();
+                // A fresh run token isolates this run's decision from any prior
+                // one; delete any stale record first so a failed recipe run can
+                // never let an old decision be read back.
+                let run_token = format!(
+                    "liaison-{}-{}-{}",
+                    std::process::id(),
+                    msg.message_id,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                );
+                let _ = crate::stewardship::liaison_decision_store::delete_record(
+                    &state_root,
+                    &group_id,
+                    &message_key,
+                );
+                let ctx = match crate::recipe_context_file::ContextFile::write(
+                    "operator-liaison",
+                    "operator_message",
+                    &msg.text,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "overseer::signal_liaison",
+                            error = %e,
+                            "could not stage operator-message context; skipping this message"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) =
+                    port.run_liaison_recipe(&group_id, msg.message_id, &run_token, ctx.path())
+                {
+                    tracing::warn!(
+                        target: "overseer::signal_liaison",
+                        error = %e,
+                        "operator-liaison recipe run failed; leaving message for a later tick"
+                    );
+                    // Do NOT advance the high-water-mark: retry on a later tick.
+                    continue;
+                }
+                match crate::stewardship::liaison_decision_store::read_verified(
+                    &state_root,
+                    &group_id,
+                    &message_key,
+                    &run_token,
+                ) {
+                    crate::stewardship::liaison_decision_store::ReadOutcome::Found(rec) => {
+                        let actions = signal_liaison::liaison_actions_from_decision(&rec);
+                        if let Some(reply) = actions.reply
+                            && let Err(e) = port.send_group_reply(&group_id, &reply)
+                        {
+                            tracing::warn!(
+                                target: "overseer::signal_liaison",
+                                error = %e,
+                                "could not post the operator-liaison reply"
+                            );
+                        }
+                        if let Some(iv) = actions.intervention {
+                            out.push(iv);
+                        }
+                    }
+                    other => {
+                        tracing::warn!(
+                            target: "overseer::signal_liaison",
+                            outcome = ?other,
+                            "no valid liaison decision recorded for this message (fail-closed)"
+                        );
+                    }
+                }
+                // Handled once: advance the durable high-water-mark so this
+                // message is never reprocessed, whatever the decision was.
+                if let Err(e) =
+                    signal_liaison::record_high_water_mark(&state_root, &group_id, msg.message_id)
+                {
+                    tracing::warn!(
+                        target: "overseer::signal_liaison",
+                        error = %e,
+                        "could not advance the liaison high-water-mark"
+                    );
+                }
+            }
+            out
+        };
+
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
+
+    /// The PR-rework pass (issue #4911, D2). A THIN rail: it makes no fixability
+    /// judgment. For each held candidate PR the wired port surfaces, it reads the
+    /// judge's typed verdict FAIL-CLOSED via [`rework_loop::poll_rework`] and,
+    /// only when that rail admits a rework (reworkable hold, cap not hit, not a
+    /// duplicate, not the Overseer's own PR), routes the resulting
+    /// [`Intervention::ReworkPr`] — or, at the cap, the
+    /// [`Intervention::Escalate`] — through the SAME gate every other action
+    /// uses.
+    ///
+    /// Fail-closed and inert-by-default: an unwired port, the flag off (default),
+    /// or a missing state root all leave the plan unchanged. A `Skip` outcome is
+    /// a no-op.
+    fn observe_rework_candidates(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if !config::rework_enabled() || self.rework_port.is_none() {
+            return;
+        }
+        let Some(state_root) = self.state_root.clone() else {
+            return;
+        };
+        let max_attempts = config::rework_max_attempts();
+        let overseer_login = config::overseer_author_login();
+
+        let interventions: Vec<Intervention> = {
+            let port = self
+                .rework_port
+                .as_ref()
+                .expect("rework_port presence checked above");
+            let mut out = Vec::new();
+            for cand in port.candidates() {
+                match rework_loop::poll_rework(
+                    &state_root,
+                    &cand.repo,
+                    cand.pr,
+                    &cand.pr_author,
+                    &cand.run_token,
+                    max_attempts,
+                    Some(overseer_login.as_str()),
+                ) {
+                    rework_loop::ReworkOutcome::Rework(iv)
+                    | rework_loop::ReworkOutcome::Escalate(iv) => out.push(iv),
+                    rework_loop::ReworkOutcome::Skip(reason) => {
+                        tracing::debug!(
+                            target: "overseer::rework_loop",
+                            repo = %cand.repo,
+                            pr = cand.pr,
+                            reason = %reason,
+                            "rework candidate skipped (fail-closed rail)"
+                        );
+                    }
+                }
+            }
+            out
+        };
+
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
+
+    /// One live agentic health-review pass ([standing]), appended to the cycle
+    /// plan when the rail is wired and due on the cadence.
+    ///
+    /// The observation AND the remediation judgment are entirely agentic: the
+    /// thin rail invokes the `overseer-health-review` recipe, whose agent reads
+    /// the OODA journal (`journalctl --user -u <unit>`), `simard status`, and
+    /// `simard goal list`, detects crash-loops and clusters a shared failure
+    /// signature across goals into a systemic-vs-per-goal root cause, and REASONS
+    /// to typed remediation DECISIONS — `LaunchRecipe` for a fix it can drive, or
+    /// `EscalateBlockedGoal` to notify the operator in plain English. Rust never
+    /// reads the journal, counts a failure, or encodes an N-identical-failure
+    /// threshold; it only schedules the recipe and routes each parsed
+    /// [`Intervention`] through the SAME gate (budget / launch-cap / sequencer /
+    /// in-flight-dedup / recursion guard) every other action uses.
+    ///
+    /// Fail-closed: an unwired reviewer, an off-cadence tick, a `HEALTHY`
+    /// verdict, or a degraded/failed recipe run all leave the plan unchanged —
+    /// never a fabricated launch or escalation.
+    ///
+    /// The pass's verdict is also SURFACED on `observed.health_review_status`
+    /// (never discarded): a pass that ran sets `Reviewed { summary, decisions }`
+    /// (so a HEALTHY pass is an observable `Reviewed { decisions: 0 }`, not a
+    /// silent no-op), a degraded/faulted pass sets `Degraded`, an operator
+    /// OPT-OUT (the dedicated knob or the shared gap-scan throttle) sets
+    /// `Disabled { reason }` naming the knob — never a silent hard-OFF (#4097),
+    /// exactly as `observe_merge_queue` surfaces the SAME opt-out — and only an
+    /// unwired/off-cadence tick leaves the additive `NotRun` default. The same
+    /// "no silent OFF" discipline `merge_reasoning_status` applies.
+    fn health_review(
+        &mut self,
+        observed: &mut ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        // Unwired: the build could not resolve the recipe/runner. Nothing ran and
+        // there is no operator intent to report — leave the additive `NotRun`.
+        if self.health_reviewer.is_none() {
+            return;
+        }
+        // Dedicated opt-out (SIMARD_OVERSEER_HEALTH_REVIEW): make it VISIBLE, never
+        // a silent OFF (#4097). Checked before the master throttle so an operator
+        // who disabled THIS pass specifically sees that named as the reason.
+        if !self.health_review_enabled {
+            observed.health_review_status = HealthReviewStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables the agentic health-review pass",
+                    config::SIMARD_OVERSEER_HEALTH_REVIEW_ENV
+                ),
+            };
+            return;
+        }
+        // Cadence: reuse the shared gap-scan enable throttle + the dedicated
+        // every-N knob (same family as the ecosystem/merge-queue passes). Advance
+        // the tick FIRST so a disabled/held pass still keeps the counter monotonic.
+        let tick = self.health_review_tick;
+        self.health_review_tick = self.health_review_tick.wrapping_add(1);
+        // Shared resource opt-out (SIMARD_OVERSEER_GAP_SCAN): the throttle for ALL
+        // agentic overseer scans. Honor it, but surface WHY the self-heal reflex
+        // stopped rather than leaving a silent `NotRun` — exactly as
+        // `observe_merge_queue` does for the SAME opt-out (#4097). (No one-time
+        // NotifyOperator: the operator set this opt-out themselves, so the status
+        // breadcrumb is enough.)
+        if !self.gap_scan_enabled {
+            observed.health_review_status = HealthReviewStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                    config::SIMARD_OVERSEER_GAP_SCAN_ENV
+                ),
+            };
+            return;
+        }
+        // Cadence only: a non-due tick is NOT disabled — skip silently and leave
+        // the last due tick's status untouched (enablement is already decided).
+        if !ecosystem_observe::should_observe(true, self.health_review_every_n, tick) {
+            return;
+        }
+        // Borrow the reviewer only for the call; the returned outcome is owned, so
+        // the immutable borrow of `self` ends before the mutable `gate` below.
+        let outcome = {
+            let reviewer = self
+                .health_reviewer
+                .as_ref()
+                .expect("health_reviewer presence checked above");
+            reviewer.review()
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // A caller-visible fault (the fail-closed rail normally degrades
+                // to an `Ok` outcome with no verdict, so this is rare). Surface it
+                // LOUD via `Degraded` rather than leaving the pass a silent gap.
+                tracing::warn!(
+                    target: "overseer::health_review",
+                    error = %e,
+                    "health-review pass failed — degrading to no review (no interventions fabricated)"
+                );
+                observed.health_review_status = HealthReviewStatus::Degraded;
+                return;
+            }
+        };
+        // Route each parsed DECISION (LaunchRecipe / EscalateBlockedGoal) through
+        // the SAME gate every other action uses. A `HEALTHY` verdict parses to an
+        // empty Vec, so this loop simply adds nothing.
+        let decisions = outcome.interventions.len();
+        for iv in outcome.interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+        // Surface the pass's verdict so an operator can tell "reviewed, healthy"
+        // (`Reviewed { decisions: 0 }`) from "never ran" (`NotRun`) and from a
+        // weak pass (`Degraded`) — the same "no silent OFF" discipline
+        // `merge_reasoning_status` applies to merge-queue reasoning. `summary`
+        // is present exactly when the pass produced an honest verdict.
+        observed.health_review_status = match outcome.summary {
+            Some(summary) => HealthReviewStatus::Reviewed { summary, decisions },
+            None => HealthReviewStatus::Degraded,
+        };
+    }
+    /// enriching `observed` with `reasoned_prs` / `triaged_issues` /
+    /// `merge_reasoning_status` and a re-narrowed `ready_prs` projection when the
+    /// rail is wired and due on the cadence.
+    ///
+    /// The reasoning itself is entirely agentic: the thin rail invokes the
+    /// `observe-merge-queue` recipe, whose agent runs `gh` across the governed
+    /// roster and REASONS to a bounded brief. Rust never queries or parses a repo
+    /// here — it receives the agent's OPAQUE brief, parses it FAIL-CLOSED against
+    /// the roster trust boundary ([`merge_queue_observe::parse_merge_queue_brief`]),
+    /// and re-narrows the `ReadyForMerge` proposals through the DETERMINISTIC rail
+    /// ([`PrOps::project_reasoned_ready_prs`] → [`project_ready_prs`]) before any
+    /// PR reaches the merge gate. Reasoning is BROAD; authorization is NARROW.
+    ///
+    /// Scope resolution (R2/R3): default-ON over the governed roster when
+    /// `SIMARD_MERGE_REASONING_SCOPE` is unset; narrowed (still on) when it names
+    /// an explicit subset; and LOUD-disabled (WARN log + status field + a one-time
+    /// dual-channel NotifyOperator) only when it is EXPLICITLY set to a disable
+    /// value. Unset is never a silent hard-OFF.
+    ///
+    /// Fail-closed: an unwired reasoner, an off cadence, an empty scope, or a
+    /// degraded recipe run leaves `observed` unchanged (no fabricated reasoning).
+    fn observe_merge_queue(&mut self, observed: &mut ObservedState, in_flight: &[InFlightItem]) {
+        if self.merge_queue_reasoner.is_none() {
+            return;
+        }
+        // Cadence: reuse the gap-scan enable + every-N gate (same opt-out family
+        // as the ecosystem pass). Advance the tick FIRST so a disabled/held pass
+        // still keeps the counter monotonic.
+        let tick = self.merge_queue_tick;
+        self.merge_queue_tick = self.merge_queue_tick.wrapping_add(1);
+        // Resource opt-out (SIMARD_OVERSEER_GAP_SCAN): the shared throttle for ALL
+        // agentic overseer scans. Honor it, but make it VISIBLE — #4097 exists to
+        // kill silent hard-OFFs, so surface WHY reasoning stopped in the status
+        // rather than leaving it a silent `Unknown`. (No one-time NotifyOperator
+        // here — that is reserved for the R3 explicit scope-disable; the operator
+        // set this opt-out themselves, so the status breadcrumb is enough.)
+        if !self.gap_scan_enabled {
+            observed.merge_reasoning_status = MergeReasoningStatus::Disabled {
+                reason: format!(
+                    "{} opt-out disables all agentic overseer scans (incl. merge-queue reasoning)",
+                    config::SIMARD_OVERSEER_GAP_SCAN_ENV
+                ),
+            };
+            return;
+        }
+        // Cadence only: a non-due tick is NOT disabled — skip silently and leave
+        // the last due tick's status untouched.
+        if !ecosystem_observe::should_observe(true, self.merge_queue_every_n, tick) {
+            return;
+        }
+
+        // Resolve the reasoning SCOPE (R2/R3). Default-ON over the roster; an
+        // EXPLICIT operator disable is LOUD, never a silent hard-OFF.
+        let scope = config::merge_reasoning_scope(&self.merge_queue_roster);
+        let scope_repos: Vec<String> = match scope {
+            config::MergeReasoningScope::Disabled => {
+                let reason = format!(
+                    "{} explicitly set to a disable value",
+                    config::SIMARD_MERGE_REASONING_SCOPE_ENV
+                );
+                observed.merge_reasoning_status = MergeReasoningStatus::Disabled {
+                    reason: reason.clone(),
+                };
+                tracing::warn!(
+                    target: "overseer::merge",
+                    reason = %reason,
+                    "observe-merge-queue: agentic merge-queue reasoning DISABLED by explicit \
+                     operator configuration — no open PRs/issues will be reasoned about this tick \
+                     (loud, not a silent hard-OFF)"
+                );
+                self.notify_merge_reasoning_disabled_once(&reason);
+                return;
+            }
+            config::MergeReasoningScope::Roster => {
+                observed.merge_reasoning_status = MergeReasoningStatus::RosterWide;
+                self.merge_queue_roster.clone()
+            }
+            config::MergeReasoningScope::Explicit(list) => {
+                observed.merge_reasoning_status = MergeReasoningStatus::Narrowed {
+                    repos: list.clone(),
+                };
+                list
+            }
+        };
+        // A configured-but-empty scope is nothing to reason about; the rail's own
+        // empty-scope guard also fails closed, but returning here avoids spawning
+        // the recipe for no repos.
+        if scope_repos.is_empty() {
+            return;
+        }
+
+        // Flatten Simard's in-flight OODA refs so the agent dedups against work an
+        // engineer already owns and never re-proposes it.
+        let inflight_refs: Vec<String> = in_flight
+            .iter()
+            .flat_map(|item| item.refs.iter().cloned())
+            .collect();
+
+        let request = merge_queue_observe::MergeQueueObserveRequest {
+            scope: scope_repos.clone(),
+            inflight_refs,
+            escalation_note: String::new(),
+        };
+        // Borrow the reasoner only for the call; the returned brief is owned, so
+        // the immutable borrow of `self` ends before the mutable projection below.
+        let outcome = {
+            let reasoner = self
+                .merge_queue_reasoner
+                .as_ref()
+                .expect("merge_queue_reasoner presence checked above");
+            reasoner.observe(request)
+        };
+        let brief = match outcome {
+            Ok(Some(brief)) => brief,
+            Ok(None) => return, // nothing actionable this pass — fabricate nothing
+            Err(e) => {
+                tracing::warn!(
+                    target: "overseer::merge",
+                    error = %e,
+                    "observe-merge-queue pass failed — degrading to no reasoning (no PRs/issues fabricated)"
+                );
+                return;
+            }
+        };
+
+        // Parse the OPAQUE brief FAIL-CLOSED against the roster trust boundary.
+        let parsed = merge_queue_observe::parse_merge_queue_brief(&brief, &scope_repos);
+        observed.reasoned_prs = parsed.reasoned_prs;
+        observed.triaged_issues = parsed.triaged_issues;
+
+        // Re-narrow the BROAD `ReadyForMerge` proposals into the NARROW set of PRs
+        // authorized to merge, against AUTHORITATIVE `gh` facts (#4097). This is
+        // the deterministic safety rail — it can only ever REMOVE candidates. The
+        // result becomes a DERIVED view of `ready_prs` (unioned with the existing
+        // deterministic survey), the ONLY thing that drives `PrReadyToMerge` into
+        // the gated merge chain. An agent can never widen merge authorization.
+        let overseer_login = self.recursion.author_login.clone();
+        let projected = self
+            .caps
+            .prs
+            .project_reasoned_ready_prs(&observed.reasoned_prs, &overseer_login);
+        for pr in projected {
+            if !observed.ready_prs.contains(&pr) {
+                observed.ready_prs.push(pr);
+            }
+        }
+    }
+
+    /// Send the R3 "merge reasoning DISABLED" alert to the operator on BOTH
+    /// channels exactly ONCE (#4097), latched so a persistent disable is surfaced
+    /// loud a single time rather than re-notified every tick. No-op when no
+    /// notifier is wired (the WARN log + status field still surface it).
+    fn notify_merge_reasoning_disabled_once(&mut self, reason: &str) {
+        if self.merge_reasoning_disabled_notified {
+            return;
+        }
+        if let Some(notifier) = self.notifier.as_ref() {
+            let notification = OperatorNotification::merge_reasoning_disabled(reason);
+            let report = notifier.notify(&notification);
+            // Latch regardless of per-channel delivery result: the WARN log and
+            // status field already carry it, and re-sending every tick would spam
+            // the operator. A failed channel is recorded in the report/logs.
+            let _ = report;
+        }
+        self.merge_reasoning_disabled_notified = true;
+    }
     /// bounded semantic + episodic + procedural + prospective reads keyed off the
     /// cycle's `keys`. The `?` on each sub-read makes the pass **atomic**: if any
     /// one read errors, the whole pass returns `Err` and the successful reads are
@@ -541,6 +1812,19 @@ impl Overseer {
         if problems.is_empty() {
             return Ok(None);
         }
+        // D1 (issue #4128): never record an observation OF our own observation.
+        // Recall-derived `overseer-obs:*` problems are the Overseer reading its
+        // own prior write-back back out of cognitive memory; folding them into a
+        // fresh write-back is the self-referential loop that self-amplifies the
+        // recurrence counter (the live "recurring signature seen 2×" incident).
+        // If a tick's ONLY problems are these self-observations, there is nothing
+        // first-order to record — record nothing and break the loop.
+        if !problems
+            .iter()
+            .any(|p| !is_recall_derived_self_observation(p))
+        {
+            return Ok(None);
+        }
         let signature = observation_signature(problems);
         let now = now_secs();
         match self.write_back_gate.peek(&signature, now) {
@@ -560,7 +1844,83 @@ impl Overseer {
         }
     }
 
-    /// Apply autonomy, budget, and conflict gates to one intervention, producing
+    /// Free the dedup slot of every in-flight investigation whose recipe-runner
+    /// is no longer `Running`, so a genuinely-new recurrence of the same
+    /// signature can be investigated on a later cycle. A poll error leaves the
+    /// entry in place (fail closed — never double-launch on a transient error).
+    fn reconcile_inflight_investigations(&mut self) {
+        if self.inflight_investigations.is_empty() {
+            return;
+        }
+        let done: Vec<String> = self
+            .inflight_investigations
+            .iter()
+            .filter_map(|(key, handle)| match self.caps.recipes.poll(handle) {
+                Ok(WorkstreamStatus::Running) | Err(_) => None,
+                Ok(_) => Some(key.clone()),
+            })
+            .collect();
+        for key in done {
+            self.inflight_investigations.remove(&key);
+        }
+    }
+
+    /// Run one claim-reaper sweep if the reaper is wired (issue #4099). Delegates
+    /// to the pure [`claim_reaper::reap_stale_claims`] over the injected seams so
+    /// all policy + containment lives in one tested place. A no-op when the
+    /// reaper is absent (bare constructor / tests) or disabled by config.
+    fn reap_stale_engineer_claims(&mut self) {
+        let Some(reaper) = self.claim_reaper.as_ref() else {
+            return;
+        };
+        let summary = claim_reaper::reap_stale_claims(
+            reaper.ledger.as_ref(),
+            reaper.probe.as_ref(),
+            reaper.cleanup.as_ref(),
+            reaper.investigator.as_ref(),
+            self.claim_reap_enabled,
+            self.claim_reap_stale_secs,
+        );
+        // Stage the investigations' self-improvement interventions (issue #4400)
+        // for dispatch through the SAME gated Act path health-review uses; they
+        // are drained into the plan after `health_review` this tick. A stale
+        // engineer's death becomes a signal, never a silent reclaim. `extend` is
+        // a no-op when the sweep surfaced nothing.
+        self.pending_reaper_interventions
+            .extend(summary.pending_interventions);
+        if !summary.reclaimed.is_empty() || summary.errors > 0 {
+            tracing::info!(
+                target: "simard::claim_reaper",
+                reclaimed = summary.reclaimed.len(),
+                skipped = summary.skipped,
+                errors = summary.errors,
+                "[simard] claim-reaper sweep complete",
+            );
+        }
+    }
+
+    /// Drain the stale-engineer reaper's staged investigation interventions (issue
+    /// #4400) into the gated plan — through the SAME gate + push loop
+    /// [`Overseer::health_review`] uses (no parallel plumbing). Each surfaced
+    /// `LaunchRecipe` / `FileIssue` / `EscalateBlockedGoal` is gated and pushed so
+    /// a stale engineer's investigation feeds self-improvement. A no-op when the
+    /// sweep surfaced nothing.
+    fn dispatch_reaper_interventions(
+        &mut self,
+        observed: &ObservedState,
+        launches: &mut usize,
+        plan: &mut Vec<PlannedIntervention>,
+    ) {
+        if self.pending_reaper_interventions.is_empty() {
+            return;
+        }
+        let interventions = std::mem::take(&mut self.pending_reaper_interventions);
+        for iv in interventions {
+            let planned = self.gate(&iv, observed, launches);
+            plan.push(planned);
+        }
+    }
+
     /// a `PlannedIntervention` (admitted or held-with-reason). The attached
     /// `remediation` is a from-intervention default; `run_cycle` overrides it with
     /// the WHY-aware classification once the problem's root cause is known.
@@ -589,10 +1949,67 @@ impl Overseer {
             );
         }
 
-        // Gap-scan opt-out: when disabled, hold the whole flag-gaps action (no
-        // notification, no issue) even though gaps were observed.
-        if matches!(iv, Intervention::FlagWorkstreamGaps { .. }) && !self.gap_scan_enabled {
+        // Gap-scan opt-out: when disabled, hold the coverage action even though
+        // gaps were observed. The closing edge is now a `LaunchRecipe` tagged with
+        // `WORKSTREAM_COVERAGE_GROUP` (issue #4128, D3b), so the opt-out matches
+        // that marker; the legacy notify-only `FlagWorkstreamGaps` is still held
+        // too (defence in depth for any direct construction).
+        if !self.gap_scan_enabled
+            && (matches!(iv, Intervention::FlagWorkstreamGaps { .. })
+                || matches!(
+                    iv,
+                    Intervention::LaunchRecipe { brief }
+                        if brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP)
+                ))
+        {
             return held_plan(iv, "held: gap-scan disabled (SIMARD_OVERSEER_GAP_SCAN)");
+        }
+
+        // In-flight investigation dedup (live defect 2026-07-15): never launch a
+        // SECOND recipe-runner investigation for a signature that already has one
+        // running. The observed failure was two recipe-runner processes (PIDs
+        // 1074394 and 1095553) investigating the identical
+        // `overseer-obs:goal:blocked:…` signature at once, because a recurring
+        // signature re-observed each cycle re-launched a fresh recipe while the
+        // prior one was still in flight (`sequence_group` is `None` for these, so
+        // the conflict sequencer never dedups them). Checked BEFORE the cost gate
+        // so a held duplicate never consumes a per-cycle launch slot; keyed per
+        // signature so a DIFFERENT investigation is unaffected.
+        if let Intervention::LaunchRecipe { brief } = iv
+            && self
+                .inflight_investigations
+                .contains_key(&recipe_dedup_key(brief))
+        {
+            return held_plan(
+                iv,
+                "held: an investigation for this signature is already in flight",
+            );
+        }
+
+        // Gap-scan coverage backoff (Problem 1 / issue #4186; meta bugs #4255,
+        // #4126): the in-flight guard above only holds a duplicate WHILE the
+        // covering workstream runs. Once it COMPLETES, an unchanged, still
+        // -recurring gap would re-launch an equivalent `WorkstreamCoverage`
+        // recipe EVERY tick — the churn that spawned duplicate backlog issues
+        // (#4186/#4190/#4191/#4198/#4201/#4203/#4206). The exponential backoff
+        // suppresses that relaunch (keyed by the same `recipe_dedup_key`) within
+        // a growing, BOUNDED window even after completion, yet always re-admits
+        // once the window elapses (never permanent silence). Scoped to the
+        // coverage sequence group so ordinary process-health / cross-cutting
+        // investigations are unaffected. Checked BEFORE the cost gate so a held
+        // duplicate never consumes a per-cycle launch slot; only PEEKED here (the
+        // window is armed in `act` on a successful launch).
+        if let Intervention::LaunchRecipe { brief } = iv
+            && brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP)
+            && self
+                .coverage_backoff
+                .peek(&recipe_dedup_key(brief), (self.clock)())
+                == BackoffDecision::Suppress
+        {
+            return held_plan(
+                iv,
+                "held: an equivalent coverage was launched recently (backoff window)",
+            );
         }
 
         // Autonomy: HIGH-RISK requires opt-in, else it is escalated (held).
@@ -628,15 +2045,54 @@ impl Overseer {
     pub fn act(&mut self, iv: &Intervention) -> Result<ActOutcome, OverseerError> {
         match iv {
             Intervention::LaunchRecipe { brief } => {
-                Ok(ActOutcome::Launched(self.caps.recipes.launch(brief)?))
+                // Anti-recursion fail-closed for the backlog-coverage closing edge
+                // (issue #4128, D3b): a workstream launched to COVER an uncovered
+                // gap is the Overseer acting autonomously on Simard's own backlog,
+                // so it must NEVER fire without a DISTINCT steward identity — the
+                // same guard the legacy `act_flag_workstream_gaps` path enforced.
+                // Scoped to the coverage sequence group so ordinary investigation
+                // launches (process-health, cross-cutting) are unaffected.
+                if brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP)
+                    && !self.recursion.is_configured()
+                {
+                    return Err(OverseerError::Recursion {
+                        subject: format!(
+                            "launch workstream-coverage recipe (unconfigured steward identity): {}",
+                            recipe_dedup_key(brief)
+                        ),
+                    });
+                }
+                let handle = self.caps.recipes.launch(brief)?;
+                // Register the launch in the in-flight dedup set so a re-observed
+                // recurring signature is HELD in `gate` until this investigation
+                // completes (reconciled at the top of `run_cycle`).
+                self.inflight_investigations
+                    .insert(recipe_dedup_key(brief), handle.clone());
+                // Arm the coverage backoff window (Problem 1 / issue #4186) so an
+                // equivalent coverage is not relaunched every tick AFTER this
+                // workstream completes and frees its in-flight slot. Only the
+                // coverage closing edge is deduped this way; ordinary
+                // investigations rely on the in-flight guard alone.
+                if brief.sequence_group.as_deref() == Some(WORKSTREAM_COVERAGE_GROUP) {
+                    self.coverage_backoff
+                        .commit(&recipe_dedup_key(brief), (self.clock)());
+                }
+                Ok(ActOutcome::Launched(handle))
             }
             Intervention::VerifyAndMergePr { repo, pr } => {
                 let report = self.caps.prs.verify(repo, *pr)?;
-                if report.ready {
-                    self.caps.prs.merge(repo, *pr)?;
-                    Ok(ActOutcome::Merged)
-                } else {
-                    Ok(ActOutcome::Escalated)
+                if !report.ready {
+                    return Ok(ActOutcome::Escalated);
+                }
+                // `verify()` is only the objective pre-filter. The authoritative
+                // agentic review runs inside `merge()` (step 3); when it refuses
+                // — or the LLM provider is unavailable and the judge fails closed
+                // — `merge()` returns `NotMergeReady`, which is an ESCALATION, not
+                // an error (never a blind merge).
+                match self.caps.prs.merge(repo, *pr) {
+                    Ok(()) => Ok(ActOutcome::Merged),
+                    Err(OverseerError::NotMergeReady { .. }) => Ok(ActOutcome::Escalated),
+                    Err(e) => Err(e),
                 }
             }
             Intervention::ResolveConflict { repo, pr } => {
@@ -665,8 +2121,89 @@ impl Overseer {
                 goal_id,
                 reason,
                 why,
-            } => self.act_escalate_blocked_goal(goal_id, reason, why),
+                problem,
+                next_step,
+                link,
+            } => self.act_escalate_blocked_goal(
+                goal_id,
+                reason,
+                why,
+                problem,
+                next_step,
+                link.as_deref(),
+            ),
             Intervention::FlagWorkstreamGaps { gaps } => self.act_flag_workstream_gaps(gaps),
+            // Agentic merge-queue hygiene (#4097). Anti-recursion fail-closed:
+            // both act on an open PR autonomously, so — like the coverage launch —
+            // they require a DISTINCT configured steward identity before firing.
+            // The argv is built by the intervention.rs builders that can never
+            // carry `--admin`/`--no-verify`.
+            Intervention::FlagStalePr { repo, pr, note } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!(
+                            "flag stale PR {repo}#{pr} (unconfigured steward identity)"
+                        ),
+                    });
+                }
+                self.caps.prs.flag_stale_pr(repo, *pr, note)?;
+                Ok(ActOutcome::StalePrFlagged {
+                    repo: repo.clone(),
+                    pr: *pr,
+                })
+            }
+            Intervention::CloseDuplicatePr {
+                repo,
+                pr,
+                duplicate_of,
+            } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!(
+                            "close duplicate PR {repo}#{pr} (unconfigured steward identity)"
+                        ),
+                    });
+                }
+                self.caps.prs.close_duplicate_pr(repo, *pr, *duplicate_of)?;
+                Ok(ActOutcome::DuplicatePrClosed {
+                    repo: repo.clone(),
+                    pr: *pr,
+                    duplicate_of: *duplicate_of,
+                })
+            }
+            // Autonomous PR rework (#4911, D2). A THIN dispatch tag that REUSES
+            // the LaunchRecipe path against default-workflow. Anti-recursion
+            // fail-closed: it drives an autonomous fix on a governed PR, so — like
+            // the coverage launch and merge-queue hygiene — it requires a DISTINCT
+            // configured steward identity before firing. The `concern` rides a
+            // ContextFile (`concern_path`), never argv (E2BIG-safe).
+            Intervention::ReworkPr {
+                repo,
+                pr,
+                concern_path,
+            } => {
+                if !self.recursion.is_configured() {
+                    return Err(OverseerError::Recursion {
+                        subject: format!("rework PR {repo}#{pr} (unconfigured steward identity)"),
+                    });
+                }
+                let brief = RecipeBrief {
+                    task_description: format!(
+                        "Rework PR #{pr} in {repo} on its existing branch to address the \
+                         merge-readiness judge's recorded concern. Read the concern verbatim \
+                         from the file at {concern_path} and make the minimal change that \
+                         resolves it (add the missing test/doc, fix the small correctness nit). \
+                         Do NOT widen scope. Push to the SAME PR branch so the judge re-reviews \
+                         it on the next tick.",
+                    ),
+                    target_repo: repo.clone(),
+                    sequence_group: Some(OVERSEER_REWORK_GROUP.to_string()),
+                };
+                let handle = self.caps.recipes.launch(&brief)?;
+                self.inflight_investigations
+                    .insert(recipe_dedup_key(&brief), handle.clone());
+                Ok(ActOutcome::Launched(handle))
+            }
         }
     }
 
@@ -801,15 +2338,31 @@ impl Overseer {
         }
     }
 
-    /// ESCALATE a genuinely-blocked "needs human review" goal to the operator on
-    /// BOTH channels (email + Signal) with the goal id + reason, so the marker
-    /// actually reaches a human. Deduped so it never re-fires in a loop; fails
-    /// CLOSED without a DISTINCT steward identity (anti-recursion).
+    /// ESCALATE a genuinely-blocked "needs human review" goal — as a THIN AGENTIC
+    /// TRIGGER (issue #4276, guideline G3). Mirrors the StepFailure →
+    /// `self_diagnose.md` seam: rather than a terminal notify-and-count, the
+    /// Overseer hands the escalation to the agentic triage recipe
+    /// (`escalation_triage.md`) through the SAME `RecipeLauncher` seam, and the
+    /// recipe owns the escalate-vs-course-correct DECISION (rewrite an unmeasurable
+    /// done-gate, complete a goal already delivered by a merged PR, or ask the
+    /// operator ONE specific question — emitting a plain-English Signal per step).
+    ///
+    /// The Rust part stays thin: it (1) fails CLOSED without a DISTINCT steward
+    /// identity (anti-recursion), (2) dedups via the SAME in-flight investigation
+    /// set the recipe-launch path uses (a re-escalation while triage is still in
+    /// flight launches nothing), (3) launches the triage recipe and consumes ONLY
+    /// the `WorkstreamHandle` (never brittle-parses recipe stdout), and (4) sends
+    /// the operator a PLAIN-ENGLISH notification (problem + next step + tracking
+    /// link — never the raw marker) on both channels, fail-open on the notifier.
+    #[allow(clippy::too_many_arguments)]
     fn act_escalate_blocked_goal(
         &mut self,
         goal_id: &str,
         reason: &str,
         why: &str,
+        problem: &str,
+        next_step: &str,
+        link: Option<&str>,
     ) -> Result<ActOutcome, OverseerError> {
         if !self.recursion.is_configured() {
             return Err(OverseerError::Recursion {
@@ -818,37 +2371,76 @@ impl Overseer {
                 ),
             });
         }
-        let signature = format!("escalate:{goal_id}");
-        let now = now_secs();
-        match self.blocked_goal_gate.peek(&signature, now) {
-            WhisperDecision::Deliver => {
-                let notifier = self.notifier.as_ref().ok_or(OverseerError::Capability {
-                    what: "notify.operator",
-                    detail: "no operator notifier configured".to_string(),
-                })?;
-                // Carry the root-cause WHY into the operator notification so a
-                // human receives the analysis, not just the bare symptom.
-                let notification =
-                    OperatorNotification::goal_blocked_with_why(goal_id, reason, why);
-                let report = notifier.notify(&notification);
-                // Consume the dedup slot only after a dispatch attempt (the
-                // notifier itself never drops — it queues/logs on failure).
-                self.blocked_goal_gate.commit(&signature, now);
-                tracing::info!(
-                    target: "overseer::goal_health",
-                    goal_id,
-                    reason,
-                    action = "escalate",
-                    dispatched = report.dispatched(),
-                    all_sent = report.all_sent(),
-                    "overseer escalated a genuinely-blocked needs-human-review goal to the operator"
-                );
-                Ok(ActOutcome::GoalEscalated {
-                    goal_id: goal_id.to_string(),
-                })
-            }
-            other => Ok(Self::goal_health_suppressed("escalate", goal_id, other)),
+
+        // Build the agentic triage brief. The task description carries the
+        // structured context (goal id + plain-English problem + next step + the
+        // internal WHY) and points the agent at the recipe asset — exactly like
+        // the self_diagnose seam. `recipe_dedup_key` derives a stable per-goal key
+        // from this text, so a re-escalation of the same goal reuses the same slot.
+        let brief = RecipeBrief {
+            task_description: format!(
+                "Triage and course-correct a blocked goal before escalating to a human. \
+                 Follow prompt_assets/simard/overseer/escalation_triage.md. \
+                 Goal id: {goal_id}. Problem (plain English): {problem} \
+                 Recommended next step: {next_step} \
+                 Internal diagnostic WHY (translate to plain English, do not surface \
+                 raw): {why}. Reason marker (translate, do not surface raw): {reason}. \
+                 Decide root-cause + course-correction (rewrite an unmeasurable \
+                 done-gate to be machine-checkable, complete a goal already delivered \
+                 by a merged PR, or ask the operator ONE specific plain-English \
+                 question), and send a jargon-free Signal message per step.",
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let key = recipe_dedup_key(&brief);
+
+        // In-flight dedup: never launch a SECOND triage for a goal whose triage is
+        // still running (the same mechanism the recipe-launch path uses). A
+        // flapping goal cannot spawn triage every cycle.
+        if self.inflight_investigations.contains_key(&key) {
+            tracing::debug!(
+                target: "overseer::goal_health",
+                goal_id,
+                action = "escalate",
+                reason = "duplicate",
+                "overseer suppressed a blocked-goal escalation (triage already in flight)"
+            );
+            return Ok(ActOutcome::GoalHealthSuppressed {
+                reason: "duplicate",
+            });
         }
+
+        // Hand off to the agentic triage recipe and hold ONLY the handle.
+        let handle = self.caps.recipes.launch(&brief)?;
+        self.inflight_investigations.insert(key, handle.clone());
+
+        // Notify the operator in PLAIN ENGLISH (fail-open: only when a notifier is
+        // configured — a missing notifier never blocks the agentic triage launch).
+        if let Some(notifier) = self.notifier.as_ref() {
+            let notification =
+                OperatorNotification::goal_blocked_triaged(goal_id, problem, next_step, link);
+            let report = notifier.notify(&notification);
+            tracing::info!(
+                target: "overseer::goal_health",
+                goal_id,
+                action = "escalate",
+                triage_workstream = %handle.id,
+                dispatched = report.dispatched(),
+                all_sent = report.all_sent(),
+                "overseer launched agentic escalation-triage and notified the operator in plain English"
+            );
+        } else {
+            tracing::info!(
+                target: "overseer::goal_health",
+                goal_id,
+                action = "escalate",
+                triage_workstream = %handle.id,
+                "overseer launched agentic escalation-triage (no operator notifier configured)"
+            );
+        }
+
+        Ok(ActOutcome::Launched(handle))
     }
 
     /// Map a non-`Deliver` dedup-gate decision for a goal-board health action
@@ -876,14 +2468,9 @@ impl Overseer {
         ActOutcome::GoalHealthSuppressed { reason }
     }
 
-    /// FLAG the backlog-coverage gaps the recurring gap-scan found: notify the
-    /// operator on BOTH channels (email + Signal) with ONE consolidated,
-    /// provenance-labelled summary AND file one DEDUPED issue per fresh gap via
-    /// the SAME M1 stewardship path goal-health uses. Fails CLOSED without a
-    /// DISTINCT steward identity (anti-recursion). Deduped per gap signature so a
-    /// recurring gap notifies/files at most once per window; the dedup slot is
-    /// consumed only after a successful file, so a failure retries rather than
-    /// silently losing the gap.
+    /// FLAG the backlog-coverage gaps the recurring gap-scan found by notifying
+    /// the operator on both channels. Routine observations never create GitHub
+    /// issues or stewardship backlog items.
     fn act_flag_workstream_gaps(&mut self, gaps: &[GapItem]) -> Result<ActOutcome, OverseerError> {
         if !self.recursion.is_configured() {
             return Err(OverseerError::Recursion {
@@ -897,7 +2484,7 @@ impl Overseer {
         let now = now_secs();
         // Peek every gap first (no commit) so the consolidated notification names
         // exactly the FRESH gaps; a recurring gap within the dedup window is
-        // counted as suppressed and neither re-notified nor re-filed.
+        // counted as suppressed and not re-notified.
         let mut fresh: Vec<GapItem> = Vec::new();
         let mut suppressed = 0usize;
         for g in gaps {
@@ -915,48 +2502,133 @@ impl Overseer {
                 target: "overseer::gap_scan",
                 flagged = 0usize,
                 suppressed,
+                reused_existing = 0usize,
                 "overseer gap-scan: every observed gap is within the dedup window (suppressed)"
             );
             return Ok(ActOutcome::WorkstreamGapsFlagged {
                 flagged: 0,
                 suppressed,
+                reused_existing: 0,
+            });
+        }
+
+        // Durable GitHub-side dedup (issue #4717): BEFORE filing anything, query
+        // GitHub for an OPEN issue already carrying each fresh gap's stable
+        // `stewardship-signature` marker. A match means a prior process (or an
+        // earlier window) already filed it — skip creation so a recurring gap is
+        // filed at most once EVEN ACROSS A RESTART (the in-process `gap_gate`
+        // reset to empty on boot cannot remember it). A `gh` search error FAILS
+        // LOUD and creates nothing — a blind create on a failed dedup lookup is
+        // exactly the burst regression #4717 fixes. When no seam is wired the
+        // gap-scan only notifies (never files), exactly as before.
+        let mut reused_existing = 0usize;
+        let mut to_file: Vec<GapItem> = Vec::new();
+        if let Some(client) = self.gap_issue_client.as_ref() {
+            for g in &fresh {
+                let key = g.dedup_key();
+                let open = client
+                    .search_issues(ECOSYSTEM_OBSERVE_TARGET, &key)
+                    .map_err(|source| OverseerError::Capability {
+                        what: "gap_scan.dedup_search",
+                        detail: format!(
+                            "durable gap-filing dedup lookup failed for {key}: {source}"
+                        ),
+                    })?;
+                if open_issue_has_marker(&open, &key) {
+                    reused_existing += 1;
+                } else {
+                    to_file.push(g.clone());
+                }
+            }
+        } else {
+            to_file = fresh.clone();
+        }
+
+        // A durable match on every fresh gap ⇒ nothing new to notify or file, but
+        // still commit the in-process gate so an immediate re-observation does not
+        // re-hit `gh`.
+        if to_file.is_empty() {
+            for g in &fresh {
+                let sig = format!("workstream-gap:{}", g.signature);
+                self.gap_gate.commit(&sig, now);
+            }
+            tracing::info!(
+                target: "overseer::gap_scan",
+                flagged = 0usize,
+                suppressed,
+                reused_existing,
+                "overseer gap-scan: every fresh gap already has an open issue (durable dedup skip)"
+            );
+            return Ok(ActOutcome::WorkstreamGapsFlagged {
+                flagged: 0,
+                suppressed,
+                reused_existing,
             });
         }
 
         // ONE consolidated operator notification (email + Signal) naming every
-        // fresh gap — the SAME mandatory notifier the merge / goal-health paths use.
+        // gap we are actually filing — the SAME mandatory notifier the merge /
+        // goal-health paths use.
         let notifier = self.notifier.as_ref().ok_or(OverseerError::Capability {
             what: "notify.operator",
             detail: "no operator notifier configured".to_string(),
         })?;
-        let notification = OperatorNotification::workstream_gap(fresh.len(), &fresh);
+        let notification = OperatorNotification::workstream_gap(to_file.len(), &to_file);
         let report = notifier.notify(&notification);
 
-        // One DEDUPED issue per fresh gap via the M1 stewardship path.
+        // File ONE deduped issue per genuinely-new gap, embedding the durable
+        // `stewardship-signature` marker so a later sweep (or a restarted process)
+        // finds it and skips a re-file. Only when the durable seam is wired.
+        if let Some(client) = self.gap_issue_client.as_ref() {
+            for g in &to_file {
+                let key = g.dedup_key();
+                let title = format!("[stewardship] workstream_gap: {}", g.title);
+                let body = format!(
+                    "Auto-filed by the Overseer gap-scan: uncovered backlog work with no active \
+                     workstream, no open PR, and no fix in flight.\n\n\
+                     - what: {what}\n- ref: {ref_id}\n- why it matters: {why}\n\n\
+                     stewardship-signature: {key}\n",
+                    what = g.title,
+                    ref_id = g.ref_id,
+                    why = g.why_it_matters,
+                    key = key,
+                );
+                let filed = client
+                    .create_issue(ECOSYSTEM_OBSERVE_TARGET, &title, &body)
+                    .map_err(|source| OverseerError::Capability {
+                        what: "gap_scan.issue_create",
+                        detail: format!("durable gap-filing create failed for {key}: {source}"),
+                    })?;
+                tracing::info!(
+                    target: "overseer::gap_scan",
+                    signature = %key,
+                    issue = filed.number,
+                    url = %filed.url,
+                    "overseer gap-scan filed a deduped issue for an uncovered workstream"
+                );
+            }
+        }
+
+        // Commit the gate for EVERY fresh gap (filed and durable-reused) so an
+        // immediate same-window re-observation is suppressed before any `gh` call.
         for g in &fresh {
-            let run = OrchestratorRunBrief {
-                recipe_name: "smart-orchestrator".to_string(),
-                failed_step: "workstream-gap-scan".to_string(),
-                source_module: "overseer".to_string(),
-                failure_kind: format!("workstream_gap:{}", g.category.label()),
-                error_text: format!("{} — {}", g.ref_id, g.why_it_matters),
-            };
-            self.caps.issues.file(&run)?;
             let sig = format!("workstream-gap:{}", g.signature);
             self.gap_gate.commit(&sig, now);
         }
 
         tracing::info!(
             target: "overseer::gap_scan",
-            flagged = fresh.len(),
+            flagged = to_file.len(),
             suppressed,
+            reused_existing,
             dispatched = report.dispatched(),
             all_sent = report.all_sent(),
-            "overseer flagged uncovered backlog work: notified the operator + filed deduped issue(s)"
+            "overseer recorded uncovered backlog work and notified the operator"
         );
         Ok(ActOutcome::WorkstreamGapsFlagged {
-            flagged: fresh.len(),
+            flagged: to_file.len(),
             suppressed,
+            reused_existing,
         })
     }
 
@@ -982,21 +2654,43 @@ impl Overseer {
     /// empty + a `tracing` log (never a silent failure, never a panic). The
     /// caller folds the result into the structured analysis so recall raises
     /// `recurrence` for a repeatedly-seen cause.
+    ///
+    /// Issue #4128 (D2b): occurrence memory now stores ONE count-in-content fact
+    /// per `(signature, cause_label)`. Each such fact is EXPANDED back into its
+    /// `count` `PriorOccurrence`s (bounded by [`OCCURRENCE_RECALL_LIMIT`]) so the
+    /// downstream recurrence tally — `analyze` counts matching occurrences — still
+    /// ratchets to the escalation threshold, without the unbounded row growth that
+    /// let the Overseer's own re-observation self-amplify.
     fn recall_occurrences(&self, dedup_key: &str) -> Vec<PriorOccurrence> {
         let Some(mem) = self.memory.as_ref() else {
             return Vec::new();
         };
         let concept = occurrence_concept(dedup_key);
         match mem.search_facts(&concept, OCCURRENCE_RECALL_LIMIT, 0.0) {
-            Ok(facts) => facts
-                .into_iter()
-                .filter_map(|f| {
-                    serde_json::from_str::<StoredOccurrence>(&f.content)
+            Ok(facts) => {
+                let mut out: Vec<PriorOccurrence> = Vec::new();
+                for f in facts {
+                    let Some(stored) = serde_json::from_str::<StoredOccurrence>(&f.content)
                         .ok()
                         .filter(|o| o.signature == dedup_key)
-                        .map(StoredOccurrence::into_prior)
-                })
-                .collect(),
+                    else {
+                        continue;
+                    };
+                    // Expand the count-in-content tally into that many recalled
+                    // occurrences, bounded overall so a large saturating count can
+                    // never blow up the recalled set.
+                    let remaining = (OCCURRENCE_RECALL_LIMIT as usize).saturating_sub(out.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    let repeats = (stored.count.max(1) as usize).min(remaining);
+                    let prior = stored.into_prior();
+                    for _ in 0..repeats {
+                        out.push(prior.clone());
+                    }
+                }
+                out
+            }
             Err(e) => {
                 tracing::debug!(
                     target: "overseer::root_cause",
@@ -1009,11 +2703,42 @@ impl Overseer {
         }
     }
 
+    /// Read the current recorded occurrence `count` for `(signature, cause_label)`
+    /// from cognitive memory (issue #4128, D2b), so a fresh occurrence upserts an
+    /// incremented count rather than appending a new row. Best-effort: no memory,
+    /// a recall error, or no prior fact ⇒ 0. Takes the MAX across any matching
+    /// facts so a legacy multi-row tail (pre-#4128 appends) still ratchets forward
+    /// instead of resetting.
+    fn recorded_occurrence_count(&self, signature: &str, cause_label: &str) -> u32 {
+        let Some(mem) = self.memory.as_ref() else {
+            return 0;
+        };
+        let concept = occurrence_concept(signature);
+        match mem.search_facts(&concept, OCCURRENCE_RECALL_LIMIT, 0.0) {
+            Ok(facts) => facts
+                .iter()
+                .filter_map(|f| serde_json::from_str::<StoredOccurrence>(&f.content).ok())
+                .filter(|o| o.signature == signature && o.cause_label == cause_label)
+                .map(|o| o.count.max(1))
+                .max()
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
     /// Record this occurrence's root-cause signature + primary cause + action +
     /// outcome into cognitive memory (amplihack-memory-lib, G2) so a later cycle
     /// recalls it and raises `recurrence`. Best-effort: no memory wired ⇒ no-op;
     /// a store error is `tracing`-logged and swallowed (never fatal to the tick,
     /// never silent).
+    ///
+    /// Issue #4128 (D2b): this UPSERTS a SINGLE count-in-content fact per
+    /// `(signature, cause_label)` — it reads the prior count, stores an
+    /// incremented count under a stable caller-dedup key (superseding the old
+    /// live fact), and prunes the superseded tail — rather than appending a fresh
+    /// fact every cycle. Appending grew occurrence rows without bound, which is
+    /// exactly what let the Overseer's re-observation of its own signature
+    /// self-amplify into the "recurring signature seen 2×" incident.
     fn record_occurrence(&self, entry: &ProblemEntry, outcome: &ActOutcome) {
         let Some(mem) = self.memory.as_ref() else {
             return;
@@ -1021,11 +2746,17 @@ impl Overseer {
         let Some(primary) = entry.why.primary() else {
             return;
         };
+        // Increment the prior count (saturating) so the single stored fact is an
+        // honest, bounded running tally of this cause's occurrences.
+        let count = self
+            .recorded_occurrence_count(&entry.key, &primary.label)
+            .saturating_add(1);
         let record = StoredOccurrence {
             signature: entry.key.clone(),
             cause_label: primary.label.clone(),
             action: entry.action.clone(),
             outcome: describe_outcome(outcome),
+            count,
         };
         let content = match serde_json::to_string(&record) {
             Ok(c) => c,
@@ -1039,18 +2770,42 @@ impl Overseer {
             }
         };
         let concept = occurrence_concept(&entry.key);
+        let caller_key = StoredOccurrence::caller_key(&entry.key, &primary.label);
         let tags = vec![
             entry.key.clone(),
             primary.label.clone(),
             "overseer-root-cause".to_string(),
         ];
-        if let Err(e) = mem.store_fact(&concept, &content, 0.9, &tags, "overseer:root-cause") {
+        // CallerKey upsert: the incremented-count content supersedes the prior
+        // live fact so exactly one live occurrence fact survives per key.
+        if let Err(e) = mem.store_fact_with_caller_key(
+            &caller_key,
+            &concept,
+            &content,
+            0.9,
+            &tags,
+            "overseer:root-cause",
+        ) {
             tracing::debug!(
                 target: "overseer::root_cause",
                 signature = %entry.key,
                 cause = %primary.label,
                 error = %e,
                 "root-cause occurrence store failed (best-effort) — recurrence tracking degraded"
+            );
+            return;
+        }
+        // Reclaim the superseded revision archived by the upsert so occurrence
+        // recall reads exactly one live count-in-content fact (best-effort — a
+        // failed prune only leaves a reclaimable archived tail, never a wrong
+        // count, since recall takes the MAX count across matching facts).
+        if let Err(e) = mem.prune_superseded() {
+            tracing::debug!(
+                target: "overseer::root_cause",
+                signature = %entry.key,
+                cause = %primary.label,
+                error = %e,
+                "root-cause occurrence prune failed (best-effort) — superseded tail left for a later pass"
             );
         }
     }
@@ -1070,33 +2825,98 @@ fn now_secs() -> i64 {
 fn is_cost_bearing(iv: &Intervention) -> bool {
     matches!(
         iv,
-        Intervention::LaunchRecipe { .. } | Intervention::RunAudit { .. }
+        Intervention::LaunchRecipe { .. }
+            | Intervention::RunAudit { .. }
+            | Intervention::ReworkPr { .. }
     )
 }
 
+/// Stable dedup key for one recipe-runner investigation launch (live defect
+/// 2026-07-15). Two launches for the SAME goal / recurring signature must map to
+/// the same key so the in-flight guard holds the duplicate; two DIFFERENT
+/// investigations must map to distinct keys so neither is starved.
+///
+/// A launch embeds a STABLE signature token in its task description and this keys
+/// on that token (when present), making the guard robust to incidental prose
+/// drift around it:
+///   * [`STALE_INVESTIGATION_DEDUP_PREFIX`](crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX)
+///     — a stale-engineer investigation's per-claim signature (issue #4400): two
+///     ticks for the SAME still-stale claim carry the same token but a VOLATILE
+///     timestamped evidence dir + growing idle age, so keying on the token holds
+///     the duplicate.
+///   * [`OVERSEER_OBS_PREFIX`] — a recurring-observation signature (issue #2628).
+///
+/// Absent any token, the trimmed task description is the key — deterministic for a
+/// given problem summary, which is itself derived deterministically from the
+/// signal.
+fn recipe_dedup_key(brief: &RecipeBrief) -> String {
+    let desc = brief.task_description.trim();
+    for token in [
+        crate::overseer::claim_reaper::STALE_INVESTIGATION_DEDUP_PREFIX,
+        OVERSEER_OBS_PREFIX,
+    ] {
+        if let Some(start) = desc.find(token) {
+            let tail = &desc[start..];
+            let end = tail
+                .find(|c: char| c == ')' || c.is_whitespace())
+                .unwrap_or(tail.len());
+            return tail[..end].to_string();
+        }
+    }
+    desc.to_string()
+}
+
+/// The write-back prefix the Overseer stamps on its own observation episodes
+/// (issue #2628). A recalled episode carrying this prefix is the Overseer reading
+/// its OWN prior observation back out of cognitive memory — folding such a
+/// recall-derived problem into a fresh write-back is the self-referential loop
+/// that self-amplifies the recurrence counter (issue #4128, D1). The write
+/// boundary excludes any problem whose `dedup_key` already carries this prefix.
+const OVERSEER_OBS_PREFIX: &str = "overseer-obs:";
+
+/// True for a recall-derived problem that is the Overseer's OWN prior observation
+/// (its `dedup_key` already carries the [`OVERSEER_OBS_PREFIX`]). These are
+/// filtered at the write boundary (issue #4128, D1) so the Overseer never records
+/// an observation OF its own observation.
+fn is_recall_derived_self_observation(problem: &Problem) -> bool {
+    problem.dedup_key.starts_with(OVERSEER_OBS_PREFIX)
+}
+
 /// Stable, deterministic signature for the Overseer's own observation write-back
-/// (issue #2628): the sorted, deduped problem `dedup_key`s joined. Two identical
-/// observations produce the same signature (so the write-back gate de-dups them);
-/// two different observations produce distinct signatures (so both are recorded).
+/// (issue #2628): the sorted, deduped FIRST-ORDER problem `dedup_key`s joined.
+/// Two identical observations produce the same signature (so the write-back gate
+/// de-dups them); two different observations produce distinct signatures (so both
+/// are recorded).
+///
+/// Recall-derived `overseer-obs:*` problems are excluded (issue #4128, D1): the
+/// signature keys ONLY genuinely first-order observations, so the write-back can
+/// never nest an `overseer-obs:` prefix on itself and re-observe its own output.
 fn observation_signature(problems: &[Problem]) -> String {
-    let mut keys: Vec<&str> = problems.iter().map(|p| p.dedup_key.as_str()).collect();
+    let mut keys: Vec<&str> = problems
+        .iter()
+        .filter(|p| !is_recall_derived_self_observation(p))
+        .map(|p| p.dedup_key.as_str())
+        .collect();
     keys.sort_unstable();
     keys.dedup();
-    format!("overseer-obs:{}", keys.join("|"))
+    format!("{OVERSEER_OBS_PREFIX}{}", keys.join("|"))
 }
 
 /// The human-readable one-line body of the Overseer's observation write-back.
-/// Every problem summary is `sanitize_recalled`-cleaned (defence in depth: the
-/// summaries may themselves already carry recalled text) before it enters the
-/// episode content that is persisted into the multi-writer memory graph.
+/// Only FIRST-ORDER problems are described (recall-derived `overseer-obs:*`
+/// self-observations are excluded, issue #4128 D1). Every problem summary is
+/// `sanitize_recalled`-cleaned (defence in depth: the summaries may themselves
+/// already carry recalled text) before it enters the episode content that is
+/// persisted into the multi-writer memory graph.
 fn observation_content(problems: &[Problem]) -> String {
     let parts: Vec<String> = problems
         .iter()
+        .filter(|p| !is_recall_derived_self_observation(p))
         .map(|p| sanitize_recalled(&p.summary))
         .collect();
     sanitize_recalled(&format!(
         "overseer observed {} problem(s): {}",
-        problems.len(),
+        parts.len(),
         parts.join("; ")
     ))
 }
@@ -1189,15 +3009,40 @@ fn describe_outcome(outcome: &ActOutcome) -> String {
 
 /// The durable form of a [`PriorOccurrence`], stored in cognitive memory with the
 /// problem `signature` so recall can filter to this problem's occurrences.
+///
+/// Issue #4128 (D2b): occurrence memory is an UPSERT of ONE fact per
+/// `(signature, cause_label)` carrying a bounded `count`, rather than a fresh
+/// appended fact every cycle. The count-in-content is the honest recurrence
+/// tally; recall expands it back into that many `PriorOccurrence`s so the
+/// recurrence-driven root-cause escalation still ratchets, without the unbounded
+/// row growth that let the Overseer's own re-observation self-amplify.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredOccurrence {
     signature: String,
     cause_label: String,
     action: String,
     outcome: String,
+    /// How many times this `(signature, cause_label)` has been recorded. Defaults
+    /// to 1 for legacy facts written before the count field existed (each such
+    /// pre-#4128 fact represented exactly one occurrence).
+    #[serde(default = "one_u32")]
+    count: u32,
+}
+
+/// serde default for [`StoredOccurrence::count`]: a legacy (pre-#4128) occurrence
+/// fact carried no count and represented exactly one occurrence.
+fn one_u32() -> u32 {
+    1
 }
 
 impl StoredOccurrence {
+    /// The stable caller-dedup key for this occurrence's upsert (issue #4128,
+    /// D2b): one live fact per `(signature, cause_label)`. Keyed on both so
+    /// distinct causes of the SAME signature never collapse onto one row.
+    fn caller_key(signature: &str, cause_label: &str) -> String {
+        format!("overseer-occ:{signature}::{cause_label}")
+    }
+
     fn into_prior(self) -> PriorOccurrence {
         PriorOccurrence {
             cause_label: self.cause_label,
@@ -1205,6 +3050,46 @@ impl StoredOccurrence {
             outcome: self.outcome,
         }
     }
+}
+
+/// The conflict-sequencer / gate marker for the Overseer's backlog-coverage
+/// closing edge (issue #4128, D3b). A [`Intervention::LaunchRecipe`] carrying
+/// this `sequence_group` is the workstream launched to COVER an uncovered gap:
+/// the gate holds it when the gap-scan is disabled (preserving the opt-out that
+/// used to live on the notify-only `FlagWorkstreamGaps` path) and the sequencer
+/// serialises concurrent coverage launches.
+const WORKSTREAM_COVERAGE_GROUP: &str = "workstream-coverage";
+
+/// Sequence group for the autonomous PR rework loop (issue #4911, Deliverable 2).
+/// Serialises rework launches so two ticks never drive concurrent fixes for the
+/// same PR, and tags the reused `LaunchRecipe` dispatch for telemetry.
+const OVERSEER_REWORK_GROUP: &str = "overseer-rework";
+
+/// Per-gap dedup key for a backlog-coverage problem (issue #4128, D3a):
+/// `workstream-gap:<sorted, deduped gap signatures>`. Keying on the specific gap
+/// set (never the bare `workstream-gap` constant) stops distinct gap sets from
+/// collapsing onto one dedup key — which had starved the closing edge / in-flight
+/// guard to a single gap. Each gap `signature` is a restricted slug built from
+/// trusted identifiers only, so the key is always a safe, stable token.
+fn workstream_gap_key(gaps: &[GapItem]) -> String {
+    let mut sigs: Vec<&str> = gaps.iter().map(|g| g.signature.as_str()).collect();
+    sigs.sort_unstable();
+    sigs.dedup();
+    format!("workstream-gap:{}", sigs.join("|"))
+}
+
+/// LINE-BOUNDED durable-marker match for gap-filing dedup (issue #4717): true iff
+/// some OPEN `issue`'s body carries a whole line equal to
+/// `stewardship-signature: <key>` (after trimming that line's surrounding
+/// whitespace). Deliberately NOT a bare `body.contains(...)` substring test — a
+/// longer, distinct key (`…g-hot-extra`) embeds a shorter one (`…g-hot`) as a
+/// prefix, so a substring match would silently swallow a genuinely-new gap under
+/// an unrelated issue.
+fn open_issue_has_marker(issues: &[GhIssue], key: &str) -> bool {
+    let needle = format!("stewardship-signature: {key}");
+    issues
+        .iter()
+        .any(|i| i.body.lines().any(|line| line.trim() == needle))
 }
 
 /// Orient: fold `Signal`s into ranked, deduplicated `Problem`s. Dedups against
@@ -1375,13 +3260,17 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
             )),
         ),
         // The recurring gap-scan surfaces ONE consolidated signal per Observe
-        // pass, so it maps to a SINGLE high-priority coverage problem with a
-        // stable, evidence-independent dedup key. Uncovered p1/p2 goals, bug/P1
-        // issues, and live anomalies all rank High.
+        // pass carrying every uncovered gap. It maps to a SINGLE high-priority
+        // coverage problem whose dedup key is keyed PER-GAP (issue #4128, D3a):
+        // `workstream-gap:<sorted gap signatures>` rather than the bare
+        // `workstream-gap` constant. Keying on the specific gap set means a
+        // DIFFERENT set of gaps no longer collapses onto one dedup key (which had
+        // starved the closing edge / in-flight guard to a single gap). Uncovered
+        // p1/p2 goals, bug/P1 issues, and live anomalies all rank High.
         Signal::WorkstreamGap { gaps } => (
             ProblemKind::WorkstreamCoverage,
             Priority::High,
-            "workstream-gap".to_string(),
+            workstream_gap_key(gaps),
             format!("{} uncovered workstream(s)", gaps.len()),
         ),
         // A diagnosed step failure (#2640): a broken OODA step is HIGH priority.
@@ -1404,7 +3293,129 @@ fn classify_signal(s: &Signal) -> (ProblemKind, Priority, String, String) {
                 None => format!("OODA step failed — root cause {}", cause.as_str()),
             },
         ),
+        // Agentic merge-queue reasoning (#4097): a PR judged STALE. A merge-queue
+        // hygiene problem — flag it (comment), never merge. Low priority (advisory
+        // cleanup). Dedup keyed per-PR so a recurring stale PR flags at most once.
+        Signal::StalePrDetected { repo, pr } => (
+            ProblemKind::DeliveryReady,
+            Priority::Low,
+            format!("delivery:stale-pr:{repo}#{pr}"),
+            format!("PR {repo}#{pr} judged stale — no recent activity"),
+        ),
+        // A PR judged a DUPLICATE of another (#4097): close the duplicate,
+        // referencing the original. Low priority hygiene; dedup keyed per-PR.
+        Signal::DuplicatePrDetected {
+            repo,
+            pr,
+            duplicate_of,
+        } => (
+            ProblemKind::DeliveryReady,
+            Priority::Low,
+            format!("delivery:dup-pr:{repo}#{pr}"),
+            format!("PR {repo}#{pr} judged a duplicate of #{duplicate_of}"),
+        ),
+        // An open ISSUE triaged READY with no active workstream (#4097): the same
+        // backlog-coverage family as the gap-scan, so it ranks the same. Dedup
+        // keyed per-issue so a recurring ready issue surfaces at most once.
+        Signal::IssueNeedsWorkstream {
+            repo,
+            issue,
+            next_action,
+        } => (
+            ProblemKind::WorkstreamCoverage,
+            Priority::Normal,
+            format!("workstream:issue:{repo}#{issue}"),
+            format!("issue {repo}#{issue} ready with no workstream — next: {next_action}"),
+        ),
+        // The running binary is behind merged main (#2590): a HIGH-priority
+        // self-deploy problem. Dedup key is constant so a persisting drift
+        // (observed every tick until deployed) folds into a single problem.
+        Signal::DeployDriftDetected { behind_commits, .. } => (
+            ProblemKind::DeployDrift,
+            Priority::High,
+            "deploy:drift".to_string(),
+            format!(
+                "running binary is {behind_commits} commit(s) behind merged main — \
+                 self-deploy required"
+            ),
+        ),
     }
+}
+
+/// A single reasoned PR paired with the ground-truth GitHub facts the
+/// re-narrowing projection needs (#4097). The agentic reasoner PROPOSES via
+/// [`ReasonedPr`]; the rail confirms Simard-origin + objective-mergeability from
+/// these authoritative fields before anything is authorized to merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectionCandidate {
+    /// The agentic reviewer's proposal for this PR.
+    pub reasoned: ReasonedPr,
+    /// `author.login` from `gh` — the anti-recursion author guard's input.
+    pub author_login: String,
+    /// `headRefName` from `gh` — the engineer-branch narrowing's input.
+    pub head_ref: String,
+    /// `isDraft` from `gh` — the draft-exclusion rail's input (#4339). A draft
+    /// PR can never be merged server-side, so the projection admits ONLY
+    /// `Some(false)`; `Some(true)` and `None` (unknown/absent) are excluded
+    /// fail-closed.
+    pub is_draft: Option<bool>,
+    /// The objective-gate snapshot (`mergeable`, checks, base, labels) from `gh`.
+    pub snapshot: PrSnapshot,
+}
+
+/// Re-narrow the BROAD agentic reasoning into the NARROW set of PRs authorized to
+/// merge (#4097). This is the deterministic safety rail that guarantees a
+/// broadened REASONING scope can NEVER widen merge AUTHORIZATION: only a PR that
+/// passes EVERY gate below is projected into `ObservedState.ready_prs` (which is
+/// the ONLY thing that drives `Signal::PrReadyToMerge` → the gated merge chain).
+///
+/// A candidate is authorized iff ALL hold:
+/// 1. disposition is exactly [`PrDisposition::ReadyForMerge`] (a proposal to
+///    merge — `NeedsWork`/`Stale`/`Duplicate` are never merge candidates);
+/// 2. the author is NOT the overseer bot (`overseer_login`) — anti-recursion, so
+///    the Overseer never merges its own artifact;
+/// 3. the PR proves Simard-origin — it carries the engineer-PR label OR rides an
+///    engineer-exclusive branch namespace (the same G3 narrowing
+///    [`merge_ops`](crate::overseer::merge_ops) applies), so an operator's own
+///    review PR sharing the author login is never merged;
+/// 4. it passes the objective gates ([`evaluate_objective_gates`]: base-allowlist
+///    + `MERGEABLE` + all checks green);
+/// 5. it is NOT a draft (#4339) — `is_draft == Some(false)`. A draft can never be
+///    merged server-side, so `Some(true)` and an unknown/absent draft state
+///    (`None`) are both excluded fail-closed.
+///
+/// This is a pure NARROWING — it can only ever remove candidates. The
+/// authoritative six-criteria merge-authority gate (with the agentic MergeJudge)
+/// still runs downstream; this only decides which PRs are even proposed to it.
+pub fn project_ready_prs(
+    candidates: &[ProjectionCandidate],
+    base_allowlist: &[String],
+    overseer_login: &str,
+) -> Vec<PrRef> {
+    candidates
+        .iter()
+        .filter(|c| c.reasoned.disposition == PrDisposition::ReadyForMerge)
+        // Anti-recursion author guard: never the overseer bot's own PR.
+        .filter(|c| !c.author_login.eq_ignore_ascii_case(overseer_login))
+        // Engineer-PR narrowing: prove Simard-origin (label OR engineer branch).
+        .filter(|c| {
+            c.snapshot
+                .labels
+                .iter()
+                .any(|l| config::is_engineer_pr_label(l))
+                || config::is_engineer_branch(&c.head_ref)
+        })
+        // Draft gate (#4339): a draft can never be merged. Admit ONLY a
+        // known-non-draft PR; `Some(true)` and `None` (unknown/absent) are
+        // excluded fail-closed. Pure narrowing — mirrors `survey_ready_prs`.
+        .filter(|c| c.is_draft == Some(false))
+        // Objective gates: base-allowlist + MERGEABLE + all checks green.
+        .filter(|c| evaluate_objective_gates(&c.snapshot, base_allowlist).is_ok())
+        .map(|c| PrRef {
+            repo: c.reasoned.repo.clone(),
+            pr: c.reasoned.pr,
+        })
+        .collect()
 }
 
 /// Decide: choose one `Intervention` for a `Problem`. Illustrative routing; a
@@ -1414,11 +3425,36 @@ pub fn decide(problem: &Problem) -> Intervention {
     match problem.kind {
         ProblemKind::DeliveryReady => {
             for s in &problem.evidence {
-                if let Signal::PrReadyToMerge { repo, pr } = s {
-                    return Intervention::VerifyAndMergePr {
-                        repo: repo.clone(),
-                        pr: *pr,
-                    };
+                match s {
+                    Signal::PrReadyToMerge { repo, pr } => {
+                        return Intervention::VerifyAndMergePr {
+                            repo: repo.clone(),
+                            pr: *pr,
+                        };
+                    }
+                    // A stale-PR proposal (#4097): flag it with a comment (never a
+                    // merge/close), gated under MergeAuthority.
+                    Signal::StalePrDetected { repo, pr } => {
+                        return Intervention::FlagStalePr {
+                            repo: repo.clone(),
+                            pr: *pr,
+                            note: problem.summary.clone(),
+                        };
+                    }
+                    // A duplicate-PR proposal (#4097): close it referencing the
+                    // original, gated under MergeAuthority.
+                    Signal::DuplicatePrDetected {
+                        repo,
+                        pr,
+                        duplicate_of,
+                    } => {
+                        return Intervention::CloseDuplicatePr {
+                            repo: repo.clone(),
+                            pr: *pr,
+                            duplicate_of: *duplicate_of,
+                        };
+                    }
+                    _ => {}
                 }
             }
             Intervention::Report
@@ -1477,21 +3513,14 @@ pub fn decide(problem: &Problem) -> Intervention {
                 // Root-cause context (issue #2635): the recurrence of this
                 // blocked-goal cause (from memory recall, folded into the WHY),
                 // the one-line WHY string (for the operator escalation), and the
-                // STABLE primary cause label (for a deduped root-cause issue), so
-                // a repeatedly re-parked goal escalates its ROOT CAUSE instead of
-                // being blindly re-unblocked.
+                // repeatedly re-parked goal escalates its ROOT CAUSE to the
+                // operator instead of being blindly re-unblocked.
                 let recurrence = problem.why.as_ref().map(|w| w.recurrence).unwrap_or(0);
                 let why = problem
                     .why
                     .as_ref()
                     .map(|w| w.to_string())
                     .unwrap_or_default();
-                let cause_label = problem
-                    .why
-                    .as_ref()
-                    .and_then(|w| w.primary())
-                    .map(|c| c.label.clone())
-                    .unwrap_or_else(|| "unknown-cause".to_string());
                 return decide_blocked_goal(
                     goal_id,
                     reason,
@@ -1499,7 +3528,6 @@ pub fn decide(problem: &Problem) -> Intervention {
                     needs_review,
                     recurrence,
                     why,
-                    cause_label,
                 );
             }
             Intervention::TransferGoal {
@@ -1550,9 +3578,42 @@ pub fn decide(problem: &Problem) -> Intervention {
             note: compose_whisper_note(problem, &ObservedState::default()),
             urgency: WhisperUrgency::Normal,
         },
-        // Backlog-coverage gaps carry the consolidated `WorkstreamGap` evidence
-        // forward verbatim so Act can notify + file the specific gaps.
+        // Backlog-coverage gaps get a CLOSING EDGE (issue #4128, D3b): launch a
+        // workstream that actually COVERS the uncovered work so the gap stops
+        // recurring — never the old notify-only `FlagWorkstreamGaps`, which left
+        // the gap uncovered and re-surfaced it every window as the recurring
+        // `workstream-gap` signature. The launch is tagged with the
+        // `WORKSTREAM_COVERAGE_GROUP` sequence group so the gate can hold it when
+        // the gap-scan is disabled (the opt-out that used to live on the notify
+        // path) and the sequencer serialises concurrent coverage launches; the
+        // per-gap signatures embedded in the brief make the in-flight guard dedup
+        // a re-observed identical gap set to a SINGLE in-flight coverage launch.
         ProblemKind::WorkstreamCoverage => {
+            // An agentic issue-triage proposal (#4097): a Ready issue with no
+            // workstream. Launch a workstream that covers it (the same closing-edge
+            // philosophy as the gap-scan), keyed to the concrete issue ref.
+            if let Some((repo, issue, next_action)) =
+                problem.evidence.iter().find_map(|s| match s {
+                    Signal::IssueNeedsWorkstream {
+                        repo,
+                        issue,
+                        next_action,
+                    } => Some((repo.clone(), *issue, next_action.clone())),
+                    _ => None,
+                })
+            {
+                return Intervention::LaunchRecipe {
+                    brief: RecipeBrief {
+                        task_description: format!(
+                            "Cover the ready, uncovered issue {repo}#{issue} surfaced by the \
+                             Overseer's agentic merge-queue/issue triage: launch or track a \
+                             workstream that addresses it. Next action: {next_action}."
+                        ),
+                        target_repo: repo,
+                        sequence_group: Some(WORKSTREAM_COVERAGE_GROUP.to_string()),
+                    },
+                };
+            }
             let gaps = problem
                 .evidence
                 .iter()
@@ -1561,7 +3622,28 @@ pub fn decide(problem: &Problem) -> Intervention {
                     _ => None,
                 })
                 .unwrap_or_default();
-            Intervention::FlagWorkstreamGaps { gaps }
+            // Describe the gaps by category + restricted-slug signature only
+            // (both bounded/safe), never free-text titles, so the brief can never
+            // inflate a launched task description.
+            let details = gaps
+                .iter()
+                .map(|g| format!("{}: {}", g.category.label(), g.signature))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Intervention::LaunchRecipe {
+                brief: RecipeBrief {
+                    task_description: format!(
+                        "Cover uncovered backlog workstream(s) surfaced by the Overseer \
+                         gap-scan so they stop recurring: launch or track a workstream that \
+                         closes each gap. {n} gap(s): {details}. ({key})",
+                        n = gaps.len(),
+                        details = details,
+                        key = workstream_gap_key(&gaps),
+                    ),
+                    target_repo: "rysweet/Simard".to_string(),
+                    sequence_group: Some(WORKSTREAM_COVERAGE_GROUP.to_string()),
+                },
+            }
         }
         // A diagnosed step failure drives a CORRECTIVE workstream (#2640, PART 2):
         // launch a recipe that diagnoses the WHY and applies the remedy, keyed to
@@ -1599,6 +3681,28 @@ pub fn decide(problem: &Problem) -> Intervention {
                 },
             }
         }
+        // Autonomous self-deploy rail (#2590): a deploy-drift problem yields a
+        // guarded Deploy to the merged head. This is the DETERMINISTIC trigger
+        // only — the go/no-go SAFETY judgment stays in the guarded executor
+        // (`evaluate_deploy_gate` refuses no-op / rollback / red-canary /
+        // crash-loop) and the high-risk AutonomyGate. Fail-CLOSED: with no
+        // resolved target commit in evidence it ESCALATES rather than deploying
+        // blind.
+        ProblemKind::DeployDrift => {
+            match problem.evidence.iter().find_map(|s| match s {
+                Signal::DeployDriftDetected { target_commit, .. } => Some(target_commit.clone()),
+                _ => None,
+            }) {
+                Some(commit) if !commit.trim().is_empty() => Intervention::Deploy { commit },
+                _ => Intervention::Escalate {
+                    reason: format!(
+                        "deploy drift detected but no target commit was resolved — escalating \
+                         rather than deploying blind ({})",
+                        problem.summary
+                    ),
+                },
+            }
+        }
     }
 }
 
@@ -1608,8 +3712,8 @@ pub fn decide(problem: &Problem) -> Intervention {
 /// - a RECURRING re-park (memory recall shows the SAME cause re-occurring at or
 ///   above [`RECURRENCE_ESCALATION_THRESHOLD`]) is NOT blindly re-unblocked every
 ///   cycle (the operator's rejected antipattern). Instead the ROOT CAUSE is
-///   ESCALATED — a deduplicated issue describing *why it keeps getting re-parked*
-///   — so the systemic defect is fixed rather than the symptom re-patched;
+///   ESCALATED to the operator with the root-cause analysis so the systemic
+///   defect can be fixed without generating another tracking issue;
 /// - a first-time / infrequent PERPETUAL goal false-parked by the **no-progress**
 ///   safeguard is SELF-HEALED — auto-unblocked + reactivated (a root-cause fix
 ///   for a false park, not a symptom patch);
@@ -1628,47 +3732,84 @@ fn decide_blocked_goal(
     needs_review: bool,
     recurrence: u32,
     why: String,
-    cause_label: String,
 ) -> Intervention {
-    // Recurring re-park: escalate the ROOT CAUSE (deduped issue), never re-patch.
-    // The issue's routing + dedup fields are STABLE across recurrences: the
-    // `source_module` routes to Simard (the goal-board/OODA subsystem that
-    // re-parks the goal), and neither `failure_kind` nor `error_text` embeds the
-    // (ever-changing) recurrence count or the rendered WHY — only the stable
-    // `goal_id` + primary `cause_label` — so the same systemic defect is filed
-    // ONCE and deduped by `stewardship::failure_signature`, not once per cycle.
-    if recurrence >= RECURRENCE_ESCALATION_THRESHOLD {
-        return Intervention::FileIssue {
-            run: OrchestratorRunBrief {
-                recipe_name: "overseer-root-cause".to_string(),
-                failed_step: format!("goal-unblock:{goal_id}"),
-                source_module: "simard::overseer".to_string(),
-                failure_kind: "recurring_goal_reblock".to_string(),
-                error_text: format!(
-                    "goal `{goal_id}` is repeatedly re-parked despite symptom-level unblocks; \
-                     the systemic root cause is `{cause_label}`. The Overseer escalates the root \
-                     cause instead of re-patching the symptom every cycle."
-                ),
-            },
-        };
-    }
-    if perpetual && is_no_progress_marker(&reason) {
+    // A false-parked perpetual goal (a bare no-progress safeguard block) is still
+    // SELF-HEALED locally — auto-unblocked + reactivated — because that is a
+    // deterministic root-cause fix for a false park, not a judgement call that
+    // needs agentic triage. Everything that genuinely needs a human decision is
+    // handed to the agentic triage recipe (see below), so this stays a narrow,
+    // safe self-heal rail rather than a competing escalate-vs-course-correct
+    // heuristic.
+    if perpetual && is_no_progress_marker(&reason) && recurrence < RECURRENCE_ESCALATION_THRESHOLD {
         return Intervention::UnblockGoal { goal_id, reason };
     }
-    if needs_review {
+
+    // Otherwise route to the AGENTIC escalation-triage recipe (issue #4276). The
+    // recurrence count and `needs_review` flag are now only TRIGGERS that decide
+    // whether triage runs — the escalate-vs-course-correct DECISION itself is
+    // owned by the recipe, never by this bare integer threshold. A recurring
+    // re-park OR a needs-review block both hand off to triage.
+    if recurrence >= RECURRENCE_ESCALATION_THRESHOLD || needs_review {
+        let (problem, next_step) = plain_english_blocked(&goal_id, &reason, recurrence);
         return Intervention::EscalateBlockedGoal {
             goal_id,
             reason,
             why,
+            problem,
+            next_step,
+            // Fail-open (issue #4276, A1): the tracking issue that holds the full
+            // detail is filed in the goal-curation path and is not reachable at
+            // this seam, so no link is threaded here — the operator still gets the
+            // plain-English problem + next step, and the triage recipe surfaces the
+            // detail. Never block the escalation on link presence.
+            link: None,
         };
     }
     Intervention::Report
+}
+
+/// Translate a blocked-goal's internal marker + diagnostic WHY into a
+/// PLAIN-ENGLISH `(problem, next_step)` for the operator (issue #4276). The raw
+/// marker (`🔒 [OODA-SAFEGUARD] … why=UNCLEAR-CRITERIA evidence=[…]`) and the
+/// one-line WHY are internal jargon; this is the human-facing seed text the
+/// agentic triage recipe further refines. It is deliberately free of every
+/// machine token so the operator never sees `OODA-SAFEGUARD` / `UNCLEAR-CRITERIA`
+/// / `evidence=[` / `why=` / the 🔒 lock marker.
+fn plain_english_blocked(goal_id: &str, reason: &str, recurrence: u32) -> (String, String) {
+    let no_progress = is_no_progress_marker(reason);
+    let recurring = recurrence >= RECURRENCE_ESCALATION_THRESHOLD;
+    let problem = if no_progress {
+        format!(
+            "Goal \"{goal_id}\" is stuck: Simard can't automatically tell when it is \
+             finished, so it keeps re-investigating without shipping anything and is \
+             making no real progress."
+        )
+    } else if recurring {
+        format!(
+            "Goal \"{goal_id}\" keeps getting blocked for the same reason over and over, \
+             so Simard is unable to move it forward on its own."
+        )
+    } else {
+        format!("Goal \"{goal_id}\" is blocked and Simard can't move it forward on its own.")
+    };
+    let next_step = if no_progress {
+        "Give the goal a finish condition a test or check can confirm — for example a \
+         specific issue CLOSED, a specific PR MERGED, or a file/command the done-gate \
+         can check — or close the goal if a merged PR already delivered it."
+            .to_string()
+    } else {
+        "Review the goal, then either give it a concrete, checkable finish line or close \
+         it if it is out of scope or already delivered."
+            .to_string()
+    };
+    (problem, next_step)
 }
 
 #[cfg(test)]
 mod tests {
     use super::capabilities::*;
     use super::*;
+    use crate::error::SimardResult;
 
     // ── Fakes: each satisfies one capability with canned values. ────────────
     struct FakeStatus(ObservedState);
@@ -1772,6 +3913,136 @@ mod tests {
         }
     }
 
+    /// A fake drift sensor for the OBSERVE-rail tests: returns a fixed
+    /// observation (or `None`) so `run_cycle`'s drift wiring can be exercised
+    /// without a live git checkout.
+    struct FakeDriftObserver(Option<capabilities::DeployDriftObservation>);
+    impl deploy_trigger::DeployDriftObserver for FakeDriftObserver {
+        fn observe(&self) -> Option<capabilities::DeployDriftObservation> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn observe_rail_behind_main_emits_deploy_signal_and_admitted_plan() {
+        // A wired daemon whose running binary is behind merged main OBSERVEs the
+        // drift, raises `DeployDriftDetected`, and (high-risk autonomy on) plans
+        // an ADMITTED guarded Deploy to the merged head — no operator command.
+        let _guard = deploy_trigger::deploy_throttle_test_guard();
+        deploy_trigger::reset_global_deploy_throttle();
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(
+                capabilities::DeployDriftObservation {
+                    target_commit: "mergedHEADabc".to_string(),
+                    behind_commits: 3,
+                },
+            ))));
+        let report = ov.run_cycle().expect("cycle");
+
+        assert!(
+            report.signals.iter().any(|s| matches!(
+                s,
+                Signal::DeployDriftDetected { target_commit, behind_commits }
+                    if target_commit == "mergedHEADabc" && *behind_commits == 3
+            )),
+            "the observe rail must raise DeployDriftDetected"
+        );
+        let deploy = report
+            .plan
+            .iter()
+            .find(|p| p.intervention.label() == "deploy")
+            .expect("a Deploy intervention is planned");
+        assert!(deploy.admitted, "high-risk autonomy admits the deploy");
+        assert!(
+            matches!(&deploy.intervention, Intervention::Deploy { commit } if commit == "mergedHEADabc"),
+            "Deploy targets the merged head"
+        );
+        deploy_trigger::reset_global_deploy_throttle();
+    }
+
+    #[test]
+    fn observe_rail_suppresses_deploy_during_a_crash_loop() {
+        // Live crash-loop guard (#2590): never deploy into a restart storm, even
+        // with drift present. Reuses the observed restart churn + the deploy
+        // gate's threshold.
+        let _guard = deploy_trigger::deploy_throttle_test_guard();
+        deploy_trigger::reset_global_deploy_throttle();
+        let churny = ObservedState {
+            restart_churn: Some(deploy::CRASH_LOOP_CHURN_THRESHOLD),
+            ..ObservedState::default()
+        };
+        let mut ov = Overseer::new(caps(churny, false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(
+                capabilities::DeployDriftObservation {
+                    target_commit: "mergedHEADabc".to_string(),
+                    behind_commits: 1,
+                },
+            ))));
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            !report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "a crash-loop must suppress the deploy signal"
+        );
+        deploy_trigger::reset_global_deploy_throttle();
+    }
+
+    #[test]
+    fn observe_rail_anti_thrash_second_tick_within_window_does_not_re_emit() {
+        // The process-global throttle admits at most one deploy attempt per
+        // min-interval, so a drift re-observed on the very next tick (the daemon
+        // rebuilds the Overseer each tick) does not re-emit a deploy signal.
+        let _guard = deploy_trigger::deploy_throttle_test_guard();
+        deploy_trigger::reset_global_deploy_throttle();
+        let obs = || capabilities::DeployDriftObservation {
+            target_commit: "mergedHEADabc".to_string(),
+            behind_commits: 1,
+        };
+        let mut first = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(obs()))));
+        let r1 = first.run_cycle().expect("cycle 1");
+        assert!(
+            r1.signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "first tick emits the drift signal"
+        );
+        // A fresh Overseer (as the daemon rebuilds each tick) re-observes the
+        // same drift, but the process-global throttle is still inside its window.
+        let mut second = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_deploy_drift_observer(Box::new(FakeDriftObserver(Some(obs()))));
+        let r2 = second.run_cycle().expect("cycle 2");
+        assert!(
+            !r2.signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "second tick within the min-interval must not re-emit a deploy"
+        );
+        deploy_trigger::reset_global_deploy_throttle();
+    }
+
+    #[test]
+    fn observe_rail_is_inert_without_a_wired_observer() {
+        // No sensor wired ⇒ the rail never touches the throttle and never emits a
+        // deploy signal (the pre-wiring behaviour is exactly preserved).
+        let mut ov = Overseer::new(caps(ObservedState::default(), false, vec![]))
+            .with_high_risk_autonomy(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            !report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::DeployDriftDetected { .. })),
+            "an unwired rail emits no deploy signal"
+        );
+    }
+
     #[test]
     fn signals_only_fire_above_threshold() {
         let below = ObservedState {
@@ -1864,6 +4135,163 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_investigation_for_an_in_flight_signature_is_held() {
+        // Live-daemon defect (2026-07-15): the overseer had TWO recipe-runner
+        // processes (PIDs 1074394 and 1095553) investigating the SAME recurring
+        // signature simultaneously, because a recurring `overseer-obs:goal:blocked`
+        // signature re-observed each cycle launched a FRESH `smart-orchestrator`
+        // recipe while the prior one was still running. `sequence_group` is `None`
+        // for these ProcessHealth/RecurringSignature launches, so the conflict
+        // sequencer never dedups them. A launch-site guard must ensure a given
+        // goal / recurring-signature has at most ONE investigation in flight.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]));
+        let brief = RecipeBrief {
+            task_description: "recurring signature seen 2× in cognitive memory \
+                               (overseer-obs:goal:blocked:simard-identity-coherence)"
+                .to_string(),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let iv = Intervention::LaunchRecipe {
+            brief: brief.clone(),
+        };
+
+        // Cycle 1: the first investigation for this signature is admitted and the
+        // recipe-runner is launched (still Running, per FakeRecipes::poll).
+        let first = ov.gate(&iv, &ObservedState::default(), &mut 0);
+        assert!(
+            first.admitted,
+            "the first investigation for a signature must be admitted"
+        );
+        let launched = ov.act(&first.intervention).expect("launch");
+        assert!(
+            matches!(launched, ActOutcome::Launched(_)),
+            "the admitted investigation must actually launch a workstream"
+        );
+
+        // Cycle 2: the SAME recurring signature is re-observed while the first
+        // investigation is still in flight. It MUST be held — never a second
+        // concurrent recipe-runner for the same signature.
+        let second = ov.gate(&iv, &ObservedState::default(), &mut 0);
+        assert!(
+            !second.admitted,
+            "a duplicate investigation for an in-flight signature must be HELD, \
+             got admitted plan: {second:?}"
+        );
+        assert!(
+            second.note.to_ascii_lowercase().contains("flight")
+                || second.note.to_ascii_lowercase().contains("in-flight")
+                || second.note.to_ascii_lowercase().contains("already"),
+            "the hold reason must explain the in-flight dedup: {:?}",
+            second.note
+        );
+
+        // A DIFFERENT signature is unaffected — the guard dedups per signature,
+        // never a blanket launch freeze.
+        let other = Intervention::LaunchRecipe {
+            brief: RecipeBrief {
+                task_description: "recurring signature seen 2× in cognitive memory \
+                                   (overseer-obs:goal:blocked:some-other-goal)"
+                    .to_string(),
+                target_repo: "rysweet/Simard".to_string(),
+                sequence_group: None,
+            },
+        };
+        let other_plan = ov.gate(&other, &ObservedState::default(), &mut 0);
+        assert!(
+            other_plan.admitted,
+            "an investigation for a DIFFERENT signature must still be admitted"
+        );
+    }
+
+    /// FINDING 1 (issue #4400 / PR #4403) — the CROSS-TICK dedup contract at the
+    /// `recipe_dedup_key` seam. A stale-engineer investigation brief carries a
+    /// STABLE `stale-investigation:<sanitized_claim_key>` token (distinct from the
+    /// `overseer-obs:` write-back prefix, issue #4128). Two ticks for the SAME
+    /// still-stale claim embed the SAME token but DIFFERENT volatile prose
+    /// (timestamped evidence dir, growing idle age); the dedup key MUST key on the
+    /// stable token so the in-flight guard holds the duplicate. Two DIFFERENT
+    /// claims MUST map to distinct keys so neither is starved.
+    ///
+    /// Pre-fix this does not compile (`STALE_INVESTIGATION_DEDUP_PREFIX` does not
+    /// exist) and would fail (the key is the whole volatile task description, so
+    /// two ticks differ).
+    #[test]
+    fn stale_investigation_briefs_for_the_same_claim_share_a_stable_dedup_key() {
+        use crate::overseer::claim_reaper::{
+            STALE_INVESTIGATION_DEDUP_PREFIX, sanitize_claim_key_for_archive,
+        };
+
+        let claim_key = "rysweet/Simard:quiet-idle-goal";
+        let token = format!(
+            "{STALE_INVESTIGATION_DEDUP_PREFIX}{}",
+            sanitize_claim_key_for_archive(claim_key)
+        );
+
+        // Tick 1 and tick 2 for the SAME claim: identical stable token, DIFFERENT
+        // volatile prose (a fresh timestamped evidence dir + a larger idle age).
+        let tick1 = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({token}). \
+                 Evidence: /state/reaped-engineers/quiet-idle-goal-1000/. Idle age: 9000s."
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        let tick2 = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({token}). \
+                 Evidence: /state/reaped-engineers/quiet-idle-goal-2500/. Idle age: 10500s."
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+
+        let k1 = recipe_dedup_key(&tick1);
+        let k2 = recipe_dedup_key(&tick2);
+        assert_eq!(
+            k1, k2,
+            "two ticks for the SAME still-stale claim must map to the SAME dedup key \
+             despite volatile prose drift; got {k1:?} vs {k2:?}"
+        );
+        assert_eq!(
+            k1, token,
+            "the dedup key must be the stable stale-investigation token, not the volatile \
+             task description; got {k1:?}"
+        );
+
+        // A DIFFERENT claim ⇒ a DIFFERENT key (no false dedup starving a distinct
+        // investigation).
+        let other_key = "rysweet/Simard:a-different-goal";
+        let other = RecipeBrief {
+            task_description: format!(
+                "Investigate a quiet/idle engineer BEFORE Simard reaps it ({}{}). \
+                 Evidence: /state/reaped-engineers/a-different-goal-1000/. Idle age: 9000s.",
+                STALE_INVESTIGATION_DEDUP_PREFIX,
+                sanitize_claim_key_for_archive(other_key),
+            ),
+            target_repo: "rysweet/Simard".to_string(),
+            sequence_group: None,
+        };
+        assert_ne!(
+            recipe_dedup_key(&other),
+            k1,
+            "two DIFFERENT claims must map to DISTINCT dedup keys"
+        );
+
+        // The stable token MUST NOT reuse the `overseer-obs:` write-back prefix,
+        // which carries separate self-referential-loop semantics (issue #4128).
+        assert_ne!(
+            STALE_INVESTIGATION_DEDUP_PREFIX, OVERSEER_OBS_PREFIX,
+            "the stale-investigation token must be distinct from the overseer-obs prefix"
+        );
+        assert!(
+            !k1.starts_with(OVERSEER_OBS_PREFIX),
+            "the stale-investigation dedup key must not be an overseer-obs key: {k1:?}"
+        );
+    }
+
+    #[test]
     fn anti_recursion_refuses_own_pr() {
         let guard = RecursionGuard {
             author_login: "simard-overseer[bot]".to_string(),
@@ -1918,5 +4346,934 @@ mod tests {
             })
             .expect("act");
         assert_eq!(out, ActOutcome::Escalated);
+    }
+
+    // ── #4097: a NotMergeReady from the authoritative agentic merge step must
+    //    ESCALATE (be handed to the operator), never be tallied as an error and
+    //    never a blind merge. A genuine capability/safety error still propagates.
+
+    /// A `PrOps` whose `verify()` passes the objective pre-filter but whose
+    /// `merge()` returns a scripted result — so we can drive the Act handler's
+    /// mapping of the authoritative merge step's outcome.
+    struct ScriptedMergePrs {
+        ready: bool,
+        merge_result: fn(&str, u32) -> Result<(), OverseerError>,
+    }
+    impl PrOps for ScriptedMergePrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: self.ready,
+                checks: vec![],
+            })
+        }
+        fn merge(&self, repo: &str, pr: u32) -> Result<(), OverseerError> {
+            (self.merge_result)(repo, pr)
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+    }
+
+    fn caps_with_prs(prs: Box<dyn PrOps>) -> Capabilities {
+        Capabilities {
+            status: Box::new(FakeStatus(ObservedState::default())),
+            recipes: Box::new(FakeRecipes),
+            prs,
+            deployer: Box::new(FakeDeployer),
+            meetings: Box::new(FakeMeetings),
+            issues: Box::new(FakeIssues),
+            goals: Box::new(FakeGoals(vec![])),
+            auditor: Box::new(FakeAuditor),
+            memory: Box::new(capabilities::InertMemoryRecall),
+        }
+    }
+
+    #[test]
+    fn act_escalates_when_merge_returns_not_merge_ready() {
+        // verify() is ready (objective pre-filter passed), but the authoritative
+        // agentic merge step refuses → NotMergeReady. The Act handler must map
+        // this to an ESCALATION, not propagate it as an error.
+        let prs = ScriptedMergePrs {
+            ready: true,
+            merge_result: |_repo, pr| {
+                Err(OverseerError::NotMergeReady {
+                    pr,
+                    reason: "the merge-readiness review did not approve yet".to_string(),
+                })
+            },
+        };
+        let mut ov = Overseer::new(caps_with_prs(Box::new(prs)));
+        let out = ov
+            .act(&Intervention::VerifyAndMergePr {
+                repo: "rysweet/Simard".to_string(),
+                pr: 4097,
+            })
+            .expect("a NotMergeReady must be handled as an escalation, not an Err");
+        assert_eq!(
+            out,
+            ActOutcome::Escalated,
+            "a not-ready-now merge refusal escalates to the operator"
+        );
+    }
+
+    #[test]
+    fn act_propagates_a_genuine_capability_error_from_merge() {
+        // A genuine infra/safety failure (e.g. the anti-recursion guard, a `gh`
+        // failure) must still propagate as an Err so the tick counts it under
+        // `errors` — never silently downgraded to an escalation.
+        let prs = ScriptedMergePrs {
+            ready: true,
+            merge_result: |_repo, _pr| {
+                Err(OverseerError::Capability {
+                    what: "merge.recursion",
+                    detail: "refused own PR".to_string(),
+                })
+            },
+        };
+        let mut ov = Overseer::new(caps_with_prs(Box::new(prs)));
+        let res = ov.act(&Intervention::VerifyAndMergePr {
+            repo: "rysweet/Simard".to_string(),
+            pr: 4097,
+        });
+        assert!(
+            matches!(res, Err(OverseerError::Capability { .. })),
+            "a genuine capability/safety error must propagate as an error, got {res:?}"
+        );
+    }
+
+    // ── ecosystem-observe rail (issue #2419) ────────────────────────────────
+
+    /// A fake [`ecosystem_observe::EcosystemObserver`] that records the roster +
+    /// in-flight refs it was handed and returns a scripted outcome — no
+    /// subprocess, no `gh`, no recipe runner.
+    type EcoCallLog = std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>>;
+    struct FakeEcoObserver {
+        outcome: SimardResult<Option<String>>,
+        seen: EcoCallLog,
+    }
+    impl FakeEcoObserver {
+        fn returning(outcome: SimardResult<Option<String>>) -> Self {
+            Self {
+                outcome,
+                seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+        /// Build one that shares its call log with the caller, so a test can
+        /// inspect what the rail forwarded after the observer is boxed.
+        fn with_log(outcome: SimardResult<Option<String>>) -> (Self, EcoCallLog) {
+            let seen: EcoCallLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    outcome,
+                    seen: std::sync::Arc::clone(&seen),
+                },
+                seen,
+            )
+        }
+    }
+    impl ecosystem_observe::EcosystemObserver for FakeEcoObserver {
+        fn observe(
+            &self,
+            roster: &[String],
+            inflight_refs: &[String],
+        ) -> SimardResult<Option<String>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((roster.to_vec(), inflight_refs.to_vec()));
+            match &self.outcome {
+                Ok(v) => Ok(v.clone()),
+                Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
+                    base_type: "ecosystem-observe".to_string(),
+                    reason: "scripted failure".to_string(),
+                }),
+            }
+        }
+    }
+
+    fn overseer_with_eco(outcome: SimardResult<Option<String>>, every_n: u64) -> Overseer {
+        // No process-health signal, so any launch in the plan comes solely from
+        // the ecosystem-observe rail.
+        Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_ecosystem_observer(
+                vec!["rysweet/Simard".to_string(), "rysweet/azlin".to_string()],
+                Box::new(FakeEcoObserver::returning(outcome)),
+                every_n,
+            )
+    }
+
+    #[test]
+    fn ecosystem_observe_routes_brief_into_a_gated_launch() {
+        let brief = "PROBLEM: azlin CI red -> brief: fix flaky provisioning test".to_string();
+        let mut ov = overseer_with_eco(Ok(Some(brief.clone())), 1);
+        let report = ov.run_cycle().expect("cycle");
+        // The rail's brief became one admitted LaunchRecipe in the plan.
+        let launches: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| p.intervention.label() == "launch_recipe")
+            .collect();
+        assert_eq!(launches.len(), 1, "the rail adds exactly one launch");
+        assert!(launches[0].admitted, "the launch is gated-admitted");
+        match &launches[0].intervention {
+            Intervention::LaunchRecipe { brief: b } => {
+                assert_eq!(
+                    b.task_description, brief,
+                    "the opaque brief is forwarded verbatim"
+                );
+                assert_eq!(b.target_repo, ECOSYSTEM_OBSERVE_TARGET);
+            }
+            other => panic!("expected LaunchRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ecosystem_observe_none_adds_no_launch() {
+        let mut ov = overseer_with_eco(Ok(None), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "a None observation fabricates no launch"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_failure_degrades_without_launch() {
+        let mut ov = overseer_with_eco(
+            Err(crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "ecosystem-observe".to_string(),
+                reason: "boom".to_string(),
+            }),
+            1,
+        );
+        let report = ov
+            .run_cycle()
+            .expect("cycle must not error when the rail fails");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "a rail failure degrades safely and fabricates no launch"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_skipped_when_disabled() {
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(false) // opt-out disables the rail
+            .with_ecosystem_observer(
+                vec!["rysweet/Simard".to_string()],
+                Box::new(FakeEcoObserver::returning(Ok(Some("brief".to_string())))),
+                1,
+            );
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "the gap-scan opt-out also disables the ecosystem-observe rail"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_respects_every_n_cadence() {
+        // every_n = 2 → observe on ticks 0, 2, 4; skip 1, 3.
+        let mut ov = overseer_with_eco(Ok(Some("brief".to_string())), 2);
+        let launched = |r: &CycleReport| {
+            r.plan
+                .iter()
+                .any(|p| p.intervention.label() == "launch_recipe")
+        };
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 0 observes");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 1 skipped");
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 2 observes");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 3 skipped");
+    }
+
+    #[test]
+    fn ecosystem_observe_unwired_is_a_noop() {
+        // No `.with_ecosystem_observer(...)` → the pass is skipped entirely.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "an unwired rail never contributes a launch"
+        );
+    }
+
+    #[test]
+    fn ecosystem_observe_hands_inflight_refs_for_dedup() {
+        let (observer, log) = FakeEcoObserver::with_log(Ok(None));
+        let in_flight = vec![InFlightItem {
+            id: "g1".to_string(),
+            source: "ooda".to_string(),
+            refs: vec!["issue:rysweet/Simard#42".to_string()],
+        }];
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, in_flight))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_ecosystem_observer(vec!["rysweet/Simard".to_string()], Box::new(observer), 1);
+        ov.run_cycle().expect("cycle");
+        let calls = log.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the rail invokes the observer once per due tick"
+        );
+        assert_eq!(
+            calls[0].0,
+            vec!["rysweet/Simard".to_string()],
+            "the roster is forwarded to the observer"
+        );
+        assert_eq!(
+            calls[0].1,
+            vec!["issue:rysweet/Simard#42".to_string()],
+            "Simard's in-flight OODA refs are flattened and forwarded for dedup"
+        );
+    }
+
+    // ── [standing] agentic health-review wiring ───────────────────────────────
+
+    /// A scripted [`health_review::HealthReviewer`] returning a fixed outcome and
+    /// counting the reviews it saw, so a test can assert cadence + routing.
+    struct FakeHealthReviewer {
+        outcome: SimardResult<Vec<Intervention>>,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl FakeHealthReviewer {
+        fn returning(outcome: SimardResult<Vec<Intervention>>) -> Self {
+            Self {
+                outcome,
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+        fn with_counter(
+            outcome: SimardResult<Vec<Intervention>>,
+        ) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    outcome,
+                    calls: std::sync::Arc::clone(&calls),
+                },
+                calls,
+            )
+        }
+    }
+    impl health_review::HealthReviewer for FakeHealthReviewer {
+        fn review(&self) -> SimardResult<health_review::HealthReviewOutcome> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.outcome {
+                Ok(ivs) => Ok(health_review::HealthReviewOutcome {
+                    interventions: ivs.clone(),
+                    // A scripted pass always carries an honest verdict, so the
+                    // wiring can assert the surfaced `Reviewed { .. }` status.
+                    summary: Some("fake health-review verdict".to_string()),
+                }),
+                Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
+                    base_type: "overseer-health-review".to_string(),
+                    reason: "scripted failure".to_string(),
+                }),
+            }
+        }
+    }
+
+    /// A [`health_review::HealthReviewer`] that returns an `Ok` outcome carrying
+    /// NO verdict (`summary: None`) and no interventions — the exact fail-closed
+    /// shape the real [`health_review::RecipeHealthReviewer`] degrades to on an
+    /// infra fault (recipe-runner missing, parse-miss ladder exhausted). Distinct
+    /// from `FakeHealthReviewer`'s `Err`, which models a caller-visible fault.
+    struct FakeVerdictlessReviewer;
+    impl health_review::HealthReviewer for FakeVerdictlessReviewer {
+        fn review(&self) -> SimardResult<health_review::HealthReviewOutcome> {
+            Ok(health_review::HealthReviewOutcome::default())
+        }
+    }
+
+    fn launch_iv(desc: &str) -> Intervention {
+        Intervention::LaunchRecipe {
+            brief: RecipeBrief {
+                task_description: desc.to_string(),
+                target_repo: "rysweet/Simard".to_string(),
+                sequence_group: None,
+            },
+        }
+    }
+    fn escalate_iv(goal_id: &str) -> Intervention {
+        Intervention::EscalateBlockedGoal {
+            goal_id: goal_id.to_string(),
+            reason: "crash_loop".to_string(),
+            why: "shared failure signature across goals".to_string(),
+            problem: "The daemon is stuck retrying the same broken step over and over.".to_string(),
+            next_step: "A human should inspect the failing step and unblock it.".to_string(),
+            link: None,
+        }
+    }
+
+    fn overseer_with_health(outcome: SimardResult<Vec<Intervention>>, every_n: u64) -> Overseer {
+        // No process-health signal, so any intervention in the plan comes solely
+        // from the health-review rail.
+        Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(FakeHealthReviewer::returning(outcome)), every_n)
+            .with_health_review_enabled(true)
+    }
+
+    #[test]
+    fn health_review_routes_launch_and_escalate_into_gated_plan() {
+        let outcome = Ok(vec![
+            launch_iv("fix the crash-looping provisioning step"),
+            escalate_iv("g-42"),
+        ]);
+        let mut ov = overseer_with_health(outcome, 1);
+        let report = ov.run_cycle().expect("cycle");
+        let launches: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| p.intervention.label() == "launch_recipe")
+            .collect();
+        assert_eq!(launches.len(), 1, "the rail adds exactly one launch");
+        assert!(launches[0].admitted, "the launch is gated-admitted");
+        let escalations: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| matches!(p.intervention, Intervention::EscalateBlockedGoal { .. }))
+            .collect();
+        assert_eq!(escalations.len(), 1, "the rail adds exactly one escalation");
+        assert!(
+            escalations[0].admitted,
+            "the escalation is gated-admitted with goal-health on"
+        );
+        // The pass's verdict is SURFACED on the observed state (never discarded):
+        // both typed decisions are counted, so an operator sees "reviewed, acted".
+        match report.observed.health_review_status {
+            HealthReviewStatus::Reviewed {
+                decisions,
+                ref summary,
+            } => {
+                assert_eq!(decisions, 2, "both decisions are counted in the verdict");
+                assert!(
+                    !summary.is_empty(),
+                    "the verdict carries a non-empty summary"
+                );
+            }
+            other => panic!("expected a surfaced Reviewed verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_review_healthy_verdict_surfaces_reviewed_with_zero_decisions() {
+        // The whole point of surfacing the verdict: a HEALTHY pass (zero
+        // interventions) must leave an OBSERVABLE trace — `Reviewed { 0 }` — so
+        // an operator can tell "reviewed, nothing to do" from "never ran"
+        // (`NotRun`). No silent no-op.
+        let mut ov = overseer_with_health(Ok(vec![]), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::Reviewed {
+                summary: "fake health-review verdict".to_string(),
+                decisions: 0,
+            },
+            "a HEALTHY pass surfaces a Reviewed verdict with zero decisions"
+        );
+    }
+
+    #[test]
+    fn health_review_failure_surfaces_degraded_status() {
+        // A caller-visible rail fault takes no action AND is LOUD: the observed
+        // status is `Degraded`, never a silent `NotRun`/healthy.
+        let mut ov = overseer_with_health(
+            Err(crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "overseer-health-review".to_string(),
+                reason: "boom".to_string(),
+            }),
+            1,
+        );
+        let report = ov
+            .run_cycle()
+            .expect("cycle must not error on a rail fault");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::Degraded,
+            "a degraded pass is surfaced LOUD, never a silent OFF"
+        );
+    }
+
+    #[test]
+    fn health_review_ok_without_verdict_surfaces_degraded_status() {
+        // The real rail degrades to `Ok(HealthReviewOutcome::default())` (no
+        // verdict) on an infra fault — NOT `Err`. That fail-closed `Ok(None)`
+        // shape must still surface `Degraded`, never a silent healthy-looking
+        // `Reviewed`, because `summary` is present exactly when the pass produced
+        // an honest verdict.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(FakeVerdictlessReviewer), 1)
+            .with_health_review_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::Degraded,
+            "an Ok pass with no verdict is surfaced Degraded, never a silent healthy Reviewed"
+        );
+    }
+
+    #[test]
+    fn health_review_unwired_leaves_status_not_run() {
+        // No reviewer wired → no pass ran → the verdict stays the additive
+        // `NotRun` default (distinct from a HEALTHY `Reviewed { 0 }`).
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.health_review_status,
+            HealthReviewStatus::NotRun,
+            "an unwired rail leaves the verdict NotRun (never ran)"
+        );
+    }
+
+    #[test]
+    fn health_review_off_cadence_leaves_status_not_run() {
+        // every_n = 2 → tick 1 is off-cadence: no pass runs, so the verdict stays
+        // NotRun on the skipped tick even though tick 0 reviewed.
+        let mut ov = overseer_with_health(Ok(vec![launch_iv("fix")]), 2);
+        let r0 = ov.run_cycle().expect("cycle");
+        assert!(
+            matches!(
+                r0.observed.health_review_status,
+                HealthReviewStatus::Reviewed { .. }
+            ),
+            "tick 0 reviews and surfaces a verdict"
+        );
+        let r1 = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            r1.observed.health_review_status,
+            HealthReviewStatus::NotRun,
+            "an off-cadence tick runs no pass and leaves the verdict NotRun"
+        );
+    }
+
+    #[test]
+    fn health_review_healthy_verdict_adds_nothing() {
+        // A HEALTHY verdict parses to an empty Vec at the rail; the pass adds
+        // nothing to the plan.
+        let mut ov = overseer_with_health(Ok(vec![]), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report.plan.iter().all(|p| {
+                p.intervention.label() != "launch_recipe"
+                    && !matches!(p.intervention, Intervention::EscalateBlockedGoal { .. })
+            }),
+            "a HEALTHY review fabricates no intervention"
+        );
+    }
+
+    #[test]
+    fn health_review_failure_degrades_without_intervention() {
+        let mut ov = overseer_with_health(
+            Err(crate::error::SimardError::AdapterInvocationFailed {
+                base_type: "overseer-health-review".to_string(),
+                reason: "boom".to_string(),
+            }),
+            1,
+        );
+        let report = ov
+            .run_cycle()
+            .expect("cycle must not error when the rail fails");
+        assert!(
+            report.plan.iter().all(|p| {
+                p.intervention.label() != "launch_recipe"
+                    && !matches!(p.intervention, Intervention::EscalateBlockedGoal { .. })
+            }),
+            "a rail failure degrades safely and fabricates nothing"
+        );
+    }
+
+    #[test]
+    fn health_review_disabled_when_gap_scan_disabled_surfaces_loud_status() {
+        // The shared SIMARD_OVERSEER_GAP_SCAN throttle disables ALL agentic
+        // overseer scans, health-review included. It must do so LOUD: the
+        // reviewer is never invoked, the plan gains nothing, AND the observed
+        // status is `Disabled { reason }` naming the gap-scan knob — never a
+        // silent `NotRun` that an operator cannot distinguish from "never wired".
+        let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(false) // shared throttle disables the rail
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(reviewer), 1)
+            .with_health_review_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a gap-scan-disabled rail never invokes the reviewer"
+        );
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "the gap-scan opt-out also disables the health-review rail"
+        );
+        match report.observed.health_review_status {
+            HealthReviewStatus::Disabled { ref reason } => assert!(
+                reason.contains(config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+                "the disable breadcrumb names the gap-scan knob, got {reason:?}"
+            ),
+            other => panic!("expected a LOUD Disabled status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_review_disabled_when_dedicated_flag_disabled_surfaces_loud_status() {
+        // Reviewer wired, gap-scan on, but the dedicated opt-out is off. The pass
+        // never invokes the reviewer, contributes nothing, and surfaces a LOUD
+        // `Disabled { reason }` naming the dedicated knob (never silent NotRun).
+        let (reviewer, calls) = FakeHealthReviewer::with_counter(Ok(vec![launch_iv("fix")]));
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(true)
+            .with_health_reviewer(Box::new(reviewer), 1)
+            .with_health_review_enabled(false);
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a disabled rail never invokes the reviewer"
+        );
+        assert!(
+            report
+                .plan
+                .iter()
+                .all(|p| p.intervention.label() != "launch_recipe"),
+            "a disabled rail contributes nothing"
+        );
+        match report.observed.health_review_status {
+            HealthReviewStatus::Disabled { ref reason } => assert!(
+                reason.contains(config::SIMARD_OVERSEER_HEALTH_REVIEW_ENV),
+                "the disable breadcrumb names the dedicated knob, got {reason:?}"
+            ),
+            other => panic!("expected a LOUD Disabled status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn health_review_respects_every_n_cadence() {
+        // every_n = 2 → review on ticks 0, 2; skip 1, 3.
+        let mut ov = overseer_with_health(Ok(vec![launch_iv("fix")]), 2);
+        let launched = |r: &CycleReport| {
+            r.plan
+                .iter()
+                .any(|p| p.intervention.label() == "launch_recipe")
+        };
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 0 reviews");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 1 skipped");
+        assert!(launched(&ov.run_cycle().unwrap()), "tick 2 reviews");
+        assert!(!launched(&ov.run_cycle().unwrap()), "tick 3 skipped");
+    }
+
+    #[test]
+    fn health_review_unwired_is_a_noop() {
+        // No `.with_health_reviewer(...)` → the pass is skipped entirely.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report.plan.iter().all(|p| {
+                p.intervention.label() != "launch_recipe"
+                    && !matches!(p.intervention, Intervention::EscalateBlockedGoal { .. })
+            }),
+            "an unwired rail never contributes anything"
+        );
+    }
+
+    #[test]
+    fn health_review_escalation_held_when_goal_health_disabled() {
+        // Reviewer emits an escalation, but goal-board health is opted out: the
+        // gate HOLDS it (present, not admitted) rather than acting.
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_goal_health_enabled(false)
+            .with_health_reviewer(
+                Box::new(FakeHealthReviewer::returning(Ok(vec![escalate_iv("g-7")]))),
+                1,
+            )
+            .with_health_review_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        let escalations: Vec<_> = report
+            .plan
+            .iter()
+            .filter(|p| matches!(p.intervention, Intervention::EscalateBlockedGoal { .. }))
+            .collect();
+        assert_eq!(
+            escalations.len(),
+            1,
+            "the escalation is present in the plan"
+        );
+        assert!(
+            !escalations[0].admitted,
+            "goal-health opt-out holds the escalation (not admitted)"
+        );
+    }
+
+    // ── #4097 observe-merge-queue reasoning wiring ────────────────────────────
+
+    /// A scripted [`merge_queue_observe::MergeQueueReasoner`] that returns a fixed
+    /// outcome and records the requests it saw, so a test can assert the rail
+    /// forwarded the resolved scope + in-flight refs.
+    type MqCallLog = std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Vec<String>)>>>;
+    struct FakeMergeQueueReasoner {
+        outcome: SimardResult<Option<String>>,
+        seen: MqCallLog,
+    }
+    impl FakeMergeQueueReasoner {
+        fn with_log(outcome: SimardResult<Option<String>>) -> (Self, MqCallLog) {
+            let seen: MqCallLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    outcome,
+                    seen: std::sync::Arc::clone(&seen),
+                },
+                seen,
+            )
+        }
+    }
+    impl merge_queue_observe::MergeQueueReasoner for FakeMergeQueueReasoner {
+        fn observe(
+            &self,
+            request: merge_queue_observe::MergeQueueObserveRequest,
+        ) -> SimardResult<Option<String>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.scope.clone(), request.inflight_refs.clone()));
+            match &self.outcome {
+                Ok(v) => Ok(v.clone()),
+                Err(_) => Err(crate::error::SimardError::AdapterInvocationFailed {
+                    base_type: "observe-merge-queue".to_string(),
+                    reason: "scripted failure".to_string(),
+                }),
+            }
+        }
+    }
+
+    /// A `PrOps` whose `project_reasoned_ready_prs` returns a scripted projection,
+    /// standing in for the deterministic rail that fetches authoritative `gh`
+    /// facts. Everything else is trivial.
+    struct ProjectingPrs {
+        projected: Vec<PrRef>,
+    }
+    impl PrOps for ProjectingPrs {
+        fn verify(&self, _repo: &str, _pr: u32) -> Result<VerifyReport, OverseerError> {
+            Ok(VerifyReport {
+                ready: true,
+                checks: vec![],
+            })
+        }
+        fn merge(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+        fn resolve_conflict(&self, _repo: &str, _pr: u32) -> Result<(), OverseerError> {
+            Ok(())
+        }
+        fn project_reasoned_ready_prs(
+            &self,
+            _reasoned: &[capabilities::ReasonedPr],
+            _overseer_login: &str,
+        ) -> Vec<PrRef> {
+            self.projected.clone()
+        }
+    }
+
+    const MQ_BRIEF: &str = r#"{
+        "reasoned_prs": [
+            {"repo": "rysweet/Simard", "pr": 10, "disposition": "stale", "rationale": "no activity for 30 days"},
+            {"repo": "rysweet/Simard", "pr": 11, "disposition": "ready-for-merge", "rationale": "green + mergeable"}
+        ],
+        "triaged_issues": [
+            {"repo": "rysweet/Simard", "issue": 20, "priority": "high", "readiness": "ready", "next_action": "start a workstream"}
+        ]
+    }"#;
+
+    #[test]
+    fn merge_queue_reasoning_populates_observed_state_default_on_over_roster() {
+        // Unset SIMARD_MERGE_REASONING_SCOPE => default-ON over the governed
+        // roster. The agentic brief populates the new reasoned fields even though
+        // SIMARD_AUTOMERGE_* are unset — the dead-wire fix (#4097).
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_merge_queue_reasoner(
+                vec!["rysweet/Simard".to_string()],
+                Box::new(FakeMergeQueueReasoner::with_log(Ok(Some(MQ_BRIEF.to_string()))).0),
+                1,
+            );
+        let report = ov.run_cycle().expect("cycle");
+        assert_eq!(
+            report.observed.reasoned_prs.len(),
+            2,
+            "both reasoned PRs survive the roster trust boundary"
+        );
+        assert_eq!(report.observed.triaged_issues.len(), 1);
+        assert_eq!(
+            report.observed.merge_reasoning_status,
+            capabilities::MergeReasoningStatus::RosterWide,
+            "unset scope => reasoning ran default-ON over the governed roster"
+        );
+        // A stale-PR reasoning conclusion becomes a StalePrDetected signal…
+        assert!(
+            report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::StalePrDetected { pr, .. } if *pr == 10)),
+            "the stale reasoning conclusion drives a StalePrDetected signal"
+        );
+        // …but a ReadyForMerge conclusion NEVER fabricates a PrReadyToMerge (only
+        // the re-narrowed ready_prs projection may) — the core safety invariant.
+        assert!(
+            !report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::PrReadyToMerge { pr, .. } if *pr == 11)),
+            "ReadyForMerge reasoning alone must never authorize a merge"
+        );
+    }
+
+    #[test]
+    fn merge_queue_reasoning_forwards_scope_and_inflight_refs() {
+        let (reasoner, log) = FakeMergeQueueReasoner::with_log(Ok(None));
+        let in_flight = vec![InFlightItem {
+            id: "g1".to_string(),
+            source: "ooda".to_string(),
+            refs: vec!["pr:rysweet/Simard#10".to_string()],
+        }];
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, in_flight))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(true)
+            .with_merge_queue_reasoner(vec!["rysweet/Simard".to_string()], Box::new(reasoner), 1);
+        ov.run_cycle().expect("cycle");
+        let calls = log.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the rail invokes the reasoner once per tick"
+        );
+        assert_eq!(calls[0].0, vec!["rysweet/Simard".to_string()]);
+        assert_eq!(calls[0].1, vec!["pr:rysweet/Simard#10".to_string()]);
+    }
+
+    #[test]
+    fn merge_queue_projection_derives_ready_prs_from_reasoning() {
+        // The deterministic rail re-narrows the agentic ReadyForMerge proposals
+        // into ready_prs. Here the projecting PrOps admits PR #11.
+        let projected = vec![PrRef {
+            repo: "rysweet/Simard".to_string(),
+            pr: 11,
+        }];
+        let mut ov = Overseer::new(Capabilities {
+            status: Box::new(FakeStatus(ObservedState::default())),
+            recipes: Box::new(FakeRecipes),
+            prs: Box::new(ProjectingPrs { projected }),
+            deployer: Box::new(FakeDeployer),
+            meetings: Box::new(FakeMeetings),
+            issues: Box::new(FakeIssues),
+            goals: Box::new(FakeGoals(vec![])),
+            auditor: Box::new(FakeAuditor),
+            memory: Box::new(capabilities::InertMemoryRecall),
+        })
+        .with_high_risk_autonomy(true)
+        .with_gap_scan_enabled(true)
+        .with_merge_queue_reasoner(
+            vec!["rysweet/Simard".to_string()],
+            Box::new(FakeMergeQueueReasoner::with_log(Ok(Some(MQ_BRIEF.to_string()))).0),
+            1,
+        );
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            report
+                .observed
+                .ready_prs
+                .iter()
+                .any(|p| p.repo == "rysweet/Simard" && p.pr == 11),
+            "the ReadyForMerge proposal is projected into ready_prs via the rail"
+        );
+        // ready_prs drives PrReadyToMerge — now legitimately, from the projection.
+        assert!(
+            report
+                .signals
+                .iter()
+                .any(|s| matches!(s, Signal::PrReadyToMerge { pr, .. } if *pr == 11)),
+            "the projected ready PR is the ONLY path to PrReadyToMerge"
+        );
+    }
+
+    #[test]
+    fn merge_queue_reasoning_unwired_leaves_observation_untouched() {
+        // No reasoner wired => the pass is skipped and the new fields keep their
+        // additive defaults (Unknown status, empty reasoned/triaged).
+        let mut ov =
+            Overseer::new(caps(ObservedState::default(), true, vec![])).with_gap_scan_enabled(true);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(report.observed.reasoned_prs.is_empty());
+        assert!(report.observed.triaged_issues.is_empty());
+        assert_eq!(
+            report.observed.merge_reasoning_status,
+            capabilities::MergeReasoningStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn merge_queue_reasoning_gap_scan_optout_is_visible_not_silent() {
+        // The gap-scan resource opt-out throttles ALL agentic overseer scans,
+        // including merge-queue reasoning. #4097 exists to kill SILENT hard-OFFs,
+        // so this path must surface WHY reasoning stopped (a loud Disabled status),
+        // never leave a silent `Unknown`. A reasoner IS wired; only the opt-out
+        // holds it — proving the visibility comes from the opt-out, not an absence.
+        let (reasoner, log) = FakeMergeQueueReasoner::with_log(Ok(Some(MQ_BRIEF.to_string())));
+        let mut ov = Overseer::new(caps(ObservedState::default(), true, vec![]))
+            .with_high_risk_autonomy(true)
+            .with_gap_scan_enabled(false) // resource opt-out
+            .with_merge_queue_reasoner(vec!["rysweet/Simard".to_string()], Box::new(reasoner), 1);
+        let report = ov.run_cycle().expect("cycle");
+        assert!(
+            matches!(
+                report.observed.merge_reasoning_status,
+                capabilities::MergeReasoningStatus::Disabled { .. }
+            ),
+            "the gap-scan opt-out must surface a loud Disabled status, not a silent Unknown; got {:?}",
+            report.observed.merge_reasoning_status
+        );
+        assert!(
+            report.observed.reasoned_prs.is_empty(),
+            "the opt-out still fabricates no reasoning"
+        );
+        assert_eq!(
+            log.lock().expect("log").len(),
+            0,
+            "the reasoner recipe is never spawned under the resource opt-out"
+        );
     }
 }

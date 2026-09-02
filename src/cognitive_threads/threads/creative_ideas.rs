@@ -31,12 +31,18 @@ use crate::cognitive_memory::creative_idea::{
 };
 use crate::creative_ideas::CreativeIdeasConfig;
 use crate::creative_ideas::dedup;
+use crate::creative_ideas::dedup_gate::{self, PlannedAction};
 use crate::creative_ideas::pipeline::{AgenticIdeaPipeline, IdeaPipeline, RouteOutcome};
 use crate::creative_ideas::source::AgenticIdeaSource;
 use crate::error::{SimardError, SimardResult};
+use crate::ooda_brain::{DeterministicLifecycleBrain, OodaBrain, ThreadName};
 
 /// Stable telemetry id.
 pub const CREATIVE_IDEAS_ID: &str = "creative_ideas";
+/// The agentic narration recipe this rail invokes (production only) to surface a
+/// natural-language `reasoning_summary` from a typed record. The generation +
+/// semantic-dedup + routing gates stay in Rust; the recipe narrates the batch.
+pub const RECIPE: &str = "creative-ideate";
 
 /// How many recent episodes/entries to fold into the observation window.
 const OBSERVATION_LIMIT: usize = 20;
@@ -131,6 +137,20 @@ pub struct CreativeIdeasThread {
     cfg: CreativeIdeasConfig,
     source: Box<dyn IdeaSource>,
     pipeline: Box<dyn IdeaPipeline>,
+    /// The semantic dedup + enhance reasoner (issue #2925). Consulted per
+    /// candidate before persistence. The production brain is a `RecipeBrain`;
+    /// tests inject a stub. When `semantic_enabled` is false the brain is NOT
+    /// consulted (the gate runs the deterministic word-set backstop only).
+    brain: Box<dyn OodaBrain>,
+    /// Whether the agentic (semantic) dedup layer is active. False falls the gate
+    /// back to deterministic word-set dedup (today's behaviour, no enhance).
+    semantic_enabled: bool,
+    /// Stage-1 coarse-shortlist size fed to the reasoner per candidate.
+    shortlist_k: usize,
+    /// Production-only: surface a natural-language `reasoning_summary` via the
+    /// `creative-ideate` recipe after a successful generation batch. Off under
+    /// the test seams so offline unit tests spawn no recipe.
+    narrate: bool,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -146,17 +166,44 @@ impl CreativeIdeasThread {
     }
 
     /// Build with an explicit config, idea source, and review/route pipeline
-    /// (the fully-injectable test seam).
+    /// (the fully-injectable test seam). The semantic dedup layer defaults to
+    /// **off** here (deterministic word-set dedup, today's behaviour); the
+    /// production entrypoints ([`Self::from_env`], [`register`]) wire the
+    /// recipe-backed reasoner. Use [`Self::with_pipeline_and_brain`] to inject a
+    /// stub reasoner in tests.
     #[must_use]
     pub fn with_pipeline(
         cfg: CreativeIdeasConfig,
         source: Box<dyn IdeaSource>,
         pipeline: Box<dyn IdeaPipeline>,
     ) -> Self {
+        Self::with_pipeline_and_brain(
+            cfg,
+            source,
+            pipeline,
+            Box::new(DeterministicLifecycleBrain),
+            /* semantic_enabled */ false,
+        )
+    }
+
+    /// Fully-injectable seam: explicit config, source, pipeline, dedup reasoner,
+    /// and whether the semantic layer is active (issue #2925).
+    #[must_use]
+    pub fn with_pipeline_and_brain(
+        cfg: CreativeIdeasConfig,
+        source: Box<dyn IdeaSource>,
+        pipeline: Box<dyn IdeaPipeline>,
+        brain: Box<dyn OodaBrain>,
+        semantic_enabled: bool,
+    ) -> Self {
         Self {
             cfg,
             source,
             pipeline,
+            brain,
+            semantic_enabled,
+            shortlist_k: dedup_gate::shortlist_k_from_env(),
+            narrate: false,
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -164,14 +211,21 @@ impl CreativeIdeasThread {
         }
     }
 
-    /// Build from the environment with the production idea source + pipeline.
+    /// Build from the environment with the production idea source + pipeline +
+    /// recipe-backed semantic dedup reasoner (issue #2925).
     #[must_use]
     pub fn from_env() -> Self {
-        Self::with_pipeline(
+        let (brain, semantic_enabled) = build_dedup_brain();
+        let mut thread = Self::with_pipeline_and_brain(
             CreativeIdeasConfig::from_env(),
             Box::new(AgenticIdeaSource::from_env()),
             Box::new(AgenticIdeaPipeline::from_env()),
-        )
+            brain,
+            semantic_enabled,
+        );
+        // Production surfaces a natural-language reasoning_summary via the recipe.
+        thread.narrate = true;
+        thread
     }
 
     /// The core, fallible tick body. `tick` wraps this and folds any `Err` into
@@ -182,9 +236,9 @@ impl CreativeIdeasThread {
         let raw = self.source.generate(&inputs, self.cfg.batch)?;
         let generated = raw.len();
 
-        let deduped =
-            dedup::reject_duplicates(raw, &inputs.previous_ideas, dedup::DEFAULT_DEDUP_THRESHOLD);
-        let selected = dedup::select_balanced(deduped, self.cfg.batch);
+        // Bound the number of reasoner calls per tick BEFORE the semantic gate.
+        // The gate (not a batch word-set filter) is now the dedup authority.
+        let selected = dedup::select_balanced(raw, self.cfg.batch);
         let surviving = selected.len();
 
         let mut report = GenerationReport {
@@ -195,6 +249,9 @@ impl CreativeIdeasThread {
             routed_goal: 0,
             routed_issue: 0,
             review_errors: 0,
+            skipped: 0,
+            enhanced: 0,
+            dedup_errors: 0,
             dry_run: ctx.dry_run,
         };
 
@@ -202,42 +259,138 @@ impl CreativeIdeasThread {
             if ctx.shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let mut idea = raw_to_creative_idea(raw_idea, &inputs, ctx.now_epoch);
 
-            // Persist the freshly-generated `New` idea (skipped under dry-run).
-            if !ctx.dry_run {
-                let store = ProspectiveCreativeIdeaStore::new(ctx.memory);
-                idea.node_id = store.store(&idea)?;
-                report.persisted += 1;
-            }
+            // Semantic dedup + enhance decision (issue #2925). The pool is the
+            // trigger-scoped previous ideas already loaded by `assemble_inputs`.
+            let plan = dedup_gate::plan_candidate(
+                raw_idea,
+                &inputs.previous_ideas,
+                self.brain.as_ref(),
+                self.semantic_enabled,
+                self.shortlist_k,
+                dedup::DEFAULT_DEDUP_THRESHOLD,
+            );
 
-            // Review + route. A single idea's failure is logged (explicit
-            // telemetry — no silent fallback) and never aborts the batch.
-            match self.pipeline.review_and_route(&mut idea, &inputs, ctx) {
-                Ok(RouteOutcome::Goal) => {
-                    report.reviewed += 1;
-                    report.routed_goal += 1;
+            match plan {
+                PlannedAction::Create => {
+                    self.create_candidate(raw_idea, &inputs, ctx, &mut report)?;
                 }
-                Ok(RouteOutcome::Issue) => {
-                    report.reviewed += 1;
-                    report.routed_issue += 1;
+                PlannedAction::Skip { .. } => {
+                    // A true semantic duplicate: drop it, nothing persisted.
+                    report.skipped += 1;
                 }
-                Ok(RouteOutcome::Parked | RouteOutcome::DryRun) => {
-                    report.reviewed += 1;
+                PlannedAction::Enhance {
+                    target_node_id,
+                    rationale,
+                } => {
+                    let store = ProspectiveCreativeIdeaStore::new(ctx.memory);
+                    match dedup_gate::apply_enhance(
+                        &store,
+                        &target_node_id,
+                        raw_idea,
+                        &rationale,
+                        ctx.dry_run,
+                    )? {
+                        true => report.enhanced += 1, // 0 new nodes
+                        // The target vanished between shortlist and apply — never
+                        // lose the idea; fall back to creating it.
+                        false => self.create_candidate(raw_idea, &inputs, ctx, &mut report)?,
+                    }
                 }
-                Err(error) => {
-                    report.review_errors += 1;
-                    tracing::warn!(
+                PlannedAction::FailClosed { reason } => {
+                    // Fail-CLOSED: never silently create a duplicate on a broken
+                    // reasoner. Drop this candidate this cycle; it is regenerated
+                    // and retried next run. Surfaced (not swallowed).
+                    report.dedup_errors += 1;
+                    tracing::error!(
                         target: "creative_ideas",
-                        error = %error,
-                        idea_id = %idea.idea_id,
-                        "[simard] creative-ideas review/route failed for one idea"
+                        reason = %reason,
+                        "[simard] creative-ideas: dedup reasoner failed for one candidate — dropped this cycle (fail-closed), retried next run (#2925)"
                     );
                 }
             }
         }
 
+        // Per-tick telemetry (issue #2925): generated / skipped / enhanced /
+        // created counts. `[simard]`-prefixed structured tracing — no println!.
+        tracing::info!(
+            target: "creative_ideas",
+            generated = report.generated,
+            skipped = report.skipped,
+            enhanced = report.enhanced,
+            created = report.persisted,
+            dedup_errors = report.dedup_errors,
+            "[simard] creative_ideas dedup: generated={} skipped={} enhanced={} created={}",
+            report.generated,
+            report.skipped,
+            report.enhanced,
+            report.persisted,
+        );
+
+        // Durability (issue #2798): no explicit checkpoint is needed here — the
+        // pinned amplihack-memory engine's WAL is write-through and replayed on
+        // open, so ideas persisted above survive a non-graceful daemon exit and
+        // are recovered on reopen. Pinned by the durability regression tests; the
+        // always-empty tab was the state-root resolver divergence, not a
+        // durability defect (fixed in `routes::resolve_state_root`, D1).
         Ok(report)
+    }
+
+    /// CREATE one candidate: persist it as a fresh `New` idea (skipped under
+    /// dry-run) and run the review/route pipeline. A single idea's review/route
+    /// failure is logged (explicit telemetry — no silent fallback) and never
+    /// aborts the batch.
+    fn create_candidate(
+        &self,
+        raw_idea: &RawIdea,
+        inputs: &GenerationInputs,
+        ctx: &mut ThreadContext<'_>,
+        report: &mut GenerationReport,
+    ) -> SimardResult<()> {
+        let mut idea = raw_to_creative_idea(raw_idea, inputs, ctx.now_epoch);
+
+        if !ctx.dry_run {
+            let store = ProspectiveCreativeIdeaStore::new(ctx.memory);
+            idea.node_id = store.store(&idea)?;
+            report.persisted += 1;
+        }
+
+        match self.pipeline.review_and_route(&mut idea, inputs, ctx) {
+            Ok(RouteOutcome::Goal) => {
+                report.reviewed += 1;
+                report.routed_goal += 1;
+            }
+            Ok(RouteOutcome::Issue) => {
+                report.reviewed += 1;
+                report.routed_issue += 1;
+            }
+            Ok(RouteOutcome::Parked | RouteOutcome::DryRun) => {
+                report.reviewed += 1;
+            }
+            Err(error) => {
+                report.review_errors += 1;
+                tracing::warn!(
+                    target: "creative_ideas",
+                    error = %error,
+                    idea_id = %idea.idea_id,
+                    "[simard] creative-ideas review/route failed for one idea"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Manual, on-demand generation entrypoint for the operator dashboard's
+    /// **Run now** control.
+    ///
+    /// Runs ONE generation pass unconditionally — **bypassing the default-ON/opt-out
+    /// `enabled()` gate and the 24h schedule** — and RETURNS the outcome (unlike
+    /// the total [`Self::tick`], which folds errors into a `failed` outcome). Side
+    /// effects are identical to a scheduled tick: it persists via `ctx.memory` and
+    /// may route accepted ideas to goals/issues. Surfaces failures loudly as `Err`
+    /// (never a silent no-op); honors `ctx.shutdown` and `ctx.dry_run`.
+    pub fn run_now(&mut self, ctx: &mut ThreadContext<'_>) -> SimardResult<GenerationReport> {
+        self.run_tick(ctx)
     }
 
     /// Assemble the (read-only) observation window from the goal board, recent
@@ -379,15 +532,36 @@ impl CreativeIdeasThread {
 }
 
 /// Structured result of one successful generation tick.
-struct GenerationReport {
-    generated: usize,
-    surviving: usize,
-    persisted: usize,
-    reviewed: usize,
-    routed_goal: usize,
-    routed_issue: usize,
-    review_errors: usize,
-    dry_run: bool,
+///
+/// Public so the operator dashboard's manual "Run now" control
+/// ([`CreativeIdeasThread::run_now`]) can report what a run produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct GenerationReport {
+    /// Raw ideas the source produced this run.
+    pub generated: usize,
+    /// Ideas surviving the batch bound (before the semantic gate).
+    pub surviving: usize,
+    /// Ideas persisted to the store as `New` (0 under dry-run).
+    pub persisted: usize,
+    /// Ideas that completed review (regardless of routing target).
+    pub reviewed: usize,
+    /// Accepted ideas routed to a new goal.
+    pub routed_goal: usize,
+    /// Human-review-flagged ideas routed to an issue.
+    pub routed_issue: usize,
+    /// Per-idea review/route failures (logged, non-fatal).
+    pub review_errors: usize,
+    /// Candidates the semantic gate judged true duplicates and dropped (#2925).
+    pub skipped: usize,
+    /// Candidates merged into an existing idea (ENHANCE; 0 new nodes) (#2925).
+    pub enhanced: usize,
+    /// Candidates dropped this cycle because the dedup reasoner failed
+    /// (fail-closed; surfaced, retried next run) (#2925).
+    pub dedup_errors: usize,
+    /// Whether the run was a dry-run (nothing persisted/routed). Internal-only;
+    /// the dashboard "Run now" report never dry-runs, so it is not serialized.
+    #[serde(skip)]
+    pub dry_run: bool,
 }
 
 impl CognitiveThread for CreativeIdeasThread {
@@ -397,6 +571,10 @@ impl CognitiveThread for CreativeIdeasThread {
 
     fn kind(&self) -> ThreadKind {
         ThreadKind::BackgroundThought
+    }
+
+    fn purpose(&self) -> &'static str {
+        "Generate divergent creative ideas in the background"
     }
 
     fn policy(&self) -> SchedulePolicy {
@@ -432,26 +610,53 @@ impl CognitiveThread for CreativeIdeasThread {
                     "generated"
                 };
                 let summary = format!(
-                    "creative_ideas: {verb} {} idea(s), {} survived dedup, {} persisted, \
-                     {} reviewed ({} → goal, {} → issue), {} review error(s)",
+                    "creative_ideas: {verb} {} idea(s), {} survived batch, {} persisted, \
+                     {} skipped, {} enhanced, {} reviewed ({} → goal, {} → issue), \
+                     {} review error(s), {} dedup error(s)",
                     report.generated,
                     report.surviving,
                     report.persisted,
+                    report.skipped,
+                    report.enhanced,
                     report.reviewed,
                     report.routed_goal,
                     report.routed_issue,
                     report.review_errors,
+                    report.dedup_errors,
                 );
                 let detail = json!({
                     "generated": report.generated,
                     "surviving": report.surviving,
                     "persisted": report.persisted,
+                    "skipped": report.skipped,
+                    "enhanced": report.enhanced,
                     "reviewed": report.reviewed,
                     "routed_goal": report.routed_goal,
                     "routed_issue": report.routed_issue,
                     "review_errors": report.review_errors,
+                    "dedup_errors": report.dedup_errors,
                     "dry_run": report.dry_run,
                 });
+
+                // Production-only narration: after the generation + semantic-dedup
+                // + routing pass (which owns every durable idea/goal/issue effect,
+                // extending the #4959 typed records), invoke the recipe to surface
+                // a natural-language reasoning_summary from a typed record. Never
+                // runs under the offline test seams (narrate=false) or in dry-run.
+                if self.narrate
+                    && !report.dry_run
+                    && let Some(narrated) = super::super::recipe_rail::narrate_pure_thread(
+                        ctx.repo_root,
+                        ctx.state_root,
+                        RECIPE,
+                        ThreadName::CreativeIdeas,
+                        &summary,
+                        start,
+                    )
+                {
+                    return narrated;
+                }
+
                 ThreadOutcome::ok(summary, start.elapsed()).with_detail(detail)
             }
             Err(error) => {
@@ -478,6 +683,8 @@ impl CognitiveThread for CreativeIdeasThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }
@@ -495,18 +702,57 @@ fn raw_to_creative_idea(raw: &RawIdea, inputs: &GenerationInputs, now_epoch: u64
     idea
 }
 
+/// Build the semantic dedup + enhance reasoner for the production thread (issue
+/// #2925). Tries the recipe-runner-backed [`crate::ooda_brain::RecipeBrain`]
+/// bound to `creative-idea-dedup.yaml`; when that is unavailable (no
+/// recipe-runner-rs, no agent binary, or the recipe asset is missing) it falls
+/// back **loudly** to a deterministic word-set brain with the semantic layer
+/// OFF — never silently. The returned `bool` is whether the agentic layer is
+/// active (also gated by the `SIMARD_CREATIVE_IDEAS_SEMANTIC_DEDUP` kill-switch).
+fn build_dedup_brain() -> (Box<dyn OodaBrain>, bool) {
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match crate::ooda_brain::RecipeBrain::new(
+        &repo_root,
+        "creative-idea-dedup.yaml",
+        "recipe-idea-dedup-brain",
+    ) {
+        Some(brain) => {
+            let enabled = dedup_gate::semantic_dedup_enabled();
+            tracing::info!(
+                target: "creative_ideas",
+                semantic_enabled = enabled,
+                "[simard] creative-ideas: semantic dedup = RecipeBrain (creative-idea-dedup.yaml) (#2925)"
+            );
+            (Box::new(brain), enabled)
+        }
+        None => {
+            tracing::warn!(
+                target: "creative_ideas",
+                "[simard] creative-ideas: semantic dedup recipe/brain unavailable — falling back to deterministic word-set dedup (no enhance) (#2925)"
+            );
+            (Box::new(DeterministicLifecycleBrain), false)
+        }
+    }
+}
+
 /// Register the Creative Ideas thread with the `Mind` scheduler.
 ///
 /// The daemon reaches this through [`register_creative_ideas_if_enabled`], which
 /// owns the default-ON/opt-out gate. Builds the production idea source +
-/// review/route pipeline; the thread's `enabled()` gate is defence-in-depth that
-/// still makes an opted-out thread inert even if it were registered directly.
+/// review/route pipeline + semantic dedup reasoner (#2925); the thread's
+/// `enabled()` gate is defence-in-depth that still makes an opted-out thread
+/// inert even if it were registered directly.
 pub fn register(mind: &mut Mind, config: CreativeIdeasConfig) {
-    let thread = CreativeIdeasThread::with_pipeline(
+    let (brain, semantic_enabled) = build_dedup_brain();
+    let mut thread = CreativeIdeasThread::with_pipeline_and_brain(
         config,
         Box::new(AgenticIdeaSource::from_env()),
         Box::new(AgenticIdeaPipeline::from_env()),
+        brain,
+        semantic_enabled,
     );
+    // Production surfaces a natural-language reasoning_summary via the recipe.
+    thread.narrate = true;
     mind.register(Box::new(thread));
 }
 

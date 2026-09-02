@@ -3,11 +3,14 @@
 //! canned-response stub.
 
 use super::prompt_store;
-use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{
+    EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain, PerGoalAction, PerGoalCycleCtx,
+};
 use crate::base_types::BaseTypeTurnInput;
 use crate::error::{SimardError, SimardResult};
 use crate::identity::OperatingMode;
 use crate::session_builder::{LlmProvider, SessionBuilder};
+use std::path::PathBuf;
 
 /// Embedded prompt — compile-time fallback. The runtime brain reads from
 /// disk via [`prompt_store::global`] so prompt edits take effect on the
@@ -18,11 +21,52 @@ pub const PROMPT_NAME: &str = "ooda_brain.md";
 
 const ADAPTER_TAG: &str = "ooda-brain";
 
+/// Trusted, daemon-minted context for a single typed-record write (Group D
+/// RustyClawd seam, #4967). Threads the ONLY facts the agent needs to record a
+/// verified [`PerGoalAction`](super::PerGoalAction) via the gated
+/// `simard ooda record-decision` tool: WHERE to write (`record_path`), WHICH
+/// binary records it (`simard_bin`), and the identity the record must bind to
+/// (`goal_id`/`cycle_number`, re-checked fail-closed by
+/// [`read_verified`](super::read_verified) at R6/R7). Both paths are
+/// daemon-owned (a fresh per-cycle temp dir + the resolved current exe), so they
+/// are emitted into the prompt verbatim — never model-derived.
+#[derive(Clone, Debug)]
+pub struct RecordDecisionContext {
+    /// Owner-only path the tool atomically writes the typed record to.
+    pub record_path: PathBuf,
+    /// The `simard` binary the agent invokes (`current_exe`), never a bare name.
+    pub simard_bin: PathBuf,
+    /// Durable goal id the record must bind to (reader R6).
+    pub goal_id: String,
+    /// Cycle number the record must bind to (reader R7).
+    pub cycle_number: u32,
+}
+
 /// Thin seam over whatever subprocess/HTTP path the rustyclawd adapter uses.
-/// Production wires the real adapter via `RustyClawdSessionSubmitter`; tests
-/// wire a canned-response stub without touching production wiring.
+/// Production wires the real adapter via `SessionLlmSubmitter`; tests wire a
+/// canned-response stub without touching production wiring.
 pub trait LlmSubmitter: Send + Sync {
     fn submit(&self, rendered_prompt: &str) -> SimardResult<String>;
+
+    /// Run an agentic turn whose objective is to RECORD a typed decision by
+    /// calling the gated `simard ooda record-decision` tool (Group D typed-record
+    /// seam, #4967). The `rendered_prompt` already contains the exact tool
+    /// invocation (with `record_path`/`goal_id`/`cycle_number` from `ctx`), so
+    /// the default impl simply runs the agentic turn and DISCARDS its prose
+    /// stdout — the verdict lives in the record the agent wrote, which the caller
+    /// reads back via [`read_verified`](super::read_verified) and fails CLOSED on
+    /// if absent (#1711). Test stubs override this to write a real record.
+    ///
+    /// `ctx` is passed for stubs/instrumentation; the production default ignores
+    /// it because every field it needs is already baked into `rendered_prompt`.
+    fn submit_for_record(
+        &self,
+        rendered_prompt: &str,
+        _ctx: &RecordDecisionContext,
+    ) -> SimardResult<()> {
+        self.submit(rendered_prompt)?;
+        Ok(())
+    }
 }
 
 /// LLM-backed brain. Construct via `build_rustyclawd_brain` in production so
@@ -91,8 +135,139 @@ impl<S: LlmSubmitter> OodaBrain for RustyClawdBrain<S> {
             reason,
         })
     }
+
+    /// Per-goal, per-cycle agentic decision (issue #4453; Group D typed-record
+    /// rework, #4967). The reasoner ACTS by calling the gated
+    /// `simard ooda record-decision` tool (which validates the closed
+    /// [`PerGoalAction`] enum and atomically writes one typed
+    /// [`PerGoalDecisionRecord`](super::PerGoalDecisionRecord)); this method then
+    /// reads that typed record via [`read_verified`](super::read_verified). It
+    /// NEVER scrapes the agent's prose stdout (WS-4 pattern, #2573/#2658), so a
+    /// stray or injected JSON print has zero effect on the decision.
+    ///
+    /// NO-FALLBACK, FAIL-CLOSED (#2580 / #1711): a submitter failure OR any
+    /// read-verification failure (absent / malformed / wrong-schema / out-of-enum
+    /// / empty-reason / goal- or cycle-mismatch) surfaces as an `Err` the driver
+    /// records as a cycle failure and performs a safe no-op — never a silent
+    /// `continue`. A genuine "leave it" answer is a real, model-recorded
+    /// `continue`.
+    fn decide_per_goal_cycle(&self, ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        // Fresh, UNIQUE per-cycle temp dir (owner-only, auto-removed on drop). A
+        // stale record from a prior cycle can never live at this path — and the
+        // reader still independently re-checks goal_id/cycle_number (R6/R7).
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            ADAPTER_TAG,
+            "simard-ooda-rustyclawd-decision-",
+            "per-cycle decision",
+            "decision.json",
+        )?;
+
+        // Resolve THIS binary so the agent can invoke `record-decision`
+        // deterministically (never a bare name that depends on PATH). If it
+        // cannot be resolved, no record is written and the reader fails CLOSED
+        // at R1 — a NO-FALLBACK cycle failure.
+        let simard_bin = super::resolve_simard_bin(ADAPTER_TAG)?;
+
+        let rec_ctx = RecordDecisionContext {
+            record_path: record_path.clone(),
+            simard_bin,
+            goal_id: ctx.goal_id.clone(),
+            cycle_number: ctx.cycle_number,
+        };
+
+        // Render a prompt that instructs the agent to RECORD its verdict via the
+        // tool, then run the agentic turn. The agent's stdout is IGNORED.
+        let prompt = render_per_goal_cycle_prompt(ctx, &rec_ctx);
+        self.submitter.submit_for_record(&prompt, &rec_ctx)?;
+
+        // Read the TYPED record — never scrape prose. Every failure mode is an
+        // Err → a safe no-op cycle failure (#1711). The thin deterministic rail
+        // then acts on this validated closed enum.
+        super::read_verified(&record_path, &ctx.goal_id, ctx.cycle_number)
+    }
 }
 
+/// Render the per-goal, per-cycle reasoning prompt (issue #4453; Group D
+/// typed-record rework, #4967). Compact and self-contained: it states the six
+/// actions, the invariants (never idle-reset a healthy standing goal;
+/// investigate before any destructive action), and — critically — instructs the
+/// agent to RECORD its verdict by calling `simard ooda record-decision` via its
+/// bash tool rather than printing JSON. Durable state and the three demoted
+/// signals are fed as read-only context; the CHOICE among the actions is the
+/// agentic part. `rec` carries the trusted, daemon-minted record path / binary /
+/// identity woven verbatim into the tool invocation.
+fn render_per_goal_cycle_prompt(ctx: &PerGoalCycleCtx, rec: &RecordDecisionContext) -> String {
+    let open_prs = if ctx.open_pr_refs.is_empty() {
+        "none".to_string()
+    } else {
+        ctx.open_pr_refs.join(", ")
+    };
+    let stale = match ctx.stale_claim_secs {
+        Some(secs) => format!("{secs}s since worker claim last seen alive"),
+        None => "n/a (live worker present or none expected)".to_string(),
+    };
+    format!(
+        "# OODA Brain — Per-Goal, Per-Cycle Decision\n\n\
+         You decide the single best next action for ONE active goal THIS cycle.\n\
+         This runs for every goal every cycle: a healthy in-flight goal is left\n\
+         alone; a goal with no live work is advanced; a goal that looks wrong is\n\
+         INVESTIGATED (read logs/tools) BEFORE any destructive step. NEVER\n\
+         reap/reset a worker purely because a heartbeat or worktree looks stale.\n\n\
+         ## Goal\n\
+         - goal_id: {goal_id}\n\
+         - description: {desc}\n\
+         - status: {status}\n\
+         - cycle_number: {cycle}\n\
+         - history: {history}\n\
+         - effect_jobs_in_flight: {jobs}\n\
+         - open_pr_refs: {open_prs}\n\
+         - wip_ref_count: {wip}\n\
+         - worker_present: {worker}\n\n\
+         ## Signals (INPUTS ONLY — never the decision by themselves)\n\
+         - standing_idle_signal: {idle}\n\
+         - stale_claim: {stale}\n\
+         - effect_board_missed: {board}\n\n\
+         ## Actions (pick exactly one)\n\
+         continue | spawn | reorient | investigate | wait | complete\n\n\
+         ## HOW TO RECORD YOUR DECISION (call the tool — do NOT print JSON)\n\
+         Record your verdict by calling the `simard ooda record-decision` tool\n\
+         EXACTLY ONCE, using your shell/bash tool. The daemon reads the typed\n\
+         record the tool writes; it does NOT read your prose. Anything you print\n\
+         to stdout is IGNORED. Run (substitute your chosen `<action>` and a\n\
+         concrete `<reason>`):\n\n\
+         ```bash\n\
+         \"{simard_bin}\" ooda record-decision \\\n\
+           --choice <action> \\\n\
+           --reason \"<short concrete reason>\" \\\n\
+           --record-path \"{record_path}\" \\\n\
+           --goal-id \"{goal_id}\" \\\n\
+           --cycle-number {cycle}\n\
+         ```\n\n\
+         For `spawn` you MAY add an optional `--task-hint \"<next piece>\"`. For a\n\
+         LARGE reason or hint, write it to a file and pass `--reason-path <FILE>`\n\
+         / `--task-hint-path <FILE>` instead of the inline flag. `<action>` is\n\
+         exactly one of: continue, spawn, reorient, investigate, wait, complete.\n\
+         `--reason` is MANDATORY and must be non-empty; an unknown `--choice` is\n\
+         rejected. Call the tool EXACTLY ONCE. If you do not record a valid\n\
+         decision, the daemon takes NO action on your behalf: it records an\n\
+         explicit cycle failure and fails CLOSED (no silent fallback, #1711). A\n\
+         genuine \"leave it\" answer is a real `continue`, recorded explicitly.",
+        goal_id = ctx.goal_id,
+        desc = ctx.goal_description,
+        status = ctx.goal_status,
+        cycle = ctx.cycle_number,
+        history = ctx.history_summary,
+        jobs = ctx.effect_jobs_in_flight,
+        open_prs = open_prs,
+        wip = ctx.wip_ref_count,
+        worker = ctx.worker_present,
+        idle = ctx.standing_idle_signal,
+        stale = stale,
+        board = ctx.effect_board_missed,
+        simard_bin = rec.simard_bin.display(),
+        record_path = rec.record_path.display(),
+    )
+}
 /// Closed set of `EngineerLifecycleDecision` variant tags. Kept in sync
 /// with the `#[serde(tag = "choice", rename_all = "snake_case")]` enum in
 /// `mod.rs`. Used by the prose-first DECISION marker parser to validate
@@ -426,14 +601,14 @@ pub fn build_rustyclawd_brain() -> SimardResult<Box<dyn OodaBrain>> {
 
 // ---------------------------------------------------------------------------
 // Inline tests (issue #1979 — per-source-file coverage of the RustyClawd
-// bridge: the prose-first marker parser, the legacy JSON-object salvage,
-// the UTF-8-safe log truncation, AND the bridge's end-to-end behaviour for
+// brain: the prose-first marker parser, the legacy JSON-object salvage,
+// the UTF-8-safe log truncation, AND the brain's end-to-end behaviour for
 // the four shapes the directive calls out (well-formed JSON, JSON with
 // trailing prose, completely unparseable, and a per-shape end-to-end run
-// through the bridge with a canned-response submitter).
+// through the brain with a canned-response submitter).
 //
 // Sibling `tests.rs` covers higher-level dispatch; these inline tests pin
-// the private parser helpers that the bridge depends on. )
+// the private parser helpers that the brain depends on. )
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -775,10 +950,10 @@ mod tests {
         }
     }
 
-    // ----- (d) RustyClawdBrain bridge: end-to-end with stub submitter ---
+    // ----- (d) RustyClawdBrain brain: end-to-end with stub submitter ---
 
     #[test]
-    fn bridge_returns_decision_on_marker_response() {
+    fn brain_returns_decision_on_marker_response() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nhb ok");
         let brain = RustyClawdBrain::new(stub);
         let d = brain.decide_engineer_lifecycle(&ctx()).expect("must Ok");
@@ -789,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_rejects_json_only_response() {
+    fn brain_rejects_json_only_response() {
         let stub = StubSubmitter::ok(r#"{"choice":"continue_skipping","rationale":"hb ok"}"#);
         let brain = RustyClawdBrain::new(stub);
         let err = brain
@@ -807,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_rejects_json_in_prose_response() {
+    fn brain_rejects_json_in_prose_response() {
         let stub = StubSubmitter::ok(
             "Some thinking...\n```json\n{\"choice\":\"deprioritize\",\"rationale\":\"chronic\"}\n```\nDone.",
         );
@@ -822,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_surfaces_adapter_error_on_unparseable_response() {
+    fn brain_surfaces_adapter_error_on_unparseable_response() {
         let stub = StubSubmitter::ok("totally not json at all");
         let brain = RustyClawdBrain::new(stub);
         let err = brain
@@ -841,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_propagates_submitter_error_without_panic() {
+    fn brain_propagates_submitter_error_without_panic() {
         let stub = StubSubmitter::err();
         let brain = RustyClawdBrain::new(stub);
         let err = brain
@@ -858,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_calls_submitter_exactly_once_per_decision() {
+    fn brain_calls_submitter_exactly_once_per_decision() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let counter = stub.call_counter();
         let brain = RustyClawdBrain::new(stub);
@@ -866,12 +1041,12 @@ mod tests {
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "bridge must call submitter exactly once per decision"
+            "brain must call submitter exactly once per decision"
         );
     }
 
     #[test]
-    fn bridge_renders_prompt_with_context_fields() {
+    fn brain_renders_prompt_with_context_fields() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let brain = RustyClawdBrain::new(stub);
         let prompt = brain.render_prompt(&EngineerLifecycleCtx {
@@ -896,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_renders_sentinel_none_as_placeholder() {
+    fn brain_renders_sentinel_none_as_placeholder() {
         let stub = StubSubmitter::ok("DECISION: continue_skipping\nok");
         let brain = RustyClawdBrain::new(stub);
         let prompt = brain.render_prompt(&EngineerLifecycleCtx {
@@ -926,5 +1101,115 @@ mod tests {
                 "VALID_VARIANTS must include `{tag}`"
             );
         }
+    }
+
+    // ----- Group D: per-goal-cycle typed-record seam (#4967) --------------
+
+    fn per_goal_ctx() -> PerGoalCycleCtx {
+        PerGoalCycleCtx {
+            goal_id: "research-cognition".into(),
+            goal_description: "keep improving cognition".into(),
+            goal_status: "in-progress".into(),
+            cycle_number: 4287,
+            history_summary: String::new(),
+            effect_jobs_in_flight: 0,
+            open_pr_refs: Vec::new(),
+            last_outcomes: Vec::new(),
+            wip_ref_count: 0,
+            worker_present: false,
+            worker_log_tail: String::new(),
+            standing_idle_signal: true,
+            stale_claim_secs: None,
+            effect_board_missed: false,
+        }
+    }
+
+    /// A stub that OVERRIDES `submit_for_record` to write a real, verified
+    /// `PerGoalDecisionRecord` via the same chokepoint the CLI tool uses —
+    /// exactly what the production agent would do by calling
+    /// `simard ooda record-decision`. This proves `decide_per_goal_cycle` reads
+    /// the typed record back through `read_verified`, not the prose stdout.
+    struct RecordingStub {
+        choice: &'static str,
+        reason: &'static str,
+    }
+
+    impl LlmSubmitter for RecordingStub {
+        fn submit(&self, _rendered_prompt: &str) -> SimardResult<String> {
+            // Never called on the record path; present only to satisfy the trait.
+            Ok(String::new())
+        }
+
+        fn submit_for_record(
+            &self,
+            rendered_prompt: &str,
+            ctx: &RecordDecisionContext,
+        ) -> SimardResult<()> {
+            // The prompt must contain the exact tool invocation the agent runs.
+            assert!(
+                rendered_prompt.contains("ooda record-decision"),
+                "the rendered prompt must instruct the agent to call record-decision"
+            );
+            assert!(
+                rendered_prompt.contains(&ctx.record_path.display().to_string()),
+                "the rendered prompt must carry the trusted record_path"
+            );
+            let action =
+                crate::ooda_brain::PerGoalAction::from_choice_fields(self.choice, self.reason, "")
+                    .expect("stub choice/reason must validate");
+            let record = crate::ooda_brain::PerGoalDecisionRecord {
+                schema: crate::ooda_brain::EXPECTED_SCHEMA.to_string(),
+                goal_id: ctx.goal_id.clone(),
+                cycle_number: ctx.cycle_number,
+                action,
+            };
+            crate::persistence::persist_json(
+                "test-rustyclawd-record-decision",
+                &ctx.record_path,
+                &record,
+            )
+            .map_err(|e| SimardError::AdapterInvocationFailed {
+                base_type: "test".into(),
+                reason: format!("stub write failed: {e}"),
+            })
+        }
+    }
+
+    #[test]
+    fn decide_per_goal_cycle_reads_the_recorded_typed_decision() {
+        let brain = RustyClawdBrain::new(RecordingStub {
+            choice: "spawn",
+            reason: "standing goal idle; start the next research piece",
+        });
+        let action = brain
+            .decide_per_goal_cycle(&per_goal_ctx())
+            .expect("a recorded valid decision must read back through read_verified");
+        match action {
+            PerGoalAction::Spawn { reason, .. } => {
+                assert_eq!(reason, "standing goal idle; start the next research piece")
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    /// A stub whose agentic turn writes NOTHING (the model failed to call the
+    /// tool). The seam must fail CLOSED at the read (R1), never a silent
+    /// `continue`.
+    struct SilentStub;
+
+    impl LlmSubmitter for SilentStub {
+        fn submit(&self, _rendered_prompt: &str) -> SimardResult<String> {
+            Ok(String::new())
+        }
+        // Inherits the DEFAULT submit_for_record → runs `submit`, writes no record.
+    }
+
+    #[test]
+    fn decide_per_goal_cycle_fails_closed_when_no_record_written() {
+        let brain = RustyClawdBrain::new(SilentStub);
+        assert!(
+            brain.decide_per_goal_cycle(&per_goal_ctx()).is_err(),
+            "if the agent records no decision, the seam MUST fail CLOSED (#1711), never default to continue"
+        );
     }
 }

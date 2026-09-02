@@ -9,7 +9,7 @@
 //!
 //! These target `LibraryCognitiveMemory::in_memory()` directly — the in-memory
 //! `GraphStore` implements `query_neighbors`, so the edge round-trip is
-//! exercised without the bridge/IPC layer. `graph_stats` is read-only.
+//! exercised without the memory/IPC layer. `graph_stats` is read-only.
 
 use super::{CognitiveMemoryOps, LibraryCognitiveMemory};
 

@@ -9,10 +9,13 @@
 //! `main` and run the new code. The pins are advanced as upstream lands work:
 //!
 //!   * `amplihack-agent-eval`  59548a96… → **2a93441d…** (amplihack-rs main)
-//!   * `amplihack-memory`       f8003708… → **e005a596…** (memory-lib main —
-//!     the squash-merge of PR #120, which lands the first-class `creative_idea`
-//!     prospective memory type on top of PR #121's `measurement::precision_at_k`
-//!     recall-quality primitive, so the single pin carries both)
+//!   * `amplihack-memory`       901f63ad… → **72c5ea1b…** (memory-lib main —
+//!     the squash-merge of PR #126, which serves the ranked-recall graph term
+//!     from a single bulk graph-adjacency scan per edge type instead of a
+//!     per-node `query_neighbors` BFS; cuts OODA prepare-context from ~11 min/
+//!     cycle toward seconds at ~7,590 facts with byte-identical ranking, no
+//!     store-format change; Simard consumes it to fix the "memory graph never
+//!     loads" pathology, issue #40)
 //!
 //! These are the exact 40-char SHAs verified against `git ls-remote … main`
 //! at authoring time.
@@ -20,11 +23,11 @@
 //! # The lockstep invariant
 //!
 //! The `persistent` feature of `amplihack-memory` compiles the LadybugDB
-//! engine through the published `lbug` crate, and the standalone `simard-tui`
-//! binary links `lbug` directly to render the goal board read-only. The final
-//! binary must link **exactly one** `lbug` (one engine, one on-disk store
-//! format). So Simard's direct `lbug = "=X"` pin must equal whatever single
-//! version the memory-lib bump resolves — never a second, conflicting line.
+//! engine through the `lbug` crate, and the standalone `simard-tui` binary
+//! links `lbug` directly to render the goal board read-only. The final binary
+//! must link **exactly one** `lbug` (one engine, one on-disk store format). So
+//! Simard's direct `lbug` git dep must pin the SAME rysweet/ladybug-rust fork
+//! rev the memory-lib bump resolves — never a second, conflicting line.
 //!
 //! # Why these are file-shaped (rg/grep-shaped)
 //!
@@ -41,23 +44,32 @@ use std::path::PathBuf;
 // ── Target / stale pin constants (verified against upstream `main`) ──────────
 
 /// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
-const AGENT_EVAL_TARGET_REV: &str = "2a93441d1837f9f853d5dddc56cc1088353a8872";
-/// amplihack-memory-lib `main` commit carrying the `amplihack-memory` crate:
-/// PR #120's squash-merge (the first-class `creative_idea` prospective memory
-/// type — CreativeIdeaStatus lifecycle + typed MemoryLink/MemoryLinkKind — which
-/// Simard's Creative Ideas thread re-exports), which lands directly on top of
-/// PR #121's `measurement::precision_at_k` primitive, so this single rev carries
-/// BOTH upstream additions.
-const MEMORY_TARGET_REV: &str = "e005a5963b38bc02610fa5b0bef7e52625dcd092";
+const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
+/// amplihack-memory-lib commit carrying the `amplihack-memory` crate.
+///
+/// Superseded by issue #4687: originally the #2626 bump target
+/// (`c266e15d…`, PR #131's lbug storage-compatibility fix), this now tracks the
+/// #4687 WAL crash-consistency fix commit `0031505b…`, which is the same
+/// storage-compatible line (still pins `lbug` to the fork rev whose crate
+/// version is `0.17.1`, store format v42) plus the single-owner / fsync-durable
+/// WAL fix. See `tests/issue_4687_amplihack_pin_bump.rs` for the #4687 guard.
+const MEMORY_TARGET_REV: &str = "0031505b911151bf47409694a6c45f8b778d91b9";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
-const MEMORY_STALE_REV: &str = "f80037089a735bd0d394e3eec5cea9fcae1895ea";
+const MEMORY_STALE_REV: &str = "72c5ea1bfcca7e6f3e314dfd99fbe4998378ffe8";
 
 /// The only git remotes these two crates may resolve from. A bump must never
 /// introduce a *new* git source (typosquat / allowlist-bypass guard, R1).
 const AGENT_EVAL_REMOTE: &str = "https://github.com/rysweet/amplihack-rs.git";
 const MEMORY_REMOTE: &str = "https://github.com/rysweet/amplihack-memory-lib.git";
+
+/// Simard's direct `lbug` dep (simard-tui goal board) is a git dep on the
+/// rysweet/ladybug-rust fork (issue #3119: fixes the from-source duplicate-symbol
+/// link + the libstdc++ std::format ABI SIGSEGV). It must pin the SAME fork rev
+/// amplihack-memory resolves to, so cargo unifies to exactly one lbug engine.
+const LBUG_FORK_TARGET_REV: &str = "5a2c107881879f4d1bb594b14967948870e65cdc";
+const LBUG_FORK_REMOTE: &str = "https://github.com/rysweet/ladybug-rust";
 
 // ── Path / IO helpers ───────────────────────────────────────────────────────
 
@@ -197,8 +209,8 @@ fn cargo_toml_pins_amplihack_memory_to_target_main_rev() {
         .expect("Cargo.toml must declare a git `amplihack-memory` dependency with a `rev`");
     assert_eq!(
         rev, MEMORY_TARGET_REV,
-        "amplihack-memory must be pinned to amplihack-memory-lib `main` HEAD \
-         {MEMORY_TARGET_REV} (#2626 bump). Found `{rev}`."
+        "amplihack-memory must be pinned to the #4687 WAL crash-consistency fix \
+         rev {MEMORY_TARGET_REV} (supersedes the #2626 bump target). Found `{rev}`."
     );
 }
 
@@ -338,27 +350,45 @@ fn lbug_resolves_to_exactly_one_version() {
 
 #[test]
 fn direct_lbug_pin_matches_the_single_locked_version() {
-    // Simard's direct `lbug = "=X"` pin must equal whatever single version the
-    // memory-lib bump resolves — the pin follows memory-lib, it is never chosen
-    // independently. This keeps the manifest honest about the linked engine.
+    // Simard's direct `lbug` dep (simard-tui goal board) is now a git dep on the
+    // rysweet/ladybug-rust fork (issue #3119). It must pin the SAME fork rev that
+    // amplihack-memory resolves to, so cargo unifies to exactly one lbug crate /
+    // one engine / one on-disk store format — the pin follows memory-lib, it is
+    // never chosen independently.
     let toml = cargo_toml();
     let line = manifest_dep_line(&toml, "lbug")
         .expect("Cargo.toml must declare a direct `lbug` dependency (simard-tui goal board)");
-    // The pin is a bare string requirement: `lbug = "=0.17.1"`.
-    let pin_raw = field_value(&line, "lbug").expect("could not parse the `lbug` version pin");
-    let pin = pin_raw.trim_start_matches('=').trim().to_string();
 
+    // It must be a git dep on the fork remote, pinned by a full-SHA `rev`.
+    let remote = field_value(&line, "git")
+        .expect("direct `lbug` must be a git dependency on the ladybug-rust fork");
+    assert_eq!(
+        remote.trim_end_matches(".git"),
+        LBUG_FORK_REMOTE.trim_end_matches(".git"),
+        "direct `lbug` must resolve from the fork {LBUG_FORK_REMOTE}, found `{remote}`."
+    );
+    let rev = dep_rev(&toml, "lbug").expect("direct `lbug` git dep must carry a `rev` pin");
+    assert_eq!(
+        rev, LBUG_FORK_TARGET_REV,
+        "direct `lbug` rev must be the fork target {LBUG_FORK_TARGET_REV}, found `{rev}`."
+    );
+    assert!(
+        is_full_sha(&rev),
+        "direct `lbug` rev `{rev}` must be a full 40-char lowercase hex git SHA."
+    );
+
+    // Exactly one locked lbug, resolved from the fork at that rev = one engine.
     let locked = distinct_locked_versions(&cargo_lock(), "lbug");
     assert_eq!(
         locked.len(),
         1,
-        "expected exactly one locked lbug version before comparing the pin; found {locked:?}"
+        "expected exactly one locked lbug version (single engine); found {locked:?}"
     );
-    let locked_version = locked.iter().next().cloned().unwrap_or_default();
-    assert_eq!(
-        pin, locked_version,
-        "Cargo.toml direct pin `lbug = \"={pin}\"` must equal the single locked \
-         lbug version `{locked_version}`. If the memory-lib bump moved lbug, \
-         update the direct pin (and its lockstep comments) to `{locked_version}`."
+    let src = locked_source(&cargo_lock(), "lbug")
+        .expect("Cargo.lock must contain the lbug [[package]] source");
+    assert!(
+        src.contains(LBUG_FORK_TARGET_REV) && src.contains(LBUG_FORK_REMOTE),
+        "Cargo.lock lbug must resolve from the fork {LBUG_FORK_REMOTE} at rev \
+         {LBUG_FORK_TARGET_REV}; found `{src}`."
     );
 }

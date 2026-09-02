@@ -5,8 +5,8 @@
 //! the state root by reusing the existing `cmd_cleanup::disk` / `memory_backup`
 //! helpers — never reimplementing them. Every destructive candidate must pass
 //! the canonical allow/deny + symlink-refusal gate ([`is_safe_to_delete`]) and
-//! honour `ctx.dry_run`. Behaviour bodies are `todo!()` stubs during TDD; the
-//! config/type surface is real so tests can pin the safety contract.
+//! honour `ctx.dry_run`. The behaviour is implemented; the config/type surface
+//! and the safety contract are pinned by tests.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -18,9 +18,14 @@ use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
+use crate::ooda_brain::ThreadName;
 
 /// Stable telemetry id.
 const MAINTENANCE_ID: &str = "maintenance";
+/// The agentic narration recipe this rail invokes (production only) to surface a
+/// natural-language `reasoning_summary` from a typed record. The safe pruning
+/// gates stay in Rust; the recipe narrates what was (or would be) pruned.
+pub const RECIPE: &str = "maintenance-housekeep";
 
 /// Tunables for [`MaintenanceThread`]. Retention counts are floors: the thread
 /// always keeps at least this many of the newest copies before pruning.
@@ -57,6 +62,10 @@ impl Default for MaintenanceConfig {
 /// The maintenance/cleanup cognitive thread (exemplar 1).
 pub struct MaintenanceThread {
     cfg: MaintenanceConfig,
+    /// Production-only: surface a natural-language `reasoning_summary` via the
+    /// `maintenance-housekeep` recipe after the deterministic prune pass. Off
+    /// under the test constructor so offline unit tests spawn no recipe.
+    narrate: bool,
     last_run_epoch: Option<u64>,
     next_run_epoch: Option<u64>,
     last_success: Option<bool>,
@@ -83,13 +92,17 @@ impl MaintenanceThread {
         if let Some(v) = read_bool_env("SIMARD_MAINTENANCE_DRY_RUN") {
             cfg.dry_run = v;
         }
-        Self::new(cfg)
+        let mut thread = Self::new(cfg);
+        // Production surfaces a natural-language reasoning_summary via the recipe.
+        thread.narrate = true;
+        thread
     }
 
     /// Build from an explicit config (test seam — no env).
     pub fn new(cfg: MaintenanceConfig) -> Self {
         Self {
             cfg,
+            narrate: false,
             last_run_epoch: None,
             next_run_epoch: None,
             last_success: None,
@@ -105,6 +118,10 @@ impl CognitiveThread for MaintenanceThread {
 
     fn kind(&self) -> ThreadKind {
         ThreadKind::Maintenance
+    }
+
+    fn purpose(&self) -> &'static str {
+        "Perform safe, conservative housekeeping and cleanup"
     }
 
     fn policy(&self) -> SchedulePolicy {
@@ -197,6 +214,25 @@ impl CognitiveThread for MaintenanceThread {
             "actions": report.actions,
             "disk": disk,
         });
+
+        // Production-only narration: after the deterministic prune pass (which
+        // owns every destructive effect above, all safety-gated), invoke the
+        // recipe to surface a natural-language reasoning_summary from a typed
+        // record. Never runs under the offline test constructor (narrate=false).
+        if self.narrate
+            && !dry_run
+            && let Some(narrated) = super::super::recipe_rail::narrate_pure_thread(
+                ctx.repo_root,
+                ctx.state_root,
+                RECIPE,
+                ThreadName::Maintenance,
+                &summary,
+                start,
+            )
+        {
+            return narrated;
+        }
+
         ThreadOutcome::ok(summary, start.elapsed()).with_detail(detail)
     }
 
@@ -209,6 +245,8 @@ impl CognitiveThread for MaintenanceThread {
             last_success: self.last_success,
             consecutive_errors: self.consecutive_errors,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

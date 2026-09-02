@@ -41,7 +41,7 @@ mod tests {
     use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
-    fn mock_bridge() -> CognitiveMemoryClient {
+    fn mock_memory() -> CognitiveMemoryClient {
         let transport =
             InMemoryRpcTransport::new("test-meeting-mod", |method, _params| match method {
                 "memory.record_sensory" => Ok(json!({"id": "sen_m1"})),
@@ -58,8 +58,8 @@ mod tests {
 
     #[test]
     fn start_meeting_creates_open_session() {
-        let bridge = mock_bridge();
-        let session = start_meeting("Architecture review", &bridge).unwrap();
+        let memory = mock_memory();
+        let session = start_meeting("Architecture review", &memory).unwrap();
         assert_eq!(session.topic, "Architecture review");
         assert_eq!(session.status, MeetingSessionStatus::Open);
         assert!(session.decisions.is_empty());
@@ -68,15 +68,15 @@ mod tests {
 
     #[test]
     fn start_meeting_rejects_empty_topic() {
-        let bridge = mock_bridge();
-        assert!(start_meeting("", &bridge).is_err());
-        assert!(start_meeting("   ", &bridge).is_err());
+        let memory = mock_memory();
+        assert!(start_meeting("", &memory).is_err());
+        assert!(start_meeting("   ", &memory).is_err());
     }
 
     #[test]
     fn record_decision_adds_to_session() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let memory = mock_memory();
+        let mut session = start_meeting("Test", &memory).unwrap();
         record_decision(
             &mut session,
             MeetingDecision {
@@ -92,8 +92,8 @@ mod tests {
 
     #[test]
     fn record_action_item_validates_priority() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let memory = mock_memory();
+        let mut session = start_meeting("Test", &memory).unwrap();
         let result = record_action_item(
             &mut session,
             ActionItem {
@@ -109,16 +109,16 @@ mod tests {
 
     #[test]
     fn add_note_to_open_session() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let memory = mock_memory();
+        let mut session = start_meeting("Test", &memory).unwrap();
         add_note(&mut session, "Important observation").unwrap();
         assert_eq!(session.notes.len(), 1);
     }
 
     #[test]
     fn add_question_to_open_session() {
-        let bridge = mock_bridge();
-        let mut session = start_meeting("Test", &bridge).unwrap();
+        let memory = mock_memory();
+        let mut session = start_meeting("Test", &memory).unwrap();
         add_question(&mut session, "What about scaling?").unwrap();
         assert_eq!(session.explicit_questions.len(), 1);
         assert_eq!(session.explicit_questions[0], "What about scaling?");

@@ -1,15 +1,15 @@
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::SimardResult;
 
-/// Search the bridge for facts matching `query`.
+/// Search the memory for facts matching `query`.
 ///
 /// Client errors propagate per PHILOSOPHY.md — no silent degradation.
-fn search_bridge(
-    bridge: &dyn CognitiveMemoryOps,
+fn search_memory(
+    memory: &dyn CognitiveMemoryOps,
     query: &str,
     limit: u32,
 ) -> SimardResult<Vec<crate::memory_cognitive::CognitiveFact>> {
-    bridge.search_facts(query, limit, 0.0)
+    memory.search_facts(query, limit, 0.0)
 }
 
 /// Resolve the operator display name.
@@ -26,11 +26,11 @@ fn resolve_operator_name() -> String {
 
 /// Build live context from cognitive memory, goals, and project state to
 /// enrich the meeting system prompt so Simard knows her own state.
-pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> SimardResult<String> {
+pub(super) fn build_live_meeting_context(memory: &dyn CognitiveMemoryOps) -> SimardResult<String> {
     let mut sections = Vec::new();
 
     // Recent meeting summaries (decisions from past meetings)
-    let past_meetings = search_bridge(bridge, "meeting:", 10)?;
+    let past_meetings = search_memory(memory, "meeting:", 10)?;
     if !past_meetings.is_empty() {
         let mut meeting_text = String::from("## Previous Meeting Summaries\n");
         for (i, m) in past_meetings.iter().enumerate().take(5) {
@@ -40,7 +40,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
     }
 
     // Recent decisions from meetings (individually stored by REPL)
-    let past_decisions = search_bridge(bridge, "decision:", 10)?;
+    let past_decisions = search_memory(memory, "decision:", 10)?;
     if !past_decisions.is_empty() {
         let mut dec_text = String::from("## Past Decisions\n");
         for (i, d) in past_decisions.iter().enumerate().take(10) {
@@ -50,7 +50,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
     }
 
     // Active goals
-    let goals = search_bridge(bridge, "goal:", 10)?;
+    let goals = search_memory(memory, "goal:", 10)?;
     if !goals.is_empty() {
         let mut goal_text = String::from("## Active Goals\n");
         for (i, g) in goals.iter().enumerate().take(5) {
@@ -60,7 +60,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
     }
 
     // Operator identity — from memory, env var, or resolved name
-    let operator = search_bridge(bridge, "operator:", 3)?;
+    let operator = search_memory(memory, "operator:", 3)?;
     if !operator.is_empty() {
         let mut op_text = String::from("## Operator Context\n");
         for fact in &operator {
@@ -73,7 +73,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
     }
 
     // Known projects — only shown when memory has project facts
-    let projects = search_bridge(bridge, "project:", 10)?;
+    let projects = search_memory(memory, "project:", 10)?;
     if !projects.is_empty() {
         let mut proj_text = String::from("## Known Projects\n");
         for p in &projects {
@@ -83,7 +83,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
     }
 
     // Research tracker / watched developers
-    let research = search_bridge(bridge, "research:", 5)?;
+    let research = search_memory(memory, "research:", 5)?;
     if !research.is_empty() {
         let mut res_text = String::from("## Research Topics\n");
         for r in &research {
@@ -93,7 +93,7 @@ pub(super) fn build_live_meeting_context(bridge: &dyn CognitiveMemoryOps) -> Sim
     }
 
     // Recent improvements
-    let improvements = search_bridge(bridge, "improvement:", 5)?;
+    let improvements = search_memory(memory, "improvement:", 5)?;
     if !improvements.is_empty() {
         let mut imp_text = String::from("## Improvement Backlog\n");
         for imp in &improvements {
@@ -156,9 +156,9 @@ mod tests {
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
     }
 
-    // ── search_bridge ─────────────────────────────────────────────
+    // ── search_memory ─────────────────────────────────────────────
 
-    fn empty_bridge() -> CognitiveMemoryClient {
+    fn empty_memory() -> CognitiveMemoryClient {
         let transport = InMemoryRpcTransport::new("test-ctx", |method, _params| match method {
             "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
             _ => Err(RpcErrorPayload {
@@ -169,7 +169,7 @@ mod tests {
         CognitiveMemoryClient::new(Box::new(transport))
     }
 
-    fn failing_bridge() -> CognitiveMemoryClient {
+    fn failing_memory() -> CognitiveMemoryClient {
         let transport = InMemoryRpcTransport::new("test-fail", |_method, _params| {
             Err(RpcErrorPayload {
                 code: -1,
@@ -180,16 +180,16 @@ mod tests {
     }
 
     #[test]
-    fn search_bridge_empty_result() {
-        let bridge = empty_bridge();
-        let facts = search_bridge(&bridge, "anything", 5).unwrap();
+    fn search_memory_empty_result() {
+        let memory = empty_memory();
+        let facts = search_memory(&memory, "anything", 5).unwrap();
         assert!(facts.is_empty());
     }
 
     #[test]
-    fn search_bridge_failure_propagates() {
-        let bridge = failing_bridge();
-        let result = search_bridge(&bridge, "query", 5);
+    fn search_memory_failure_propagates() {
+        let memory = failing_memory();
+        let result = search_memory(&memory, "query", 5);
         assert!(result.is_err());
     }
 
@@ -199,44 +199,44 @@ mod tests {
     #[test]
     fn build_context_empty_memory() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let bridge = empty_bridge();
+        let memory = empty_memory();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
-        let ctx = build_live_meeting_context(&bridge).unwrap();
+        let ctx = build_live_meeting_context(&memory).unwrap();
         assert!(ctx.contains("Operator Context"));
         assert!(ctx.contains("operator"));
     }
 
     #[serial_test::serial(cognitive_memory)]
     #[test]
-    fn build_context_failing_bridge_propagates_error() {
+    fn build_context_failing_memory_propagates_error() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let bridge = failing_bridge();
+        let memory = failing_memory();
         unsafe { std::env::remove_var("SIMARD_OPERATOR_NAME") };
-        let result = build_live_meeting_context(&bridge);
+        let result = build_live_meeting_context(&memory);
         assert!(
             result.is_err(),
-            "bridge failures must propagate, not silently degrade"
+            "memory failures must propagate, not silently degrade"
         );
     }
 
     #[test]
     fn build_context_always_has_operator_section() {
-        let bridge = empty_bridge();
-        let ctx = build_live_meeting_context(&bridge).unwrap();
+        let memory = empty_memory();
+        let ctx = build_live_meeting_context(&memory).unwrap();
         assert!(ctx.contains("Operator Context"));
     }
 
     #[test]
     fn build_context_result_is_not_empty() {
-        let bridge = empty_bridge();
-        let ctx = build_live_meeting_context(&bridge).unwrap();
+        let memory = empty_memory();
+        let ctx = build_live_meeting_context(&memory).unwrap();
         assert!(!ctx.is_empty());
     }
 
     #[test]
     fn build_context_contains_live_state_header() {
-        let bridge = empty_bridge();
-        let ctx = build_live_meeting_context(&bridge).unwrap();
+        let memory = empty_memory();
+        let ctx = build_live_meeting_context(&memory).unwrap();
         assert!(ctx.contains("Live State"));
     }
 }

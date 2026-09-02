@@ -362,6 +362,8 @@ git -C /home/azureuser/src/Simard worktree prune
 - [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
 - [Engineer loop argv sanitization](./engineer-loop-argv-sanitization.md)
 - [Engineer worktree sweep safety guards](./engineer-worktree-sweep-safety.md)
+- [Agentic disk reclamation](../concepts/agentic-disk-reclamation.md) — how idle
+  merged/closed-PR engineer worktrees are reclaimed under hard safety rails
 - [Run the OODA daemon](../howto/run-ooda-daemon.md)
 - Source: `src/engineer_worktree.rs`,
   `src/ooda_actions/advance_goal.rs::dispatch_spawn_engineer`,

@@ -75,3 +75,22 @@ pub fn check_disk_pressure_with<P: DiskStatProvider + ?Sized>(
         level,
     })
 }
+
+/// Used-percent of a filesystem from its [`DiskStat`]: `(1 - free/total) * 100`.
+/// Returns `None` when `total_bytes == 0` (an unknowable disk ⇒ the admission
+/// ceiling rail is inert, so the gate admits on the remaining signals). Issue
+/// #2706.
+pub fn used_pct(stat: &DiskStat) -> Option<f64> {
+    if stat.total_bytes == 0 {
+        return None;
+    }
+    Some((1.0 - stat.free_bytes as f64 / stat.total_bytes as f64) * 100.0)
+}
+
+/// The deterministic ENOSPC guard (issue #2706). `true` ⇒ REFUSE admission
+/// regardless of what the brain reasoned. Pure over `(used_pct, ceiling_pct)` so
+/// it is unit-tested without touching `statvfs`. The `>=` is inclusive: at
+/// exactly the ceiling, admission is already refused.
+pub fn exceeds_admission_ceiling(used_pct: f64, ceiling_pct: f64) -> bool {
+    used_pct >= ceiling_pct
+}

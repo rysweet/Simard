@@ -1,0 +1,122 @@
+name: reasoner-invalid-escape-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  JSON envelope carrying an INVALID BACKSLASH ESCAPE (a lone `\` inside a string
+  value — a Windows path, a regular expression, or a LaTeX fragment) instead of
+  silently discarding the model's whole structured decision — a reasoner-
+  reliability axis of the standing cognition-improvement goal (extends the
+  trailing-comma #2658 and unescaped-control-character #4424 recoveries).
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM. A
+  model emitting a `content`/`rationale` value routinely writes a LITERAL lone
+  backslash — `C:\Users`, a regex `\d+`, LaTeX `\alpha` — that is not part of a
+  valid `\n`/`\t`/`\uXXXX` escape. `serde_json` is spec-strict and rejects it
+  (`invalid escape` while parsing a string), so the stray backslash survives into
+  the extracted payload and fails a strict parse. Before this change every
+  reasoner site parsed strictly (`extract_json_payload(text)?` ->
+  `serde_json::from_str(..).ok()?`), so one lone backslash dropped the entire
+  decision and the phase fell back to its deterministic default — a PARSE-FAILURE
+  default, not a real model decision.
+
+  Recovery is composed by `recover_json_view`, which FIRST doubles any invalid
+  backslash escape inside a string literal (`\d` -> `\\d`), THEN escapes any
+  unescaped control byte inside a string literal, THEN strips trailing commas.
+  The invalid-escape view runs before the control-char view on purpose: a lone
+  backslash immediately followed by a raw newline (`\` + the newline byte) is a
+  backslash-then-control-char pair, and doubling the backslash first lets the
+  control-char view then escape the newline; running control-char first would
+  treat the raw newline as the backslash's (invalid) escape target and leave it a
+  raw control byte. All reasoner sites route through the one shared chokepoint
+  `recipe_output::extract_and_parse_json`, which retries the strict parse on the
+  recovered view — but ONLY when a view actually rewrote the payload (the
+  `Cow::Owned` arm). Each sub-view is a provable no-op (`Cow::Borrowed`) on valid
+  JSON, so any OTHER malformed shape (unquoted key, elided element, missing value)
+  still returns `None`: leniency never widens beyond the three named defects and a
+  genuine parse error is never masked. The three views cannot interfere — the two
+  string views only touch bytes inside string literals, comma-stripping only
+  touches structural commas outside them.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+  `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the `escape_json_string_invalid_escapes` view: borrows valid JSON unchanged
+      (including `\\`, `\"`, `\n`, `\uXXXX`, `\/`); doubles a lone backslash from a
+      regex or a Windows path INSIDE a string; leaves a valid escape untouched when
+      adjacent to an invalid one; respects an escaped quote; leaves a backslash
+      OUTSIDE a string untouched; preserves multibyte UTF-8;
+    - the composed `recover_json_view`: recovers an invalid escape alone, composes
+      all three defects, and ORDERS invalid-escape before control-char so a
+      `\`+raw-newline pair recovers correctly;
+    - the shared `extract_and_parse_json` helper end-to-end: recovers an invalid
+      escape alone, through banner + ANSI + log noise, and together with the other
+      two defects, while a genuinely malformed (non-target) envelope stays a loud
+      parse miss.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Recovery views: invalid-escape doubling (borrow on valid incl. \\ / \" / \n /
+  # \uXXXX / \/; double a lone backslash inside strings; leave adjacent valid
+  # escapes and out-of-string backslashes untouched; escaped-quote and multibyte
+  # preserved) and the composed recover_json_view (recovers invalid escape alone;
+  # composes all three defects; orders invalid-escape before control-char).
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output::extract::tests::escape_invalid_escapes recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Shared chokepoint end-to-end: an invalid-escape envelope now parses to the
+  # correct typed decision (alone, through banner+ANSI+log noise, and composed
+  # with a control char and a trailing comma); a non-target-malformed body / no
+  # object still returns None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict/trailing-comma/
+  # control-char behaviour is unregressed by composing the invalid-escape view.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

@@ -9,7 +9,7 @@
 //! never registers a tmux subagent session (the telemetry gap that made the
 //! gauge read ZERO while the daemon was actively running engineers).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::WORKTREES_SUBDIR;
 use super::claim::{claim_is_live, read_engineer_claim_full};
@@ -21,6 +21,11 @@ pub struct LiveEngineerWorktree {
     pub goal_id: String,
     /// PID recorded in the claim sentinel (the allocating daemon/engineer).
     pub pid: i32,
+    /// Absolute worktree path (the dir the enumerator already scans). Populated
+    /// so callers — the issue-#2690 overlap gate — can compute the engineer's
+    /// changed-file set without re-walking the worktrees root. Additive: the
+    /// dashboard "Active Engineers" gauge ignores it.
+    pub worktree_path: PathBuf,
 }
 
 /// Enumerate every engineer worktree under `<state_root>/engineer-worktrees/`
@@ -31,9 +36,17 @@ pub struct LiveEngineerWorktree {
 /// rows, never a panic — so a dashboard read never fails because of transient
 /// filesystem state.
 pub fn live_claimed_engineers(state_root: &Path) -> Vec<LiveEngineerWorktree> {
-    let root = state_root.join(WORKTREES_SUBDIR);
+    live_claimed_engineers_in_worktrees(&state_root.join(WORKTREES_SUBDIR))
+}
+
+/// Like [`live_claimed_engineers`] but scans an explicit worktrees directory
+/// (the dir that directly contains the per-engineer worktrees), without
+/// re-joining [`WORKTREES_SUBDIR`]. Lets callers that already hold the
+/// worktrees root — or a test override that is not named `engineer-worktrees`
+/// — enumerate it directly. Same I/O-tolerant contract.
+pub fn live_claimed_engineers_in_worktrees(worktrees_root: &Path) -> Vec<LiveEngineerWorktree> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&root) else {
+    let Ok(entries) = std::fs::read_dir(worktrees_root) else {
         return out;
     };
     for entry in entries.flatten() {
@@ -55,6 +68,7 @@ pub fn live_claimed_engineers(state_root: &Path) -> Vec<LiveEngineerWorktree> {
         out.push(LiveEngineerWorktree {
             goal_id,
             pid: claim.pid,
+            worktree_path: path,
         });
     }
     out
@@ -66,7 +80,7 @@ pub fn live_claimed_engineers(state_root: &Path) -> Vec<LiveEngineerWorktree> {
 /// Only strips the two-field suffix when it actually matches (a run of digits
 /// then a 6-char hex tag); otherwise the whole directory name is returned so an
 /// unexpected name still yields a stable, non-empty dedup key.
-fn goal_id_from_worktree_dir(name: &str) -> String {
+pub(crate) fn goal_id_from_worktree_dir(name: &str) -> String {
     let mut it = name.rsplitn(3, '-');
     let last = it.next(); // hex6
     let mid = it.next(); // epoch secs

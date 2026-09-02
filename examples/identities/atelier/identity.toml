@@ -1,0 +1,59 @@
+# Atelier — EXAMPLE industrial & furniture-design identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# NOTE: `atelier` is an EXAMPLE identity — there is no compiled-in
+# `simard-atelier`; Simard's own identities are the six built-ins in
+# `src/identity/loader.rs` (see `examples/identities/README.md`). This package
+# is a demonstration of the pluggable-identity framework, defined entirely as
+# data under `examples/identities/atelier/`.
+#
+# The atelier turns a parametric product brief into a fabrication-ready package:
+# a 3D model, a render, and fabrication exports (STEP/STL, cut list, BOM). Its
+# real behavior is delivered by the agentic recipes under `recipes/`, which may
+# drive any external domain tooling (Blender `bpy`, FreeCAD, OpenSCAD, a mesh
+# exporter, …). None of that tooling lives in Simard's daemon.
+
+[package]
+name = "atelier"
+version = "0.1.0"
+description = "Example identity: parametric product brief -> 3D model + render + fabrication package (STEP/STL, cut list, BOM)"
+
+[[identities]]
+name = "atelier"
+default_mode = "engineer"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "atelier-system"
+path = "prompts/atelier_system.md"
+
+[[identities.prompt_assets]]
+id = "atelier-brief"
+path = "prompts/atelier_brief.md"
+
+[[identities.prompt_assets]]
+id = "atelier-model"
+path = "prompts/atelier_model.md"
+
+[[identities.prompt_assets]]
+id = "atelier-render"
+path = "prompts/atelier_render.md"
+
+[[identities.prompt_assets]]
+id = "atelier-fabricate"
+path = "prompts/atelier_fabricate.md"
+
+[[identities.prompt_assets]]
+id = "atelier-handoff"
+path = "prompts/atelier_handoff.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "scoped-write"

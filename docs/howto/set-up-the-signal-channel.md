@@ -1,7 +1,7 @@
 ---
 title: How to set up the Signal channel
 description: Connect Simard to Signal so an allowlisted operator can command her and receive notifications, using a locally-run signal-cli JSON-RPC daemon. Covers linking a device (or using a dedicated number), the Note-to-Self flow for single-number linked-device setups, loop prevention, configuration, the allowlist, and verification. The signal feature is built by default, so a plain build is signal-capable.
-last_updated: 2026-07-04
+last_updated: 2026-07-09
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -14,6 +14,7 @@ related:
   - ../reference/conversation-channel-api.md
   - ../concepts/operational-autonomy-model.md
   - ./start-a-meeting.md
+  - ../reference/simard-installer.md
 ---
 
 # How to set up the Signal channel
@@ -161,28 +162,51 @@ read_only_unknown = false        # keep unknown senders fully ignored (default)
 - Set `read_only_unknown = true` only if you want non-allowlisted senders to be
   able to read `status`; they can never trigger a mutation.
 
-## 5. Build and run Simard
+## 5. Install and run Simard
 
 The Signal channel is compiled into a stock build (the `signal` feature is a
-default), so the plain build command already includes it:
+default), so the plain build command already includes it. The durable deployment
+path is the canonical installer:
 
 ```bash
-cargo build
+cargo build --release
+./target/release/simard install
 ```
 
-Then launch the Signal channel with the `signal run` subcommand:
+The installer writes and restarts `simard-ooda.service`. The OODA daemon hosts
+the Signal channel **in-process** (converge-to-single-daemon): it runs on a
+supervised background thread with reconnect-and-backoff, so there is no separate
+`simard-signal.service` to manage. If a prior install created one, `install`
+decommissions it (stops, disables, and removes the unit). The channel is
+DEFAULT-ON (opt out with `SIMARD_SIGNAL_ENABLED=0`) and stays dormant until a
+`[signal]` config table is present.
+
+User systemd services may not inherit the shell environment you used to run the
+installer. Prefer Signal and provider configuration in `$SIMARD_HOME/config.toml`.
+If your selected provider still requires environment variables, import them into
+the user systemd manager explicitly and restart:
 
 ```bash
-simard signal run
+systemctl --user import-environment ANTHROPIC_API_KEY SIMARD_LLM_PROVIDER
+systemctl --user restart simard-ooda.service
 ```
 
-On startup Simard reads the `[signal]` table, connects to the signal-cli endpoint,
-and begins receiving inbound messages from allowlisted senders and sending
-notifications out. Leave it running (systemd unit, tmux, or a supervisor) alongside
-the signal-cli daemon from step 3. `simard signal run` exits when the signal-cli
-socket closes; supervise it if you want it to reconnect. Only a deliberately
-minimal `--no-default-features` build omits the Signal code; it still recognizes
-`simard signal run` but tells you to rebuild with the feature.
+Do not embed provider secrets in generated systemd units.
+
+Verify the service:
+
+```bash
+systemctl --user status simard-ooda.service --no-pager
+journalctl --user -u simard-ooda.service -n 100 --no-pager
+```
+
+On startup Simard reads the `[signal]` table, connects to the signal-cli
+endpoint, and begins receiving inbound messages from allowlisted senders and
+sending notifications out — all inside the OODA daemon. `simard signal run`
+remains available for foreground smoke tests, but long-running hosts run the
+channel in-process via the installer-managed `simard-ooda.service`. Only a
+deliberately minimal `--no-default-features` build omits the Signal code; it
+still recognizes `simard signal run` but tells you to rebuild with the feature.
 
 ## 6. Verify the round trip
 

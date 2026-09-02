@@ -59,8 +59,8 @@ fn build_memory_store(
             // De-fork Phase 2b (issue #2307): open the library-backed store
             // ONCE and share the single Arc across:
             //   1. the in-process writer registration (so the goal store and
-            //      any other in-process bridge consumer hits the same handle);
-            //   2. the consolidation bridge handed to the runtime (wrapped via
+            //      any other in-process memory consumer hits the same handle);
+            //   2. the consolidation memory handed to the runtime (wrapped via
             //      `SharedMemory` for `Box<dyn ...>` shape);
             //   3. the cognitive memory store overlay used for legacy
             //      memory-record persistence.
@@ -108,13 +108,13 @@ struct AssembledParts {
     ports: RuntimePorts,
     request: RuntimeRequest,
     /// Cognitive memory backend for `RuntimeKernel::set_cognitive_client()`.
-    consolidation_bridge: Option<Box<dyn CognitiveMemoryOps>>,
+    consolidation_memory: Option<Box<dyn CognitiveMemoryOps>>,
 }
 
 /// Build all runtime components from a bootstrap config.
 fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     let prompt_store = Arc::new(FilePromptAssetStore::new(config.prompt_root.value.clone()));
-    let (memory_store, consolidation_bridge) = build_memory_store(config)?;
+    let (memory_store, consolidation_memory) = build_memory_store(config)?;
     let evidence_store = Arc::new(FileBackedEvidenceStore::try_new(
         config.evidence_store_path(),
     )?);
@@ -163,15 +163,15 @@ fn assemble_parts(config: &BootstrapConfig) -> SimardResult<AssembledParts> {
     Ok(AssembledParts {
         ports,
         request,
-        consolidation_bridge,
+        consolidation_memory,
     })
 }
 
 pub fn assemble_local_runtime(config: &BootstrapConfig) -> SimardResult<LocalRuntime> {
     let parts = assemble_parts(config)?;
     let mut runtime = LocalRuntime::compose(parts.ports, parts.request)?;
-    if let Some(bridge) = parts.consolidation_bridge {
-        runtime.set_cognitive_client(bridge);
+    if let Some(memory) = parts.consolidation_memory {
+        runtime.set_cognitive_client(memory);
     }
     Ok(runtime)
 }
@@ -182,8 +182,8 @@ pub fn assemble_local_runtime_from_handoff(
 ) -> SimardResult<LocalRuntime> {
     let parts = assemble_parts(config)?;
     let mut runtime = LocalRuntime::compose_from_handoff(parts.ports, parts.request, snapshot)?;
-    if let Some(bridge) = parts.consolidation_bridge {
-        runtime.set_cognitive_client(bridge);
+    if let Some(memory) = parts.consolidation_memory {
+        runtime.set_cognitive_client(memory);
     }
     Ok(runtime)
 }
@@ -195,7 +195,7 @@ pub fn run_local_session(config: &BootstrapConfig) -> SimardResult<LocalSessionE
     let outcome = runtime.run(config.objective.value.clone())?;
     let _ = runtime.export_handoff()?;
 
-    // Flush any pending bridge writes before shutdown.
+    // Flush any pending memory writes before shutdown.
     runtime.flush_pending_memory();
 
     let snapshot = runtime.snapshot()?;

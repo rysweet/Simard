@@ -31,8 +31,8 @@ related:
 >
 > The persistence functions (`load_goal_board`, `save_goal_board`,
 > `persist_board`) and mutation helpers (`add_active_goal`,
-> `enqueue_stewardship_issue`, `promote_to_active`, `update_goal_progress`,
-> `clear_goal_assignment`, `archive_completed`) **exist today** in
+> `promote_to_active`, `update_goal_progress`, `clear_goal_assignment`,
+> `archive_completed`) **exist today** in
 > [`src/goal_curation/operations.rs`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/operations.rs)
 > and behave as documented below.
 >
@@ -575,6 +575,16 @@ Appends an active goal. Fails if:
 > [Goal target-repo routing](./goal-target-repo-routing.md) (issue
 > [#2359](https://github.com/rysweet/Simard/issues/2359)).
 
+> **Labels (`labels` field).** Each `ActiveGoal` also carries a
+> `labels: Vec<String>` of free-form tags for categorization, filtering, and
+> provenance. It is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`,
+> so pre-#2743 snapshots load with `labels = []` and unlabelled goals serialize
+> byte-identically (no migration, stable board snapshot hash). Every creation
+> path stamps exactly one `source:*` provenance tag at first materialization
+> (creative-ideas-promoted goals get `source:creative-ideas`). See
+> [Goal labels / tags](./goal-labels.md) (issue
+> [#2743](https://github.com/rysweet/Simard/issues/2743)).
+
 ### `add_backlog_item`
 
 ```rust
@@ -582,24 +592,6 @@ pub fn add_backlog_item(board: &mut GoalBoard, item: BacklogItem) -> SimardResul
 ```
 
 Appends a backlog item. Fails if an item with the same `id` already exists.
-
-### `enqueue_stewardship_issue`
-
-```rust
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()>
-```
-
-Idempotent. Derives a stable backlog ID using the format
-`stewardship-<org>_<repo>-<number>` (forward slashes in the repository name
-are replaced with underscores, e.g. `org/repo` → `stewardship-org_repo-42`),
-then calls `add_backlog_item`. If a backlog item with that ID already exists
-the call is a no-op. Default score: `DEFAULT_STEWARD_SCORE` (0.6).
 
 ### `promote_to_active`
 
@@ -680,8 +672,8 @@ their seeding from this constant.
 pub const DEFAULT_STEWARD_SCORE: f64 = 0.6
 ```
 
-Default backlog score assigned to stewardship-filed issues by
-`enqueue_stewardship_issue`.
+Default score used when the Overseer intentionally creates internal backlog
+work. Stewardship-filed GitHub issues are not added to the goal board.
 
 ---
 
@@ -772,4 +764,3 @@ at `src/operator_commands_meeting/improvement_curation.rs:123`.
 There is no silent disk fallback for writes — when cognitive memory is
 unavailable, `save_goal_board` fails and the in-memory mutation is lost.
 For reads, the resilience contract (log + empty board) is documented above.
-

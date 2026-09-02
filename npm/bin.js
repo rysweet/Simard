@@ -107,8 +107,13 @@ function main() {
 
   // Pass through all arguments to the native binary
   const args = process.argv.slice(2);
+  const env = { ...process.env };
+  const packagedAssets = join(installDir(), "prompt_assets");
+  if (existsSync(packagedAssets)) {
+    env.SIMARD_INSTALL_PROMPT_ASSETS_ROOT = packagedAssets;
+  }
   try {
-    execFileSync(bin, args, { stdio: "inherit" });
+    execFileSync(bin, args, { stdio: "inherit", env });
     process.exit(0);
   } catch (err) {
     process.exit(err.status || 1);

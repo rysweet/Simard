@@ -8,7 +8,7 @@
 //! memories.
 //!
 //! This module reintroduces a periodic backup as a **verified** routine: it
-//! snapshots the live store through the bridge (inherently the migrated path),
+//! snapshots the live store through the memory (inherently the migrated path),
 //! re-opens and verifies the backup before pruning, and only then trims old
 //! backups. It is best-effort — a failure is surfaced loudly to the caller and
 //! never aborts the OODA cycle.
@@ -89,7 +89,7 @@ fn backup_config_for(state_root: &Path) -> BackupConfig {
 /// old backups (issue #2420).
 ///
 /// Steps:
-/// 1. Snapshot the live cognitive store (`bridge`) plus the file-backed records
+/// 1. Snapshot the live cognitive store (`memory`) plus the file-backed records
 ///    at `state_root/memory_records.json` into `state_root/backups/<ts>/`.
 /// 2. Re-open and verify the backup (checksum + manifest self-consistency) —
 ///    [`backup_memory_verified`] returns `Err` if it does not verify.
@@ -98,14 +98,14 @@ fn backup_config_for(state_root: &Path) -> BackupConfig {
 /// Returns the verified manifest. Any failure is returned as `Err` so the caller
 /// logs it and skips the prune, leaving prior good backups intact.
 pub fn run_verified_backup(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     state_root: &Path,
 ) -> SimardResult<BackupManifest> {
     let records_path = state_root.join(MEMORY_RECORDS_FILENAME);
     let file_store = FileBackedMemoryStore::try_new(&records_path)?;
     let config = backup_config_for(state_root);
 
-    let manifest = backup_memory_verified(bridge, &file_store, BACKUP_AGENT, &config)?;
+    let manifest = backup_memory_verified(memory, &file_store, BACKUP_AGENT, &config)?;
 
     // Prune only AFTER a verified backup so a failed/partial backup can never
     // cause the last-known-good backup to be reclaimed.
@@ -172,15 +172,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state_root = tmp.path();
 
-        let bridge = LibraryCognitiveMemory::in_memory().unwrap();
-        bridge
+        let memory = LibraryCognitiveMemory::in_memory().unwrap();
+        memory
             .store_fact("rust", "memory-safe", 0.9, &[], "ep1")
             .unwrap();
-        bridge
+        memory
             .store_fact("backups", "must be verified", 0.95, &[], "ep2")
             .unwrap();
 
-        let manifest = run_verified_backup(&bridge, state_root).expect("verified backup");
+        let manifest = run_verified_backup(&memory, state_root).expect("verified backup");
 
         assert_eq!(manifest.cognitive_facts_count, 2);
         assert!(
@@ -200,9 +200,9 @@ mod tests {
     #[test]
     fn run_verified_backup_on_empty_store_is_valid() {
         let tmp = tempfile::tempdir().unwrap();
-        let bridge = LibraryCognitiveMemory::in_memory().unwrap();
+        let memory = LibraryCognitiveMemory::in_memory().unwrap();
 
-        let manifest = run_verified_backup(&bridge, tmp.path()).expect("verified empty backup");
+        let manifest = run_verified_backup(&memory, tmp.path()).expect("verified empty backup");
         assert_eq!(manifest.cognitive_facts_count, 0);
 
         let v = verify_backup(&manifest.backup_dir).unwrap();

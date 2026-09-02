@@ -1,7 +1,7 @@
 ---
 title: RPC Transport Pattern
 description: How Simard's RPC transport infrastructure provides typed clients for knowledge and gym services, using native Rust transports with circuit breaker fault tolerance.
-last_updated: 2026-07-06
+last_updated: 2026-07-08
 owner: simard
 doc_type: concept
 ---
@@ -15,10 +15,9 @@ Simard uses an **RPC transport abstraction** — typed `RpcTransport` implementa
 | Transport | Use Case | Notes |
 |-----------|----------|-------|
 | **NativeRpcTransport** | Production (knowledge, gym) | In-process Rust handlers, zero overhead |
-| **SubprocessRpcTransport** | Testing infrastructure | Spawns a Python subprocess; used only in integration tests |
-| **InMemoryRpcTransport** | Unit testing | In-memory mock; no I/O |
+| **InMemoryRpcTransport** | Unit testing | In-memory mock; no I/O, no subprocess |
 
-> **History**: Prior to #2181, the knowledge and gym clients used Python subprocess transports with a native Rust fallback. The native Rust transports are now the only production path. Cognitive memory is provided by the library-backed `LibraryCognitiveMemory` (over `amplihack-memory-lib`) as the sole on-disk backend after the de-fork (Phase 2b) — see [Cognitive Memory Architecture](cognitive-memory.md) and [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md).
+> **History**: Prior to #2181, the knowledge and gym clients used Python subprocess transports with a native Rust fallback. The native Rust transports became the only production path in #2181. As of #3181 (the pure-Rust daemon) the last subprocess transport — a test-only `SubprocessRpcTransport` that spawned `python3` — has been **removed** along with all Python: no transport spawns an external process any more, and the two remaining transports (`NativeRpcTransport`, `InMemoryRpcTransport`) are both pure Rust and in-process. Cognitive memory is provided by the library-backed `LibraryCognitiveMemory` (over `amplihack-memory-lib`) as the sole on-disk backend after the de-fork (Phase 2b) — see [Cognitive Memory Architecture](cognitive-memory.md) and [Library-backed Cognitive Memory](cognitive-memory-library-adapter.md).
 
 ## Wire Protocol
 
@@ -60,6 +59,14 @@ Each transport speaks newline-delimited JSON. One request per line on stdin, one
 > `knowledge.query`, `gym.run_scenario`, the built-in `bridge.health` probe)
 > and on-disk format is byte-for-byte unchanged. Renaming a struct or module
 > never alters what goes on the wire.
+>
+> The wider terminology cleanup (proposed, #2951) — renaming the lowercase
+> "bridge" in log strings, comments, and identifiers we control to the accurate
+> RPC / client / server / handoff vocabulary, while leaving frozen wire /
+> persisted / CLI values like `bridge.health` unchanged — is described in
+> [Eliminating "bridge" terminology](../concepts/bridge-terminology-elimination.md)
+> and enforced by the
+> [No-`bridge` naming guard](../reference/no-bridge-naming-guard.md).
 
 ## Rust-Side Architecture
 
@@ -77,13 +84,14 @@ pub trait RpcTransport: Send + Sync {
 
 | Type | Purpose |
 |------|---------|
-| `SubprocessRpcTransport` | Spawns Python, manages stdin/stdout, kills on drop |
-| `InMemoryRpcTransport` | Handler function for unit tests, no Python needed |
+| `NativeRpcTransport` | In-process Rust handlers for production (knowledge, gym); no subprocess |
+| `InMemoryRpcTransport` | Handler function for unit tests, no I/O |
 | `CircuitBreakerTransport<T>` | Wraps any transport with fault tolerance |
 
-These live in `src/rpc_transport/` (`in_memory`, `native`, `subprocess`
-submodules); the shared request/response types (`RpcRequest`, `RpcResponse`,
-`RpcHealth`, the `RpcTransport` trait) live in `src/rpc.rs`.
+These live in `src/rpc_transport/` (`in_memory`, `native` submodules); the
+shared request/response types (`RpcRequest`, `RpcResponse`, `RpcHealth`, the
+`RpcTransport` trait) live in `src/rpc.rs`. There is no `subprocess` submodule —
+Simard spawns no external process for RPC.
 
 ### Circuit Breaker
 
@@ -104,32 +112,14 @@ The circuit breaker lives in `src/rpc_circuit_breaker.rs`. Only
 transport-level errors (code `-32001`) trip the circuit. Application errors
 (method not found, internal) do not.
 
-## Python-Side Architecture
+## Server-Side Handlers
 
-The subprocess transport is only used by integration tests. The Python test
-fixtures extend a small `RpcServer` base class that runs the stdin/stdout
-loop and dispatches registered method handlers:
+Production handlers run **in-process in Rust** behind `NativeRpcTransport`;
+there is no external server process and no Python. A handler implements the
+same newline-delimited JSON contract described above and is registered by
+dotted method name.
 
-```python
-class RpcServer:
-    def __init__(self, server_name: str) -> None
-    def register(self, method: str, handler: Callable) -> None
-    def run(self) -> None  # stdin/stdout loop
-```
-
-A fixture server extends `RpcServer` and registers method handlers:
-
-```python
-class EchoRpcServer(RpcServer):
-    def __init__(self):
-        super().__init__("echo")
-        self.register("echo", self.handle_echo)
-
-    def handle_echo(self, params):
-        return {"echoed": params}
-```
-
-The built-in `bridge.health` method is always registered and returns
+The built-in `bridge.health` method is always available and returns
 `{"server_name": "...", "healthy": true}`. The method string stays
 `bridge.health` for wire compatibility — it is part of the frozen protocol,
 not a Rust identifier.
@@ -140,11 +130,16 @@ not a Rust identifier.
 
 | Error Type | When | Recovery |
 |-----------|------|----------|
-| `RpcSpawnFailed` | Python binary not found | Check PATH, install python3 |
+| `RpcSpawnFailed` | A child IPC process (e.g. the native Rust single-writer client launched by `memory_ipc`/`runtime_ipc`) could not be spawned | Check the `simard` binary path and PATH; retry |
 | `RpcTransportError` | Stdin/stdout broken, process exited | Circuit breaker opens, auto-respawn on next call |
 | `RpcProtocolError` | Malformed JSON, type mismatch | Log and surface to operator |
 | `RpcCallFailed` | Method returned error payload | Surface to caller with method context |
 | `RpcCircuitOpen` | Too many recent failures | Wait for cooldown, check transport health |
+
+> `RpcSpawnFailed` is a transport-agnostic IPC error retained across the
+> pure-Rust migration (#3181). It is shared by the native Rust IPC launchers
+> (`memory_ipc`, `runtime_ipc`, `agent_supervisor`, `self_relaunch`, and
+> peers) and no longer relates to spawning any Python process.
 
 ### Data Loss Prevention
 
@@ -168,7 +163,7 @@ de-fork (Phase 2b, issue #2307) they go directly through the in-process
 
 ## Testing
 
-### Unit Tests (no Python needed)
+### Unit Tests (in-memory)
 
 ```rust
 let transport = InMemoryRpcTransport::echo("test");
@@ -176,23 +171,15 @@ let response = transport.call(health_request()).unwrap();
 assert!(response.result.is_some());
 ```
 
-### Integration Tests (subprocess transport)
+### Circuit-Breaker Tests
 
-```rust
-let transport = SubprocessRpcTransport::new(
-    "echo-test",
-    "tests/fixtures/echo_rpc.py",
-    vec![],
-    Duration::from_secs(5),
-);
-let health = transport.health().expect("transport should be healthy");
-assert_eq!(health.server_name, "echo");
-```
+Fault-tolerance behaviour is covered entirely in Rust by
+`src/rpc_circuit_breaker.rs` (`#[cfg(test)]`), driving an
+`InMemoryRpcTransport` (or a failing handler) through the state machine — no
+subprocess, no fixtures, no Python:
 
-### Feral Tests
-
-- Kill the subprocess mid-request → `RpcTransportError`
-- Send malformed JSON → `RpcProtocolError`
-- Fixture script doesn't exist → `RpcSpawnFailed` or `RpcTransportError`
-- Subprocess exits immediately → EOF detection
-- 3 consecutive transport failures → circuit opens
+- Transport-level error (code `-32001`) → circuit trips toward `Open`
+- 3 consecutive transport failures → circuit opens; calls return `RpcCircuitOpen`
+- Cooldown elapsed → `HalfOpen`; probe success closes, probe failure reopens
+- Application errors (method not found, internal) do **not** trip the circuit
+- Malformed JSON from a handler → `RpcProtocolError`

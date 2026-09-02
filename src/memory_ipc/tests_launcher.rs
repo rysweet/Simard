@@ -1,4 +1,4 @@
-//! Failing TDD tests (issue #1590, Step 7) for the cognitive-memory bridge
+//! Failing TDD tests (issue #1590, Step 7) for the cognitive-memory client
 //! launcher helpers required by spec section A2 / Recommendation C.
 //!
 //! Public API under test (not yet implemented):
@@ -14,7 +14,7 @@
 //! pub fn open_reader_client(state_root: &Path) -> SimardResult<ReaderClient>;
 //! ```
 //!
-//! Behavioural ladder for the writer (matches `launch_real_meeting_bridge`):
+//! Behavioural ladder for the writer (matches `launch_real_meeting_client`):
 //!   1. Connect to the daemon's UDS at `default_socket_path()` if present.
 //!   2. Otherwise reap any stale open-lock and `LibraryCognitiveMemory::open`.
 //!
@@ -49,18 +49,25 @@ fn launch_writer_client_succeeds_on_fresh_state_root_without_daemon() {
     let root = fresh_state_root("writer-fresh");
     let writer = launch_writer_client(&root)
         .expect("launch_writer_client must succeed without a daemon when state root is writable");
-    // ops() must hand back a usable trait object.
+    // ops() must hand back a usable trait object whose fresh-store state is
+    // concretely correct — a brand-new tier-2 store must hold zero facts. (The
+    // earlier version discarded the stats via `let _ =`, verifying only that the
+    // call did not error; asserting the count turns it into a behaviour check.)
     let ops: &dyn CognitiveMemoryOps = writer.ops();
-    let _ = ops
+    let stats = ops
         .get_statistics()
-        .expect("get_statistics must work on a fresh writer bridge");
+        .expect("get_statistics must work on a fresh writer client");
+    assert_eq!(
+        stats.semantic_count, 0,
+        "a freshly opened tier-2 writer must front an empty store (no facts)"
+    );
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_supports_store_fact_round_trip() {
+fn writer_client_supports_store_fact_round_trip() {
     let root = fresh_state_root("writer-roundtrip");
-    let writer = launch_writer_client(&root).expect("writer bridge");
+    let writer = launch_writer_client(&root).expect("writer client");
 
     writer
         .ops()
@@ -110,7 +117,7 @@ fn open_reader_client_succeeds_after_writer_initialises_db() {
     let root = fresh_state_root("reader-after-writer");
     {
         // Drop the writer to release the open-lock before the reader opens.
-        let writer = launch_writer_client(&root).expect("writer bridge");
+        let writer = launch_writer_client(&root).expect("writer client");
         writer
             .ops()
             .store_fact(
@@ -131,13 +138,13 @@ fn open_reader_client_succeeds_after_writer_initialises_db() {
         .expect("reader search_facts");
     assert!(
         facts.iter().any(|f| f.content == "seeded by writer"),
-        "reader bridge must surface facts written by the prior writer"
+        "reader client must surface facts written by the prior writer"
     );
 }
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
+fn writer_client_is_compatible_with_save_and_load_goal_board() {
     // The whole point of these helpers is to let dashboard / meeting /
     // engineer call sites flow through `save_goal_board(&board, writer.ops())`
     // and `load_goal_board(reader.ops())` without any ceremony.
@@ -145,10 +152,11 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
     // #[cfg(test)] hermetic guard in save_goal_board does not trip.
     let hermetic = crate::test_support::HermeticState::new();
     let root = hermetic.state_root().to_path_buf();
-    let writer = launch_writer_client(&root).expect("writer bridge");
+    let writer = launch_writer_client(&root).expect("writer client");
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -171,17 +179,18 @@ fn writer_bridge_is_compatible_with_save_and_load_goal_board() {
 
 #[test]
 #[serial_test::serial(cognitive_memory)]
-fn writer_bridge_does_not_create_legacy_goal_records_json_on_save() {
+fn writer_client_does_not_create_legacy_goal_records_json_on_save() {
     // Acceptance criterion #6: every save must flow through cognitive memory.
     // No writer call site is allowed to create the legacy JSON file.
     // HermeticState pins SIMARD_STATE_ROOT to a TempDir so the
     // #[cfg(test)] hermetic guard in save_goal_board does not trip.
     let hermetic = crate::test_support::HermeticState::new();
     let root = hermetic.state_root().to_path_buf();
-    let writer = launch_writer_client(&root).expect("writer bridge");
+    let writer = launch_writer_client(&root).expect("writer client");
 
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -252,7 +261,7 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_client() 
     let writer = launch_writer_client(&root)
         .expect("launch_writer_client must succeed via the registered in-process writer");
 
-    // Write through the bridge.
+    // Write through the client.
     writer
         .ops()
         .store_fact(
@@ -265,7 +274,7 @@ fn register_in_process_writer_returns_registered_arc_via_launch_writer_client() 
         .expect("store_fact through in-process writer must succeed");
 
     // The fact must be visible on the registered Arc directly,
-    // proving the bridge and the registered handle are the SAME backend.
+    // proving the client and the registered handle are the SAME backend.
     let facts = inner
         .search_facts("tdd-1590:in-process-writer", 5, 0.0)
         .expect("search_facts on the registered Arc must succeed");

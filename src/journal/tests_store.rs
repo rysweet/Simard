@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 use super::test_support::{FakeMemory, pr};
 use crate::cognitive_memory::CognitiveMemoryOps;
@@ -154,4 +154,106 @@ fn corrupt_journal_record_fails_loud() {
     // Enumeration stays lenient — a corrupt record is simply skipped.
     let all = store.query(None, None).expect("query tolerates corruption");
     assert!(all.is_empty());
+}
+
+/// Build an entry for `date` stamped with an explicit generation time and a
+/// specific PR count, so a test can distinguish two same-day duplicates.
+fn entry_at(date: NaiveDate, generated_at: DateTime<Utc>, pr_count: usize) -> JournalEntry {
+    JournalEntry {
+        date,
+        generated_at,
+        narrative: format!("generated at {generated_at}"),
+        draft: String::new(),
+        prs: (0..pr_count)
+            .map(|i| pr(i as u64, "a change", "open"))
+            .collect(),
+        quiet_day: false,
+    }
+}
+
+/// Inject a journal fact directly (bypassing caller-key dedup) so a test can
+/// forge the *duplicate-day* corruption the live store exhibited: two distinct
+/// `journal:YYYY-MM-DD` facts for the same day.
+fn inject_duplicate_fact(mem: &Arc<dyn CognitiveMemoryOps>, entry: &JournalEntry) {
+    let key = journal_caller_key(entry.date);
+    let content = serde_json::to_string(entry).expect("serialize entry");
+    // `store_fact` appends without caller-key replacement, so repeated calls
+    // for the same concept accumulate — exactly the state the read layer must
+    // now defend against.
+    mem.store_fact(
+        &key,
+        &content,
+        1.0,
+        &[JOURNAL_TAG.to_string()],
+        "journal-generator",
+    )
+    .expect("inject duplicate fact");
+}
+
+#[test]
+fn duplicate_day_facts_collapse_to_newest_in_dates_and_search() {
+    let (mem, store) = fresh_store();
+    let d = ymd(2026, 7, 15);
+    let older = entry_at(d, "2026-07-15T21:20:47Z".parse().expect("ts"), 31);
+    let newer = entry_at(d, "2026-07-15T22:04:00Z".parse().expect("ts"), 34);
+    // Insert out of generation order to prove selection is by timestamp, not
+    // enumeration order.
+    inject_duplicate_fact(&mem, &newer);
+    inject_duplicate_fact(&mem, &older);
+
+    // Date picker: the day appears exactly ONCE (no duplicate), with the
+    // newest generation's PR count.
+    let dates = store.dates().expect("dates");
+    assert_eq!(
+        dates,
+        vec![d],
+        "duplicate day must collapse to a single date"
+    );
+    let all = store.query(None, None).expect("query all");
+    assert_eq!(all.len(), 1, "search must not list the day twice");
+    assert_eq!(all[0].prs.len(), 34, "newest generation wins");
+
+    // Single-entry read agrees with the deduped list (newest wins), not the
+    // arbitrary first-enumerated duplicate.
+    let got = store.get_by_date(d).expect("get").expect("present");
+    assert_eq!(
+        got.prs.len(),
+        34,
+        "get_by_date returns the newest generation"
+    );
+}
+
+#[test]
+fn duplicate_facts_across_multiple_days_each_collapse_independently() {
+    let (mem, store) = fresh_store();
+    let d1 = ymd(2026, 7, 14);
+    let d2 = ymd(2026, 7, 15);
+    inject_duplicate_fact(
+        &mem,
+        &entry_at(d1, "2026-07-14T10:00:00Z".parse().unwrap(), 2),
+    );
+    inject_duplicate_fact(
+        &mem,
+        &entry_at(d1, "2026-07-14T12:00:00Z".parse().unwrap(), 5),
+    );
+    inject_duplicate_fact(
+        &mem,
+        &entry_at(d2, "2026-07-15T09:00:00Z".parse().unwrap(), 1),
+    );
+    inject_duplicate_fact(
+        &mem,
+        &entry_at(d2, "2026-07-15T11:00:00Z".parse().unwrap(), 7),
+    );
+
+    let all = store.query(None, None).expect("query all");
+    let dates: Vec<NaiveDate> = all.iter().map(|e| e.date).collect();
+    assert_eq!(dates, vec![d2, d1], "one entry per day, newest day first");
+    assert_eq!(all[0].prs.len(), 7, "d2 newest generation wins");
+    assert_eq!(all[1].prs.len(), 5, "d1 newest generation wins");
+
+    // Range filtering still applies on top of the dedup.
+    let ranged = store.query(Some((d1, d1)), None).expect("query range");
+    assert_eq!(ranged.len(), 1);
+    assert_eq!(ranged[0].date, d1);
+    assert_eq!(ranged[0].prs.len(), 5);
 }

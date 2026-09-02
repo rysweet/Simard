@@ -38,13 +38,16 @@ pub mod jargon;
 pub mod pr_source;
 pub mod providers;
 pub mod recipe;
+pub mod reconcile;
 pub mod render;
 pub mod store;
 pub mod thread;
 pub mod types;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
+#[cfg(all(test, unix))]
+mod tests_clean_result_channel;
 #[cfg(test)]
 mod tests_dejargon_teeth;
 #[cfg(test)]
@@ -53,6 +56,8 @@ mod tests_generate;
 mod tests_jargon;
 #[cfg(test)]
 mod tests_pr_source;
+#[cfg(test)]
+mod tests_reconcile;
 #[cfg(test)]
 mod tests_render;
 #[cfg(test)]
@@ -78,6 +83,11 @@ pub use providers::{
     episode_time_label, generate_and_store,
 };
 pub use recipe::{RecipeDrafter, RecipeReviewer};
+pub use reconcile::{
+    DEFAULT_RECONCILE_LOOKBACK_DAYS, GhMergedPrSource, JOURNAL_RECONCILE_DAYS_ENV,
+    MAX_RECONCILE_LOOKBACK_DAYS, MergedPrSource, ReconcileReport, reconcile_entry,
+    reconcile_lookback_days, reconcile_lookback_days_from, reconcile_recent_days,
+};
 pub use render::{html_escape, render_entry_html, render_entry_tui_lines};
 pub use store::{
     JOURNAL_CONCEPT_PREFIX, JOURNAL_TAG, JournalStore, all_entries, entry_matches,

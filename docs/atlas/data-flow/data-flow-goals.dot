@@ -1,0 +1,4 @@
+digraph DataFlowGoals { rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  mutation -> load -> json -> filter -> heal -> board; board -> cache -> snapshot -> readers; board -> done -> tombstones -> commit; board -> commit -> reconcile -> json; commit -> tracker -> json;
+  mutation [label="operator/meeting/OODA mutation"]; load [label="goal_board_store::load"]; json [label="goal_board.json\nauthoritative", fillcolor="#fff6df"]; filter [label="filter tombstones"]; heal [label="heal stale no-progress"]; board [label="OodaState.active_goals"]; cache [label="overwrite_memory_cache"]; snapshot [label="goal-board:snapshot\nderived cache", fillcolor="#fff6df"]; readers [label="legacy/dashboard/prepare readers"]; done [label="archive/drop/done sweep"]; tombstones [label="tombstone ids"]; commit [label="commit_cycle"]; reconcile [label="reconcile persisted + in-flight"]; tracker [label="no-progress tracker + cycle_count"];
+}

@@ -1,6 +1,6 @@
 //! Construct an [`OodaClients`] from a `state_root` path so that recipe
 //! steps (which run as short-lived helper-bin invocations) can instantiate
-//! the same bridges the long-lived OODA daemon uses.
+//! the same memories the long-lived OODA daemon uses.
 //!
 //! Strategy:
 //!
@@ -18,7 +18,7 @@
 //!    delegation should use `type: recipe` to dispatch to the
 //!    `simard-engineer-loop` recipe instead.
 //!
-//! This module is the bridge between the daemon's bespoke wiring (in
+//! This module is the adapter between the daemon's bespoke wiring (in
 //! `operator_commands_ooda::daemon`) and the recipe-runner's stateless
 //! helper-bin model. Both paths share `rpc_subprocess_launcher` for the native
 //! Rust transports; they differ only in how memory and the LLM session
@@ -107,6 +107,8 @@ pub fn clients_from_state_root(state_root: &Path) -> SimardResult<OodaClients> {
             crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        outcome_verify_brain: None,
+        live_signals: None,
     })
 }
 

@@ -264,7 +264,10 @@ fn gather_inputs(
 /// Every error is treated conservatively as "has work" (fail-safe keep) EXCEPT
 /// a missing upstream, which is expected for many merged branches and yields
 /// "no unpushed work".
-fn worktree_has_uncommitted_or_unpushed_work(dir: &Path) -> bool {
+///
+/// Exposed `pub(crate)` so the disk-reclaim guard (issue #2704) can compose the
+/// exact same uncommitted/unpushed veto rather than re-deriving it and drifting.
+pub(crate) fn worktree_has_uncommitted_or_unpushed_work(dir: &Path) -> bool {
     match git_capture(dir, &["status", "--porcelain"]) {
         Ok(out) if !out.trim().is_empty() => return true,
         Ok(_) => {}

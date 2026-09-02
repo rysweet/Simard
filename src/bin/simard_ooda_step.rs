@@ -2,9 +2,9 @@
 //!
 //! This is the deterministic-phase counterpart to `simard-ooda-cycle.yaml`
 //! recipe steps. Pure-data phases (orient, decide, review, curate) round-trip
-//! state through `OodaStateSnapshot` JSON; bridge-dependent phases (observe,
+//! state through `OodaStateSnapshot` JSON; memory-dependent phases (observe,
 //! act, budget-check) are intentionally deferred — the recipe will drop in
-//! real implementations once the corresponding bridge-instantiation surface
+//! real implementations once the corresponding memory-instantiation surface
 //! exists.
 //!
 //! ## Usage
@@ -145,8 +145,8 @@ fn cmd_curate(flags: HashMap<String, String>) -> Result<String, String> {
     serde_json::to_string(&result).map_err(|e| format!("serialize curate result: {e}"))
 }
 
-/// Observe phase: bridge-dependent. Loads or builds an `OodaState` snapshot,
-/// connects bridges from `--state-root`, runs `observe`, and returns the
+/// Observe phase: memory-dependent. Loads or builds an `OodaState` snapshot,
+/// connects memories from `--state-root`, runs `observe`, and returns the
 /// `Observation` plus the updated snapshot (since `observe` mutates state —
 /// it consumes pending review_improvements into the observation).
 fn cmd_observe(flags: HashMap<String, String>) -> Result<String, String> {
@@ -154,10 +154,10 @@ fn cmd_observe(flags: HashMap<String, String>) -> Result<String, String> {
     let state_root = PathBuf::from(require(&flags, "state-root")?);
     let snapshot: OodaStateSnapshot = read_json(state_path)?;
     let mut state = snapshot.into_state();
-    let bridges =
+    let memories =
         clients_from_state_root(&state_root).map_err(|e| format!("client_factory failed: {e}"))?;
     let observation =
-        observe(&mut state, &bridges).map_err(|e| format!("observe phase failed: {e}"))?;
+        observe(&mut state, &memories).map_err(|e| format!("observe phase failed: {e}"))?;
     let result = serde_json::json!({
         "observation": observation,
         "snapshot": OodaStateSnapshot::from(&state),
@@ -165,8 +165,8 @@ fn cmd_observe(flags: HashMap<String, String>) -> Result<String, String> {
     serde_json::to_string(&result).map_err(|e| format!("serialize observe result: {e}"))
 }
 
-/// Act phase: bridge-dependent. Dispatches the supplied planned actions
-/// against live bridges and returns one [`ActionOutcome`] per input action.
+/// Act phase: memory-dependent. Dispatches the supplied planned actions
+/// against live memories and returns one [`ActionOutcome`] per input action.
 /// Also returns the post-act snapshot, since dispatch_actions mutates state
 /// (e.g. records engineer worktree handles, updates goal progress).
 fn cmd_act(flags: HashMap<String, String>) -> Result<String, String> {
@@ -176,9 +176,9 @@ fn cmd_act(flags: HashMap<String, String>) -> Result<String, String> {
     let snapshot: OodaStateSnapshot = read_json(state_path)?;
     let actions: Vec<PlannedAction> = read_json(actions_path)?;
     let mut state = snapshot.into_state();
-    let mut bridges =
+    let mut memories =
         clients_from_state_root(&state_root).map_err(|e| format!("client_factory failed: {e}"))?;
-    let outcomes = ooda_actions::dispatch_actions(&actions, &mut bridges, &mut state)
+    let outcomes = ooda_actions::dispatch_actions(&actions, &mut memories, &mut state)
         .map_err(|e| format!("act phase failed: {e}"))?;
     let result = serde_json::json!({
         "outcomes": outcomes,

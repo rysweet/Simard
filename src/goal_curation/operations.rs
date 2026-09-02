@@ -16,7 +16,7 @@ use super::types::{
 
 /// Process-local critical section for the merge-on-write pipeline in
 /// [`save_goal_board`]. Serializes the read-merge-write window inside a
-/// single Simard process so two concurrent in-process bridge clients
+/// single Simard process so two concurrent in-process memory clients
 /// (daemon + dashboard, two engineer worktrees in one cargo build, …)
 /// cannot both observe the same persisted snapshot and then each store a
 /// stale-derived snapshot that drops the other writer's goals (issue
@@ -290,7 +290,7 @@ pub fn is_placeholder_description(desc: &str) -> bool {
 /// the file. Migration failures are logged and non-fatal — a corrupt or
 /// unreadable file is left in place for operator inspection and the caller
 /// proceeds to the cognitive-memory read path.
-fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
+fn migrate_legacy_disk_file_if_present(memory: &dyn CognitiveMemoryOps) {
     let goal_path = simard_state_root().join("goal_records.json");
     if !goal_path.exists() {
         return;
@@ -325,7 +325,7 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
             return;
         }
     };
-    if let Err(e) = bridge.store_fact_with_caller_key(
+    if let Err(e) = memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -350,8 +350,8 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
 /// Load the goal board from cognitive memory.
 ///
 /// Cognitive memory is the single source of truth: the board is stored as a
-/// `goal-board:snapshot` fact via `bridge.store_fact()` and read back via
-/// `bridge.search_facts()`.
+/// `goal-board:snapshot` fact via `memory.store_fact()` and read back via
+/// `memory.search_facts()`.
 ///
 /// On every call this also performs an idempotent one-time migration: if a
 /// legacy `goal_records.json` file exists on disk (from before the move to
@@ -362,26 +362,26 @@ fn migrate_legacy_disk_file_if_present(bridge: &dyn CognitiveMemoryOps) {
 /// `Err` from migration.
 ///
 /// Resolution order after migration:
-/// 1. [`read_latest_snapshot`] — `bridge.search_facts("goal-board:snapshot", 64, 0.0)`
+/// 1. [`read_latest_snapshot`] — `memory.search_facts("goal-board:snapshot", 64, 0.0)`
 ///    filtered by `concept == "goal-board:snapshot"`, `max_by(node_id)`, parsed.
 /// 2. `GoalBoard::new()` — empty board when no snapshot exists or parsing fails.
-pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
-    migrate_legacy_disk_file_if_present(bridge);
+pub fn load_goal_board(memory: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoard> {
+    migrate_legacy_disk_file_if_present(memory);
 
     // Primary read path: cognitive memory snapshot via the shared helper.
-    // The helper returns `None` on bridge error, on zero results, or on a
+    // The helper returns `None` on memory error, on zero results, or on a
     // payload parse failure — load_goal_board folds all three into the
     // legacy "empty board" fallback so callers see a stable contract.
-    Ok(read_latest_snapshot(bridge).unwrap_or_default())
+    Ok(read_latest_snapshot(memory).unwrap_or_default())
 }
 
 /// Read the most recent `goal-board:snapshot` fact from cognitive memory,
 /// or `None` if no snapshot is available.
 ///
 /// Shared by [`load_goal_board`] (initial read) and [`save_goal_board`]
-/// (merge-on-write read). All failure modes (bridge error, empty result,
+/// (merge-on-write read). All failure modes (memory error, empty result,
 /// payload deserialization failure) return `None` with a `warn!` log line
-/// that records the bridge operation and error kind only — never the
+/// that records the memory operation and error kind only — never the
 /// payload, never goal descriptions.
 ///
 /// `search_facts` is called with `limit=64, min_confidence=0.0` so that
@@ -389,8 +389,8 @@ pub fn load_goal_board(bridge: &dyn CognitiveMemoryOps) -> SimardResult<GoalBoar
 /// accumulated. Fact ids are uuid-v7 (see `new_id()` in
 /// `cognitive_memory/mod.rs`), so the lexicographically-largest id is the
 /// most recent snapshot.
-pub(super) fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<GoalBoard> {
-    let facts = match bridge.search_facts("goal-board:snapshot", 64, 0.0) {
+pub(super) fn read_latest_snapshot(memory: &dyn CognitiveMemoryOps) -> Option<GoalBoard> {
+    let facts = match memory.search_facts("goal-board:snapshot", 64, 0.0) {
         Ok(f) => f,
         Err(e) => {
             warn!(
@@ -407,7 +407,27 @@ pub(super) fn read_latest_snapshot(bridge: &dyn CognitiveMemoryOps) -> Option<Go
         .filter(|f| f.concept == "goal-board:snapshot")
         .max_by(|a, b| a.node_id.cmp(&b.node_id))?;
     match serde_json::from_str::<GoalBoard>(&latest.content) {
-        Ok(board) => Some(board),
+        // Defensive tombstone filter on the READ path (issue: roster-goal
+        // escalation storm). A tombstoned goal removed from the board can
+        // still linger inside an older `goal-board:snapshot` fact in
+        // cognitive memory. The OODA cycle loads the board via
+        // `load_goal_board` -> `read_latest_snapshot` and, until now, never
+        // consulted the tombstone set on this hot path — so every cycle
+        // re-materialised the dead goal, the no-progress breaker saw it as
+        // blocked-with-no-progress, and it filed a fresh duplicate
+        // escalation issue. `filter_tombstoned` was only applied on the
+        // operator-command daemon path (`simard goal list`), which is why
+        // the goal appeared gone there while the OODA loop kept resurrecting
+        // it. Filtering here (the shared read used by both `load_goal_board`
+        // and the save merge-read) guarantees a tombstoned goal can never be
+        // read back from memory on any path.
+        Ok(board) => {
+            let tombstones = crate::ooda_loop::load_tombstones(&simard_state_root());
+            Some(crate::goal_board_store::filter_tombstoned(
+                board,
+                &tombstones,
+            ))
+        }
         Err(e) => {
             warn!(
                 concept = "goal-board:snapshot",
@@ -536,7 +556,7 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// 3. Call [`merge_boards`] to union by `id` (in-flight wins on collision)
 ///    and truncate the active set to [`MAX_ACTIVE_GOALS`] using the
 ///    deterministic sort key documented on `merge_boards`.
-/// 4. `bridge.store_fact("goal-board:snapshot", &serde_json::to_string(&merged)?, 1.0, &["goal-board"], "goal-curator")`.
+/// 4. `memory.store_fact("goal-board:snapshot", &serde_json::to_string(&merged)?, 1.0, &["goal-board"], "goal-curator")`.
 ///    Fact metadata is constant — only the `GoalBoard` payload is merged.
 ///
 /// **Best-effort guarantee.** No goal *added* on a disjoint subset
@@ -546,7 +566,7 @@ pub(super) fn merge_boards(persisted: GoalBoard, in_flight: GoalBoard) -> GoalBo
 /// the earlier writer's most recent fact; same-id concurrent edits
 /// resolve field-level last-writer-wins. Callers needing strict
 /// serializability must route through the daemon IPC socket.
-pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+pub fn save_goal_board(board: &GoalBoard, memory: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     // NOTE: hermetic guard removed from this call-site. The env-var-based
     // `simard_state_root()` check raced with parallel tests that unset
     // SIMARD_STATE_ROOT (see CI failure on PR #2017). The
@@ -589,7 +609,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     let _board_lock = BoardWriteLock::acquire();
 
     // Step 2: read latest persisted snapshot (None on any failure).
-    let persisted = read_latest_snapshot(bridge);
+    let persisted = read_latest_snapshot(memory);
 
     // Step 3: merge in-flight on top of persisted. On read failure /
     // empty store, persist the in-flight board unchanged.
@@ -621,7 +641,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
     // Issue #2329: route the board snapshot through CallerKey dedup so each save
     // supersedes the prior board image instead of piling up a new revision every
     // cycle. The caller key and the concept are the same stable string.
-    bridge.store_fact_with_caller_key(
+    memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -664,7 +684,7 @@ pub fn save_goal_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Si
 pub fn save_goal_board_with_removals(
     board: &GoalBoard,
     force_remove_ids: &[String],
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     // NOTE: hermetic guard removed — same reasoning as save_goal_board.
     // The launch_writer_client guard covers the hermetic property without
@@ -687,7 +707,7 @@ pub fn save_goal_board_with_removals(
     #[cfg(all(unix, not(test)))]
     let _board_lock = BoardWriteLock::acquire();
 
-    let persisted = read_latest_snapshot(bridge);
+    let persisted = read_latest_snapshot(memory);
     let mut merged = match persisted {
         Some(p) => merge_boards(p, board.clone()),
         None => board.clone(),
@@ -722,7 +742,7 @@ pub fn save_goal_board_with_removals(
         reason: format!("failed to serialize goal board: {e}"),
     })?;
     // Issue #2329: CallerKey dedup — supersede the prior board image.
-    bridge.store_fact_with_caller_key(
+    memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -734,9 +754,9 @@ pub fn save_goal_board_with_removals(
 }
 
 /// Persist the board state and record an episode for recall.
-pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
-    save_goal_board(board, bridge)?;
-    bridge.store_episode(
+pub fn persist_board(board: &GoalBoard, memory: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+    save_goal_board(board, memory)?;
+    memory.store_episode(
         &board.durable_summary(),
         "goal-curator",
         Some(&json!({"active_count": board.active.len(), "backlog_count": board.backlog.len()})),
@@ -759,13 +779,13 @@ pub fn persist_board(board: &GoalBoard, bridge: &dyn CognitiveMemoryOps) -> Sima
 /// authoritative file governs, so a cache-write failure is non-fatal.
 pub fn overwrite_memory_cache(
     board: &GoalBoard,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let snapshot = serde_json::to_string(board).map_err(|e| SimardError::InvalidGoalRecord {
         field: "board".to_string(),
         reason: format!("failed to serialize goal board: {e}"),
     })?;
-    bridge.store_fact_with_caller_key(
+    memory.store_fact_with_caller_key(
         "goal-board:snapshot",
         "goal-board:snapshot",
         &snapshot,
@@ -812,35 +832,8 @@ pub fn add_backlog_item(board: &mut GoalBoard, item: BacklogItem) -> SimardResul
     Ok(())
 }
 
-/// Default backlog score for stewardship-filed issues (issue #1167).
+/// Default backlog score for Overseer-created work.
 pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
-
-/// Enqueue a stewardship-filed (or matched) GitHub issue onto the backlog
-/// (issue #1167).
-///
-/// Idempotent: if a backlog item with the same stewardship id already exists
-/// (same repo + issue number), this is a no-op and returns `Ok(())`.
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()> {
-    let id = format!("stewardship-{}-{}", repo.replace('/', "_"), issue_number);
-    if board.backlog.iter().any(|b| b.id == id) {
-        return Ok(());
-    }
-    let item = BacklogItem {
-        id,
-        description: format!(
-            "Investigate stewardship-filed failure (signature {signature}) — {url}"
-        ),
-        source: format!("stewardship:{repo}#{issue_number}"),
-        score: DEFAULT_STEWARD_SCORE,
-    };
-    add_backlog_item(board, item)
-}
 
 /// Promote a backlog item to an active goal. The item is removed from the
 /// backlog and inserted as a `NotStarted` active goal with the given priority.
@@ -865,20 +858,33 @@ pub fn promote_to_active(
             field: "backlog_id".to_string(),
             reason: format!("backlog item '{backlog_id}' not found"),
         })?;
-    let item = board.backlog.remove(position);
-    board.active.push(ActiveGoal {
+    let promoted_source =
+        crate::goal_curation::labels::source_for_backlog(&board.backlog[position].source);
+    let goal = ActiveGoal {
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
-        id: item.id,
-        description: item.description,
+        id: board.backlog[position].id.clone(),
+        description: board.backlog[position].description.clone(),
         priority,
         status: GoalProgress::NotStarted,
         assigned_to,
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
-    });
+        labels: vec![promoted_source.to_string()],
+    };
+    // Centralized, fail-closed admission validation (issue #4930): every seam
+    // that admits a record — `add_active_goal` (direct active add),
+    // `add_backlog_item` (backlog admission), and this backlog→active promotion
+    // — must run the same required-field/priority gate. Prior to this, promotion
+    // only checked `validate_priority`, silently admitting into `board.active` a
+    // goal with an empty id/description that the direct-add path rejects.
+    // Validated BEFORE removing the item from the backlog so a rejected
+    // promotion leaves the board untouched (no goal silently lost).
+    validate_active_goal(&goal)?;
+    board.backlog.remove(position);
+    board.active.push(goal);
     Ok(())
 }
 
@@ -1116,8 +1122,7 @@ pub fn clear_goal_assignment(board: &mut GoalBoard, goal_id: &str) -> SimardResu
 pub fn archive_completed(board: &mut GoalBoard) -> Vec<ActiveGoal> {
     let mut archived = Vec::new();
     board.active.retain_mut(|goal| {
-        let dominated = matches!(goal.status, GoalProgress::Completed)
-            || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100);
+        let dominated = goal.status.is_terminal();
         if !dominated {
             return true;
         }
@@ -1167,7 +1172,7 @@ pub fn board_snapshot_hash(board: &GoalBoard) -> String {
 pub fn write_goal_carryover(
     board: &GoalBoard,
     meeting_id: &str,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     let record = GoalCarryoverRecord {
         meeting_id: meeting_id.to_string(),
@@ -1181,7 +1186,7 @@ pub fn write_goal_carryover(
         field: "carryover".to_string(),
         reason: format!("failed to serialize carryover record: {e}"),
     })?;
-    bridge.store_fact(
+    memory.store_fact(
         CARRYOVER_CONCEPT,
         &payload,
         1.0,
@@ -1198,9 +1203,9 @@ pub fn write_goal_carryover(
 
 /// Read the most recent carryover record from cognitive memory, if any.
 pub fn read_latest_carryover(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<Option<GoalCarryoverRecord>> {
-    let facts = bridge.search_facts(CARRYOVER_CONCEPT, 64, 0.0)?;
+    let facts = memory.search_facts(CARRYOVER_CONCEPT, 64, 0.0)?;
     let latest = facts
         .iter()
         .filter(|f| f.concept == CARRYOVER_CONCEPT)
@@ -1257,9 +1262,9 @@ pub enum CarryoverVerification {
 /// surfaces as a clear warning rather than silent data disappearance.
 pub fn verify_goal_carryover(
     board: &GoalBoard,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<CarryoverVerification> {
-    let record = match read_latest_carryover(bridge)? {
+    let record = match read_latest_carryover(memory)? {
         Some(r) => r,
         None => return Ok(CarryoverVerification::NoRecord),
     };
@@ -1350,10 +1355,81 @@ pub fn seed_default_board(board: &mut GoalBoard) -> usize {
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,
+            labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
         });
     }
 
     DEFAULT_SEED_GOALS.len()
+}
+
+/// `DEFAULT_SEED_GOALS` projected as owned [`crate::identity::SeedGoal`] values.
+///
+/// This is the single shape shared by Simard's baked-in defaults and an
+/// identity's declared seed goals (#3125), so the seeding site can treat both
+/// uniformly. `title` is the tuple's `id_source` (the slug source).
+pub fn default_seed_goals() -> Vec<crate::identity::SeedGoal> {
+    DEFAULT_SEED_GOALS
+        .iter()
+        .map(|(priority, title, description, repo)| {
+            crate::identity::SeedGoal::new(
+                *priority,
+                *title,
+                *description,
+                repo.map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// Resolve which seed goals to use at the OODA cold-start seeding site (#3125).
+///
+/// When the identity declares a non-empty `seed_goals` list it **overrides**
+/// Simard's baked-in `DEFAULT_SEED_GOALS` (no merge); an empty list falls
+/// through to [`default_seed_goals`], so Simard herself is unchanged.
+pub fn resolve_seed_goals(
+    identity_seed_goals: &[crate::identity::SeedGoal],
+) -> Vec<crate::identity::SeedGoal> {
+    if identity_seed_goals.is_empty() {
+        default_seed_goals()
+    } else {
+        identity_seed_goals.to_vec()
+    }
+}
+
+/// Seed the board from an explicit list of [`crate::identity::SeedGoal`] if it
+/// has no active goals. Returns the number of goals added. Mirrors
+/// [`seed_default_board`] exactly (same `SOURCE_SEED` label, same empty-board
+/// guard), differing only in that the goals come from the resolved identity /
+/// default list rather than the baked-in `DEFAULT_SEED_GOALS` tuple. A goal's
+/// `repo` slug scopes it to the identity's target repo (#3125), never to
+/// `rysweet/Simard`.
+pub fn seed_board_from_seed_goals(
+    board: &mut GoalBoard,
+    goals: &[crate::identity::SeedGoal],
+) -> usize {
+    if !board.active.is_empty() {
+        return 0;
+    }
+
+    for goal in goals {
+        let id = crate::goals::goal_slug(&goal.title);
+        board.active.push(ActiveGoal {
+            parent_goal_id: None,
+            priority_explicit: false,
+            id,
+            description: goal.description.clone(),
+            priority: goal.priority,
+            status: GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: goal.repo.clone(),
+            current_activity: None,
+            wip_refs: vec![],
+            last_progress_update_at: None,
+            labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
+        });
+    }
+
+    goals.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,7 +1497,96 @@ pub fn active_goals_as_records(board: &GoalBoard) -> Vec<crate::goals::GoalRecor
                 source_session_id: SENTINEL_SESSION_ID.clone(),
                 updated_in: crate::session::SessionPhase::Persistence,
                 evidence: Vec::new(),
+                labels: active.labels.clone(),
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// GoalRecord -> board placement adapter (reverse of active_goals_as_records)
+// ---------------------------------------------------------------------------
+
+/// Where a persisted [`GoalRecord`] lands when mapped back onto the live board
+/// (issue #2922). The inverse of [`active_goals_as_records`]: it renders an
+/// overlay `goal-store:record` — a promoted creative-idea Proposed goal, a
+/// meeting goal, a seed/runtime goal — in the SAME `ActiveGoal` / `BacklogItem`
+/// shapes a snapshot goal uses, so the dashboard's live union renders overlay
+/// and snapshot goals identically.
+///
+/// `Skip` drops terminal (`Completed`) records: they are not surfaced on the
+/// live board in either bucket.
+#[derive(Debug)]
+// An `ActiveGoal` is materially larger than the other two variants; the doc
+// contract (#2922) is that this enum stays unboxed so callers can move the
+// payload out and `{:?}`-format it, so we accept the size disparity rather than
+// box the variant.
+#[allow(clippy::large_enum_variant)]
+pub enum BoardPlacement {
+    Active(ActiveGoal),
+    Backlog(BacklogItem),
+    Skip,
+}
+
+/// Map a persisted [`GoalRecord`] back into its live-board placement (issue
+/// #2922) — the inverse of [`active_goals_as_records`].
+///
+/// Status routing mirrors the board's own active/backlog split:
+///
+/// | `GoalStatus` | Placement | Rendered progress |
+/// |--------------|-----------|-------------------|
+/// | `Active`     | active    | `InProgress { percent: 0 }` |
+/// | `Proposed`   | backlog   | — |
+/// | `Paused`     | backlog   | — |
+/// | `Completed`  | skipped   | terminal |
+///
+/// A `GoalRecord` carries none of the snapshot-only rich fields, so they are
+/// synthesized as `None` / `[]` / `false`. Pure struct mapping — panic-free on
+/// arbitrary record text: overlay records carry untrusted, model-generated
+/// content and a panic here would 500 the dashboard read path.
+pub fn record_as_active_goal(record: &crate::goals::GoalRecord) -> BoardPlacement {
+    match record.status {
+        crate::goals::GoalStatus::Completed => BoardPlacement::Skip,
+        crate::goals::GoalStatus::Active => {
+            // The forward adapter writes the `"unassigned"` sentinel for a
+            // goal with no assignee; map it back to `None` so the round-trip
+            // is faithful.
+            let assigned_to = match record.owner_identity.as_str() {
+                "unassigned" => None,
+                owner => Some(owner.to_string()),
+            };
+            BoardPlacement::Active(ActiveGoal {
+                id: record.slug.clone(),
+                description: record.title.clone(),
+                priority: u32::from(record.priority),
+                status: GoalProgress::InProgress { percent: 0 },
+                assigned_to,
+                repo: None,
+                current_activity: None,
+                wip_refs: Vec::new(),
+                last_progress_update_at: None,
+                parent_goal_id: None,
+                priority_explicit: false,
+                labels: record.labels.clone(),
+            })
+        }
+        crate::goals::GoalStatus::Proposed | crate::goals::GoalStatus::Paused => {
+            BoardPlacement::Backlog(BacklogItem {
+                id: record.slug.clone(),
+                description: record.title.clone(),
+                source: super::labels::provenance_source_label(&record.labels).to_string(),
+                score: backlog_score_for_priority(record.priority),
+            })
+        }
+    }
+}
+
+/// Deterministic backlog score from a goal's priority so the proposed backlog
+/// orders stably (issue #2922). Higher priority — a LOWER number, p1 is most
+/// important — yields a higher score. The priority is clamped into `[1, 10]`
+/// and mapped to `(0, 1]` via `(11 - p) / 10`, so p1 -> 1.0, p3 -> 0.8, and
+/// p10+ -> 0.1. Always finite; never panics for any `u8`.
+fn backlog_score_for_priority(priority: u8) -> f64 {
+    let p = f64::from(priority.clamp(1, 10));
+    (11.0 - p) / 10.0
 }

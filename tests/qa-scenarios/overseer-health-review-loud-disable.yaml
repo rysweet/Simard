@@ -1,0 +1,66 @@
+name: overseer-health-review-loud-disable
+app_type: cli
+description: |
+  Outside-in proof that when an operator opts the Overseer's agentic
+  HEALTH-REVIEW rail OFF, the disable is OBSERVABLE — never a silent no-op.
+
+  Why this matters (the standing self-heal goal): the health-review pass is the
+  crash-loop self-heal reflex. It has its OWN dedicated opt-out
+  (`SIMARD_OVERSEER_HEALTH_REVIEW`, default-on) and is additionally gated by the
+  shared `SIMARD_OVERSEER_GAP_SCAN` throttle that disables ALL agentic overseer
+  scans. Previously BOTH opt-outs made the pass `return` SILENTLY, leaving
+  `observed.health_review_status` at the `NotRun` default — so an operator who
+  disabled the unrelated backlog gap-scan could not tell "never wired" from
+  "silently disabled", and the crash-loop self-heal reflex was dropped with no
+  signal. That is exactly the silent hard-OFF #4097 exists to kill, which the
+  sibling `observe_merge_queue` pass already avoids by surfacing a LOUD
+  `MergeReasoningStatus::Disabled { reason }` for the SAME opt-out.
+
+  This scenario drives the hermetic, in-process wiring tests that pin the
+  corrected, observable contract:
+    - the shared gap-scan opt-out disables the rail LOUD: the reviewer is never
+      invoked and `health_review_status` is `Disabled { reason }` naming the
+      `SIMARD_OVERSEER_GAP_SCAN` knob;
+    - the dedicated `SIMARD_OVERSEER_HEALTH_REVIEW` opt-out likewise surfaces
+      `Disabled { reason }` naming that knob, reviewer never invoked;
+    - an UNWIRED rail and an OFF-CADENCE tick still leave the additive `NotRun`
+      default (an opt-out is loud; "never ran" is not fabricated into a disable).
+  It also re-runs the full overseer suite to prove the existing health-review
+  parse / ladder / dispatch / gate / verdict-surfacing contract is unregressed.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The loud-disable wiring invariants in isolation (both new tests share this
+  # prefix; the full overseer suite below covers the preserved-NotRun cases).
+  - action: run
+    params:
+      command: "cargo test --locked --lib overseer::tests::health_review_disabled_when"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The full overseer suite proves the health-review rail (parse, escalation
+  # ladder, dispatch, gate, verdict surfacing) did not regress under the new
+  # loud-disable status.
+  - action: run
+    params:
+      command: "cargo test --locked --lib overseer::"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

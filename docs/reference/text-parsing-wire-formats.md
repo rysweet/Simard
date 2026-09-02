@@ -1,6 +1,6 @@
 ---
 title: Text-parsing wire formats
-description: Normative reference for every text-based wire format Simard's Rust code parses from LLM and recipe output. Replaces the former JSON-based contracts.
+description: Current reference for text-based wire formats; OODA formats become legacy only after verified typed-route cutover.
 last_updated: 2026-06-29
 review_schedule: as-needed
 owner: simard
@@ -18,9 +18,15 @@ related:
 
 Crate: `simard`
 
-This page is the normative definition of every text-based wire format that
-Simard's Rust code parses from LLM or recipe output. There are three
-protocol families, each used at specific decision sites.
+This page is the normative definition of current text-based wire formats parsed
+from LLM or recipe output.
+
+!!! note "Migration condition"
+    Current releases use the OODA formats on this page. Their OODA consumers
+    become legacy only after a release implements and selects the typed route
+    and verifies those parsers are unreachable. They remain authoritative while
+    the route is `legacy` or `shadow`. Non-OODA parsers remain governed by this
+    page after OODA cutover.
 
 For the design rationale, see
 [Concept: text-based brain protocol](../concepts/text-based-brain-protocol.md).
@@ -61,6 +67,18 @@ Used by: **every** recipe-backed parser below, before it runs.
 > and the distill-private ANSI/launcher stripper now delegate to it. Extending
 > the one `is_noise_line` predicate re-hardens **every** consumer — decide,
 > orient, engineer-lifecycle, merge-judge, progress checker, distill — at once.
+>
+> **User-facing PR titles** ([#1093](https://github.com/rysweet/Simard/issues/1093)):
+> the daily journal's `plainify_pr_title` (`src/journal/pr_source.rs`) also routes
+> a PR title through `strip_recipe_noise` before rendering it as a layperson
+> "what changed & why it matters" phrase. When the orchestrator's fallback
+> commit-message generator lifts the agent's first stdout line verbatim, a PR
+> title occasionally **is** the `ℹ NODE_OPTIONS=… (saved preference)` launch
+> banner (observed on leaked commits, e.g. `9a7e88ec8 fix: ℹ NODE_OPTIONS=…`).
+> Reusing the shared predicate collapses such a title to the neutral "A code
+> change." fallback instead of surfacing launcher noise; a title that merely
+> *mentions* `NODE_OPTIONS` in prose is preserved (the banner arm anchors on
+> `ℹ` + `NODE_OPTIONS=` + `(saved preference)`).
 
 ### Functions
 
@@ -70,7 +88,7 @@ Used by: **every** recipe-backed parser below, before it runs.
 | `strip_recipe_noise(&str) -> Cow` | `strip_ansi` + drop ISO-8601 tracing lines, runner-banner lines, **and Copilot launch-log preamble lines** (via `is_noise_line`). `Cow::Borrowed` on the clean path. |
 | `is_noise_line(&str) -> bool` *(private)* | Per-line predicate: `true` for an ISO-timestamp tracing line, a runner summary-banner line, **or** a Copilot launcher line (`is_copilot_launcher_line`). A JSON payload line beginning (after `trim_start`) with a structural token (`{`, `"`, `[`), an action keyword, a bare decimal, or a verdict keyword never matches, so dropping such a line never discards the answer. |
 | `is_copilot_launcher_line(&str) -> bool` *(private)* | The launcher-only arm (#2496). Anchored `starts_with`/`contains` matches on the four launcher shapes below; matches **no** payload line. ANSI is stripped before it runs. |
-| `balanced_objects` / `last_balanced_object` / `extract_json_payload` | String-literal-aware balanced `{…}` scan. JSON extraction is **dual-pass** (line-dropped **and** ANSI-only) so the payload survives both an interleaved log line inside a pretty body and a same-line log prefix. |
+| `balanced_objects` / `last_balanced_object` | String-literal-aware balanced `{…}` scan over cleaned text. Compose `strip_recipe_noise` + `last_balanced_object` for extraction. (The former `extract_json_payload` dual-pass wrapper — line-dropped **and** ANSI-only — was retired as dead code in #4991.) |
 | `extract_verdict(raw, keywords)` | Precedence keyword scan over cleaned text. |
 | `record_parse_outcome(phase, success)` | Emits `recipe_parse_{success,failure}_total{phase}` to `metrics.jsonl`. |
 
@@ -148,10 +166,10 @@ denominator per phase.
 
 ## Protocol 1: First-word match (OODA brains)
 
-Used by: `ooda_brain::recipe_brain` (all three phases)
+Used by: `ooda_brain::recipe_brain` (all three current parser-route phases)
 
 > **Changed in [#2144](https://github.com/rysweet/Simard/issues/2144):**
-> All three OODA brain parsers now use the same first-word extraction pattern.
+> The planned typed route will not register these parsers after cutover.
 > The `DECISION:` marker protocol, JSON extraction, and keyword-scanning
 > fallback chains have been removed.
 
@@ -199,6 +217,15 @@ No `serde_json`. No regex. No keyword scanning. Only `str::split_whitespace()`,
 
 ### 1a. Decide phase (`recipe_brain.rs`)
 
+> **MOVED to the typed-record model
+> ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A).**
+> The decide phase no longer parses stdout at all. The `ooda-decide` recipe calls
+> the gated `simard ooda record-decide` tool, which writes a typed
+> `DecideDecisionRecord` (`schema: simard.ooda.decide.v1`); `RecipeBrain` reads it
+> **fail-CLOSED** via `read_verified_decide` (no `advance_goal` default). The
+> first-word grammar below is **legacy** and no longer runs on the OODA path. See
+> [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
+
 **Enum:** `DecideJudgment`
 
 **Parser:** `parse_action_from_text(text) -> DecideJudgment`
@@ -243,6 +270,17 @@ consolidate_memory Memory hasn't been consolidated in 12 hours.
 ---
 
 ### 1b. Orient phase (`recipe_brain.rs`)
+
+> **MOVED to the typed-record model
+> ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A).**
+> The orient phase no longer parses stdout at all. The `ooda-orient` recipe calls
+> the gated `simard ooda record-orient` tool, which writes a typed
+> `OrientDecisionRecord` (`schema: simard.ooda.orient.v1`, carrying `base_urgency`
+> for the self-consistent no-escalation recheck); `RecipeBrain` reads it
+> **fail-CLOSED** via `read_verified_orient` (keeps base urgency on failure, no
+> floor default). The float/floor grammar below is **legacy** and no longer runs
+> on the OODA path. See
+> [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
 
 **Struct:** `OrientJudgment`
 

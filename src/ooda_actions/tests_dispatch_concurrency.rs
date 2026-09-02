@@ -9,13 +9,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::base_types::{BaseTypeDescriptor, BaseTypeOutcome, BaseTypeSession, BaseTypeTurnInput};
 use crate::error::{SimardError, SimardResult};
 use crate::goal_curation::{GoalBoard, GoalProgress, add_active_goal};
 use crate::ooda_actions::dispatch_actions_bounded;
-use crate::ooda_actions::test_helpers::{active_goal, test_bridges};
+use crate::ooda_actions::test_helpers::{active_goal, test_memories};
 use crate::ooda_loop::{ActionKind, OodaState, OrchestratorSessionFactory, PlannedAction};
 
 /// Shared instrumentation across every session a factory mints, so tests can
@@ -59,7 +59,7 @@ impl BaseTypeSession for FakeSession {
             && input.objective.contains(sub.as_str())
         {
             return Err(SimardError::RpcTransportError {
-                bridge: "fake-session".to_string(),
+                endpoint: "fake-session".to_string(),
                 reason: format!("injected failure for objective containing '{sub}'"),
             });
         }
@@ -119,22 +119,29 @@ fn advance_action(goal_id: &str) -> PlannedAction {
 fn concurrent_dispatch_parallelizes_and_respects_cap() {
     let ids = ["adv-t-0", "adv-t-1", "adv-t-2", "adv-t-3"];
     let actions: Vec<PlannedAction> = ids.iter().map(|id| advance_action(id)).collect();
-    let sleep = Duration::from_millis(200);
+    // Per-`run_turn` "live" window. `thread::sleep` yields the CPU, so once two
+    // workers have both entered `run_turn` they overlap regardless of core
+    // count — but only if the second worker starts before the first's window
+    // closes. Under the CPU-oversubscribed deploy gate, worker-thread start can
+    // stagger by >200ms, letting each call finish before the next begins so
+    // `peak` never reaches 2. A wider window swamps that scheduling jitter
+    // without weakening either assertion (peak>=2 still demands real overlap;
+    // cap=1 still forbids it).
+    let sleep = Duration::from_millis(1000);
 
     let instr = Arc::new(Instrumentation::default());
-    let mut bridges = test_bridges();
-    bridges.session_factory = Some(Arc::new(FakeFactory {
+    let mut memories = test_memories();
+    memories.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep,
-        response: "NO ACTION".to_string(),
+        response: "NO ACTION\nREASON: concurrency test no-op".to_string(),
         fail_substring: None,
     }));
     let mut state = OodaState::new(board_with_unassigned_goals(&ids));
 
     // Run 1: cap = N → all dispatch concurrently.
-    let t0 = Instant::now();
-    let outcomes = dispatch_actions_bounded(&actions, &mut bridges, &mut state, ids.len()).unwrap();
-    let parallel_elapsed = t0.elapsed();
+    let outcomes =
+        dispatch_actions_bounded(&actions, &mut memories, &mut state, ids.len()).unwrap();
 
     assert_eq!(outcomes.len(), ids.len());
     for o in &outcomes {
@@ -158,22 +165,20 @@ fn concurrent_dispatch_parallelizes_and_respects_cap() {
     instr.live.store(0, Ordering::SeqCst);
 
     // Run 2: cap = 1 → dispatch serialized (peak must never exceed 1).
-    let t1 = Instant::now();
-    let _ = dispatch_actions_bounded(&actions, &mut bridges, &mut state, 1).unwrap();
-    let serial_elapsed = t1.elapsed();
+    //
+    // The concurrency invariant is the deterministic peak-overlap gauge above
+    // (peak>=2 at cap=N, peak<=1 at cap=1), NOT a wall-clock ratio. The former
+    // `parallel_elapsed * 2 <= serial_elapsed` assertion was the canary redder:
+    // under heavy parallel host load the two runs' elapsed times converge and
+    // the ratio flakes, even though the actual overlap gauge is always correct.
+    // We assert the gauge, never the clock (and deliberately do NOT loosen a
+    // timing bound to paper over the flake — see PR #4566, rejected).
+    let _ = dispatch_actions_bounded(&actions, &mut memories, &mut state, 1).unwrap();
 
     let peak_serial = instr.peak.load(Ordering::SeqCst);
     assert!(
         peak_serial <= 1,
         "cap=1 must serialize dispatch; peak={peak_serial}"
-    );
-
-    // The cap=N run must be substantially faster than the cap=1 run. This is
-    // robust to per-call overhead (both runs incur the same N input builds);
-    // only the sleep parallelizes.
-    assert!(
-        parallel_elapsed * 2 <= serial_elapsed,
-        "concurrent dispatch must be >=2x faster than serialized: parallel={parallel_elapsed:?}, serial={serial_elapsed:?}"
     );
 }
 
@@ -185,17 +190,17 @@ fn same_goal_claimed_once_no_double_spawn() {
     let actions = vec![advance_action("dup-goal"), advance_action("dup-goal")];
 
     let instr = Arc::new(Instrumentation::default());
-    let mut bridges = test_bridges();
-    bridges.session_factory = Some(Arc::new(FakeFactory {
+    let mut memories = test_memories();
+    memories.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep: Duration::from_millis(150),
-        response: "NO ACTION".to_string(),
+        response: "NO ACTION\nREASON: duplicate-claim test no-op".to_string(),
         fail_substring: None,
     }));
     let mut state = OodaState::new(board_with_unassigned_goals(&["dup-goal"]));
 
     let outcomes =
-        dispatch_actions_bounded(&actions, &mut bridges, &mut state, actions.len()).unwrap();
+        dispatch_actions_bounded(&actions, &mut memories, &mut state, actions.len()).unwrap();
 
     assert_eq!(outcomes.len(), 2);
     // Exactly one thread won the claim and ran the turn; the other skipped
@@ -228,17 +233,18 @@ fn one_failing_advance_does_not_abort_others() {
     let actions: Vec<PlannedAction> = ids.iter().map(|id| advance_action(id)).collect();
 
     let instr = Arc::new(Instrumentation::default());
-    let mut bridges = test_bridges();
-    bridges.session_factory = Some(Arc::new(FakeFactory {
+    let mut memories = test_memories();
+    memories.session_factory = Some(Arc::new(FakeFactory {
         instr: Arc::clone(&instr),
         sleep: Duration::from_millis(50),
-        response: "NO ACTION".to_string(),
+        response: "NO ACTION\nREASON: failure-isolation test no-op".to_string(),
         // Only the "adv-fail-b" goal's objective contains "fail-b".
         fail_substring: Some("fail-b".to_string()),
     }));
     let mut state = OodaState::new(board_with_unassigned_goals(&ids));
 
-    let outcomes = dispatch_actions_bounded(&actions, &mut bridges, &mut state, ids.len()).unwrap();
+    let outcomes =
+        dispatch_actions_bounded(&actions, &mut memories, &mut state, ids.len()).unwrap();
 
     assert_eq!(outcomes.len(), 3, "one outcome per input action, in order");
     assert!(

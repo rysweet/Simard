@@ -1,0 +1,53 @@
+name: "Dashboard Daemon-Status Truthfulness"
+description: "Outside-in check that the unified Status snapshot (Overview 'System Status', GET /api/status/snapshot, `simard status`, TUI Status tab) never reports the OODA daemon as 'unavailable' while it is actually running (#4215). Before the fix the daemon section was assembled only from `systemctl show`, so every non-systemd deployment (dev / worktree / container) read `availability: unavailable` / note `systemctl: unit not loaded` even mid-cycle — hiding the most basic self-understanding fact. The snapshot must agree with the durable heartbeat `/api/status` reads."
+version: "1.0.0"
+
+config:
+  timeout: 120000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 120000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Status snapshot daemon section agrees with the running heartbeat"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-daemon-status-truthful.sh"
+    timeout: 120000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "dashboard"
+    - "status"
+    - "daemon"
+    - "issue-4215"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

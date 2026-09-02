@@ -138,6 +138,17 @@ pub struct WorkflowSnapshot {
 pub struct RepoSnapshot {
     pub slug: String,
     pub default_branch: String,
+    /// The default branch's current head commit SHA (`gh api
+    /// repos/<owner>/<repo>/commits/<branch> --jq .sha`). This is the key the
+    /// last-known-green cache compares against to decide whether a repo can be
+    /// skipped. Empty only for offline fixtures that omit it.
+    pub head_sha: String,
+    /// When `true`, this repo was **not** re-collected this sweep: its
+    /// default-branch head SHA matched the last-known-green SHA in the cache, so
+    /// it is green by cache and [`workflows`](Self::workflows) is empty. This is
+    /// how an unchanged-green repo becomes a cheap no-op instead of a full
+    /// re-audit.
+    pub green_from_cache: bool,
     pub workflows: Vec<WorkflowSnapshot>,
 }
 

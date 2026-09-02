@@ -1,0 +1,49 @@
+# Cartographer — reference EXAMPLE non-engineering identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# The cartographer turns a dataset + a question into a served interactive
+# dashboard with a written narrative. Its real behavior is delivered by the
+# agentic recipe in `recipes/cartographer-dashboard.yaml`, which may drive any
+# external domain tooling (pandas, a plotting library, a web framework, …). None
+# of that tooling lives in Simard's daemon.
+
+[package]
+name = "cartographer"
+version = "0.1.0"
+description = "Reference example identity: dataset + question -> served dashboard + narrative"
+
+[[identities]]
+name = "cartographer"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "cartographer-system"
+path = "prompts/cartographer_system.md"
+
+[[identities.prompt_assets]]
+id = "cartographer-explore"
+path = "prompts/cartographer_explore.md"
+
+[[identities.prompt_assets]]
+id = "cartographer-visualize"
+path = "prompts/cartographer_visualize.md"
+
+[[identities.prompt_assets]]
+id = "cartographer-narrative"
+path = "prompts/cartographer_narrative.md"
+
+[[identities.prompt_assets]]
+id = "cartographer-deliver"
+path = "prompts/cartographer_deliver.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"

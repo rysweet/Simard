@@ -210,6 +210,45 @@ fn is_noise_line(line: &str) -> bool {
         || t.starts_with("[running]")
 }
 
+/// Strip recipe-runner's per-agent line prefix:
+/// `  [08:25:09] [amplihack:copilot:123] <payload>`.
+///
+/// The prefix is logging metadata, not payload. Removing it lets downstream
+/// extractors see a real verdict when the agent answered, and lets launcher-only
+/// lines collapse to ordinary launcher noise.
+///
+/// Returns [`Some`] with the payload substring (a **borrowed** slice of `line`,
+/// never a fresh allocation) when the prefix is present, or [`None`] when `line`
+/// carries no such prefix. Callers treat `None` as "use the line unchanged".
+fn strip_recipe_agent_prefix(line: &str) -> Option<&str> {
+    let leading = line.len() - line.trim_start().len();
+    let t = &line[leading..];
+    let b = t.as_bytes();
+    if b.len() < "[00:00:00] [amplihack:x:0] ".len() {
+        return None;
+    }
+    if b.first() != Some(&b'[') {
+        return None;
+    }
+    let time_ok = b.get(1..9).is_some_and(|time| {
+        time[0].is_ascii_digit()
+            && time[1].is_ascii_digit()
+            && time[2] == b':'
+            && time[3].is_ascii_digit()
+            && time[4].is_ascii_digit()
+            && time[5] == b':'
+            && time[6].is_ascii_digit()
+            && time[7].is_ascii_digit()
+    });
+    if !time_ok || b.get(9) != Some(&b']') || b.get(10) != Some(&b' ') {
+        return None;
+    }
+    let rest = &t[11..];
+    let after_agent = rest.strip_prefix("[amplihack:")?;
+    let end = after_agent.find("] ")?;
+    Some(&after_agent[end + 2..])
+}
+
 /// Strip ANSI escapes **and** drop whole tracing/env_logger log lines,
 /// recipe-runner summary-banner lines, and Copilot CLI launch-log preamble
 /// lines (all via [`is_noise_line`]).
@@ -218,248 +257,36 @@ fn is_noise_line(line: &str) -> bool {
 /// no droppable line), preserving today's behaviour and allocations.
 pub fn strip_recipe_noise(raw: &str) -> Cow<'_, str> {
     let de_ansi = strip_ansi(raw);
-    if !de_ansi.lines().any(is_noise_line) {
-        // No droppable lines: pass through the ANSI-strip result as-is
-        // (`Borrowed` stays `Borrowed` on the fully-clean path).
+    // Clean-path detection is allocation-free: `strip_recipe_agent_prefix` now
+    // borrows (returning `Some` payload / `None`) and `is_noise_line` only
+    // scans, so a fully-clean input never allocates and returns the ANSI-strip
+    // result as-is (`Borrowed` stays `Borrowed`). A line is droppable if it
+    // carries an agent prefix we'd rewrite (`Some`) or is noise on its own.
+    let has_droppable = de_ansi
+        .lines()
+        .any(|line| match strip_recipe_agent_prefix(line) {
+            Some(_) => true,
+            None => is_noise_line(line),
+        });
+    if !has_droppable {
         return de_ansi;
     }
-    let kept: Vec<&str> = de_ansi.lines().filter(|l| !is_noise_line(l)).collect();
+    // Rebuild once. Each kept line is a borrowed slice (prefix-stripped payload
+    // or the original line), so the only allocation on the dirty path is the
+    // final joined `String` — no per-line `String` churn.
+    let kept: Vec<&str> = de_ansi
+        .lines()
+        .filter_map(|line| {
+            let payload = strip_recipe_agent_prefix(line).unwrap_or(line);
+            if is_noise_line(payload) {
+                None
+            } else {
+                Some(payload)
+            }
+        })
+        .collect();
     Cow::Owned(kept.join("\n"))
 }
-
-/// Scan `bytes` starting at `start` (which must index a `{`) for the matching
-/// closing brace, honouring JSON string literals so braces inside `"…"` do
-/// not affect the depth count. Returns the byte index of the matching `}`.
-fn scan_balanced(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = start;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else {
-            match c {
-                b'"' => in_string = true,
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i);
-                    }
-                }
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Return every balanced `{…}` span in `s`, in source order, by trying each
-/// `{` opener in turn.
-///
-/// String-literal aware (braces inside JSON strings are ignored). A `{` that
-/// never closes — an unmatched opener in leading prose, e.g. a code fragment
-/// like `fn f() {` — is skipped so a genuinely balanced object *after* it is
-/// still found, rather than being demoted to a nested span and lost (relied on
-/// by distillation, issue #2508). Used by callers that need to try each
-/// candidate against a typed envelope — e.g. distillation parses each span as a
-/// `{ "facts": [...] }` object and keeps the first that deserialises.
-pub fn balanced_objects(s: &str) -> Vec<&str> {
-    let bytes = s.as_bytes();
-    let mut spans = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{'
-            && let Some(end) = scan_balanced(bytes, i)
-        {
-            spans.push(&s[i..=end]);
-            i = end + 1;
-            continue;
-        }
-        i += 1;
-    }
-    spans
-}
-
-/// Return the **last** balanced top-level `{…}` span in `s`, or `None`.
-///
-/// Returning the last span means a leading "thinking"/banner object cannot
-/// shadow the real answer object that follows it.
-pub fn last_balanced_object(s: &str) -> Option<&str> {
-    balanced_objects(s).pop()
-}
-
-/// Strip JSON **trailing commas** — a `,` immediately preceding a closing `}`
-/// or `]` (ignoring intervening ASCII whitespace) — as a last-resort recovery
-/// view for otherwise-well-formed LLM JSON (issue #2658).
-///
-/// A trailing comma before `}`/`]` is the single most common real-world LLM
-/// JSON defect and is **never valid JSON**, so this stripper is a *provable
-/// no-op on valid input*: it returns [`Cow::Borrowed`] byte-for-byte unchanged
-/// whenever no trailing comma is present (the zero-allocation clean path).
-/// A caller therefore retries a strict-parse failure on this view without any
-/// risk of altering behaviour on well-formed output.
-///
-/// String-literal aware: a comma inside a JSON string (respecting `\"`
-/// escapes) is never touched, so a comma in a fact's `content` is preserved
-/// verbatim. Only the offending comma bytes are removed and every removed byte
-/// is ASCII, so the result is always valid UTF-8.
-///
-/// Note this targets *only* the single-trailing-comma shape. A genuinely
-/// malformed object (e.g. an elided element `[1,,2]`, an unquoted key, a
-/// missing value) is left still-malformed so the caller's strict parse still
-/// rejects it — leniency never widens to accept broken JSON.
-pub fn strip_json_trailing_commas(s: &str) -> Cow<'_, str> {
-    let bytes = s.as_bytes();
-    // Cheap detection pass first so clean JSON borrows unchanged (zero-alloc).
-    if !has_trailing_comma(bytes) {
-        return Cow::Borrowed(s);
-    }
-    // Rebuild, dropping only the trailing commas. Only ASCII comma bytes are
-    // ever skipped, so the surviving bytes remain valid UTF-8.
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else if c == b'"' {
-            in_string = true;
-            out.push(c);
-        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
-            // Trailing comma — drop it (do not copy).
-        } else {
-            out.push(c);
-        }
-        i += 1;
-    }
-    match String::from_utf8(out) {
-        Ok(stripped) => Cow::Owned(stripped),
-        // Unreachable in practice (only ASCII commas are dropped), but never
-        // panic on recovery input — fall back to the original text.
-        Err(_) => Cow::Borrowed(s),
-    }
-}
-
-/// Does `bytes` contain at least one string-aware trailing comma?
-///
-/// Mirrors the scan in [`strip_json_trailing_commas`] but only detects, so the
-/// common clean case can borrow the input without allocating.
-fn has_trailing_comma(bytes: &[u8]) -> bool {
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else if c == b'"' {
-            in_string = true;
-        } else if c == b',' && next_nonspace_is_close(bytes, i + 1) {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Is the first non-ASCII-whitespace byte at or after `i` a closing `}`/`]`?
-///
-/// Only JSON insignificant whitespace (space, tab, LF, CR, form-feed) is
-/// skipped; any other byte (including `"` opening the next key/element) means
-/// the comma is a legitimate separator and must be kept.
-fn next_nonspace_is_close(bytes: &[u8], mut i: usize) -> bool {
-    while i < bytes.len() {
-        match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' | 0x0c => i += 1,
-            b'}' | b']' => return true,
-            _ => return false,
-        }
-    }
-    false
-}
-
-/// Extract a JSON object from noisy recipe stdout as an owned `String`.
-///
-/// Tries two cleaned views and returns the last balanced `{…}` from the first
-/// that yields one:
-///
-/// 1. [`strip_recipe_noise`] — drops whole log/banner lines, which recovers a
-///    payload whose pretty-printed body has an interleaved tracing line.
-/// 2. [`strip_ansi`] — line-preserving, which recovers a payload that sits on
-///    the *same physical line* as a leading timestamp/log prefix (that line
-///    would otherwise be dropped wholesale by view 1).
-///
-/// Returns `None` when neither view contains a balanced object.
-pub fn extract_json_payload(raw: &str) -> Option<String> {
-    for cleaned in [strip_recipe_noise(raw), strip_ansi(raw)] {
-        if let Some(obj) = last_balanced_object(cleaned.as_ref()) {
-            return Some(obj.to_string());
-        }
-    }
-    None
-}
-
-/// A verdict-keyword match against cleaned recipe output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerdictMatch<'k> {
-    /// The keyword (borrowed from the caller's precedence list) that matched.
-    pub keyword: &'k str,
-    /// The full ANSI/log/banner-stripped, trimmed recipe text — the source
-    /// the caller turns into a rationale string.
-    pub rationale: String,
-}
-
-/// Scan recipe stdout for the first verdict keyword present, in the caller's
-/// precedence order, after stripping ANSI/log/banner noise.
-///
-/// Matching is case-insensitive substring containment. The first keyword in
-/// `keywords` that appears wins, so callers encode precedence by ordering
-/// (e.g. `["not_ready", "not ready", "unclear", "ready"]` so `not_ready`
-/// beats the `ready` it contains). Returns `None` when the cleaned text is
-/// empty or contains none of the keywords.
-pub fn extract_verdict<'k>(raw: &str, keywords: &[&'k str]) -> Option<VerdictMatch<'k>> {
-    let cleaned = strip_recipe_noise(raw);
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    for &kw in keywords {
-        if lower.contains(&kw.to_ascii_lowercase()) {
-            return Some(VerdictMatch {
-                keyword: kw,
-                rationale: trimmed.to_string(),
-            });
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,240 +399,35 @@ mod tests {
         );
     }
 
-    // ---- balanced_objects / last_balanced_object -------------------------
-
     #[test]
-    fn balanced_objects_finds_each_top_level_object() {
-        let s = "{\"a\":1} junk {\"b\":2}";
-        assert_eq!(balanced_objects(s), vec!["{\"a\":1}", "{\"b\":2}"]);
-    }
-
-    #[test]
-    fn balanced_objects_ignores_braces_inside_strings() {
-        let s = "{\"text\":\"a } b { c\"}";
-        assert_eq!(balanced_objects(s), vec!["{\"text\":\"a } b { c\"}"]);
-    }
-
-    #[test]
-    fn balanced_objects_handles_escaped_quote_in_string() {
-        let s = r#"{"q":"he said \"}\" loudly"}"#;
-        assert_eq!(balanced_objects(s), vec![s]);
-    }
-
-    #[test]
-    fn balanced_objects_skips_unmatched_leading_brace() {
-        // An unmatched, never-closing `{` in leading prose (e.g. a code fragment
-        // such as `fn f() {`) must not anchor the scan and swallow the genuinely
-        // balanced object that follows it — the candidate restart recovers it
-        // (relied on by episode distillation, issue #2508).
-        let s = r#"prefix fn f() { then {"facts":[]}"#;
-        assert_eq!(balanced_objects(s), vec![r#"{"facts":[]}"#]);
-    }
-
-    #[test]
-    fn last_balanced_object_returns_trailing_answer() {
-        let s = "{\"thinking\":true} then {\"answer\":42}";
-        assert_eq!(last_balanced_object(s), Some("{\"answer\":42}"));
-    }
-
-    #[test]
-    fn last_balanced_object_none_when_no_object() {
-        assert_eq!(last_balanced_object("no braces"), None);
-    }
-
-    // ---- extract_json_payload --------------------------------------------
-
-    #[test]
-    fn extract_json_payload_recovers_from_ansi_log_noise() {
-        // Raw fails (contains ESC); cleaned succeeds — the #2479-style
-        // raw-vs-stripped recovery proof, generalised.
-        let raw = "\x1b[2m2026-06-28T08:08:58.151133Z\x1b[0m  INFO simard: run\n\
-                   {\"facts\":[{\"concept\":\"lesson-learned\"}]}";
-        assert!(
-            serde_json::from_str::<serde_json::Value>(raw).is_err(),
-            "raw span with ESC byte must not parse as JSON"
-        );
-        let payload = extract_json_payload(raw).expect("payload recovered");
-        assert!(serde_json::from_str::<serde_json::Value>(&payload).is_ok());
-        assert_eq!(payload, "{\"facts\":[{\"concept\":\"lesson-learned\"}]}");
-    }
-
-    #[test]
-    fn extract_json_payload_none_for_pure_noise() {
-        let raw = "2026-06-28T08:08:58.151133Z  INFO no payload at all";
-        assert_eq!(extract_json_payload(raw), None);
-    }
-
-    #[test]
-    fn extract_json_payload_recovers_same_line_log_prefix() {
-        // Payload appended to a log line on the SAME physical line: the
-        // line-dropped view would discard it, so the ANSI-only fallback view
-        // must recover it.
-        let raw = "\x1b[2m2026-06-28T08:08:58.151133Z\x1b[0m  INFO done {\"facts\":[]}";
+    fn strip_recipe_noise_removes_prefixed_launcher_line() {
+        let raw = "Recipe: progress-assessment (v1.0.0)\n\
+                   Steps: 1\n\
+                     [08:26:10] [amplihack:copilot:460198] ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/u/.amplihack/config\n\
+                   Recipe 'progress-assessment': SUCCESS (6.0s)\n\
+                     [completed] assess-progress (6.0s)";
         assert_eq!(
-            extract_json_payload(raw),
-            Some("{\"facts\":[]}".to_string())
+            strip_recipe_noise(raw),
+            "Recipe 'progress-assessment': SUCCESS (6.0s)"
         );
     }
 
     #[test]
-    fn extract_json_payload_recovers_interleaved_log_line() {
-        // A tracing line interleaved inside a pretty-printed body: the
-        // line-dropped view removes it so the braces balance again.
-        let raw = "{\n  \"facts\": [\n\
-                   2026-06-28T08:08:58.151133Z  INFO progress\n\
-                   ]\n}";
-        assert_eq!(
-            extract_json_payload(raw),
-            Some("{\n  \"facts\": [\n]\n}".to_string())
-        );
-    }
-
-    // ---- extract_verdict -------------------------------------------------
-
-    const MERGE_KEYWORDS: &[&str] = &["not_ready", "not ready", "unclear", "ready"];
-
-    #[test]
-    fn extract_verdict_precedence_not_ready_beats_ready() {
-        let m = extract_verdict("The PR is not_ready yet.", MERGE_KEYWORDS).unwrap();
-        assert_eq!(m.keyword, "not_ready");
-    }
-
-    #[test]
-    fn extract_verdict_plain_ready() {
-        let m = extract_verdict("Looks ready to merge.", MERGE_KEYWORDS).unwrap();
-        assert_eq!(m.keyword, "ready");
-    }
-
-    #[test]
-    fn extract_verdict_case_insensitive() {
-        let m = extract_verdict("VERDICT: READY", MERGE_KEYWORDS).unwrap();
-        assert_eq!(m.keyword, "ready");
-    }
-
-    #[test]
-    fn extract_verdict_none_when_absent() {
-        assert!(extract_verdict("cannot decide", MERGE_KEYWORDS).is_none());
-    }
-
-    #[test]
-    fn extract_verdict_none_when_empty_after_stripping() {
-        let raw = "2026-06-28T08:08:58.151133Z  INFO only a log line";
-        assert!(extract_verdict(raw, MERGE_KEYWORDS).is_none());
-    }
-
-    #[test]
-    fn extract_verdict_ignores_keyword_substring_inside_dropped_log_line() {
-        // "already" contains "ready"; the log line must be dropped so it does
-        // not produce a false Ready verdict. The real verdict follows.
-        let raw = "2026-06-28T08:08:58.000000Z  INFO already running batch\n\
-                   Verdict: not_ready — missing tests.";
-        let m = extract_verdict(raw, MERGE_KEYWORDS).unwrap();
-        assert_eq!(m.keyword, "not_ready");
-        assert!(!m.rationale.contains("already running"));
-    }
-
-    #[test]
-    fn extract_verdict_rationale_is_cleaned_full_text() {
-        let raw = "After review I accept the claim.";
-        let m = extract_verdict(raw, &["reject", "accept"]).unwrap();
-        assert_eq!(m.keyword, "accept");
-        assert_eq!(m.rationale, "After review I accept the claim.");
-    }
-
-    // ---- strip_json_trailing_commas (issue #2658) ------------------------
-
-    #[test]
-    fn strip_trailing_commas_valid_json_is_borrowed_zero_copy() {
-        // The clean path must not allocate and must be byte-identical: a
-        // provable no-op on valid JSON, so a strict-parse retry on this view
-        // can never change behaviour on well-formed output.
-        let s = r#"{"facts":[{"concept":"pr-pattern","content":"a"}],"procedures":[]}"#;
-        let out = strip_json_trailing_commas(s);
+    fn strip_recipe_noise_preserves_prefixed_payload() {
+        let raw = "Recipe: progress-assessment (v1.0.0)\n\
+                   Steps: 1\n\
+                     [08:25:09] [amplihack:copilot:1635817] {\"verdict\":\"accept\",\"rationale\":\"evidence-backed\"}\n\
+                   Recipe 'progress-assessment': SUCCESS (14.0s)\n\
+                     [completed] assess-progress (14.0s)";
+        let cleaned = strip_recipe_noise(raw);
         assert!(
-            matches!(out, Cow::Borrowed(_)),
-            "valid JSON must borrow unchanged (zero-alloc)"
+            cleaned.contains("{\"verdict\":\"accept\""),
+            "payload must survive: {cleaned}"
         );
-        assert_eq!(out, s);
-    }
-
-    #[test]
-    fn strip_trailing_commas_before_brace_and_bracket() {
-        // Trailing comma before `}` and before `]` are both removed, yielding
-        // parseable JSON.
-        let malformed = r#"{"facts":[{"concept":"pr-pattern","content":"a",},],}"#;
-        let fixed = strip_json_trailing_commas(malformed);
-        assert!(matches!(fixed, Cow::Owned(_)), "a change must allocate");
         assert!(
-            serde_json::from_str::<serde_json::Value>(&fixed).is_ok(),
-            "stripped output must be valid JSON: {fixed}"
+            !cleaned.contains("amplihack:copilot"),
+            "agent log prefix must be removed: {cleaned}"
         );
-        assert_eq!(
-            fixed,
-            r#"{"facts":[{"concept":"pr-pattern","content":"a"}]}"#
-        );
-    }
-
-    #[test]
-    fn strip_trailing_commas_tolerates_whitespace_before_close() {
-        // Whitespace (incl. newlines) between the comma and the closer is
-        // skipped — the pretty-printed shape an LLM actually emits.
-        let malformed = "{\n  \"facts\": [\n    {\"concept\": \"a\"},\n  ],\n}";
-        let fixed = strip_json_trailing_commas(malformed);
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&fixed).is_ok(),
-            "pretty-printed trailing commas must be recovered: {fixed}"
-        );
-    }
-
-    #[test]
-    fn strip_trailing_commas_never_corrupts_comma_in_string_content() {
-        // A `,}` or `,]` sequence INSIDE a JSON string is content, not a
-        // trailing comma, and must survive verbatim (including when the string
-        // ends immediately after it).
-        let s = r#"{"content":"first, second,","tag":"x"}"#;
-        let out = strip_json_trailing_commas(s);
-        assert!(
-            matches!(out, Cow::Borrowed(_)),
-            "string-internal commas are not trailing commas — must borrow"
-        );
-        assert_eq!(out, s);
-
-        // Even a literal `, ]` inside string content is preserved.
-        let s2 = r#"{"content":"a, ] b, } c"}"#;
-        assert_eq!(strip_json_trailing_commas(s2), s2);
-    }
-
-    #[test]
-    fn strip_trailing_commas_respects_escaped_quote_in_string() {
-        // An escaped quote must not prematurely end the string, so a `,]`
-        // after it (still inside the string) is not stripped.
-        let s = r#"{"content":"he said \"go,\" then left,","k":1}"#;
-        let out = strip_json_trailing_commas(s);
-        assert!(matches!(out, Cow::Borrowed(_)));
-        assert_eq!(out, s);
-    }
-
-    #[test]
-    fn strip_trailing_commas_leaves_genuinely_malformed_still_malformed() {
-        // An elided element `,,` is NOT a single trailing comma: leniency must
-        // not repair it into valid JSON.
-        let malformed = r#"{"facts":[1,,2]}"#;
-        let out = strip_json_trailing_commas(malformed);
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&out).is_err(),
-            "a doubly-malformed array must remain malformed: {out}"
-        );
-    }
-
-    #[test]
-    fn strip_trailing_commas_preserves_multibyte_utf8() {
-        // Non-ASCII content around a stripped comma must round-trip intact.
-        let malformed = r#"{"content":"café — δοκιμή","k":1,}"#;
-        let fixed = strip_json_trailing_commas(malformed);
-        let v: serde_json::Value =
-            serde_json::from_str(&fixed).expect("multibyte content must stay valid after strip");
-        assert_eq!(v["content"], "café — δοκιμή");
     }
 }
 
@@ -887,9 +509,11 @@ mod issue_2496_launcher_tests {
     #[test]
     fn recovers_json_payload_behind_launcher_preamble() {
         let raw = format!("{INFO_MARKER}\n{LAUNCHING}\n{{\"facts\":[]}}");
+        let cleaned = strip_recipe_noise(&raw);
         assert_eq!(
-            extract_json_payload(&raw),
-            Some("{\"facts\":[]}".to_string())
+            cleaned.trim(),
+            "{\"facts\":[]}",
+            "the JSON payload must survive with the launcher preamble stripped"
         );
     }
 

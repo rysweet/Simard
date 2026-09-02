@@ -37,6 +37,9 @@ pub mod cognitive_threads;
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
 // `#[cfg(test)]` sibling so release/debug builds never compile them.
 pub mod brain_introspection;
+// #4968: typed brain-introspection record + fail-closed reader (sibling of the
+// adapter, NOT an ooda_brain seam) that retires the text-marker scrape.
+pub mod brain_introspection_record;
 #[cfg(test)]
 mod brain_introspection_tests;
 mod copilot_status_probe;
@@ -56,8 +59,15 @@ pub mod cost_tracking;
 pub mod creative_ideas;
 pub mod disk_health;
 pub mod disk_pressure;
+pub mod disk_reclaim;
+pub mod done_criteria;
 pub mod engineer_loop;
 pub mod engineer_worktree;
+// Issue #2942: the enrichment-observability emit seam — proves recalled memory
+// reaches OODA decisions (per-turn attach/degrade INFO/WARN + simard.enrichment.*
+// metrics, the per-cycle rollup the dashboard reads, and the recall-on-vs-off
+// ablation feeding #2644).
+pub mod enrichment_observability;
 pub mod error;
 // Issue #2679: the shared per-fact reliability scorer, homed here so both
 // write-boundary seams (the IPC `StoreFactGated` handler and the in-process
@@ -65,6 +75,9 @@ pub mod error;
 pub mod eval_watchdog;
 pub mod evidence;
 pub mod fact_reliability;
+pub mod fact_reliability_bench;
+#[cfg(test)]
+mod fact_reliability_bench_tests;
 #[cfg(test)]
 mod fact_reliability_tests;
 pub mod git_guardrails;
@@ -72,6 +85,15 @@ pub mod goal_board_store;
 pub mod goal_curation;
 pub mod goals;
 pub mod greeting_banner;
+// Phase 4 of issue #2713: the LOCAL "COIN Gym" harness — runs the COIN
+// benchmark shape locally, scores vs. the published leaderboard, and A/Bs a
+// single-model baseline against a multi-agent team, mirroring skwaq's
+// failure-analysis + overfitting-reviewer gating. The harness executor delegates
+// to `coin evaluate` (Docker + instrumented replay is Phase 3/VM); a mock oracle
+// exercises the whole pipeline offline. See
+// `docs/research/coin-benchmark-and-skwaq-study.md` (design) and
+// `docs/howto/run-the-coin-gym-harness.md` (usage).
+pub mod coin_gym;
 pub mod gym;
 pub mod gym_client;
 pub mod gym_history;
@@ -82,8 +104,10 @@ pub mod hive_event_bus;
 pub mod identity;
 pub mod identity_auth;
 pub mod identity_composition;
+pub mod identity_curated_state;
 pub mod identity_precedence;
 pub mod improvements;
+pub mod install;
 pub mod journal;
 pub mod knowledge_client;
 pub mod knowledge_context;
@@ -123,6 +147,7 @@ pub mod overseer;
 mod persistence;
 pub mod prompt_assets;
 pub mod prompt_delivery;
+pub mod read_only_guard;
 // Issues #2640/#2692: shared "path-in-argv, content-in-file" transport for
 // unbounded recipe context values, so a large payload never overflows ARG_MAX
 // (the live journal E2BIG recipe-spawn failure).
@@ -151,6 +176,9 @@ pub mod self_metrics;
 // recipe invoker (mirrors `disk_health`) with disk-backed last-run persistence
 // so the ~30-day cadence survives daemon restarts.
 pub mod self_quality_audit;
+// #4968: typed self-quality-audit record + fail-closed reader (sibling of the
+// adapter, NOT an ooda_brain seam) that retires the text-marker scrape.
+pub mod self_quality_audit_record;
 #[cfg(test)]
 mod self_quality_audit_tests;
 pub mod self_relaunch;
@@ -172,6 +200,12 @@ pub mod spawn_payload;
 pub mod state_root;
 pub mod stewardship;
 pub mod subagent_sessions;
+// Issue #2741: proactive RUSTSEC/cargo-deny advisory stewardship. The pure
+// remediation-decision reasoner (bump-or-justified-ignore behind a
+// deterministic rail) lives here; it reuses `stewardship::dedup` and
+// `stewardship::merge_authority`. See
+// docs/reference/supply-chain-advisory-stewardship.md.
+pub mod supply_chain_steward;
 // Issue #2528: unified telemetry facade + one `simard status` snapshot. The
 // `telemetry` module is the OpenTelemetry-backed metric facade + in-process
 // registry; `status` is the single typed StatusSnapshot the CLI, dashboard, and
@@ -189,6 +223,7 @@ mod tests_hermetic_guard;
 #[cfg(test)]
 mod tests_memory_ipc;
 pub mod trace_collector;
+pub mod typed_ooda;
 pub mod update_check;
 pub mod util;
 pub mod worktree_gc;
@@ -278,8 +313,8 @@ pub use handoff::{
     RuntimeHandoffStore,
 };
 pub use identity::{
-    BuiltinIdentityLoader, IdentityLoadRequest, IdentityLoader, IdentityManifest, ManifestContract,
-    MemoryPolicy, OperatingMode,
+    BuiltinIdentityLoader, IdentityAuthority, IdentityLoadRequest, IdentityLoader,
+    IdentityManifest, ManifestContract, MemoryPolicy, OperatingMode, SeedGoal, WritePosture,
 };
 pub use identity_auth::{
     AuthIdentity, DualIdentityConfig, env_for_identity, identity_for_operation,
@@ -345,9 +380,10 @@ pub use rpc::{
     unpack_rpc_response,
 };
 pub use rpc_circuit_breaker::{CircuitBreakerConfig, CircuitBreakerTransport, CircuitState};
-pub use rpc_transport::{InMemoryRpcTransport, SubprocessRpcTransport};
+pub use rpc_transport::InMemoryRpcTransport;
 pub use test_support::TestAdapter;
 
+pub use coin_gym::{coin_gym_usage, dispatch_coin_gym_cli};
 pub use engineer_handoff::{
     ENGINEER_HANDOFF_FILE_NAME, ENGINEER_MODE_BOUNDARY, EngineerHandoffContext,
     SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,

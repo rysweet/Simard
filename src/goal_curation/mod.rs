@@ -7,8 +7,13 @@
 //! ([`decompose`]) that breaks one large goal into bounded sub-goals.
 
 pub mod completion_gate;
+pub mod labels;
+pub mod live_signal;
+pub mod live_signal_source;
 pub mod no_progress_breaker;
+pub mod no_progress_why;
 mod operations;
+pub mod outcome_verify;
 pub mod progress_evidence;
 pub mod progress_reviewer;
 pub mod recipe_progress_checker;
@@ -21,17 +26,18 @@ mod prioritize;
 // Re-export all public items so `crate::goal_curation::X` still works.
 pub use operations::CarryoverVerification;
 pub use operations::{
-    DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, active_goals_as_records, add_active_goal,
-    add_backlog_item, archive_completed, board_snapshot_hash, clear_goal_assignment,
-    enqueue_stewardship_issue, load_goal_board, overwrite_memory_cache, persist_board,
-    promote_to_active, read_latest_carryover, rollup_parent_progress, save_goal_board,
-    save_goal_board_with_removals, seed_default_board, simard_state_root, update_goal_progress,
+    BoardPlacement, DEFAULT_SEED_GOALS, DEFAULT_STEWARD_SCORE, active_goals_as_records,
+    add_active_goal, add_backlog_item, archive_completed, board_snapshot_hash,
+    clear_goal_assignment, default_seed_goals, load_goal_board, overwrite_memory_cache,
+    persist_board, promote_to_active, read_latest_carryover, record_as_active_goal,
+    resolve_seed_goals, rollup_parent_progress, save_goal_board, save_goal_board_with_removals,
+    seed_board_from_seed_goals, seed_default_board, simard_state_root, update_goal_progress,
     update_goal_progress_with_evidence, verify_goal_carryover, write_goal_carryover,
 };
 pub use types::{
     ActiveGoal, BacklogItem, CARRYOVER_CONCEPT, GoalBoard, GoalCarryoverRecord, GoalEdge,
     GoalEdgeType, GoalNode, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX, WipRef,
-    description_marks_standing,
+    description_marks_research, description_marks_standing,
 };
 
 pub use decompose::{
@@ -43,17 +49,31 @@ pub use prioritize::{PrioritizationSignals, prioritize};
 
 pub use completion_gate::{
     COMPLETION_VERIFICATION_METRIC, CompletionEvidence, CompletionEvidenceGate, CompletionVerdict,
-    EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource, MissingEvidence,
-    VerificationOutcome, archive_completed_evidence_aware, archive_completed_with_evidence,
-    classify_from_missing, classify_outcome, completion_evidence_enabled, error_class_from_missing,
-    false_completion_rate, has_derivable_signal, is_self_affecting, record_completion_verification,
+    DependencyState, EvidenceSource, FALSE_COMPLETION_RATE_METRIC, GhCliEvidenceSource,
+    MissingEvidence, VerificationOutcome, archive_completed_evidence_aware,
+    archive_completed_with_evidence, classify_from_missing, classify_outcome,
+    completion_evidence_enabled, error_class_from_missing, false_completion_rate,
+    has_derivable_signal, is_self_affecting, record_completion_verification,
     record_false_completion_rate,
 };
 
 pub use no_progress_breaker::{
     NO_PROGRESS_BLOCKED_PREFIX, NO_PROGRESS_BLOCKED_SUFFIX, NO_PROGRESS_BREAKER_THRESHOLD,
-    NoProgressResolution, NoProgressTracker, StuckGoalDisposition, is_no_progress_marker,
-    no_progress_blocked_reason, obsolescence_reason, resolve_no_progress, verify_stuck_goal,
+    NO_PROGRESS_QUARANTINE_MARKER_KIND, NO_PROGRESS_QUARANTINE_MARKER_REF_ID, NoProgressResolution,
+    NoProgressTracker, SURFACED_INVESTIGATION_FAILURE_LIMIT, StuckGoalDisposition,
+    humanize_block_reason, is_bare_no_progress_block, is_no_progress_marker, is_quarantine_ref,
+    is_quarantined, no_progress_blocked_reason, no_progress_blocked_reason_with_why,
+    obsolescence_reason, quarantine_marker, resolution_for_why, resolve_no_progress,
+    verify_stuck_goal,
+};
+
+pub use no_progress_why::{Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner};
+
+pub use live_signal::{LiveSignal, LiveSignalSource};
+pub use live_signal_source::DaemonLiveSignals;
+pub use outcome_verify::{
+    GOAL_LIVE_OUTCOME_VERIFICATION_METRIC, OutcomeVerificationReport, outcome_verify_enabled,
+    record_outcome_verification, verify_completion_candidates, verify_goal_outcome,
 };
 
 #[cfg(test)]
@@ -63,9 +83,29 @@ mod tests_adapter;
 #[cfg(test)]
 mod tests_carryover;
 #[cfg(test)]
+mod tests_labels;
+#[cfg(test)]
 mod tests_no_progress_breaker;
+// Issue #16 (TDD): pure-policy tests for the agentic root-cause upgrade of the
+// no-progress breaker (classification tokens, WHY/evidence value types, the
+// WHY-aware block-reason renderer, and the class -> resolution map).
+#[cfg(test)]
+mod tests_no_progress_why;
+// process_health (TDD): pure-policy tests for the OODA breaker terminal-quarantine
+// rung that ends the UNCLEAR-CRITERIA churn — the additive `surfaced_failures`
+// argument on `resolution_for_why`, the `QuarantineTerminal` variant, and the
+// durable injection-safe quarantine marker helpers.
+#[cfg(test)]
+mod tests_quarantine;
+// Issue #17 (TDD): pure primitives of the already-blocked re-investigation pass
+// — the `is_bare_no_progress_block` deterministic rail and the
+// `NoProgressTracker` persisted `reinvestigated` dedupe set (lifecycle + serde).
+#[cfg(test)]
+mod tests_no_progress_reinvestigation;
 #[cfg(test)]
 mod tests_operations;
+#[cfg(test)]
+mod tests_reverse_adapter;
 #[cfg(test)]
 mod tests_save_with_removals;
 

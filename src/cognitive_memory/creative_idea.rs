@@ -343,10 +343,24 @@ impl<'a> ProspectiveCreativeIdeaStore<'a> {
         Self { mem }
     }
 
-    /// Every stored revision (no dedupe) filtered by the sentinel — the raw
-    /// append-only stream. Used internally by [`Self::list`] and by tests.
+    /// Every stored revision (no dedupe) for the creative-idea sentinel — the
+    /// raw append-only stream. Used internally by [`Self::list`] and by tests.
+    ///
+    /// Reads through [`CognitiveMemoryOps::list_prospective_by_trigger`] so the
+    /// `limit` bounds only nodes carrying [`CREATIVE_IDEA_TRIGGER`] (issue
+    /// #122): the backend applies the trigger filter *in the query*, so ideas
+    /// survive no matter how many unrelated prospective memories the live store
+    /// accumulates. The old path (`list_all_prospective` + a Rust post-filter)
+    /// truncated the creative nodes out of the row window in a large store, so
+    /// the dashboard showed 0 ideas. **Fail-closed**: no fallback to the
+    /// unscoped enumeration — a read error propagates rather than masking as an
+    /// empty list. The retained sentinel `filter` is a cheap defensive guard
+    /// that keeps [`CreativeIdea::from_prospective`] from ever seeing a
+    /// non-creative node should a backend widen the match.
     fn all_revisions(&self, limit: u32) -> SimardResult<Vec<CreativeIdea>> {
-        let nodes = self.mem.list_all_prospective(limit)?;
+        let nodes = self
+            .mem
+            .list_prospective_by_trigger(CREATIVE_IDEA_TRIGGER, limit)?;
         nodes
             .iter()
             .filter(|n| n.trigger_condition == CREATIVE_IDEA_TRIGGER)

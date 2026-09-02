@@ -10,178 +10,186 @@ they are the same gates CI enforces.
 ## Table of Contents
 
 1. [Rust-Only Policy](#rust-only-policy)
-2. [Local Pre-Commit Workflow](#local-pre-commit-workflow)
+2. [Local Commit Gates](#local-commit-gates)
 3. [Merge Policy: No `--admin` Merges](#merge-policy-no---admin-merges)
 4. [Cognitive Memory Durability (Per-Write Barrier + SIGTERM + Periodic Backups)](#cognitive-memory-durability-per-write-barrier--sigterm--periodic-backups)
 5. [Local Data Retention Disclosure](#local-data-retention-disclosure)
 6. [Pre-Existing Test Failure Disposition](#pre-existing-test-failure-disposition)
 7. [Real-Meeting & Dashboard E2E Verification](#real-meeting--dashboard-e2e-verification)
-8. [Engineering Guidelines (G1/G2/G3)](#engineering-guidelines-g1g2g3)
+8. [Engineering Guidelines (G1/G2/G3/G4)](#engineering-guidelines-g1g2g3g4)
 
 ---
 
 ## Rust-Only Policy
 
-Simard is migrating to a Rust-only codebase ([#2155](https://github.com/rysweet/Simard/issues/2155)).
-**New `.py` files under `src/` or `python/`, and new `.js`/`.ts` files outside
-`npm/` and `tests/e2e-dashboard/`, are not permitted.**
+Simard is a **pure-Rust daemon** ([#2155](https://github.com/rysweet/Simard/issues/2155),
+[#3181](https://github.com/rysweet/Simard/issues/3181)). There is **no Python**
+anywhere — not in the runtime, the tests, the scripts, or CI — and no Python
+runtime is required to build, test, or gate the code. The graph store is the
+embedded `lbug` (LadybugDB) Rust crate, **never** a Python `kuzu` package.
 
-A CI gate (`scripts/check-rust-only-gate.sh`) enforces this on every PR and
-as a pre-commit hook. A small set of pre-existing files is allow-listed until
-they are individually migrated — see the script for the current list.
+**No `.py` file may exist anywhere in the repository**, and new `.js`/`.ts`
+files outside `npm/` and `tests/e2e-dashboard/` are not permitted.
 
-If you need to add a non-Rust file that falls outside the allow-list, open an
-issue explaining the need and add the file to the allow-list in
-`scripts/check-rust-only-gate.sh` with a comment referencing the issue.
+A CI gate (`scripts/check-rust-only-gate.sh`) enforces this on every PR and in
+the local `pre-commit` git hook. It fails on **any** tracked or staged `.py`
+file anywhere in the tree — not only under `src/`/`python/` — which is the
+hardening that keeps Python from silently creeping back in. The Python
+allow-list is **empty**.
+
+If you need to add a non-Rust file (`.js`/`.ts` only), open an issue explaining
+the need and add the file to the allow-list in
+`scripts/check-rust-only-gate.sh` with a comment referencing the issue. There
+is **no** allow-list path for `.py`.
 
 ---
 
-## Local Pre-Commit Workflow
+## Local Commit Gates
 
-Simard uses the [`pre-commit`](https://pre-commit.com) framework to mirror
-the CI `pre-commit` workflow on every developer machine. The local hooks run
-**the same checks CI runs** — if they pass locally, CI will pass.
+Simard's local gates are **native Git hooks** — plain committed shell scripts
+wired through Git's [`core.hooksPath`](https://git-scm.com/docs/githooks). There
+is **no `pre-commit` framework, no `pip install`, and no Python**. The hooks run
+**the same `cargo` checks CI runs** — if they pass locally, CI will pass.
 
-### One-Time Setup
+The repo commits its own hooks under `hooks/` and shared gate bodies under
+`scripts/gates/`. CI runs the identical `cargo` commands directly. Full
+reference: [Local Commit Gates (Native Git Hooks)](docs/operations/pre-commit-setup.md).
+
+### One-Time Enrollment
 
 ```bash
 # From the repo root
+git config core.hooksPath hooks
+# (or the Python-free convenience wrapper, which does exactly this + verifies)
 ./scripts/install-precommit.sh
 ```
 
-The script is idempotent; running it again is a no-op if hooks are already
-installed.
+The committed hooks (`hooks/pre-commit`, `hooks/pre-push`) are already in every
+checkout; enrollment only tells *your* clone to use them. It is idempotent.
+Engineer worktrees are enrolled automatically by
+`engineer_worktree::install_hooks` (a native `git config core.hooksPath hooks`,
+no subprocess, best-effort with a loud `[simard]` diagnostic on failure).
 
-What `install-precommit.sh` does:
+Confirm:
 
-1. Verifies `python3` and `pip` (or `pipx`) are available.
-2. Installs the `pre-commit` framework (pinned `>=3.7`) into the user
-   site (`pip install --user pre-commit`) or via `pipx` if available.
-3. Runs `pre-commit install --install-hooks` (the project pins
-   `default_install_hook_types: [pre-commit, pre-push]` in the config so
-   both hook stages are installed in one call).
-4. Performs an initial `pre-commit run --all-files` to warm caches.
+```bash
+git config --get core.hooksPath   # → hooks
+git ls-files -s hooks/            # both entries show mode 100755
+```
 
-> **Note on `scripts/install-precommit.sh`** — this installer is part of
-> the issue #1631 hardening work and lands in the same PR as this
-> documentation. If you are reading this on a branch that does not yet
-> contain the script, fall back to the manual install below.
+### What Each Gate Runs
 
-### What Each Hook Runs
+The gate bodies in
+[`scripts/gates/pre-commit.sh`](scripts/gates/pre-commit.sh) and
+[`scripts/gates/pre-push.sh`](scripts/gates/pre-push.sh) are the source of
+truth; the table below is a summary.
 
-The actual configuration is in
-[`.pre-commit-config.yaml`](.pre-commit-config.yaml); the table below is
-a summary, not the source of truth.
+| Stage | Command |
+|---|---|
+| `pre-commit` | `scripts/check-rust-only-gate.sh --staged` |
+| `pre-commit` | `cargo fmt --all -- --check` |
+| `pre-commit` | `scripts/clippy-precommit-release.sh` → `cargo clippy --release --no-deps -- -D warnings` |
+| `pre-push` | `cargo fmt --all -- --check` |
+| `pre-push` | `cargo test --release --lib -- --test-threads=$(nproc) cognitive_memory bootstrap memory_ipc memory_consolidation` |
+| `pre-push` | `cargo clippy --all-targets --all-features --locked -- -D warnings` |
 
-| Hook id | Stage(s) | Command |
-|---|---|---|
-| `cargo-fmt` | `pre-commit`, `pre-push`, `manual` | `cargo fmt --all -- --check` |
-| `cargo-clippy-precommit` | `pre-commit`, `manual` | `cargo clippy --release --no-deps -- -D warnings` (via [`scripts/clippy-precommit-release.sh`](scripts/clippy-precommit-release.sh)) |
-| `cargo-clippy` | `pre-push`, `manual` | `cargo clippy --all-targets --all-features --locked -- -D warnings` |
-| `cargo-test-race-subset` | `pre-push`, `manual` | `cargo test --release --lib -- --test-threads=$(nproc) cognitive_memory bootstrap memory_ipc memory_consolidation` |
+The two-tier clippy gate is intentional: `--release --no-deps` gives instant
+feedback at commit time; `--all-targets --all-features --locked` reuses the warm
+`target/` after the race-test compile and runs at push time, mirroring CI.
 
-The two-tier clippy gate is intentional: the `--release --no-deps`
-hook gives instant feedback at commit time; the `--all-targets
---all-features --locked` hook reuses the warm `target/` after the
-race-test compile and runs at push time, mirroring CI exactly.
-
-The `cargo-clippy-precommit` hook runs through a thin wrapper,
+The `cargo clippy --release` gate runs through
 [`scripts/clippy-precommit-release.sh`](scripts/clippy-precommit-release.sh),
 which guarantees the `lbug` (LadybugDB) native static library is on the linker
-search path before invoking `cargo clippy --release` (issue #2426). `lbug`
-0.17.1 caches its prebuilt `liblbug.a` inside the cargo *registry source*
-directory; CI's cargo cache persists `target/` but not `registry/src`, so on a
-cache restore the cached release build-script output points at an evicted
-archive and clippy fails with `could not find native static library `lbug``.
-The wrapper provisions a stable copy of `liblbug.a` (reusing an existing
-registry prebuilt, otherwise downloading the same release asset the `build` and
-`coverage` jobs use) and points `lbug` at it via `LBUG_LIBRARY_DIR`. It is a
+search path before invoking clippy (issue #2426). `lbug` caches its prebuilt
+`liblbug.a` inside the cargo *registry source* directory; CI's cargo cache
+persists `target/` but not `registry/src`, so on a cache restore the cached
+release build-script output points at an evicted archive and clippy fails with
+`could not find native static library `lbug``. The wrapper provisions a stable
+copy of `liblbug.a` and points `lbug` at it via `LBUG_LIBRARY_DIR`. It is a
 no-op for warm local checks, so the budgets below still hold.
 
-Realistic budgets (warm caches, dev host with the workspace already
-built):
+Realistic budgets (warm caches, workspace already built):
 
 - `cargo fmt --check` — under 2 seconds. Effectively free at commit time.
 - `cargo clippy --release --no-deps` — typically under 30 seconds
-  incrementally with `--no-deps` keeping the analysis bounded to the
-  workspace. From cold it is several minutes (one-time cost).
-- `cargo test --release --lib -- --test-threads=$(nproc) <filters>` —
-  the race-catching subset (cognitive memory, bootstrap, IPC, and
-  consolidation modules). Total budget ≤ 90s on a dev host. This is
-  intentionally **not** the full suite; the goal is to catch the
-  concurrency regressions that surface only under parallel execution
-  before they reach CI.
+  incrementally; several minutes from cold (one-time cost).
+- `cargo test --release --lib -- --test-threads=$(nproc) <filters>` — the
+  race-catching subset (cognitive memory, bootstrap, IPC, consolidation). Total
+  budget ≤ 90s on a dev host. This is intentionally **not** the full suite; the
+  goal is to catch the concurrency regressions that surface only under parallel
+  execution before they reach CI.
 
-The pre-push gate is deliberately narrow: full-suite gating belongs in
-CI, where the test runner has more cores and isolated caches. Local
-hooks exist to prevent the multi-thread race classes (writer-Arc
-lifecycle, IPC bridge teardown, consolidation order-of-operations) from
-ever leaving a developer machine.
+The pre-push gate is deliberately narrow: full-suite gating belongs in CI, where
+the runner has more cores and isolated caches. Local hooks exist to prevent the
+multi-thread race classes (writer-`Arc` lifecycle, IPC teardown, consolidation
+order-of-operations) from ever leaving a developer machine.
 
 ### Manual Invocation
 
 ```bash
-# Run all hooks on all files (recommended before opening a PR)
-pre-commit run --all-files
+# Run a full stage against the working tree (recommended before opening a PR)
+./scripts/gates/pre-commit.sh
+./scripts/gates/pre-push.sh
 
-# Run a specific hook on all files
-pre-commit run cargo-fmt --all-files
-pre-commit run cargo-clippy-precommit --all-files
-pre-commit run cargo-clippy --all-files --hook-stage pre-push
-pre-commit run cargo-test-race-subset --all-files --hook-stage pre-push
-
-# Run only on staged files (default behavior at commit time)
-pre-commit run
+# Or run the underlying commands directly (identical to CI)
+cargo fmt --all -- --check
+scripts/clippy-precommit-release.sh
+cargo clippy --all-targets --all-features --locked -- -D warnings
+scripts/check-rust-only-gate.sh          # full-tree Rust-only scan
 ```
 
-### Bypassing Hooks (Emergency Only)
+### Bypassing Gates (Emergency Only)
 
-The standard `pre-commit` `SKIP=` env var is honored:
+Native hooks are bypassed with Git's built-in `--no-verify`:
 
 ```bash
-# Skip a single hook (DISCOURAGED — use only when actively debugging
-# the hook itself, not the code under change)
-SKIP=cargo-test-race-subset git push
+# DISCOURAGED — use only when actively debugging a gate script itself.
+git commit --no-verify -m "WIP"
+git push   --no-verify
 ```
 
-> **PRs pushed with `SKIP=` will be rejected at merge time.** CI re-runs
-> the same checks and merge is blocked on red CI. There is no admin
-> override (see [Merge Policy](#merge-policy-no---admin-merges)).
+> **Commits/pushes made with `--no-verify` will be rejected at merge time.** CI
+> re-runs the identical gate commands and merge is blocked on red CI. There is
+> no admin override (see [Merge Policy](#merge-policy-no---admin-merges)). There
+> is no per-hook `SKIP=` variable — that was a `pre-commit`-framework feature.
 
-### Verifying Your Hooks Catch What CI Catches
+### Verifying Your Gates Catch What CI Catches
 
-The hooks are designed to catch three failure classes. To verify they
-work on your machine, intentionally introduce each failure once:
+The gates catch four failure classes. To verify they work on your machine,
+intentionally introduce each once:
 
 ```bash
-# 1. Format failure — should be blocked at commit time by cargo-fmt
+# 0. Rust-only violation — blocked at commit time (a .py ANYWHERE is rejected)
+touch tests/should_not_exist.py && git add tests/should_not_exist.py && \
+  git commit -m "test"
+# Expected: rust-only gate fails.
+git restore --staged tests/should_not_exist.py && rm tests/should_not_exist.py
+
+# 1. Format failure — blocked at commit time by cargo fmt
 echo 'fn   bad_fmt(  )  ->  i32{1}' >> src/lib.rs && \
   git add src/lib.rs && git commit -m "test"
-# Expected: cargo-fmt hook fails.
+# Expected: fmt gate fails.
 git restore --staged src/lib.rs && git checkout -- src/lib.rs
 
-# 2. Clippy failure — should be blocked at commit time by cargo-clippy-precommit
-# (introduce e.g. `let unused = 2;` in non-test code)
-# Expected: cargo-clippy-precommit hook fails on commit.
+# 2. Clippy failure — blocked at commit time (introduce e.g. `let unused = 2;`
+#    in non-test code). Expected: clippy gate fails on commit.
 
-# 3. Race-subset test failure — should be blocked at push time
-# (introduce a failing assertion in a test inside cognitive_memory,
-#  bootstrap, memory_ipc, or memory_consolidation)
-# Expected: cargo-test-race-subset hook fails on push.
+# 3. Race-subset test failure — blocked at push time (introduce a failing
+#    assertion in a cognitive_memory / bootstrap / memory_ipc /
+#    memory_consolidation test). Expected: push-stage gate fails.
 ```
 
 Revert each test change before continuing.
 
-### Updating Hook Versions
+### Updating the Gates
 
-Because every hook is `language: system` (it shells out to the locally
-installed `cargo`), there are no upstream hook revisions to bump. To
-bump the framework itself:
-
-```bash
-pipx upgrade pre-commit          # or: pip install --user --upgrade pre-commit
-pre-commit install --install-hooks
-```
+The gate scripts shell out to the locally installed `cargo`, so there are no
+upstream hook revisions to bump and nothing to `pip install` or auto-update.
+To change what a gate runs, edit `scripts/gates/*.sh` (and the matching CI step
+in [`.github/workflows/verify.yml`](.github/workflows/verify.yml) — they are
+kept in lockstep) in a reviewed PR. Hook and gate-script changes are treated as
+security-sensitive, since committed hooks execute on every developer's `git
+commit`.
 
 ---
 
@@ -217,7 +225,7 @@ was traced to a chain of admin merges that suppressed warning signals.
 
 Before requesting merge:
 
-- [ ] Local `pre-commit run --all-files` is green.
+- [ ] Local commit + push gates are green: `./scripts/gates/pre-commit.sh && ./scripts/gates/pre-push.sh`.
 - [ ] Local `cargo fmt --all -- --check && cargo clippy --all-targets --all-features --locked -- -D warnings && cargo test --all-features --locked -- --skip cargo_install_from_repo_succeeds` is green.
 - [ ] CI on the PR is green.
 - [ ] Pre-existing failures inherited from `main` are either fixed in this PR or tracked by a linked GitHub issue.
@@ -572,22 +580,27 @@ durability and ingestion regressions before they reach production.
 
 ---
 
-## Engineering Guidelines (G1/G2/G3)
+## Engineering Guidelines (G1/G2/G3/G4)
 
 These are **durable engineering principles**, not a point-in-time
 snapshot. They apply to human contributors *and* to Simard's own OODA
 reasoners and engineer sessions. They are encoded declaratively in the
 hot-reloaded prompt assets under `prompt_assets/simard/` (mirrored into
-the recipe YAML the daemon runs), enforced as soft review gates in the
+the recipe YAML the daemon runs), enforced as soft review flags in the
 merge-readiness judge and the code-review reasoner, and pinned by a
 presence test at
 [`tests/engineering_guidelines_prompts.rs`](tests/engineering_guidelines_prompts.rs).
+G1–G3 are **soft advisory flags**; **G4 additionally has a hard
+deterministic backstop** — the Overseer pr-verify scan
+`scan_no_point_in_time_report_docs` (pr-verify check #8) — that **blocks**
+a merge which would commit a new point-in-time report doc.
 
-> **Why these three?** Each guideline is a lesson learned from a
-> specific merged PR where a change looked complete but left a durable
-> gap. The guidelines exist so the same class of gap is caught the next
-> time — by a reviewer, by the merge-judge, or by Simard herself while
-> planning the work.
+> **Why these four?** Each guideline is a lesson learned from a
+> specific merged PR (or a run of them) where a change looked complete
+> but left a durable gap. The guidelines exist so the same class of gap
+> is caught the next time — by a reviewer, by the merge-judge, by Simard
+> herself while planning the work, or (for G4) by the deterministic
+> merge-gate scan.
 
 > **Terminology.** Simard runs a single **Brain** (the one-Brain
 > model). The interpretive reasoners named below — OODA Orient, Decide,
@@ -700,14 +713,78 @@ and which fails **closed** to `unclear` on a parse-miss — is the
 of model/tool output through that same fail-closed, structured path rather
 than adding fresh line/substring slicing.
 
+### G4 — Durable docs only; never commit point-in-time report docs
+
+Simard's repository documentation must be **accurate** and **durable**:
+it describes how the system *actually works today* and is expected to be
+**updated** by a later PR that changes the feature. The repo must
+**never** carry **point-in-time report docs** — investigation, testing,
+diagnosis, blockage/recurrence, or benchmark-**snapshot** write-ups that
+are true only "as of" the moment they were written.
+
+Decide by **doc type, not topic**. The same subsystem can be the subject
+of both a good durable doc and a banned report doc:
+
+- **Durable → keep it, and keep it current.** If a later PR that changes
+  the feature would be expected to update the doc (architecture, design,
+  reference, how-to), it is durable. Durable documentation is
+  **explicitly encouraged** — G4 never discourages keeping the real docs
+  accurate.
+- **Point-in-time → issue and/or memory, not a repo doc.** If the doc is
+  only ever true as of the day it was written ("what I found while
+  diagnosing X", a testing write-up, a measured-rate snapshot), its
+  findings belong in a **GitHub issue** (the authoritative, trackable,
+  dedup-able sink) and/or Simard's memory. Recurrences consolidate into a
+  single tracking issue, not a new doc per occurrence.
+
+Unlike G1–G3, G4 has **two rails**. The soft rail is the same
+prompt/review guidance that discourages authoring a report doc. The hard
+rail is a **deterministic backstop** — the Overseer pr-verify scan
+`scan_no_point_in_time_report_docs` (pr-verify check #8) — that blocks a
+merge whose diff **adds** a report doc. The scan is deliberately narrow:
+it is **added-only** (edits to existing docs are never flagged) and
+**report-typed** (it flags a newly added `.md` only when it sits under a
+reserved report directory — `docs/investigation/`, `docs/reports/`,
+`docs/runs/` — or carries a report-typed *title*, never merely
+report-flavored body prose). It uses **no `--admin` / `--no-verify`
+bypass**: a flagged PR does not merge until the report doc is removed and
+its content moved to an issue/memory.
+
+**Motivating context.** A run of `docs(investigation)` / `docs(overseer)`
+PRs — #2879, #2843, #2819, #2814, #2801 — each committed a kgpacks-rs
+blockage investigation/diagnosis report as a repo doc. Point-in-time
+reports go stale immediately, **poison Simard's own context** when she
+reads her repo as grounding, and bury the durable docs. G4 routes that
+content to issues/memory and keeps the doc tree durable.
+
+**What "done" looks like for a G4-affected change:**
+
+- An investigation/testing/diagnosis **finding** is recorded as a GitHub
+  issue and/or memory — not as a new repo doc; recurrences consolidate
+  into one tracking issue.
+- Any durable documentation the change warrants is written or updated
+  under `docs/` with a **feature/architecture title**, not a report
+  title.
+- If the pr-verify scan flags an added report doc, the content is moved
+  to an issue and the doc removed from the PR — the gate is resolved,
+  never overridden.
+
+See [Durable-Documentation Policy (G4)](docs/concepts/durable-documentation-policy.md)
+for the rationale and two-rail architecture,
+[No point-in-time report docs — pr-verify scan](docs/reference/no-point-in-time-docs-scan.md)
+for the deterministic behavior, and
+[Record an investigation finding](docs/howto/record-an-investigation-finding.md)
+for the step-by-step.
+
 ### Where the guidelines are encoded
 
 | Layer | Assets | Effect |
 |---|---|---|
-| Engineer + OODA reasoner prompts | `engineer_system.md`, `engineer_planning.md`, `ooda_orient.md`, `ooda_decide.md`, `ooda_brain.md` (+ mirrored recipes `ooda-orient.yaml`, `ooda-decide.yaml`, `ooda-engineer-lifecycle.yaml`) | Simard's engineers and OODA Brain apply G1/G2/G3 while planning and doing cognition/memory/parsing work. |
-| Review gates (soft) | `merge_readiness_judge.md` (+ `merge-readiness-judge.yaml`), `review_pipeline.md`, `progress_assessment_reviewer.md` (+ `progress-assessment.yaml`) | Reviewers FLAG (a) cognition changes with no live self-measurement, (b) memory-arch changes in Simard's repo that belong in `amplihack-memory-lib`, (c) new/extended brittle output-parsing where an agentic step is cleaner. |
+| Engineer + OODA reasoner prompts | `engineer_system.md`, `engineer_planning.md`, `ooda_orient.md`, `ooda_decide.md`, `ooda_brain.md` (+ mirrored recipes `ooda-orient.yaml`, `ooda-decide.yaml`, `ooda-engineer-lifecycle.yaml`) | Simard's engineers and OODA Brain apply G1/G2/G3/G4 while planning and doing cognition/memory/parsing/documentation work. |
+| Review gates (soft) | `merge_readiness_judge.md` (+ `merge-readiness-judge.yaml`), `review_pipeline.md`, `progress_assessment_reviewer.md` (+ `progress-assessment.yaml`), `overseer/pr_verify.md` | Reviewers FLAG (a) cognition changes with no live self-measurement, (b) memory-arch changes in Simard's repo that belong in `amplihack-memory-lib`, (c) new/extended brittle output-parsing where an agentic step is cleaner, (d) a PR that ADDS a point-in-time investigation/testing/diagnosis report doc that belongs in an issue/memory (G4). |
+| Deterministic backstop (G4) | `src/overseer/pr_verify.rs` — pr-verify check #8, `scan_no_point_in_time_report_docs` | Hard-**blocks** a merge whose diff ADDS a new point-in-time report doc. Unlike the soft flags above, this fails the merge gate with `ready: false`; there is no `--admin` / `--no-verify` bypass. |
 | Goal framing | `goal_session_objective.md`, `goal_decomposition.md` (+ `goal-decomposition.yaml`), `goal_curator_system.md` | Standing cognition/self-improvement goals inherit G1 (hybrid benchmark + live) and G2 (route memory-arch upstream) in their success criteria. Those goals are **seeded at runtime into `~/.simard` state**, not stored as repo assets — so the presence test pins the G1/G2 framing in the goal *prompts*, not any specific goal slug. |
-| Durable doc | this section | Human-facing source of truth for G1/G2/G3. |
+| Durable doc | this section | Human-facing source of truth for G1/G2/G3/G4. |
 | Presence test | `tests/engineering_guidelines_prompts.rs` | Pins keyword invariants so a future prompt edit cannot silently drop a guideline. |
 
 **Why not `AGENTS.md`?** `AGENTS.md` is regenerated amplihack boilerplate —
@@ -715,7 +792,7 @@ its body is overwritten on each agent-context sync (the file even opens with
 a corrupted marker line). It is therefore **deliberately excluded** as a
 durable layer: a cross-reference added there would not survive regeneration.
 This `CONTRIBUTING.md` section is the single canonical, human-facing source
-of truth for G1/G2/G3, and no `AGENTS.md` edit is required for parity.
+of truth for G1/G2/G3/G4, and no `AGENTS.md` edit is required for parity.
 
 **Hot reload.** The `prompt_assets/simard/` files hot-reload from
 `~/.simard/prompt_assets/`. After this PR merges, the operator syncs
@@ -727,7 +804,7 @@ daemon — the merge alone does not change live behaviour.
 The review gates add **advisory flags** — they do not change the
 machine verdict enum (`ready` / `not_ready` / `unclear` for the
 merge-judge, and the severity scale for the code reviewer). A reviewer
-or the merge-judge raises a G1/G2/G3 flag as a finding or blocker with a
+or the merge-judge raises a G1/G2/G3/G4 flag as a finding or blocker with a
 `fix` suggestion; the author either addresses it or justifies why it
 does not apply. What fires a flag:
 
@@ -740,6 +817,16 @@ does not apply. What fires a flag:
 - **G3 flag** — a new or extended line/substring parser over model/tool
   output where a structured JSON contract + agent extraction would be
   cleaner.
+- **G4 flag** — a PR that ADDS a new point-in-time investigation/testing/
+  diagnosis report doc instead of recording the finding in a GitHub
+  issue and/or memory.
+
+**G4 is the exception to "soft flags only."** In addition to the advisory
+flag above, G4 has a **hard deterministic backstop**: even if the soft
+flag is missed, the Overseer pr-verify scan `scan_no_point_in_time_report_docs`
+(check #8) fails the merge gate for a PR that adds a report doc — no
+`--admin` / `--no-verify` bypass. The soft flag catches it earlier and
+more helpfully; the scan guarantees it cannot slip through.
 
 ### Verifying the guidelines are present
 
@@ -750,7 +837,8 @@ cargo test --test engineering_guidelines_prompts
 The test reads the prompt assets, lowercases them, and asserts stable
 keyword invariants for each guideline (for example `live
 self-measurement` and `trended over time` for G1, `amplihack-memory-lib`
-for G2, `brittle parsing` and `agentic step` for G3), asserts each
+for G2, `brittle parsing` and `agentic step` for G3, and
+`no-point-in-time-docs` / `point-in-time` for G4), asserts each
 edited reasoner `.md` stays in parity with its recipe `.yaml` mirror,
 and asserts the edited reasoner regions do not rename the one-Brain
 OODA phases as a "Bridge". It asserts **keywords, not full sentences**,

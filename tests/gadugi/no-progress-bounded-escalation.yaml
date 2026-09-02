@@ -1,0 +1,55 @@
+name: "OODA No-Progress Bounded Escalation (issue #16 follow-up)"
+description: "Outside-in proof that an evidence-less no-progress re-investigation can no longer livelock forever: after SURFACED_INVESTIGATION_FAILURE_LIMIT consecutive surfaced failures the breaker escalates the goal to a human WITH the re-investigation count as concrete evidence (never evidence=[(none)]) and a MEASURABLE make-the-done-criteria-machine-checkable ask. Runs the in-tree unit tests that pin the bound, the escalation evidence shape, the human triage issue, and the progress-reset window."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "No-progress bounded escalation: constant contract + bound/evidence/reset outcomes"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/no-progress-bounded-escalation.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "ooda"
+    - "no-progress-breaker"
+    - "bounded-escalation"
+    - "issue-16"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -1,4 +1,19 @@
-# How-to: Diagnose OODA Brain Decision Parse Failures
+---
+title: Diagnose OODA brain decision parse failures
+description: Current runbook for diagnosing first-word lifecycle parser failures until typed-route cutover.
+last_updated: 2026-07-13
+review_schedule: as-needed
+owner: simard
+doc_type: howto
+status: implemented
+---
+
+# How-to: Diagnose OODA brain decision parse failures
+
+!!! note "Migration condition"
+    Use this runbook for current releases and whenever the selected route is
+    `legacy` or `shadow`. It becomes rollback-only after a release implements
+    and selects the typed route and verifies this parser is unreachable.
 
 > **Audience:** operators on call when a goal is stuck in `continue_skipping`
 > longer than expected.
@@ -6,7 +21,7 @@
 > **Prerequisites:** read access to `~/.simard/logs/` on the daemon host;
 > familiarity with the `simard` CLI.
 
-The OODA brain decision parser extracts the **first word** from the model
+The current OODA brain decision parser extracts the **first word** from the model
 response and matches it case-insensitively against the 6 known lifecycle
 variants. When no match is found, the cycle defaults to `ContinueSkipping`
 and emits a `WARN`-level log line that contains the **full raw model

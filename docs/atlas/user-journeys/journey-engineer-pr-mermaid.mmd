@@ -1,0 +1,33 @@
+sequenceDiagram
+  autonumber
+  participant Cycle as OODA Act phase
+  participant Spawn as dispatch_spawn_engineer
+  participant Repo as repo_resolver
+  participant Admission as admission gates
+  participant Worktree as EngineerWorktree
+  participant Supervisor as agent_supervisor
+  participant Child as simard engineer run single-process
+  participant AgentLoop as engineer_loop::spawn_agent_for_goal
+  participant Amplihack as amplihack copilot/RustyClawd
+  participant GitHub as git/gh remote
+
+  Cycle->>Spawn: PlannedAction spawn_engineer(goal, task)
+  Spawn->>Spawn: read-only posture rails and duplicate-live checks
+  Spawn->>Repo: resolve_goal_repo(goal.repo)
+  Repo-->>Spawn: target parent repo or loud failure
+  Spawn->>Admission: overlap admission + resource admission
+  Admission-->>Spawn: Admit/Defer/ReclaimFirst
+  Spawn->>Worktree: allocate(parent_repo, state_root, goal_id)
+  Worktree-->>Spawn: isolated worktree path + branch
+  Spawn->>Spawn: ensure_amplihack_fresh()
+  Spawn->>Supervisor: spawn_subordinate(SubordinateConfig)
+  Supervisor->>Child: tmux or direct process: simard engineer run single-process <worktree> <goal>
+  Child->>AgentLoop: spawn_agent_for_goal(objective, inspection, workspace)
+  AgentLoop->>AgentLoop: build_agent_prompt + quality standards
+  AgentLoop->>Amplihack: run_engineer_subprocess(prompt on stdin for copilot)
+  Amplihack->>GitHub: implement, test, commit, gh pr create per prompt/tools
+  GitHub-->>Amplihack: PR URL/status
+  Amplihack-->>AgentLoop: trailing summary
+  AgentLoop-->>Child: execution summary
+  Child-->>Supervisor: subprocess exits naturally
+  Supervisor-->>Spawn: pid/session handle recorded

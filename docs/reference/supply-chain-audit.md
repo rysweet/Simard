@@ -8,6 +8,7 @@ doc_type: reference
 status: active
 related:
   - ./dependency-trust-policy.md
+  - ./supply-chain-advisory-stewardship.md
   - ./release-integrity.md
   - ../howto/self-maintain-dependency-pins.md
   - ./pr-finalization-pipeline.md
@@ -221,7 +222,7 @@ cargo-deny:
     - name: Check out repository
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     - name: Install cargo-deny
-      uses: taiki-e/install-action@4e4e4d1450e58bef95d6f394ac20d46ad7d24ebf # cargo-deny
+      uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
       with:
         tool: cargo-deny@0.19.9
     - name: Run cargo deny
@@ -237,15 +238,26 @@ Key properties (shared with the other guardrail jobs):
 - **Never writes the shared cache.** It does not touch `Swatinem/rust-cache`,
   so it cannot contend with the single-writer `simard-ci-v2` cache.
 - **SHA-pinned action with explicit, version-pinned `tool:`.**
-  `taiki-e/install-action` is pinned by commit SHA, and `tool: cargo-deny@0.19.9`
-  pins **both** the tool and its version. The version pin is load-bearing: the
+  `taiki-e/install-action` is pinned by commit SHA to its **`v2` release**
+  (`# v2.82.10`), and `tool: cargo-deny@0.19.9` pins **both** the tool and its
+  version. The version pin is load-bearing: the
   `[advisories]` schema (scope-valued `unmaintained` / `unsound`, with the old
   per-class severity keys removed) is the 0.19.x format, so an unpinned upgrade
-  could change how `deny.toml` is interpreted. The `tool:` input is also
-  required for selection: `taiki-e` publishes one tag (and commit) per tool, so
-  a SHA pin alone — as the existing `cargo-audit` job uses — selects the tool
-  baked into *that* commit. Reusing the `cargo-audit` SHA without a `tool:`
-  input would install **cargo-audit**, not cargo-deny.
+  could change how `deny.toml` is interpreted. The `tool:` input also drives
+  selection: the pinned `v2` release commit is the action's shared entrypoint
+  and installs whichever tool `tool:` names, so every guardrail job
+  (`cargo-audit`, `cargo-deny`, `cargo-vet`) uses the *same*
+  `taiki-e/install-action@<v2 SHA>` pin and differs only in its `tool:` value.
+
+  > **Pin the `v2` release SHA, never a per-tool tag.** `taiki-e` also publishes
+  > a convenience tag/commit per tool (`# cargo-deny`, `# cargo-audit`, …), but
+  > those commits sit on a lineage **diverged** from the action's default
+  > branch. GitHub's Dependabot `github_actions` updater shallow-clones the
+  > action to look for newer versions and cannot resolve a diverged commit
+  > (`error: no such commit …`), which fails the whole `dependabot-updates` run
+  > and turns the default branch's Actions health red. Pinning the `v2` release
+  > SHA (reachable from the default branch) keeps the pin SHA-hardened **and**
+  > Dependabot-updatable.
 - **`--locked`.** Passed to `cargo-deny` itself (`cargo deny --locked check`;
   `--locked` is a top-level flag, before the `check` subcommand). It fails if
   `Cargo.lock` is dirty, so the check always reflects the committed graph (no
@@ -380,10 +392,25 @@ Both honour the same `RUSTSEC-2023-0071` (`rsa`) exemption, expressed once in
 `.cargo/audit.toml` and once in `deny.toml`, each with the identical
 justification and tracking link, so the two cannot drift into disagreement.
 
+> **Proactively kept current (#2741).** The `cargo-audit` job runs **offline
+> against a pinned advisory DB** (`.github/advisory-db.sha`) so a
+> freshly-published upstream advisory cannot retroactively fail unrelated PRs.
+> `cargo-deny` cannot pin its advisory DB to a revision (it always fetches HEAD),
+> so at PR time it runs only the DB-independent **licenses/bans/sources** policy;
+> the pinned `cargo-audit` job is the authoritative advisory gate. A **daily
+> scheduled scan** tracks the DB HEAD and files bump-or-justified-ignore fixes —
+> writing to **both** ignore files in sync — before an advisory would ever block
+> other work. See
+> [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md).
+
 ## See also
 
 - [Dependency trust policy](./dependency-trust-policy.md) — `cargo-vet`
   certification, trusted-crate criteria, and the advisory-resolution workflow.
+- [Supply-chain advisory stewardship](./supply-chain-advisory-stewardship.md) —
+  the proactive layer on top of this policy (#2741): the pinned PR-time advisory
+  DB, the daily scheduled scan, and the bump-or-justified-ignore remediation
+  reasoner that files fixes before a new advisory can block unrelated PRs.
 - [Release integrity](./release-integrity.md) — SBOM generation, cosign
   signing, and build-reproducibility caveats.
 - [Keep Simard's dependency pins up to date](../howto/self-maintain-dependency-pins.md) —

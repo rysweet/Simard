@@ -1,0 +1,53 @@
+name: "Dashboard Workboard Blocked Column: blocked != failed + surface WHY (issue #4178)"
+description: "Outside-in operator check that the Workboard 'Blocked' kanban column renders a lifecycle-blocked goal DISTINCTLY from a failed one, and surfaces WHY it is blocked. The Workboard card (wbGoalCard) colored a blocked goal's progress bar with var(--red) (#f85149) — the exact activity-failure red that issue #20 reserved for failures — so a blocked goal read as failed, and the card never showed the block reason. Boots the real dashboard binary, authenticates with the dashkey, and asserts the served HTML no longer uses var(--red) for the blocked bar, uses amber var(--yellow) instead (matching issue #20's blocked!=failed decision), and renders an escaped 'Blocked — <reason>' row sourced from the additive clean g.block_reason field."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 0
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Workboard blocked column is amber (not failed) with a visible reason"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/dashboard-workboard-blocked-reason.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "dashboard"
+    - "usability"
+    - "goals"
+    - "workboard"
+    - "self-serve-dashboard-improvement"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -37,13 +37,16 @@
 /// provenance or empty content does not.
 pub const RELIABILITY_THRESHOLD: f64 = 0.5;
 
-/// How many same-`concept` priors the identity-dedup step in
-/// [`commit_gated_fact`] inspects when deciding whether a new fact merely
-/// restates an equal-or-stronger existing fact. `search_facts` returns priors
-/// ranked strongest-first and filtered to `>= confidence`, so a genuine
-/// equal-or-stronger duplicate surfaces within the first few results; the
-/// window is kept intentionally small to bound the per-write query cost on the
-/// distillation hot path.
+/// How many priors each identity-dedup scan in [`commit_gated_fact`] inspects
+/// when deciding whether a new fact merely restates an equal-or-stronger
+/// existing fact. Two bounded scans — one keyed on the fact's `concept`, one on
+/// its `content` — each return up to this many priors, ranked strongest-first
+/// and filtered to `>= confidence`; their union is checked against the new
+/// fact's (canonical concept + content) identity. The window is kept
+/// intentionally small to bound the per-write query cost on the distillation
+/// hot path, and the two complementary scans keep a genuine duplicate from
+/// slipping past a single small window when either its concept OR its content
+/// neighborhood is crowded by higher-confidence facts.
 const DEDUP_PRIOR_SCAN_LIMIT: u32 = 5;
 
 /// The closed concept-label set the distillation recipe is constrained to. A
@@ -101,6 +104,48 @@ pub fn canonical_concept(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// Number of distinct informative words the content-quality signal in
+/// [`score_fact_reliability`] needs to distinguish before it awards full credit.
+/// The scorer only cares about the `0` / `1–2` / `≥3` bucket, so the informative-
+/// word scan stops once this many distinct words are seen (bounding the work on
+/// the up-to-64 KiB content body).
+const FULL_CONTENT_WORD_BUCKET: usize = 3;
+
+/// Count DISTINCT *informative* words in `content`, stopping once `cap` distinct
+/// words have been seen.
+///
+/// An **informative** word is a whitespace-delimited token bearing at least one
+/// alphanumeric character; a token made only of punctuation/symbols (`"..."`,
+/// `"-"`, `"—"`) carries no information and is skipped. Each informative token is
+/// normalized before the distinctness check — folded to lowercase with every
+/// non-alphanumeric character stripped — so `"recall"`, `"Recall"` and
+/// `"recall."` collapse to a single distinct word and mere repetition
+/// (`"the the the"`) cannot inflate the count past one.
+///
+/// This is the information proxy the content-quality signal scores against,
+/// replacing a raw `split_whitespace` token count that treated punctuation
+/// tokens and repeated words as if each carried fresh information. The scan is
+/// linear in the (length-capped) content and only runs at fact-commit time, off
+/// the recall hot path.
+fn distinct_informative_words(content: &str, cap: usize) -> usize {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for token in content.split_whitespace() {
+        let normalized: String = token
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        if normalized.is_empty() {
+            continue; // punctuation/symbol-only token — carries no information
+        }
+        seen.insert(normalized);
+        if seen.len() >= cap {
+            break;
+        }
+    }
+    seen.len()
+}
+
 /// Self-assess the reliability of one distilled fact (issue #2433, BGML's
 /// *information self-assessment ownership*, §IV). Returns a confidence score in
 /// `[0.0, 1.0]` from cheap, locally-available signals — no extra LLM call:
@@ -108,19 +153,23 @@ pub fn canonical_concept(raw: &str) -> Option<&'static str> {
 /// | Signal | Weight | Rationale |
 /// |--------|--------|-----------|
 /// | **Provenance grounding** | 0.5 | Resolved by the caller: batch-membership for the in-process sink, store-existence for the IPC handler. A source that cannot be grounded is unverifiable / hallucinated provenance — the strongest unreliability signal. |
-/// | **Content quality** | ≤0.3 | Empty / whitespace-only content carries no information and is a HARD gate (score `0.0`); otherwise ≥3 words earns the full weight, 1–2 words a partial 0.15. |
+/// | **Content quality** | ≤0.3 | Scored over *distinct informative words* (alphanumeric-bearing tokens, case/punctuation-normalized and de-duplicated), not raw whitespace tokens. Content with zero informative words — empty, whitespace-only, or punctuation/symbol-only (`"... ... ..."`) — carries no information and is a HARD gate (score `0.0`); otherwise ≥3 distinct informative words earns the full weight, 1–2 a partial 0.15. Degenerate repetition (`"the the the"`) has one distinct word, so it only earns the partial weight. |
 /// | **Concept validity** | 0.1 | Awarded when the concept canonicalizes into [`KNOWN_CONCEPTS`]. |
 ///
-/// A nominal fact (grounded, ≥3 words, known concept) scores `0.9`. Because
-/// grounding (0.5) is *necessary* to clear [`RELIABILITY_THRESHOLD`] (0.5), an
-/// ungrounded fact tops out at `0.4` (content + concept) and an empty fact scores
-/// `0.0`; both are quarantined.
+/// A nominal fact (grounded, ≥3 distinct informative words, known concept) scores
+/// `0.9`. Because grounding (0.5) is *necessary* to clear
+/// [`RELIABILITY_THRESHOLD`] (0.5), an ungrounded fact tops out at `0.4` (content
+/// + concept) and a no-information fact scores `0.0`; both are quarantined.
 pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f64 {
-    // (0) Hard gate: empty / whitespace-only content carries no information and
-    // is quarantined unconditionally, regardless of how trustworthy its
-    // provenance looks. We only need the 0 / 1–2 / ≥3 word bucket, so stop after
-    // the third word instead of scanning the whole (up to 64 KiB) content.
-    let words = content.split_whitespace().take(3).count();
+    // (0) Hard gate: content that carries no information is quarantined
+    // unconditionally, regardless of how trustworthy its provenance looks. This
+    // covers empty / whitespace-only content AND content made only of
+    // punctuation/symbol tokens (`"... ... ..."`), which carry exactly as much
+    // information as an empty string. Distinctness also means degenerate
+    // repetition (`"the the the"`) counts as a single word, not three. We only
+    // need the 0 / 1–2 / ≥3 bucket, so the scan stops after the third distinct
+    // informative word instead of walking the whole (up to 64 KiB) content.
+    let words = distinct_informative_words(content, FULL_CONTENT_WORD_BUCKET);
     if words == 0 {
         return 0.0;
     }
@@ -132,8 +181,9 @@ pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f
         score += 0.5;
     }
 
-    // (2) Content quality (content is non-empty here — see the hard gate above).
-    if words >= 3 {
+    // (2) Content quality (content has ≥1 informative word here — see the hard
+    // gate above).
+    if words >= FULL_CONTENT_WORD_BUCKET {
         score += 0.3;
     } else {
         score += 0.15;
@@ -152,6 +202,62 @@ pub fn score_fact_reliability(concept: &str, content: &str, grounded: bool) -> f
 /// boundary seams share this identical store/quarantine decision.
 pub fn fact_passes_gate(concept: &str, content: &str, grounded: bool) -> bool {
     score_fact_reliability(concept, content, grounded) >= RELIABILITY_THRESHOLD
+}
+
+/// Normalize fact content into the **identity key** used by [`commit_gated_fact`]'s
+/// dedup step: trim, then collapse every run of interior whitespace to a single
+/// ASCII space.
+///
+/// The dedup step asks "does this new fact merely restate an equal-or-stronger
+/// existing fact of the same identity?". A restatement that differs only in
+/// surrounding or interior whitespace — an LLM re-emitting the same lesson across
+/// distillation passes with a stray double space, a tab, or a wrapped newline —
+/// carries the identical lesson and must NOT be promoted a second time. Exact
+/// `trim()` equality misses that case: `"empty  outcome list"` and
+/// `"empty outcome list"` compare unequal and both get stored, inflating semantic
+/// memory with a redundant fact and dragging down recall precision. Collapsing
+/// interior whitespace folds those trivial variants onto one key.
+///
+/// This affects the dedup *comparison* only — a fact that survives the gate is
+/// still stored **verbatim** via `store_fact_with_provenance`, so no content is
+/// rewritten. Case is deliberately preserved: distilled content can carry
+/// case-significant tokens (identifiers, error strings), so two facts differing
+/// only in case are left as distinct rather than silently merged.
+pub fn dedup_content_key(content: &str) -> String {
+    // `split_whitespace` already trims leading/trailing whitespace and treats any
+    // run of Unicode whitespace as one separator, so joining with a single space
+    // yields the canonical single-spaced form in one pass.
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Normalize a distiller-cited source-episode id to the canonical key both
+/// write-boundary seams ground and thread provenance against: trim surrounding
+/// whitespace.
+///
+/// A cognitive-memory episode `node_id` (UUID-v7 / ULID) never carries interior
+/// *or* surrounding whitespace, so trimming is a no-op for any well-formed id.
+/// It only rescues an id an LLM re-emitted with a stray leading/trailing newline
+/// or space — a surface variant of a genuine id. Without this, such an id fails
+/// the *exact* grounding match, and the two failure modes are exactly the ones
+/// the shared gate exists to prevent:
+///
+///   * the fact scores ungrounded (tops out at 0.4 < [`RELIABILITY_THRESHOLD`])
+///     and is quarantined — a genuinely grounded fact silently dropped, dragging
+///     distillation fact-yield down, and
+///   * even if grounded, a `store_fact_with_provenance` call handed the padded id
+///     draws a `DERIVES_FROM` edge to a node that does not resolve, so the edge
+///     dangles and the stored fact loses its provenance.
+///
+/// Both the IPC server's `StoreFactGated` handler and the in-process
+/// [`crate::memory_consolidation`] `DistillFactSink` call this so a cited id
+/// grounds and threads provenance identically no matter which boundary writes it
+/// — the seam-parity invariant the shared gate is built on. Interior whitespace
+/// is deliberately preserved (a genuinely different / malformed id like
+/// `"ep 123"` is left ungrounded rather than silently merged), matching the
+/// conservative surface-form policy of [`canonical_concept`] and
+/// [`dedup_content_key`].
+pub fn normalize_source_episode_id(raw: &str) -> &str {
+    raw.trim()
 }
 
 /// Disposition of one write-boundary gate decision (issue #2679), returned by
@@ -198,13 +304,18 @@ impl FactGateDecision {
 /// differs per seam. Everything downstream of grounding is identical and lives
 /// here:
 ///
+///   - The concept is canonicalized ONCE up front (see [`canonical_concept`]):
+///     it is scored, deduped, AND stored under its canonical [`KNOWN_CONCEPTS`]
+///     label, so surface variants ("PR-Pattern", "pr_pattern", "pr-pattern.")
+///     that already SCORE identically also store/dedup identically. An off-spec
+///     concept (canonicalizes to `None`) is preserved verbatim.
 ///   - Confidence is ALWAYS [`score_fact_reliability`]'s output, never a client
 ///     hint.
 ///   - Below [`RELIABILITY_THRESHOLD`] → [`FactGateDecision::Quarantined`].
 ///   - A weaker-or-equal restatement never clobbers an existing equal-or-stronger
-///     fact of the same identity (`concept` + trimmed `content`); such a fact is
-///     also quarantined (its score still cleared the threshold, so the caller can
-///     distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
+///     fact of the same identity (canonical `concept` + trimmed `content`); such
+///     a fact is also quarantined (its score still cleared the threshold, so the
+///     caller can distinguish it by `confidence >= RELIABILITY_THRESHOLD`).
 ///   - Survivors persist via `store_fact_with_provenance` with the gate-computed
 ///     confidence and the source-episode provenance edges.
 pub fn commit_gated_fact(
@@ -216,6 +327,21 @@ pub fn commit_gated_fact(
     tags: &[String],
     source_episode_ids: &[String],
 ) -> crate::error::SimardResult<FactGateDecision> {
+    // Canonicalize the concept ONCE at the write boundary. A concept that maps
+    // into the closed KNOWN_CONCEPTS set is scored, deduped, AND stored under its
+    // canonical label, so the surface variants an LLM routinely emits —
+    // "PR-Pattern", "pr_pattern", "pr-pattern." — that already SCORE identically
+    // via `canonical_concept` also STORE and DEDUP identically rather than
+    // fragmenting the same concept across variant labels. Fragmentation splits
+    // the graph's concept vocabulary, lets a variant-labeled restatement escape
+    // the identity-dedup below (a duplicate fact is then promoted, inflating
+    // semantic memory and dragging recall precision down), and hides a fact from a
+    // recall that queries the canonical label. A genuinely off-spec concept
+    // (canonicalizes to `None`) is preserved VERBATIM, matching the conservative
+    // surface-form policy of `dedup_content_key` / `normalize_source_episode_id`.
+    // Canonicalization is idempotent, so the score is unchanged either way.
+    let concept = canonical_concept(concept).unwrap_or(concept);
+
     let confidence = score_fact_reliability(concept, content, grounded);
 
     // Threshold quarantine.
@@ -224,18 +350,50 @@ pub fn commit_gated_fact(
     }
 
     // Identity dedup: do not downgrade/duplicate an equal-or-stronger prior
-    // version of the *same* fact (concept + content). `search_facts` is queried
-    // with the new confidence as `min_confidence` so it returns only priors
-    // strong enough to block; the explicit `>=` is belt-and-suspenders against a
-    // backend that ignores the filter.
-    let new_content = content.trim();
-    let existing = memory
+    // version of the *same* fact (canonical `concept` + [`dedup_content_key`]
+    // content). Candidates are gathered from TWO bounded prior scans and unioned:
+    //
+    //   - a CONCEPT scan (`search_facts(concept, …)`), and
+    //   - a CONTENT scan (`search_facts(content, …)`).
+    //
+    // Either scan alone can miss a genuine duplicate. `search_facts` returns at
+    // most `DEDUP_PRIOR_SCAN_LIMIT` priors ranked confidence-descending, and the
+    // distillation concept vocabulary is a tiny CLOSED set ([`KNOWN_CONCEPTS`]),
+    // so many genuinely distinct facts pile up under one label. Once more than
+    // `DEDUP_PRIOR_SCAN_LIMIT` higher-confidence facts share a concept, a real
+    // content-duplicate is pushed out of the concept window and escapes dedup —
+    // the redundant fact is then promoted, inflating semantic memory and dragging
+    // recall precision down. The content scan narrows to priors that actually
+    // share this fact's words, so the exact restatement surfaces even when its
+    // concept is crowded; the concept scan conversely catches a duplicate whose
+    // content neighborhood is itself crowded by higher-confidence content-word
+    // matches. Unioning the two windows is a strict superset of either — it can
+    // only find MORE duplicates, never fewer — so no prior dedup is lost.
+    //
+    // Each scan is queried with the new confidence as `min_confidence` so only
+    // priors strong enough to block are returned; the explicit `>=` below is
+    // belt-and-suspenders against a backend that ignores the filter. Content is
+    // compared on the whitespace-normalized [`dedup_content_key`] so a restatement
+    // differing only in interior/surrounding whitespace is recognized as the same
+    // fact (the survivor is still stored verbatim — only this comparison is
+    // normalized). The explicit canonical-concept guard keys dedup on the FULL
+    // (concept, content) identity: because the content scan can return priors of a
+    // DIFFERENT concept that happen to share content words, identical content
+    // under a different concept is a distinct fact and must NOT be merged.
+    let new_key = dedup_content_key(content);
+    let mut candidates = memory
         .search_facts(concept, DEDUP_PRIOR_SCAN_LIMIT, confidence)
         .unwrap_or_default();
-    if existing
-        .iter()
-        .any(|f| f.content.trim() == new_content && f.confidence >= confidence)
-    {
+    candidates.extend(
+        memory
+            .search_facts(content, DEDUP_PRIOR_SCAN_LIMIT, confidence)
+            .unwrap_or_default(),
+    );
+    if candidates.iter().any(|f| {
+        canonical_concept(&f.concept).unwrap_or(f.concept.as_str()) == concept
+            && dedup_content_key(&f.content) == new_key
+            && f.confidence >= confidence
+    }) {
         return Ok(FactGateDecision::Quarantined { confidence });
     }
 

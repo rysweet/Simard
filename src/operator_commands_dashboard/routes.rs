@@ -10,9 +10,13 @@ use super::auth::{login, login_page, require_auth};
 use super::brain_failures::brain_failures;
 use super::chat::ws_chat_handler;
 use super::chat_store::{chat_session_by_id, chat_sessions};
-use super::creative_ideas::{creative_ideas, creative_ideas_search};
+use super::creative_ideas::{
+    creative_ideas, creative_ideas_promote, creative_ideas_prune, creative_ideas_run,
+    creative_ideas_search,
+};
 use super::current_work::current_work;
 use super::distributed::{distributed, vacate_vm};
+use super::enrichment::enrichment;
 use super::feedback::{feedback_status, feedback_submit};
 use super::goals::{
     add_goal, demote_goal, goals, promote_backlog_item, remove_goal, seed_goals, update_goal_status,
@@ -77,6 +81,7 @@ pub fn build_router() -> Router {
             "/api/cognition/recall-precision",
             get(recall_precision_correlation),
         )
+        .route("/api/enrichment", get(enrichment))
         .route("/api/merge-judge", get(merge_judge_decisions))
         .route("/api/merge-readiness", get(merge_readiness))
         .route("/api/traces", get(traces))
@@ -94,6 +99,12 @@ pub fn build_router() -> Router {
         .route("/api/journal/render/{date}", get(journal_render))
         .route("/api/creative-ideas", get(creative_ideas))
         .route("/api/creative-ideas/search", post(creative_ideas_search))
+        .route("/api/creative-ideas/run", post(creative_ideas_run))
+        .route(
+            "/api/creative-ideas/{id}/promote",
+            post(creative_ideas_promote),
+        )
+        .route("/api/creative-ideas/{id}/prune", post(creative_ideas_prune))
         .route("/api/status/snapshot", get(status_snapshot))
         .route("/api/feedback", post(feedback_submit))
         .route("/api/feedback/status/{id}", get(feedback_status))
@@ -298,11 +309,15 @@ async fn index() -> axum::response::Html<String> {
     axum::response::Html(super::index_html::index_html_string())
 }
 
+/// Resolve the durable state root the dashboard reads from.
+///
+/// Must match the resolver the OODA daemon registers its in-process writer
+/// under ([`crate::state_root::simard_state_root`], via
+/// [`crate::memory_ipc::default_state_root`]). A former divergent private copy
+/// took `SIMARD_STATE_ROOT` verbatim, so reader tier-0
+/// (`lookup_in_process_writer`) missed the daemon's key and the "Creative
+/// Ideas" tab was permanently empty even while the thread logged "10 persisted"
+/// (#2798, D1).
 pub(crate) fn resolve_state_root() -> std::path::PathBuf {
-    std::env::var("SIMARD_STATE_ROOT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
-            std::path::PathBuf::from(home).join(".simard")
-        })
+    crate::state_root::simard_state_root()
 }

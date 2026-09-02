@@ -241,3 +241,46 @@ fn dirty_worktree_equality() {
     };
     assert_eq!(a, b);
 }
+
+// --- Display: supply-chain steward variants (#2741) ---
+
+#[test]
+fn display_supply_chain_audit_parse_failed() {
+    let err = SimardError::SupplyChainAuditParseFailed {
+        reason: "missing `vulnerabilities` key".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("cargo-audit"), "{msg}");
+    assert!(msg.contains("missing `vulnerabilities` key"), "{msg}");
+}
+
+#[test]
+fn display_supply_chain_remediation_failed() {
+    let err = SimardError::SupplyChainRemediationFailed {
+        reason: "cargo update -p crossbeam-epoch exited 101".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("remediation failed"), "{msg}");
+    assert!(msg.contains("crossbeam-epoch"), "{msg}");
+}
+
+#[test]
+fn display_supply_chain_suppression_without_tracker() {
+    let err = SimardError::SupplyChainSuppressionWithoutTracker {
+        advisory_id: "RUSTSEC-2026-0204".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("RUSTSEC-2026-0204"), "{msg}");
+    assert!(msg.contains("hard rail"), "{msg}");
+}
+
+#[test]
+fn supply_chain_suppression_without_tracker_equality() {
+    let a = SimardError::SupplyChainSuppressionWithoutTracker {
+        advisory_id: "RUSTSEC-2026-0204".to_string(),
+    };
+    let b = SimardError::SupplyChainSuppressionWithoutTracker {
+        advisory_id: "RUSTSEC-2026-0204".to_string(),
+    };
+    assert_eq!(a, b);
+}

@@ -126,7 +126,7 @@ fn read_bytes(path: &Path) -> SimardResult<Vec<u8>> {
 /// the capped replication export — so the backup holds every live memory and a
 /// restore round-trips the current count.
 pub fn backup_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     agent_name: &str,
     config: &BackupConfig,
@@ -140,7 +140,7 @@ pub fn backup_memory(
 
     // Export the FULL cognitive snapshot (uncapped) so the backup is a faithful
     // copy of the live store, not a truncated replication payload.
-    let snapshot = crate::remote_transfer::export_full_memory_snapshot(bridge, agent_name)?;
+    let snapshot = crate::remote_transfer::export_full_memory_snapshot(memory, agent_name)?;
     let snapshot_path = backup_dir.join(SNAPSHOT_FILE);
     let snapshot_bytes = write_json(&snapshot_path, &snapshot)?;
 
@@ -379,12 +379,12 @@ pub fn verify_backup_memory_count(backup_dir: &Path, expected_total: usize) -> S
 /// matching memory count. Any verification failure is surfaced as an `Err` so
 /// the caller (daemon) never prunes against an unverified backup.
 pub fn backup_memory_verified(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     store: &dyn MemoryStore,
     agent_name: &str,
     config: &BackupConfig,
 ) -> SimardResult<BackupManifest> {
-    let manifest = backup_memory(bridge, store, agent_name, config)?;
+    let manifest = backup_memory(memory, store, agent_name, config)?;
     ensure_backup_valid(&manifest.backup_dir)
 }
 

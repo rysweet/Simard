@@ -1,0 +1,50 @@
+name: "Simard Installer Canonical Deployment Contract"
+description: "Outside-in coverage for `simard install`: the release binary advertises the canonical dry-run install plan for binary, prompt assets, and user systemd units, and the installer fails closed for unsafe systemd paths and prompt-asset staging failures."
+version: "1.0.0"
+
+config:
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Canonical installer dry-run and fail-closed path contracts"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/simard-installer-canonical.sh"
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "installer"
+    - "systemd"
+    - "simard"
+    - "deployment"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

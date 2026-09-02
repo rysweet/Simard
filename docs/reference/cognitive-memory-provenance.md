@@ -1,7 +1,7 @@
 ---
 title: Cognitive-memory provenance (DERIVES_FROM edges)
 description: How Simard records provenance when distilled facts and learned procedures are written to cognitive memory, linking each derived node back to the episode(s) it came from via DERIVES_FROM / PROCEDURE_DERIVES_FROM edges. Documents the CognitiveMemoryOps provenance API, the LibraryCognitiveMemory adapter behavior, the distillation and reflection wiring, and how to recall the source episodes of a fact.
-last_updated: 2026-06-20
+last_updated: 2026-07-16
 owner: simard
 doc_type: reference
 related:
@@ -404,6 +404,52 @@ on** wherever a write site supplies source-episode ids:
 
 ---
 
+## Observability: grounding-coverage self-metric
+
+Recording provenance edges is only half the story — you also want to *see*
+whether facts are actually being grounded over time. Two layers surface that:
+
+| Layer | Series | Cadence | Shape |
+|---|---|---|---|
+| OpenTelemetry gauges | `simard.memory.edges{type=DERIVES_FROM…}` | per cycle | raw edge **counts** |
+| Durable self-metric | **`fact_provenance_coverage`** | per cycle | grounded **fraction** `[0.0, 1.0]` |
+
+The durable `fact_provenance_coverage` self-metric is the graph-memory *health*
+signal. Once per OODA cycle the daemon reads the
+[`graph_stats()`](#code-entry-points) snapshot it already collects for the OTel
+edge gauges and emits one sample to the `metrics.jsonl` series:
+
+```
+fact_provenance_coverage = facts_with_provenance / facts_total
+```
+
+- **What it measures.** The fraction of semantic facts connected into the
+  `DERIVES_FROM` provenance graph. The denominator is every semantic node the
+  store reports (live plus archived/superseded revisions, matching
+  [`GraphStats`](#code-entry-points)), so the series tracks grounding across the
+  whole semantic layer — not just the newest facts.
+- **Why a ratio, not the raw counts.** The OTel `simard.memory.edges` gauges
+  already carry the raw counts, but they are point-in-time telemetry, not the
+  durable, comparable, regressable `metrics.jsonl` series that feeds gym-history
+  regression signals. A *ratio* is store-size-independent, so a grounding
+  regression (facts entering semantic memory without a provenance edge — which
+  also loses the dominant term in the [reliability gate](./trustworthy-confidence-api.md))
+  raises the same signal every other cognition self-metric
+  (`recall_precision_at_k`, `distill_fact_yield`, `controlled_forgetting`) does.
+- **Undefined on an empty store.** When the store holds zero facts, coverage is
+  *undefined* and **no** sample is emitted (skip rather than drag the series to a
+  misleading `0.0`), mirroring the `recall_precision_at_k` convention. The
+  emitter is best-effort — a metrics-write failure is logged, never propagated —
+  and pure observation: it never changes memory state.
+
+The scoring is a pure function
+(`cognitive_memory::metrics::provenance_coverage`) with the per-cycle emitter
+(`record_provenance_coverage_metric`) beside the existing
+`flush_recall_precision_metric`, so both live next to the recall-quality
+self-metrics they sit alongside.
+
+---
+
 ## Testing
 
 The feature is covered by a TDD round-trip test (in
@@ -438,7 +484,14 @@ cargo test memory_consolidation
   `store_procedure_with_provenance`, `episodes_for_fact`).
 - `src/cognitive_memory/library_adapter.rs` — `LibraryCognitiveMemory`
   overrides that delegate to the library's provenance API and traverse
-  `DERIVES_FROM` for recall.
+  `DERIVES_FROM` for recall; `graph_stats()` computes the
+  `facts_with_provenance` / `facts_total` snapshot the coverage metric reads.
+- `src/cognitive_memory/metrics.rs` — `provenance_coverage()` (pure ratio) and
+  `record_provenance_coverage_metric()` (per-cycle `fact_provenance_coverage`
+  emitter), plus the `GraphStats` snapshot type in `src/memory_cognitive.rs`.
+- `src/operator_commands_ooda/daemon/mod.rs` — the per-cycle sweep that reads
+  `graph_stats()` for the OTel edge gauges and emits the coverage self-metric
+  from the same snapshot.
 - `src/memory_consolidation/distillation.rs` — distillation writer that
   threads `source_episode_id` as `DERIVES_FROM` provenance.
 - `src/memory_consolidation/mod.rs` — `reflection_memory_operations` that

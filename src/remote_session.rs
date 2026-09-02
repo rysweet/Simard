@@ -148,7 +148,7 @@ pub fn deploy_agent(
 ) -> SimardResult<()> {
     if session.status != RemoteStatus::Running {
         return Err(SimardError::RpcTransportError {
-            bridge: "remote-session".to_string(),
+            endpoint: "remote-session".to_string(),
             reason: format!(
                 "cannot deploy to session '{}' in status '{}'",
                 session.vm_name, session.status
@@ -189,7 +189,7 @@ pub fn establish_pty(
 ) -> SimardResult<String> {
     if session.status != RemoteStatus::Running {
         return Err(SimardError::RpcTransportError {
-            bridge: "remote-session".to_string(),
+            endpoint: "remote-session".to_string(),
             reason: format!(
                 "cannot establish PTY to session '{}' in status '{}'",
                 session.vm_name, session.status
@@ -210,7 +210,7 @@ pub fn destroy_session(
 ) -> SimardResult<()> {
     if session.is_terminal() {
         return Err(SimardError::RpcTransportError {
-            bridge: "remote-session".to_string(),
+            endpoint: "remote-session".to_string(),
             reason: format!(
                 "session '{}' is already in terminal status '{}'",
                 session.vm_name, session.status
@@ -237,7 +237,7 @@ pub fn destroy_session(
 pub fn begin_transfer(session: &mut RemoteSession) -> SimardResult<()> {
     if session.status != RemoteStatus::Running {
         return Err(SimardError::RpcTransportError {
-            bridge: "remote-session".to_string(),
+            endpoint: "remote-session".to_string(),
             reason: format!(
                 "cannot begin transfer for session '{}' in status '{}'",
                 session.vm_name, session.status
@@ -252,7 +252,7 @@ pub fn begin_transfer(session: &mut RemoteSession) -> SimardResult<()> {
 pub fn end_transfer(session: &mut RemoteSession) -> SimardResult<()> {
     if session.status != RemoteStatus::Transferring {
         return Err(SimardError::RpcTransportError {
-            bridge: "remote-session".to_string(),
+            endpoint: "remote-session".to_string(),
             reason: format!(
                 "cannot end transfer for session '{}' in status '{}'",
                 session.vm_name, session.status

@@ -22,6 +22,14 @@
 targets = [{ triple = "x86_64-unknown-linux-gnu" }]
 
 # ── Advisories (RUSTSEC) ─────────────────────────────────────────────────────
+# NOTE (#2741): the PR-time gate no longer runs `cargo deny check advisories`
+# (cargo-deny always fetches the DB HEAD and so would let a brand-new upstream
+# advisory retroactively fail unrelated PRs). At PR time the authoritative
+# advisory gate is the pinned, OFFLINE `cargo audit` job (see
+# .github/advisory-db.sha + verify.yml); the daily advisory-scan workflow runs
+# `cargo deny check advisories` against DB HEAD and files proactive fixes. This
+# `[advisories]` policy — the ignore list below — is still the source of truth
+# and is exercised by that scheduled job and by any local `cargo deny check`.
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
 # Yanked crate versions always fail — they signal a withdrawn release.
@@ -49,13 +57,11 @@ ignore = [
     # exemption in .cargo/audit.toml. Tracked:
     # https://github.com/RustCrypto/RSA/issues/19
     { id = "RUSTSEC-2023-0071", reason = "rsa Marvin timing side-channel; no upstream fix; transitive JWT-verify only (rustyclawd-tools->octocrab->jsonwebtoken). Tracked: https://github.com/RustCrypto/RSA/issues/19" },
-    # crossbeam-epoch — invalid pointer dereference in the `fmt::Display` impl
-    # for `Atomic`/`Shared` when the pointer is null. Issued 2026-07-06 with NO
-    # fixed upstream release, so it fails by default and must be exempted here.
-    # Transitive: simard -> rustyclawd-tools -> moka -> crossbeam-epoch. Only
-    # reachable by `Display`-formatting a null crossbeam `Atomic`/`Shared`, which
-    # Simard never does, so the dereference is unreachable in our usage.
-    { id = "RUSTSEC-2026-0204", reason = "crossbeam-epoch fmt::Display null-pointer deref; no upstream fix (issued 2026-07-06); transitive via simard->rustyclawd-tools->moka; unreachable (Simard never Display-formats crossbeam Atomic/Shared). Tracked: https://rustsec.org/advisories/RUSTSEC-2026-0204" },
+    # NOTE: do NOT add a crossbeam-epoch advisory ignore here. The upstream fix
+    # shipped in crossbeam-epoch 0.9.20 (patched = ">= 0.9.20") and Cargo.lock
+    # pins 0.9.20, so it is resolved by upgrade, not exemption. Re-adding an
+    # ignore would silently suppress a regression below 0.9.20. Keep this list
+    # in sync with .cargo/audit.toml. See docs/reference/dependency-trust-policy.md.
 ]
 
 # ── Licenses ─────────────────────────────────────────────────────────────────
@@ -140,11 +146,14 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Git sources are an explicit allowlist. Simard pins four crates by exact rev
-# across THREE upstream repositories (rustyclawd-core + rustyclawd-tools share
-# one). Any other git source — a typosquat or hijacked transitive dep — fails.
+# Git sources are an explicit allowlist. Simard pins crates by exact rev across
+# upstream repositories (rustyclawd-core + rustyclawd-tools share one; lbug comes
+# from the rysweet/ladybug-rust fork that fixes the from-source link + libstdc++
+# ABI, see amplihack-memory docs/lbug_libstdcxx_abi.md). Any other git source — a
+# typosquat or hijacked transitive dep — fails.
 allow-git = [
     "https://github.com/rysweet/RustyClawd.git",
     "https://github.com/rysweet/amplihack-memory-lib.git",
     "https://github.com/rysweet/amplihack-rs.git",
+    "https://github.com/rysweet/ladybug-rust",
 ]

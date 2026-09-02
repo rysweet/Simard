@@ -1,0 +1,19 @@
+digraph JourneyOodaCycle {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+  daemon_load [label="daemon loads authoritative goal_board.json"];
+  heal_cache [label="filter tombstones, heal stale no-progress, refresh cache"];
+  run_cycle [label="run_ooda_cycle"];
+  intake [label="intake + cross-session hydration"];
+  observe [label="Observe"];
+  prepare [label="prepare context from cognitive memory"];
+  orient [label="Orient reasoner"];
+  decide [label="Decide reasoner"];
+  coverage [label="ensure goal coverage"];
+  act [label="Act via ooda_actions"];
+  consolidate [label="execution/procedure/reflection memory writes"];
+  commit [label="commit_cycle authoritative board"];
+  cache [label="overwrite_memory_cache"];
+  daemon_load -> heal_cache -> run_cycle -> intake -> observe -> prepare -> orient -> decide -> coverage -> act -> consolidate -> commit -> cache;
+}

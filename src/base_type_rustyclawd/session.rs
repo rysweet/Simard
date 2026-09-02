@@ -43,14 +43,14 @@ pub(super) struct RustyClawdSession {
     pub(super) is_closed: bool,
     /// RustyClawd API client, initialized on open() from environment config.
     pub(super) client: Option<RcClient>,
-    /// Tokio runtime for bridging async rustyclawd client calls into sync
+    /// Tokio runtime for adapting async rustyclawd client calls into sync
     /// BaseTypeSession methods.
     pub(super) rt: Option<tokio::runtime::Runtime>,
     /// Accumulated conversation history for multi-turn sessions (meetings, etc.).
     pub(super) conversation_history: Vec<RcMessage>,
-    /// Memory + knowledge bridges applied to every turn through the shared
+    /// Memory + knowledge memories applied to every turn through the shared
     /// enrichment entry point (issue #1665). `None`/empty until the runtime
-    /// injects configured bridges via [`BaseTypeSession::enrichment_mut`].
+    /// injects configured memories via [`BaseTypeSession::enrichment_mut`].
     pub(super) enrichment: EnrichmentClients,
 }
 

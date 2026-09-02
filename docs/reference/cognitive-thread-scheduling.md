@@ -5,14 +5,15 @@ processes" vision; **this PR implements the scheduler + three threads**:
 the primary `OodaThread`, plus two exemplars — `MaintenanceThread` and
 `EngineerLogAnalysisThread`.
 
-!!! note "As shipped in this PR (additive & OFF by default)"
-    The scheduler landed **additively and disabled by default** to honour the
+!!! note "Default-ON (opt-out) since issue #4845"
+    The scheduler is **enabled by default (opt-out)** while preserving the
     byte-for-byte OODA-parity hard constraint:
 
-    - The `Mind` and all three threads exist and are fully unit-tested.
-    - In the **live daemon** the `Mind` is created only when
-      `SIMARD_COGNITIVE_THREADS_ENABLED` is truthy, and it hosts **only the two
-      background exemplars** (`MaintenanceThread`, `EngineerLogAnalysisThread`).
+    - The `Mind` and all threads exist and are fully unit-tested.
+    - In the **live daemon** the `Mind` is created unless
+      `SIMARD_COGNITIVE_THREADS_ENABLED` is set to an explicit falsy token, and
+      it hosts the full roster (`MaintenanceThread`, `EngineerLogAnalysisThread`,
+      the ten reflective threads, and `creative_ideas`).
       It runs **after** the daemon's existing inline OODA cycle each iteration,
       so it can never delay or starve OODA.
     - The daemon's authoritative OODA cycle stays **inline and unchanged**
@@ -198,6 +199,17 @@ pub struct ThreadContext<'a> {
 
 Injecting `now_epoch` and a `Clock` makes due-computation and backoff **purely
 unit-testable** with no sleeps.
+
+!!! note "`ThreadKind` — the ten reflective threads (issue #5)"
+    Issue #5 adds ten new reflective threads on this same `Mind`. Consolidation
+    reuses `MemoryConsolidation` and prospection reuses `LongTermPlanning`; the
+    other eight add variants — `Metacognition`, `Reflection`, `Salience`,
+    `OperatorModel`, `Analogy`, `ValuesDeliberation`, `Interoception`,
+    `Narrative`. `ThreadKind` is **pure telemetry** (no exhaustive `match` on it
+    exists), so the new variants ripple only into the enum and its serialize
+    round-trip test. Full per-thread kind/cadence/priority/gate/recipe details
+    live in the [Cognitive-threads catalog](./cognitive-threads-catalog.md); the
+    shared invoke seam is [The RecipeInvoker seam](./recipe-invoker-seam.md).
 
 ## 5. The `Mind` (Scheduler)
 
@@ -567,6 +579,16 @@ green CI, no redeploy.
   — developer guide: implementing the trait, choosing a policy/priority,
   env-config, registering with the `Mind`, emitting telemetry through the single
   seam, the safety rules, and the fixture-only test plan.
+- [Cognitive-threads catalog](./cognitive-threads-catalog.md)
+  — reference for the ten reflective threads (issue #5): each thread's kind,
+  cadence, priority, env gate, recipe, memory prefixes, and live acceptance
+  signal, plus the cadence/stagger table and the S1–S8 security invariants.
+- [The RecipeInvoker seam](./recipe-invoker-seam.md)
+  — the one shared brick behind the eight recipe-backed threads and its
+  security contract.
+- [Configure the cognitive-thread batch](../howto/configure-cognitive-thread-batch.md)
+  — operator guide: the double env gate, one-at-a-time rollout, interval tuning
+  and `SIMARD_THREAD_INTERVAL_SCALE`.
 
 ---
 

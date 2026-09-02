@@ -55,11 +55,11 @@ pub(super) fn validate_watch(watch: &DeveloperWatch) -> SimardResult<()> {
 /// Add a research topic to the tracker and store it as a semantic fact.
 pub fn add_research_topic(
     topic: ResearchTopic,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     validate_topic(&topic)?;
 
-    bridge.store_fact(
+    memory.store_fact(
         &format!("research:{}", topic.id),
         &format!(
             "title={}; source={}; priority={}; status={}",
@@ -70,7 +70,7 @@ pub fn add_research_topic(
         "research-tracker",
     )?;
 
-    bridge.store_episode(
+    memory.store_episode(
         &format!("Research topic added: {}", topic.concise_label()),
         "research-tracker",
         Some(&json!({"topic_id": topic.id})),
@@ -80,11 +80,11 @@ pub fn add_research_topic(
 }
 
 /// Track a developer's public activity and store as a semantic fact.
-pub fn track_developer(watch: DeveloperWatch, bridge: &dyn CognitiveMemoryOps) -> SimardResult<()> {
+pub fn track_developer(watch: DeveloperWatch, memory: &dyn CognitiveMemoryOps) -> SimardResult<()> {
     validate_watch(&watch)?;
 
     let areas = watch.focus_areas.join(", ");
-    bridge.store_fact(
+    memory.store_fact(
         &format!("dev-watch:{}", watch.github_id),
         &format!("github_id={}; focus_areas={areas}", watch.github_id),
         0.7,
@@ -99,11 +99,11 @@ pub fn track_developer(watch: DeveloperWatch, bridge: &dyn CognitiveMemoryOps) -
 pub fn update_topic_status(
     topic_id: &str,
     new_status: ResearchStatus,
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
 ) -> SimardResult<()> {
     required_field("topic_id", topic_id)?;
 
-    bridge.store_fact(
+    memory.store_fact(
         &format!("research:{topic_id}:status"),
         &format!("status={new_status}"),
         0.8,
@@ -111,7 +111,7 @@ pub fn update_topic_status(
         "research-tracker",
     )?;
 
-    bridge.store_episode(
+    memory.store_episode(
         &format!("Research topic '{topic_id}' status changed to {new_status}"),
         "research-tracker",
         Some(&json!({"topic_id": topic_id, "new_status": new_status.to_string()})),
@@ -121,8 +121,8 @@ pub fn update_topic_status(
 }
 
 /// Load tracked research topics from cognitive memory.
-pub fn load_research_topics(bridge: &dyn CognitiveMemoryOps) -> SimardResult<Vec<ResearchTopic>> {
-    let facts = bridge.search_facts("research:", 50, 0.0)?;
+pub fn load_research_topics(memory: &dyn CognitiveMemoryOps) -> SimardResult<Vec<ResearchTopic>> {
+    let facts = memory.search_facts("research:", 50, 0.0)?;
     let mut topics = Vec::new();
     for fact in facts {
         if fact.concept.starts_with("research:")

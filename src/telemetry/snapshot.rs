@@ -17,6 +17,22 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// pathologically large file degrades to `None` instead of exhausting memory.
 pub const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Age (seconds) beyond which a once-per-cycle snapshot is considered `stale`.
+///
+/// The daemon flushes this snapshot **once per OODA cycle**, so on a perfectly
+/// healthy daemon a reader can observe a `captured_at` up to a full cycle old:
+/// the cycle interval (~300s) plus one maximum cycle runtime (~600s). The
+/// daemon-liveness check in the dashboard status route uses exactly this
+/// `300 + 600 = 900s` window to decide `running` vs `stale`; the snapshot
+/// freshness window MUST match it, otherwise the dashboard contradicts itself —
+/// reporting the daemon `running` while its data sections read `stale` for the
+/// tail of every cycle. A tighter window (the historical `300s`) fired on every
+/// healthy cycle whose runtime + sleep exceeded 300s, i.e. essentially always.
+///
+/// Single-sourced here so `status::provider` and the dashboard `enrichment`
+/// endpoint — both of which classify the SAME snapshot — cannot drift apart.
+pub const FRESHNESS_SECS: i64 = 900;
+
 /// A single counter series: monotonically increasing total for one attribute
 /// set.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +92,12 @@ pub struct MetricsSnapshot {
     /// cardinality bound — a non-zero value signals emitter misuse.
     #[serde(default)]
     pub overflow_series: u64,
+    /// Additive enrichment-observability rollup section (#2942), drained once per
+    /// OODA cycle by the daemon and read by the dashboard `GET /api/enrichment`.
+    /// `None` (omitted) until at least one enrichment decision has been observed;
+    /// `#[serde(default)]` so pre-#2942 readers tolerate its absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment: Option<serde_json::Value>,
 }
 
 impl MetricsSnapshot {
@@ -88,6 +110,7 @@ impl MetricsSnapshot {
             gauges: Vec::new(),
             histograms: Vec::new(),
             overflow_series: 0,
+            enrichment: None,
         }
     }
 

@@ -88,11 +88,14 @@ fn test_bridges() -> OodaClients {
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        outcome_verify_brain: None,
+        live_signals: None,
     }
 }
 
 fn sample_goal(id: &str, priority: u32, progress: GoalProgress) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -158,6 +161,10 @@ fn decide_selects_actions_within_concurrent_limit() {
     let priorities = orient(&obs, &board, &std::collections::HashMap::new()).unwrap();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Keep hermetic: ambient `SIMARD_SCALING=auto` makes `Default` inject an
+        // AIMD scaler that starts at its ceiling and ignores
+        // `max_concurrent_actions`, masking the cap this test asserts.
+        scaler: None,
         ..Default::default()
     };
     let actions = decide(&priorities, &config).unwrap();
@@ -262,6 +269,8 @@ fn feral_gym_client_down() {
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        outcome_verify_brain: None,
+        live_signals: None,
     };
     let mut state = OodaState::new(board_with_goals());
     let report = run_ooda_cycle(&mut state, &mut bridges, &OodaConfig::default()).unwrap();
@@ -479,6 +488,8 @@ fn successful_outcome_stores_procedural_memory() {
             simard::goal_curation::progress_evidence::NoopProgressEvidenceChecker,
         ),
         completion_evidence: None,
+        outcome_verify_brain: None,
+        live_signals: None,
     };
 
     let mut state = OodaState::new(board_with_goals());

@@ -1,5 +1,5 @@
-name: "Merge-Judge Verdict Parse (#2428/#2430/#2435/#2462/#2463, #2501/#2555)"
-description: "Outside-in proof that simard merge-pr's recipe-backed merge-readiness judge surfaces a real structured verdict from recipe-runner-rs JSON output instead of parsing the text-mode SUCCESS banner (which carries no verdict keyword and blocks every gated merge). Reproduces the text-mode banner bug and validates the json-mode fix at the recipe-runner boundary (no LLM), reproduces the real Copilot-launcher-preamble agent wire format from #2501/#2555, then runs the in-tree verdict-extraction + fail-closed unit tests."
+name: "Merge-Judge Record-Verdict Rework (#4721)"
+description: "Outside-in proof that #4721 removed the forbidden JSON-emit->scrape->act pattern from the merge-judge: the merge-readiness recipe now RECORDS a typed verdict via the agent-facing `simard merge record-verdict` tool (act-via-tool, like distill-episodes.yaml) and prints no JSON envelope, while the thin deterministic rail READS the typed record and INDEPENDENTLY re-verifies the hard safety gates (mergeable, not draft, CI green, allow-listed base) before authorizing a merge. Validates the source contract, the in-tree store/rail/CLI decision-matrix tests (merge+red-CI => refused, merge+draft => refused, hold => not-ready, missing/stale record => unclear), and an end-to-end record-verdict write at the binary boundary."
 version: "1.0.0"
 
 config:
@@ -27,7 +27,7 @@ agents:
         logLevel: "info"
 
 steps:
-  - name: "Merge-judge verdict: text-mode banner bug vs json-mode fix + parse-composition/fail-closed"
+  - name: "Merge-judge record-verdict: act-via-tool contract + deterministic safety rail"
     agent: "cli-agent"
     action: "execute_command"
     params:
@@ -49,11 +49,9 @@ metadata:
     - "stewardship"
     - "merge-authority"
     - "recipe-brain"
-    - "issue-2428"
-    - "issue-2462"
-    - "issue-2463"
-    - "issue-2501"
-    - "issue-2555"
+    - "issue-4721"
+    - "record-verdict"
+    - "safety-rail"
   priority: "high"
   author: "copilot"
   test_type: "outside-in"

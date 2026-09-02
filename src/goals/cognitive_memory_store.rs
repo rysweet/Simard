@@ -3,7 +3,7 @@
 //! See `docs/reference/cognitive-memory-goal-store.md` for the design.
 //!
 //! `bootstrap::assembly` and `meeting_backend` are the production callers:
-//! every per-record write flows through cognitive memory via the bridge
+//! every per-record write flows through cognitive memory via the memory
 //! helpers (`launch_writer_client` / `open_reader_client`). The legacy
 //! on-disk `goal_records.json` and `state/goal_store.json` files are no
 //! longer produced — closing the half-migration gap that PR #1593 /
@@ -20,6 +20,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::memory_ipc::{launch_writer_client, open_reader_client};
 use crate::metadata::{BackendDescriptor, Freshness};
@@ -43,9 +44,9 @@ const GOAL_PROSPECTIVE_PREFIX: &str = "goal:";
 pub(crate) const GOAL_STORE_LIST_LIMIT: u32 = 256;
 
 /// `GoalStore` implementation backed by cognitive memory through the
-/// bridge helpers (`launch_writer_client` / `open_reader_client`).
+/// memory helpers (`launch_writer_client` / `open_reader_client`).
 ///
-/// Each method opens a fresh bridge for the duration of one call and
+/// Each method opens a fresh memory for the duration of one call and
 /// drops it afterwards. With the tier-0 in-process Arc shortcut
 /// registered by the OODA daemon (issue #1590 follow-up), per-call
 /// acquisition inside the daemon process is a single `RwLock` read plus
@@ -88,59 +89,19 @@ impl CognitiveMemoryGoalStore {
     /// Read all goal records currently visible in cognitive memory and
     /// dedup by slug, keeping the latest write per slug.
     fn list_via_reader(&self) -> SimardResult<Vec<GoalRecord>> {
-        // The reader bridge resolves through the in-process Arc shortcut
-        // first (zero-cost for daemon callers), then the IPC socket,
-        // then `open_read_only`. If none succeed (e.g. an uninitialised
-        // state_root), `list()` returns an empty Vec rather than
-        // surfacing the error — `GoalStore::list` is best-effort and the
-        // FileBackedGoalStore behaved the same way (`load_json_or_default`).
-        let reader = match open_reader_client(&self.state_root) {
-            Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
-        };
-        let facts =
-            match reader
-                .ops()
-                .search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!(
-                        "[simard] CognitiveMemoryGoalStore::list: search_facts failed ({e}) — \
-                     returning empty record set"
-                    );
-                    return Ok(Vec::new());
-                }
-            };
-
-        // For each slug, keep the fact with the largest node_id (most
-        // recent UUID-v7).
-        let mut latest_by_slug: HashMap<String, (String, GoalRecord)> = HashMap::new();
-        for fact in facts {
-            if fact.concept != GOAL_STORE_FACT_CONCEPT {
-                continue;
-            }
-            let record: GoalRecord = match serde_json::from_str(&fact.content) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!(
-                        "[simard] CognitiveMemoryGoalStore::list: skipping unparseable record \
-                         (node_id={}): {e}",
-                        fact.node_id
-                    );
-                    continue;
-                }
-            };
-            let slug = record.slug.clone();
-            match latest_by_slug.get(&slug) {
-                Some((existing_id, _)) if existing_id >= &fact.node_id => {}
-                _ => {
-                    latest_by_slug.insert(slug, (fact.node_id, record));
-                }
-            }
-        }
-
-        Ok(latest_by_slug.into_values().map(|(_, r)| r).collect())
+        // Fail closed (bug #2896). The reader resolves through the in-process
+        // Arc shortcut first (zero-cost for daemon callers), then the IPC
+        // socket, then a direct tier-2 open (which creates the store for an
+        // uninitialised state_root, so a fresh root yields an empty — not
+        // errored — read). A reader-open or `search_facts` transport fault
+        // (e.g. the daemon's "write-len: Broken pipe" line) MUST propagate as
+        // `Err`. Swallowing it into `Ok(Vec::new())` is exactly how a persisted
+        // goal becomes invisible to `simard goal list` while the write path
+        // reports success — the silent data loss #2896 forbids. Callers decide
+        // how to react; the store never reports "no goals" for a transport
+        // error.
+        let reader = open_reader_client(&self.state_root)?;
+        list_via_ops(reader.ops())
     }
 
     /// Reconcile drift between goal state and prospective memory entries.
@@ -202,46 +163,8 @@ impl GoalStore for CognitiveMemoryGoalStore {
     }
 
     fn put(&self, record: GoalRecord) -> SimardResult<()> {
-        let content = Self::encode(&record)?;
         let writer = launch_writer_client(&self.state_root)?;
-
-        // Primary storage: semantic fact (authoritative record). Issue #2329:
-        // route through CallerKey dedup keyed per goal slug so each goal's record
-        // supersedes its own previous revision instead of appending a fresh fact
-        // every `put`. The read-side "max node_id per slug" dedup remains as a
-        // defensive guard.
-        writer.ops().store_fact_with_caller_key(
-            &format!("{GOAL_STORE_FACT_CONCEPT}:{}", record.slug),
-            GOAL_STORE_FACT_CONCEPT,
-            &content,
-            1.0,
-            &[GOAL_STORE_TAG.to_string()],
-            GOAL_STORE_SOURCE,
-        )?;
-
-        // Resolve any previous prospective memory for this goal so stale
-        // entries don't accumulate. Part of put()'s success contract (#2207):
-        // if the mirror update fails, the caller must know.
-        resolve_goal_prospectives(&record.slug, writer.ops())?;
-
-        // Dual-write: store Active goals as prospective memories so they
-        // surface via `check_triggers` during OODA preparation (#2207).
-        if record.status == GoalStatus::Active {
-            let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, record.title);
-            let trigger_condition = prospective_trigger_for(&record);
-            let action_on_trigger = format!(
-                "Pursue goal: {} (p{}, {})",
-                record.title, record.priority, record.rationale,
-            );
-            writer.ops().store_prospective(
-                &description,
-                &trigger_condition,
-                &action_on_trigger,
-                i64::from(record.priority),
-            )?;
-        }
-
-        Ok(())
+        put_via_ops(writer.ops(), record)
     }
 
     fn list(&self) -> SimardResult<Vec<GoalRecord>> {
@@ -253,11 +176,169 @@ impl GoalStore for CognitiveMemoryGoalStore {
         status: GoalStatus,
         limit: usize,
     ) -> SimardResult<Vec<GoalRecord>> {
-        let mut records = self.list()?;
-        records.retain(|r| r.status == status);
-        records.sort_by(compare_goal_records);
-        records.truncate(limit);
-        Ok(records)
+        Ok(top_by_status(self.list()?, status, limit))
+    }
+
+    fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
+        self.top_goals_by_status(GoalStatus::Active, limit)
+    }
+}
+
+/// Encode and persist a [`GoalRecord`] through an arbitrary in-process
+/// cognitive-memory handle (bug #2896).
+///
+/// Shared by [`CognitiveMemoryGoalStore::put`] (which re-derives the handle from
+/// `state_root`) and [`InProcessGoalStore::put`] (which reuses the daemon's live
+/// `ctx.memory` handle). Fail-closed: every step — the authoritative fact write,
+/// the stale-prospective resolve, and the Active dual-write — propagates its
+/// error, so a transport failure can never masquerade as a phantom `Ok`.
+pub(crate) fn put_via_ops(ops: &dyn CognitiveMemoryOps, record: GoalRecord) -> SimardResult<()> {
+    let content = CognitiveMemoryGoalStore::encode(&record)?;
+
+    // Primary storage: semantic fact (authoritative record). Issue #2329:
+    // route through CallerKey dedup keyed per goal slug so each goal's record
+    // supersedes its own previous revision instead of appending a fresh fact
+    // every `put`. The read-side "max node_id per slug" dedup remains as a
+    // defensive guard.
+    ops.store_fact_with_caller_key(
+        &format!("{GOAL_STORE_FACT_CONCEPT}:{}", record.slug),
+        GOAL_STORE_FACT_CONCEPT,
+        &content,
+        1.0,
+        &[GOAL_STORE_TAG.to_string()],
+        GOAL_STORE_SOURCE,
+    )?;
+
+    // Resolve any previous prospective memory for this goal so stale
+    // entries don't accumulate. Part of put()'s success contract (#2207):
+    // if the mirror update fails, the caller must know.
+    resolve_goal_prospectives(&record.slug, ops)?;
+
+    // Dual-write: store Active goals as prospective memories so they
+    // surface via `check_triggers` during OODA preparation (#2207).
+    if record.status == GoalStatus::Active {
+        let description = format!("{}{}", GOAL_PROSPECTIVE_PREFIX, record.title);
+        let trigger_condition = prospective_trigger_for(&record);
+        let action_on_trigger = format!(
+            "Pursue goal: {} (p{}, {})",
+            record.title, record.priority, record.rationale,
+        );
+        ops.store_prospective(
+            &description,
+            &trigger_condition,
+            &action_on_trigger,
+            i64::from(record.priority),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Read and slug-dedup all goal records visible through an arbitrary in-process
+/// cognitive-memory handle (bug #2896).
+///
+/// Shared by [`CognitiveMemoryGoalStore::list`] and [`InProcessGoalStore::list`].
+/// Fail-closed: a `search_facts` transport fault propagates as `Err` rather than
+/// being swallowed into a phantom empty list — the silent-loss signature #2896
+/// forbids. (A per-record deserialise failure is a data-integrity skip, not a
+/// transport fault, so one corrupt record never hides every other goal.)
+pub(crate) fn list_via_ops(ops: &dyn CognitiveMemoryOps) -> SimardResult<Vec<GoalRecord>> {
+    let facts = ops.search_facts(GOAL_STORE_FACT_CONCEPT, GOAL_STORE_LIST_LIMIT, 0.0)?;
+
+    // For each slug, keep the fact with the largest node_id (most
+    // recent UUID-v7).
+    let mut latest_by_slug: HashMap<String, (String, GoalRecord)> = HashMap::new();
+    for fact in facts {
+        if fact.concept != GOAL_STORE_FACT_CONCEPT {
+            continue;
+        }
+        let record: GoalRecord = match serde_json::from_str(&fact.content) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "[simard] CognitiveMemoryGoalStore::list: skipping unparseable record \
+                     (node_id={}): {e}",
+                    fact.node_id
+                );
+                continue;
+            }
+        };
+        let slug = record.slug.clone();
+        match latest_by_slug.get(&slug) {
+            Some((existing_id, _)) if existing_id >= &fact.node_id => {}
+            _ => {
+                latest_by_slug.insert(slug, (fact.node_id, record));
+            }
+        }
+    }
+
+    Ok(latest_by_slug.into_values().map(|(_, r)| r).collect())
+}
+
+/// Filter to `status`, order by the board's canonical goal ranking, and take the
+/// top `limit`. Shared by both goal-store implementations.
+fn top_by_status(
+    mut records: Vec<GoalRecord>,
+    status: GoalStatus,
+    limit: usize,
+) -> Vec<GoalRecord> {
+    records.retain(|r| r.status == status);
+    records.sort_by(compare_goal_records);
+    records.truncate(limit);
+    records
+}
+
+/// A [`GoalStore`] that persists through a caller-provided in-process
+/// cognitive-memory handle (the daemon's live `ctx.memory` `Arc`) instead of
+/// re-deriving one from `state_root`.
+///
+/// Reusing the exact handle the daemon serves `goal list` from makes a
+/// same-process goal write visible **by construction** (bug #2896): the write
+/// and the daemon's later read address the identical store, so it cannot land in
+/// a divergent tier-2 view or be lost to a `state_root` tier-0 mismatch. This
+/// mirrors how [`ProspectiveCreativeIdeaStore`] already takes `ctx.memory`, and
+/// is why the creative-ideas routing path threads `ctx.memory` all the way to
+/// `put()` rather than re-opening from `ctx.state_root`.
+///
+/// [`ProspectiveCreativeIdeaStore`]: crate::cognitive_memory::creative_idea::ProspectiveCreativeIdeaStore
+pub struct InProcessGoalStore<'a> {
+    ops: &'a dyn CognitiveMemoryOps,
+    descriptor: BackendDescriptor,
+}
+
+impl<'a> InProcessGoalStore<'a> {
+    /// Wrap a live in-process cognitive-memory handle as a goal store.
+    pub fn new(ops: &'a dyn CognitiveMemoryOps) -> SimardResult<Self> {
+        Ok(Self {
+            ops,
+            descriptor: BackendDescriptor::for_runtime_type::<Self>(
+                "goals::in-process-store",
+                "runtime-port:goal-store:in-process",
+                Freshness::now()?,
+            ),
+        })
+    }
+}
+
+impl GoalStore for InProcessGoalStore<'_> {
+    fn descriptor(&self) -> BackendDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn put(&self, record: GoalRecord) -> SimardResult<()> {
+        put_via_ops(self.ops, record)
+    }
+
+    fn list(&self) -> SimardResult<Vec<GoalRecord>> {
+        list_via_ops(self.ops)
+    }
+
+    fn top_goals_by_status(
+        &self,
+        status: GoalStatus,
+        limit: usize,
+    ) -> SimardResult<Vec<GoalRecord>> {
+        Ok(top_by_status(self.list()?, status, limit))
     }
 
     fn active_top_goals(&self, limit: usize) -> SimardResult<Vec<GoalRecord>> {
@@ -320,7 +401,7 @@ fn resolve_goal_prospectives(
 /// preparation, and ensures exactly one `pending` prospective per active goal.
 ///
 /// Operates on the caller's existing memory handle (the daemon's own writer)
-/// rather than opening a fresh bridge, so it never contends for the store lock.
+/// rather than opening a fresh memory, so it never contends for the store lock.
 ///
 /// Implemented as a two-phase pass for the same reason
 /// [`CognitiveMemoryGoalStore::reconcile_prospectives`] is: the library's
@@ -421,9 +502,9 @@ pub fn migrate_file_backed_goal_store_if_present(state_root: &std::path::Path) {
         return;
     }
 
-    // Open a single writer bridge for both reading existing slugs and
-    // writing migrated records.  Using the writer bridge (not the
-    // read-only reader bridge) is deliberate: write-mode opens replay
+    // Open a single writer memory for both reading existing slugs and
+    // writing migrated records.  Using the writer memory (not the
+    // read-only reader memory) is deliberate: write-mode opens replay
     // the WAL, handling the edge case where a prior writer left an
     // un-checkpointed WAL that read-only mode cannot recover.
     let writer = match launch_writer_client(state_root) {
@@ -661,9 +742,9 @@ mod tests {
             .expect("put active goal");
 
         // The prospective trigger condition is the slug with dashes→spaces.
-        // Open a reader bridge and check triggers with the expected phrase.
+        // Open a reader memory and check triggers with the expected phrase.
         let reader =
-            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader memory should open");
         let triggered = reader
             .ops()
             .check_triggers("fix authentication bug")
@@ -699,7 +780,7 @@ mod tests {
 
         // The trigger should no longer fire for the completed goal.
         let reader =
-            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader memory should open");
         let triggered = reader
             .ops()
             .check_triggers("deploy ci pipeline")
@@ -748,7 +829,7 @@ mod tests {
         // After reconciliation: Active goal should still have a trigger,
         // Completed goal should not.
         let reader =
-            crate::memory_ipc::open_reader_client(&root).expect("reader bridge should open");
+            crate::memory_ipc::open_reader_client(&root).expect("reader memory should open");
 
         let active_triggers = reader
             .ops()
@@ -790,7 +871,7 @@ mod tests {
 
         // Manually resolve the prospective to simulate drift.
         {
-            let writer = crate::memory_ipc::launch_writer_client(&root).expect("writer bridge");
+            let writer = crate::memory_ipc::launch_writer_client(&root).expect("writer memory");
             let triggered = writer
                 .ops()
                 .check_triggers("drifted goal")
@@ -819,7 +900,7 @@ mod tests {
             .reconcile_prospectives()
             .expect("reconcile_prospectives");
 
-        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
+        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader memory");
         let triggered = reader
             .ops()
             .check_triggers("drifted goal")
@@ -846,7 +927,7 @@ mod tests {
             .expect("put proposed goal");
 
         {
-            let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
+            let reader = crate::memory_ipc::open_reader_client(&root).expect("reader memory");
             let before = reader.ops().get_statistics().expect("get_statistics");
             assert_eq!(
                 before.prospective_count, 0,
@@ -860,7 +941,7 @@ mod tests {
             .expect("put active goal");
 
         // Open a fresh reader to see the write.
-        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader bridge");
+        let reader = crate::memory_ipc::open_reader_client(&root).expect("reader memory");
         let after = reader.ops().get_statistics().expect("get_statistics");
         assert!(
             after.prospective_count > 0,
@@ -919,6 +1000,7 @@ mod tests {
 
         let mut board = GoalBoard::new();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -980,6 +1062,7 @@ mod tests {
 
         let mut board = GoalBoard::new();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

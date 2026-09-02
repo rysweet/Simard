@@ -2,7 +2,7 @@
 //!
 //! Each struct maps one-to-one to the corresponding Python type in
 //! `amplihack-memory-lib`. Fields use the same names and semantics so that
-//! JSON round-trips between the Rust bridge client and the Python bridge
+//! JSON round-trips between the Rust memory client and the Python memory
 //! server are lossless.
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Maps to Python `SensoryItem`. The `expires_at` field is a Unix timestamp
 /// (seconds) after which the item may be pruned.
 ///
-/// Used by future `get_recent_sensory` bridge method (Phase 3+).
+/// Used by future `get_recent_sensory` memory method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct CognitiveSensoryItem {
@@ -41,7 +41,7 @@ pub struct CognitiveWorkingSlot {
 /// Maps to Python `EpisodicMemory`. Episodes can be consolidated into
 /// summaries via `consolidate_episodes`.
 ///
-/// Used by future `get_episodes` bridge method (Phase 3+).
+/// Used by future `get_episodes` memory method (Phase 3+).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct CognitiveEpisode {
@@ -50,6 +50,15 @@ pub struct CognitiveEpisode {
     pub source_label: String,
     pub temporal_index: i64,
     pub compressed: bool,
+    /// Wall-clock instant the episode was recorded, carried through from the
+    /// library `EpisodicMemory::created_at` (issue #4383). `None` for backends
+    /// or callers that genuinely lack a timestamp — never a fabricated epoch,
+    /// so the dashboard "Recent Memories" panel degrades honestly to a blank
+    /// "time ago" label rather than showing a nonsensical 1970s date.
+    /// `#[serde(default)]` so episodes serialized before this field existed
+    /// deserialize to `None`.
+    #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Distilled knowledge fact from semantic memory.
@@ -139,7 +148,7 @@ impl CognitiveStatistics {
 /// `SUPERSEDES` chain left behind by caller-key snapshot dedup.
 ///
 /// Returned by [`CognitiveMemoryOps::graph_stats`](crate::cognitive_memory::CognitiveMemoryOps::graph_stats).
-/// Backends without a provenance graph (IPC client, bridge, stubs) return an
+/// Backends without a provenance graph (IPC client, memory, stubs) return an
 /// all-zero value via the trait default, so callers stay backend-agnostic.
 ///
 /// `similar_to_edges` and `supersedes_edges` are present for completeness but

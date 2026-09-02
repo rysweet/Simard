@@ -4,7 +4,7 @@ use crate::engineer_handoff::{
     ENGINEER_MODE_BOUNDARY, SHARED_DEFAULT_STATE_ROOT_SOURCE, SHARED_EXPLICIT_STATE_ROOT_SOURCE,
 };
 use crate::operator_commands::{
-    parse_runtime_topology, print_display, print_terminal_bridge_section, print_text,
+    parse_runtime_topology, print_display, print_terminal_handoff_section, print_text,
     resolved_engineer_read_state_root, resolved_state_root,
 };
 use crate::run_local_engineer_loop;
@@ -54,8 +54,8 @@ pub fn run_engineer_loop_probe(
     for (index, decision) in run.inspection.carried_meeting_decisions.iter().enumerate() {
         print_text(&format!("Carried meeting decision {}", index + 1), decision);
     }
-    print_terminal_bridge_section(
-        run.terminal_bridge_context.as_ref(),
+    print_terminal_handoff_section(
+        run.terminal_handoff_context.as_ref(),
         if state_root_was_explicit {
             SHARED_EXPLICIT_STATE_ROOT_SOURCE
         } else {

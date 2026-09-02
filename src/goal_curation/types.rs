@@ -35,6 +35,19 @@ pub enum GoalProgress {
     Completed,
 }
 
+impl GoalProgress {
+    /// True when the goal's work has landed to a terminal-looking state:
+    /// `Completed`, or `InProgress` at ≥ 100%. This is the shared
+    /// "archive / outcome-verification candidate" predicate — the single home of
+    /// a rule that was previously duplicated across the completion gate, the
+    /// archival pass, and the #2751 outcome-verify seam. It is independent of
+    /// whether the goal is perpetual; callers add that guard where they need it.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, GoalProgress::Completed)
+            || matches!(self, GoalProgress::InProgress { percent } if *percent >= 100)
+    }
+}
+
 impl Display for GoalProgress {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -85,6 +98,39 @@ pub fn description_marks_standing(description: &str) -> bool {
         return true;
     }
     STANDING_DESCRIPTION_MARKERS
+        .iter()
+        .any(|phrase| contains_phrase_on_word_boundary(&lower, phrase))
+}
+
+/// Whole-word, case-insensitive markers in a goal description that make it a
+/// *cognition-research* goal — one whose durable subject is Simard's own
+/// cognition (graph memory, recall, distillation, reasoning). Matched with a
+/// leading word boundary (via [`contains_phrase_on_word_boundary`]) so ordinary
+/// words that merely *contain* one of these substrings (e.g. "scorecall",
+/// "preretrieval") never trigger a false positive.
+const RESEARCH_DESCRIPTION_MARKERS: &[&str] = &[
+    "cognition",
+    "recall",
+    "distillation",
+    "reasoner",
+    "memory",
+    "consolidation",
+    "retrieval",
+    "embedding",
+];
+
+/// True when `description` marks the goal as a cognition-research goal — its
+/// durable subject is improving Simard's own cognition (graph memory, recall
+/// quality, distillation fact-yield, reasoner reliability, and related
+/// retrieval/embedding/consolidation techniques).
+///
+/// This is orthogonal to [`description_marks_standing`]: a one-off recall fix
+/// is research but not standing, and a CI-stewardship goal is standing but not
+/// research. The novelty-first steering (issue #4347) applies only where *both*
+/// hold — see [`ActiveGoal::is_standing_research_goal`].
+pub fn description_marks_research(description: &str) -> bool {
+    let lower = description.to_ascii_lowercase();
+    RESEARCH_DESCRIPTION_MARKERS
         .iter()
         .any(|phrase| contains_phrase_on_word_boundary(&lower, phrase))
 }
@@ -180,6 +226,19 @@ pub struct ActiveGoal {
     /// lets legacy JSON without the key load as non-explicit (pass-eligible).
     #[serde(default, skip_serializing_if = "is_false")]
     pub priority_explicit: bool,
+    /// Free-form labels (tags) for categorization, filtering, and provenance
+    /// (issue #2743). Defaults to empty. Exactly one `source:*` provenance tag
+    /// is stamped at the goal's first materialization (see
+    /// [`crate::goal_curation::labels`]); operators may add `area:…` / topical
+    /// tags alongside it. Tags are matched by exact, case-sensitive equality.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]` keeps the
+    /// change additive and back-compatible: pre-#2743 snapshots with no
+    /// `labels` key load as empty, and an unlabelled goal serializes
+    /// byte-identically (the key is omitted), so the board snapshot hash is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field when it is `false` so
@@ -206,6 +265,7 @@ impl ActiveGoal {
             last_progress_update_at: None,
             parent_goal_id: None,
             priority_explicit: false,
+            labels: Vec::new(),
         }
     }
 
@@ -234,6 +294,24 @@ impl ActiveGoal {
         self
     }
 
+    /// Builder: replace this goal's label set wholesale. Used at seed and
+    /// provenance-stamping sites (issue #2743) — e.g. a decomposition child is
+    /// built with its inherited parent labels plus `source:decomposition`.
+    #[must_use]
+    pub fn with_labels(mut self, labels: Vec<String>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Builder: add a single label, idempotently and order-preservingly (via
+    /// [`crate::goal_curation::labels::add_label`]). A duplicate or
+    /// empty-after-trim tag is a no-op.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        super::labels::add_label(&mut self.labels, &label.into());
+        self
+    }
+
     /// Short label for display.
     pub fn concise_label(&self) -> String {
         format!("p{} [{}] {}", self.priority, self.status, self.description)
@@ -246,6 +324,22 @@ impl ActiveGoal {
     /// curation or the completion gate, and must never be tombstoned.
     pub fn is_perpetual(&self) -> bool {
         description_marks_standing(&self.description)
+    }
+
+    /// True when this is a **standing cognition-research goal** — both
+    /// standing/perpetual ([`is_perpetual`]) and marked as cognition research
+    /// ([`description_marks_research`]).
+    ///
+    /// This is the durable predicate that gates novelty-first steering (issue
+    /// #4347): when such a goal is worked, each cycle must FIRST survey
+    /// genuinely new cognition-research directions and PREFER a novel one over
+    /// yet another incremental parse-site / dedup refinement. It is deliberately
+    /// general (a standing *research* goal seeks novelty) rather than pinned to
+    /// any single goal id, and never regresses standing-perpetual semantics.
+    ///
+    /// [`is_perpetual`]: ActiveGoal::is_perpetual
+    pub fn is_standing_research_goal(&self) -> bool {
+        self.is_perpetual() && description_marks_research(&self.description)
     }
 
     /// Builder: durably mark this goal as standing/perpetual by prepending the
@@ -268,6 +362,19 @@ impl ActiveGoal {
     /// standing-goal description marker (and thus [`is_perpetual`]) is
     /// preserved.
     ///
+    /// **`wip_refs.clear()` is load-bearing, not cosmetic** — and therefore this
+    /// must only be called once the goal's current unit of work is genuinely
+    /// finished. Those refs feed the Overseer/Orient dedup set
+    /// (`overseer::sensor::in_flight_from_board`, "so the Overseer never fights
+    /// an engineer already on a case"), engineer-admission control
+    /// (`ooda_brain::depended_on`), and the no-progress completion gate's
+    /// merge/close-verification signal. Dropping them while an artifact is still
+    /// live loses merge tracking and lets the next cycle spawn an overlapping
+    /// engineer on the same seam. The never-idle rail therefore guards this call
+    /// with [`has_live_in_flight_ref`](ActiveGoal::has_live_in_flight_ref): a
+    /// research goal still holding a live PR/branch/session is treated as
+    /// in-flight progress and is NOT rolled (issue #4399, crusty finding 1).
+    ///
     /// [`is_perpetual`]: ActiveGoal::is_perpetual
     pub fn roll_to_new_cycle(&mut self) {
         self.status = GoalProgress::NotStarted;
@@ -275,6 +382,52 @@ impl ActiveGoal {
         self.wip_refs.clear();
         self.current_activity =
             Some("standing goal — finished a unit of work; rolled to a fresh cycle".to_string());
+    }
+
+    /// True when this goal still holds a LIVE in-flight engineering artifact — an
+    /// open PR, a working branch, or an engineer session/claim — in its
+    /// [`wip_refs`](ActiveGoal::wip_refs).
+    ///
+    /// This is the pure/total/panic-free predicate the never-idle no-progress
+    /// breaker uses to tell a standing research goal that is *still making
+    /// progress* (holding a live artifact — e.g. an open, unmerged PR in review)
+    /// from one that is *genuinely idle* (empty or dead refs). A goal holding a
+    /// live artifact must NOT be counted as a research-idle fault or re-oriented,
+    /// because [`roll_to_new_cycle`](ActiveGoal::roll_to_new_cycle) would wipe the
+    /// load-bearing `wip_refs` the Overseer dedup set, engineer-admission control,
+    /// and completion gate all depend on (issue #4399, crusty finding 1).
+    ///
+    /// Matching is case-insensitive and whitespace-trimmed. Kinds are
+    /// deny-by-default: only `pr` / `branch` / `session` / `engineer` count as
+    /// live. An `issue` ref is a durable record, not open engineering work, and
+    /// any unknown/garbage kind is treated as not-live — so a goal tracking only
+    /// those still faults toward re-orient. Reads only in-memory state; performs
+    /// no IO and never panics.
+    ///
+    /// # Liveness precondition (NEW-1, PR #4428)
+    ///
+    /// This predicate keys on ref *kind*, NOT ref *liveness* — deliberately, to
+    /// stay IO-free. It therefore ASSUMES `wip_refs` has ALREADY been
+    /// liveness-reconciled earlier this cycle, so a dead/merged artifact never
+    /// lingers here reading as live and suppressing the never-idle fault forever.
+    /// Two reconcile prongs run before any breaker site calls this:
+    /// * **Dead sessions** — `sweep_stale_assignments_with_sessions`
+    ///   (`crate::ooda_loop::cycle`) drops a dead engineer's
+    ///   `session`/`branch`/`engineer` refs at cycle start.
+    /// * **Merged/closed PRs** — `prune_merged_pr_refs`
+    ///   (`crate::ooda_loop::no_progress`), fed the per-cycle open-PR set, drops
+    ///   any `pr` ref no longer open, before the breaker classifies.
+    ///
+    /// Without those prongs this guard is unsound (a merged PR or dead session
+    /// reads as live forever) — the exact NEW-1 loophole.
+    pub fn has_live_in_flight_ref(&self) -> bool {
+        const LIVE_KINDS: [&str; 4] = ["pr", "branch", "session", "engineer"];
+        self.wip_refs.iter().any(|wip| {
+            let kind = wip.kind.trim();
+            LIVE_KINDS
+                .iter()
+                .any(|live| kind.eq_ignore_ascii_case(live))
+        })
     }
 }
 
@@ -389,20 +542,31 @@ pub struct GoalNode {
     /// of its children rather than a single criterion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_criterion: Option<String>,
+    /// The goal's labels, projected onto the graph node (issue #2743) so
+    /// provenance and categorization are queryable from the decomposition graph
+    /// too. This is a **snapshot copy** taken when the node is written; the
+    /// live `ActiveGoal` on the board remains the source of truth. Additive and
+    /// serde-back-compatible (pre-#2743 nodes load with empty labels).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 impl GoalNode {
     /// Construct a goal node. `done_criterion` is `Option<impl Into<String>>`
-    /// so call sites can pass `Some("…")`, `Some(string)`, or `None`.
+    /// so call sites can pass `Some("…")`, `Some(string)`, or `None`. `labels`
+    /// is the goal's label snapshot (empty for call sites without labels to
+    /// hand).
     pub fn new(
         id: impl Into<String>,
         description: impl Into<String>,
         done_criterion: Option<impl Into<String>>,
+        labels: Vec<String>,
     ) -> Self {
         Self {
             id: id.into(),
             description: description.into(),
             done_criterion: done_criterion.map(Into::into),
+            labels,
         }
     }
 }
@@ -535,6 +699,18 @@ mod tests {
     }
 
     #[test]
+    fn goal_progress_is_terminal() {
+        assert!(GoalProgress::Completed.is_terminal());
+        assert!(GoalProgress::InProgress { percent: 100 }.is_terminal());
+        assert!(GoalProgress::InProgress { percent: 150 }.is_terminal());
+        assert!(!GoalProgress::InProgress { percent: 99 }.is_terminal());
+        assert!(!GoalProgress::NotStarted.is_terminal());
+        assert!(!GoalProgress::Proposed.is_terminal());
+        assert!(!GoalProgress::Paused.is_terminal());
+        assert!(!GoalProgress::Blocked("x".into()).is_terminal());
+    }
+
+    #[test]
     fn goal_progress_display_blocked() {
         let p = GoalProgress::Blocked("waiting on review".to_string());
         assert_eq!(p.to_string(), "blocked: waiting on review");
@@ -573,6 +749,7 @@ mod tests {
 
     fn sample_goal() -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -607,6 +784,7 @@ mod tests {
     #[test]
     fn active_goal_assigned_to_none() {
         let g = ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -695,6 +873,191 @@ mod tests {
         );
     }
 
+    // ── has_live_in_flight_ref: the never-idle preservation guard (#4399) ──
+    //
+    // `wip_refs` is load-bearing — the Overseer dedup set (sensor.rs),
+    // engineer-admission control (ooda_brain), and the completion-gate's
+    // merge/close signal all read it. `has_live_in_flight_ref()` is the
+    // pure/total/panic-free predicate the never-idle breaker uses to tell
+    // "holding a live artifact" (progress — preserve refs, do NOT fault) from
+    // "genuinely idle" (empty/dead refs — fault, reset, re-orient). Live kinds
+    // are the artifacts an engineer holds open: pr / branch / session / engineer.
+    // `issue` and unknown kinds are deny-by-default, so a goal tracking only an
+    // issue still faults toward re-orient.
+
+    fn wip(kind: &str) -> WipRef {
+        WipRef {
+            kind: kind.to_string(),
+            ref_id: "1".to_string(),
+            label: "x".to_string(),
+            url: None,
+        }
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_true_for_open_engineering_artifacts() {
+        for kind in ["pr", "branch", "session", "engineer"] {
+            let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+            g.wip_refs = vec![wip(kind)];
+            assert!(
+                g.has_live_in_flight_ref(),
+                "kind '{kind}' must count as a live in-flight ref"
+            );
+        }
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_is_case_insensitive_and_trims() {
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        g.wip_refs = vec![wip("  PR  ")];
+        assert!(
+            g.has_live_in_flight_ref(),
+            "kind matching must be case-insensitive and whitespace-tolerant"
+        );
+        g.wip_refs = vec![wip("Branch")];
+        assert!(g.has_live_in_flight_ref());
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_false_for_empty_issue_only_or_unknown() {
+        // No refs at all → genuinely idle.
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        assert!(g.wip_refs.is_empty());
+        assert!(!g.has_live_in_flight_ref());
+
+        // An issue ref is NOT a live engineering artifact (deny-by-default).
+        g.wip_refs = vec![wip("issue")];
+        assert!(
+            !g.has_live_in_flight_ref(),
+            "a filed issue is not a live in-flight engineering artifact"
+        );
+
+        // Unknown/garbage kinds are deny-by-default (fail toward faulting).
+        g.wip_refs = vec![wip("mystery-kind")];
+        assert!(!g.has_live_in_flight_ref());
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_true_when_any_ref_is_live() {
+        // A mix of a dead issue ref and a live PR ref is still "in flight".
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        g.wip_refs = vec![wip("issue"), wip("pr")];
+        assert!(g.has_live_in_flight_ref());
+    }
+
+    #[test]
+    fn has_live_in_flight_ref_is_total_and_panic_free_on_pathological_kinds() {
+        // Pure predicate: no IO, never panics on empty/unicode/control kinds.
+        let mut g = ActiveGoal::new("g", "improve recall quality", 1).mark_standing();
+        g.wip_refs = vec![
+            wip(""),
+            wip("   "),
+            wip("认知"),
+            wip("pr\0\t"),
+            wip(&"x".repeat(10_000)),
+        ];
+        // Must return a bool without panicking; none of these are live.
+        assert!(!g.has_live_in_flight_ref());
+    }
+
+    // ── Standing research/cognition goals — novelty-first steering ──
+    //
+    // TDD (issue #4347): a standing *research/cognition* goal must be steered
+    // to seek genuinely NEW cognition-research directions each cycle rather
+    // than repeatedly grabbing narrow incremental parse-site / dedup fixes.
+    // The durable predicate `description_marks_research` and the combined
+    // `ActiveGoal::is_standing_research_goal` gate that steering. These tests
+    // pin the contract: standing AND research markers → true; anything missing
+    // one half → false; matching is whole-word and panic-free on any input.
+
+    #[test]
+    fn description_marks_research_recognizes_cognition_markers() {
+        // Each canonical cognition-research marker (whole word) must match.
+        assert!(description_marks_research(
+            "continuously research cognition"
+        ));
+        assert!(description_marks_research("improve recall quality"));
+        assert!(description_marks_research("distillation fact-yield"));
+        assert!(description_marks_research("reasoner reliability"));
+        assert!(description_marks_research(
+            "memory consolidation techniques"
+        ));
+        assert!(description_marks_research(
+            "graph retrieval and embedding strategies"
+        ));
+        // The live standing goal's description must be recognised as research.
+        assert!(description_marks_research(
+            "Continuously research and improve your own cognition: graph memory, \
+             recall quality, distillation fact-yield, and reasoner reliability. \
+             STANDING PERPETUAL goal — durable improvements only"
+        ));
+    }
+
+    #[test]
+    fn description_marks_research_rejects_non_research_and_word_boundary_false_positives() {
+        // Ordinary, non-cognition goals must not read as research.
+        assert!(!description_marks_research("Ship the MVP release"));
+        assert!(!description_marks_research(
+            "Fix trailing-comma JSON recovery at parse sites"
+        ));
+        assert!(!description_marks_research(""));
+        // A marker substring that does not begin on a word boundary must not
+        // trigger a match ("recall" inside "scorecall").
+        assert!(!description_marks_research("scorecall dashboard tidy-up"));
+        // "retrieval" embedded mid-word must not match.
+        assert!(!description_marks_research("preretrieval buffer resize"));
+    }
+
+    #[test]
+    fn is_standing_research_goal_requires_both_standing_and_research() {
+        // Standing AND research → true (the live 70ab8541 goal).
+        let standing_research = ActiveGoal::new(
+            "continuously-research-and-improve-your-own-cogn-70ab8541",
+            "Continuously research and improve your own cognition: graph memory, \
+             recall quality, distillation fact-yield, and reasoner reliability. \
+             STANDING PERPETUAL goal — durable improvements only",
+            1,
+        );
+        assert!(standing_research.is_standing_research_goal());
+
+        // Standing but NOT research → false (must not be novelty-steered).
+        let standing_only =
+            ActiveGoal::new("g-ci", "Steward CI health. STANDING PERPETUAL goal.", 1);
+        assert!(standing_only.is_perpetual());
+        assert!(!standing_only.is_standing_research_goal());
+
+        // Research but NOT standing → false (ordinary one-off cognition task).
+        let research_only =
+            ActiveGoal::new("g-recall", "Improve recall precision at parse sites", 1);
+        assert!(!research_only.is_perpetual());
+        assert!(!research_only.is_standing_research_goal());
+
+        // Neither → false.
+        let neither = ActiveGoal::new("g-mvp", "Ship the MVP release", 1);
+        assert!(!neither.is_standing_research_goal());
+    }
+
+    #[test]
+    fn is_standing_research_goal_is_total_and_panic_free_on_pathological_input() {
+        // Pathological descriptions must never panic and must return a bool.
+        let very_long = "recall ".repeat(50_000);
+        let g_long = ActiveGoal::new("g", very_long, 1);
+        let _ = g_long.is_standing_research_goal();
+
+        let unicode = ActiveGoal::new(
+            "g",
+            "认知 research — cognition 🧠 STANDING PERPETUAL goal",
+            1,
+        );
+        let _ = unicode.is_standing_research_goal();
+
+        let control = ActiveGoal::new("g", "cognition\0\t\r\nstanding goal", 1);
+        let _ = control.is_standing_research_goal();
+
+        // Free predicate must also tolerate arbitrary input.
+        assert!(!description_marks_research("\0\0\0"));
+    }
+
     // ── BacklogItem ─────────────────────────────────────────────────
 
     #[test]
@@ -754,6 +1117,7 @@ mod tests {
     fn goal_board_active_slots_remaining_full() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS)
             .map(|i| ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,
@@ -778,6 +1142,7 @@ mod tests {
     fn goal_board_active_slots_remaining_overflow_saturates() {
         let goals: Vec<ActiveGoal> = (0..MAX_ACTIVE_GOALS + 2)
             .map(|i| ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,

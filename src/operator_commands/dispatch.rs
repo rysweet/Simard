@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use super::command_context::CommandContext;
 use super::{
-    run_bootstrap_probe, run_engineer_loop_probe, run_engineer_read_probe, run_goal_curation_probe,
-    run_gym_compare, run_gym_list, run_gym_scenario, run_gym_suite, run_handoff_probe,
-    run_improvement_curation_probe, run_improvement_curation_read_probe, run_meeting_probe,
-    run_meeting_read_probe, run_review_probe, run_review_read_probe, run_terminal_probe,
-    run_terminal_probe_from_file, run_terminal_read_probe, run_terminal_recipe_list_probe,
-    run_terminal_recipe_probe, run_terminal_recipe_show_probe,
+    run_bootstrap_probe, run_coin_gym_verify_probe, run_engineer_loop_probe,
+    run_engineer_read_probe, run_goal_curation_probe, run_gym_compare, run_gym_list,
+    run_gym_scenario, run_gym_suite, run_handoff_probe, run_improvement_curation_probe,
+    run_improvement_curation_read_probe, run_meeting_probe, run_meeting_read_probe,
+    run_review_probe, run_review_read_probe, run_terminal_probe, run_terminal_probe_from_file,
+    run_terminal_read_probe, run_terminal_recipe_list_probe, run_terminal_recipe_probe,
+    run_terminal_recipe_show_probe,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -142,6 +143,10 @@ where
             let state_root = next_optional_path(&mut args);
             reject_extra_args(args)?;
             run_improvement_curation_read_probe(&base_type, &topology, state_root)?;
+        }
+        "coin-gym-verify" => {
+            reject_extra_args(args)?;
+            run_coin_gym_verify_probe()?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
@@ -338,8 +343,71 @@ pub fn dispatch_probe_with_context(
             let objective = ctx.require_objective()?;
             run_handoff_probe(identity, base_type, &ctx.topology, objective)?;
         }
+        "coin-gym-verify" => {
+            run_coin_gym_verify_probe()?;
+        }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod doc_parity_tests {
+    //! Guards against operator-surface documentation drift.
+    //!
+    //! Every `simard_operator_probe` subcommand wired in
+    //! [`dispatch_operator_probe`] is a shipped compatibility surface, so the
+    //! runtime-contracts reference must document it. This test caught (and now
+    //! prevents regressing) the gap where `handoff-roundtrip` was fully wired
+    //! but absent from the doc.
+
+    const DISPATCH_SRC: &str = include_str!("dispatch.rs");
+    const RUNTIME_CONTRACTS_DOC: &str = include_str!("../../docs/reference/runtime-contracts.md");
+
+    /// Extract the command literals handled by the positional
+    /// `dispatch_operator_probe` match arms. Scoped to that function so the gym
+    /// dispatcher's `list`/`run`/`compare`/`run-suite` arms (a separate surface,
+    /// documented under the gym section) are not mistaken for probe commands.
+    fn operator_probe_commands() -> Vec<String> {
+        let start = DISPATCH_SRC
+            .find("pub fn dispatch_operator_probe")
+            .expect("dispatch_operator_probe present");
+        let end = DISPATCH_SRC[start..]
+            .find("pub fn dispatch_legacy_gym_cli")
+            .map(|offset| start + offset)
+            .expect("legacy gym dispatcher present");
+        let body = &DISPATCH_SRC[start..end];
+
+        let mut commands = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix('"')
+                && let Some(close) = rest.find('"')
+                && rest[close + 1..].trim_start().starts_with("=>")
+            {
+                commands.push(rest[..close].to_string());
+            }
+        }
+        commands.sort();
+        commands.dedup();
+        commands
+    }
+
+    #[test]
+    fn every_operator_probe_command_is_documented() {
+        let commands = operator_probe_commands();
+        assert!(
+            !commands.is_empty(),
+            "expected to parse at least one probe command from dispatch_operator_probe"
+        );
+        for command in commands {
+            let needle = format!("simard_operator_probe {command}");
+            assert!(
+                RUNTIME_CONTRACTS_DOC.contains(&needle),
+                "operator-probe command `{command}` is wired in dispatch.rs but is not documented \
+                 as `{needle}` in docs/reference/runtime-contracts.md"
+            );
+        }
+    }
 }

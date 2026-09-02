@@ -518,12 +518,12 @@ impl MeetingBackend {
             }
         }
 
-        // ── Memory consolidation ── (no-op in current production; bridge
+        // ── Memory consolidation ── (no-op in current production; memory
         // is always `None`. Kept for forward compatibility; bounded with
-        // the agent-close budget if a future caller wires a bridge in.)
-        if let Some(ref bridge) = self.bridge {
+        // the agent-close budget if a future caller wires a memory in.)
+        if let Some(ref memory) = self.memory {
             persist::store_enriched_cognitive_memory(
-                &**bridge,
+                &**memory,
                 &self.topic,
                 &summary_text,
                 &self.history,
@@ -551,11 +551,11 @@ impl MeetingBackend {
         // engineer loop can verify it received the goal state the meeting
         // produced. Without this, the handoff is implicit and goals can
         // silently vanish if the state root diverges.
-        if let Some(ref bridge) = self.bridge {
-            match crate::goal_curation::load_goal_board(&**bridge) {
+        if let Some(ref memory) = self.memory {
+            match crate::goal_curation::load_goal_board(&**memory) {
                 Ok(board) => {
                     if let Err(e) =
-                        crate::goal_curation::write_goal_carryover(&board, &meeting_id, &**bridge)
+                        crate::goal_curation::write_goal_carryover(&board, &meeting_id, &**memory)
                     {
                         warn!(
                             target: "simard::meeting_backend::closing",
@@ -577,7 +577,7 @@ impl MeetingBackend {
                 }
             }
         } else {
-            // When no bridge is available (most current deployments), try
+            // When no memory is available (most current deployments), try
             // to launch one from the default state root for this write.
             // Compiled out of test builds: `default_state_root()` returns
             // `$HOME/.simard` which trips the hermetic guard (#2092).
@@ -585,19 +585,19 @@ impl MeetingBackend {
             {
                 let state_root = crate::memory_ipc::default_state_root();
                 match crate::memory_ipc::launch_writer_client(&state_root) {
-                    Ok(bridge) => match crate::goal_curation::load_goal_board(bridge.ops()) {
+                    Ok(memory) => match crate::goal_curation::load_goal_board(memory.ops()) {
                         Ok(board) => {
                             if let Err(e) = crate::goal_curation::write_goal_carryover(
                                 &board,
                                 &meeting_id,
-                                bridge.ops(),
+                                memory.ops(),
                             ) {
                                 warn!(
                                     target: "simard::meeting_backend::closing",
                                     phase = "goal_carryover",
                                     outcome = "error",
                                     error = %e,
-                                    "Failed to write goal carryover record (fallback bridge)"
+                                    "Failed to write goal carryover record (fallback memory)"
                                 );
                             }
                         }
@@ -607,7 +607,7 @@ impl MeetingBackend {
                                 phase = "goal_carryover",
                                 outcome = "error",
                                 error = %e,
-                                "Failed to load goal board for carryover (fallback bridge)"
+                                "Failed to load goal board for carryover (fallback memory)"
                             );
                         }
                     },
@@ -615,7 +615,7 @@ impl MeetingBackend {
                         tracing::debug!(
                             target: "simard::meeting_backend::closing",
                             error = %e,
-                            "Could not launch bridge for goal carryover write"
+                            "Could not launch memory for goal carryover write"
                         );
                     }
                 }

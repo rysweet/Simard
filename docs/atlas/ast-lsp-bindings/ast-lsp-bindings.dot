@@ -1,0 +1,113 @@
+digraph AstLspBindings {
+  rankdir=LR;
+  graph [fontname="Arial", fontsize=10, labelloc=t, label="Simard public API bindings - static approximation"];
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", color="#58708a", fontname="Arial", fontsize=9];
+  edge [color="#5b6770", fontname="Arial", fontsize=8];
+
+  lib [label="src/lib.rs\ncrate facade"];
+  main [label="src/main.rs\nmain()"];
+  cli [label="operator_cli::dispatch_operator_cli"];
+  daemon [label="operator_commands_ooda::daemon"];
+
+  ooda_loop [label="ooda_loop module"];
+  run_cycle [label="run_ooda_cycle()"];
+  ooda_state [label="OodaState / OodaConfig / OodaClients"];
+  planned [label="PlannedAction / ActionKind / ActionOutcome"];
+  ooda_brain [label="OodaBrain trait"];
+  decide_brain [label="OodaDecideBrain trait"];
+  orient_brain [label="OodaOrientBrain trait"];
+  recipe_brain [label="RecipeBrain"];
+  judgment [label="BrainJudgmentRecord / BrainPhase"];
+  ooda_actions [label="dispatch_actions_bounded()"];
+  typed_ooda [label="typed_ooda ledger"];
+  typed_action [label="typed_ooda::Action"];
+  goal_executor [label="GoalSessionExecutor"];
+  capability [label="CapabilityHandler / CapabilityPolicy"];
+
+  memory_ops [label="CognitiveMemoryOps trait"];
+  lib_memory [label="LibraryCognitiveMemory"];
+  remote_memory [label="RemoteCognitiveMemory"];
+  memory_ipc [label="MemoryRequest / MemoryResponse"];
+  recall_weights [label="RecallWeightSet"];
+  memory_store [label="MemoryStore trait"];
+
+  goal_curation [label="goal_curation module"];
+  goal_board [label="GoalBoard / ActiveGoal / GoalProgress"];
+  goal_store [label="GoalStore / GoalRecord"];
+  persistent_goal [label="PersistentGoalState"];
+
+  overseer [label="overseer module"];
+  observed [label="ObservedState"];
+  overseer_caps [label="StatusReader / RecipeLauncher / PrOps / GoalCurator / MemoryRecall"];
+  sensor [label="OverseerSensorThread / run_observer_cycle"];
+  cognitive_thread [label="CognitiveThread trait"];
+
+  base_types [label="base_types module"];
+  base_factory [label="BaseTypeFactory trait"];
+  base_session [label="BaseTypeSession trait"];
+  turn_contract [label="BaseTypeTurnInput / BaseTypeOutcome"];
+  copilot [label="CopilotSdkAdapter"];
+  rustyclawd [label="RustyClawdAdapter"];
+  pending [label="PendingSdkAdapter"];
+  session_builder [label="SessionBuilder / LlmProvider"];
+
+  lib -> ooda_loop [label="pub mod / pub use"];
+  lib -> memory_ops [label="pub use"];
+  lib -> goal_board [label="pub use"];
+  lib -> base_types [label="pub mod / pub use"];
+  lib -> overseer [label="pub mod"];
+  main -> cli [label="calls"];
+  cli -> daemon [label="subcommand dispatch"];
+  daemon -> ooda_state [label="builds"];
+  daemon -> run_cycle [label="calls"];
+
+  ooda_loop -> run_cycle [label="re-export"];
+  ooda_loop -> ooda_state [label="owns"];
+  ooda_loop -> planned [label="plans"];
+  run_cycle -> memory_ops [label="uses"];
+  run_cycle -> goal_board [label="loads/persists"];
+  run_cycle -> recall_weights [label="recall weights"];
+  run_cycle -> judgment [label="records"];
+  run_cycle -> ooda_actions [label="act phase"];
+  ooda_state -> ooda_brain [label="holds"];
+  ooda_state -> decide_brain [label="optional"];
+  ooda_state -> orient_brain [label="optional"];
+
+  ooda_brain -> recipe_brain [label="implemented by"];
+  decide_brain -> recipe_brain [label="implemented by"];
+  orient_brain -> recipe_brain [label="implemented by"];
+  recipe_brain -> judgment [label="emits"];
+  ooda_actions -> planned [label="consumes"];
+  ooda_actions -> typed_ooda [label="goal-session rail"];
+  typed_ooda -> typed_action [label="records"];
+  typed_ooda -> goal_executor [label="exports"];
+  goal_executor -> capability [label="uses"];
+
+  memory_ops -> lib_memory [label="implemented by"];
+  memory_ops -> remote_memory [label="implemented by"];
+  memory_ipc -> memory_ops [label="mirrors methods"];
+  remote_memory -> memory_ipc [label="sends"];
+  lib_memory -> goal_store [label="backs"];
+  memory_store -> lib_memory [label="legacy/session facade"];
+
+  goal_curation -> goal_board [label="exports"];
+  goal_curation -> goal_store [label="uses"];
+  persistent_goal -> goal_board [label="wraps"];
+  daemon -> persistent_goal [label="load_or_migrate / commit_cycle"];
+
+  overseer -> observed [label="exports"];
+  overseer -> overseer_caps [label="exports seam"];
+  sensor -> cognitive_thread [label="implements"];
+  overseer_caps -> memory_ops [label="reads"];
+  overseer_caps -> goal_board [label="curates"];
+  overseer_caps -> session_builder [label="launches recipes"];
+
+  base_types -> base_factory [label="exports"];
+  base_types -> base_session [label="exports"];
+  base_session -> turn_contract [label="turn contract"];
+  base_factory -> copilot [label="implemented by"];
+  base_factory -> rustyclawd [label="implemented by"];
+  base_factory -> pending [label="implemented by"];
+  session_builder -> copilot [label="selects"];
+  session_builder -> rustyclawd [label="selects"];
+}

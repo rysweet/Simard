@@ -10,6 +10,8 @@ related:
   - ../reference/pluggable-identity-api.md
   - ../reference/simard-cli.md
   - ../howto/move-from-terminal-recipes-into-engineer-runs.md
+  - ../howto/run-a-second-agent-identity.md
+  - ../concepts/write-authority-posture.md
 ---
 
 # How to configure pluggable identities

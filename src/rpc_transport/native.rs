@@ -1,4 +1,4 @@
-//! Native in-process bridge transport.
+//! Native in-process rpc transport.
 //!
 //! [`NativeRpcTransport`] implements [`RpcTransport`] by dispatching
 //! method calls to registered Rust handler functions, eliminating the need
@@ -18,21 +18,21 @@ use crate::rpc::{
 /// A method handler receives JSON params and returns a JSON result or error.
 pub type MethodHandler = Arc<dyn Fn(&Value) -> Result<Value, RpcErrorPayload> + Send + Sync>;
 
-/// A bridge transport that dispatches calls to registered Rust functions.
+/// A rpc transport that dispatches calls to registered Rust functions.
 ///
-/// This replaces the subprocess-based transport by running bridge logic
-/// directly in the Simard process. Each bridge method is registered as a
+/// This replaces the subprocess-based transport by running rpc logic
+/// directly in the Simard process. Each rpc method is registered as a
 /// closure that receives JSON params and returns a JSON result.
 pub struct NativeRpcTransport {
-    bridge_name: String,
+    endpoint_name: String,
     handlers: HashMap<String, MethodHandler>,
 }
 
 impl NativeRpcTransport {
-    pub fn new(bridge_name: impl Into<String>) -> Self {
-        let name = bridge_name.into();
+    pub fn new(endpoint_name: impl Into<String>) -> Self {
+        let name = endpoint_name.into();
         let mut transport = Self {
-            bridge_name: name.clone(),
+            endpoint_name: name.clone(),
             handlers: HashMap::new(),
         };
         // Always register the health check handler.
@@ -66,8 +66,8 @@ impl RpcTransport for NativeRpcTransport {
                     error: Some(RpcErrorPayload {
                         code: RPC_ERROR_METHOD_NOT_FOUND,
                         message: format!(
-                            "method '{}' is not registered on native bridge '{}'",
-                            request.method, self.bridge_name
+                            "method '{}' is not registered on native rpc '{}'",
+                            request.method, self.endpoint_name
                         ),
                     }),
                 });
@@ -90,8 +90,8 @@ impl RpcTransport for NativeRpcTransport {
 
     fn descriptor(&self) -> BackendDescriptor {
         BackendDescriptor::for_runtime_type::<Self>(
-            format!("bridge:native:{}", self.bridge_name),
-            format!("bridge::native::{}", self.bridge_name),
+            format!("rpc:native:{}", self.endpoint_name),
+            format!("rpc::native::{}", self.endpoint_name),
             Freshness::now().unwrap_or(Freshness {
                 state: crate::metadata::FreshnessState::Stale,
                 observed_at_unix_ms: 0,
@@ -162,10 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn native_transport_descriptor_contains_bridge_name() {
-        let transport = NativeRpcTransport::new("my-bridge");
+    fn native_transport_descriptor_contains_endpoint_name() {
+        let transport = NativeRpcTransport::new("my-rpc");
         let desc = transport.descriptor();
-        assert!(desc.identity.contains("my-bridge"));
+        assert!(desc.identity.contains("my-rpc"));
         assert!(desc.identity.contains("native"));
     }
 
