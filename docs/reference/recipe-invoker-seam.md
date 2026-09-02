@@ -16,7 +16,7 @@ last_updated: 2026-07-08
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: specification — issue #5 (shared brick, OFF by default)
+status: reference — issue #5 (shared brick); threads default-ON since issue #4845
 related:
   - ./cognitive-threads-catalog.md
   - ./cognitive-thread-scheduling.md
@@ -38,12 +38,14 @@ and returns a **classified** result. Every recipe-backed thread depends on this
 one trait, so every thread's acceptance test can run **offline and
 credential-free** through the fake.
 
-!!! note "Status — specification for issue #5, OFF by default"
+!!! note "Status — shared brick (issue #5); threads default-ON since issue #4845"
     This brick lands in **Phase 0** of the build (it blocks the eight
     recipe-backed threads). It is a *refactor-by-extraction* of subprocess logic
     that already exists inline in `recipe_progress_checker.rs` and the goal
-    decomposer — not new behaviour — plus the security contract below. Nothing
-    it enables runs until a thread is registered behind its double env gate.
+    decomposer — not new behaviour — plus the security contract below. Each
+    thread it enables is registered behind its double env gate, now **default-ON
+    opt-out** (issue #4845): a thread runs unless a gate is set to an explicit
+    falsy token.
 
 ## Why a seam exists at all
 

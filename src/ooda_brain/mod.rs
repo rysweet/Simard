@@ -18,14 +18,20 @@ use std::path::PathBuf;
 pub mod confidence;
 mod context;
 mod decide;
+// Issue #4967 (epic #4719, Group E): typed engineer-lifecycle Act decision record
+// + fail-closed reader that retires the last reasoner-decision stdout scrape.
+mod engineer_lifecycle_record;
 mod fallback;
 mod judgment_record;
 mod orient;
 mod orient_decide_record;
+// Issue #4970: typed cognitive-thread reasoning record + fail-closed reader that
+// replaces the boolean `"{recipe}: ok"` collapse with agentic NL reasoning.
 pub mod parse_failure;
 pub mod prompt_store;
 mod recipe_brain;
 mod rustyclawd;
+mod thread_reasoning_record;
 // Crate-visible so other recipe-runner spawn sites (goal decomposition, progress
 // checking) can bound their free-text `-c` context vars with the same helper —
 // closing the E2BIG argv-overflow class and the #2127 newline/YAML class at once.
@@ -40,11 +46,19 @@ mod prompt_store_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_group_c_contract;
+#[cfg(test)]
 mod tests_per_goal_cycle;
+#[cfg(test)]
+mod tests_record_admission;
 #[cfg(test)]
 mod tests_record_decision;
 #[cfg(test)]
+mod tests_record_idea_dedup_consolidation;
+#[cfg(test)]
 mod tests_record_orient_decide;
+#[cfg(test)]
+mod tests_record_outcome;
 #[cfg(test)]
 mod tests_rework_contract;
 
@@ -58,6 +72,10 @@ pub use context::{count_live_engineer_claims, gather_engineer_lifecycle_ctx, red
 pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME,
+};
+pub use engineer_lifecycle_record::{
+    ENGINEER_LIFECYCLE_SCHEMA, EngineerLifecycleRecord, LifecycleReadError,
+    read_verified_engineer_lifecycle_decision, sanitize_lifecycle_fields,
 };
 pub use fallback::DeterministicLifecycleBrain;
 pub use judgment_record::{
@@ -74,6 +92,10 @@ pub use orient_decide_record::{
     OrientFields, read_verified_decide, read_verified_orient,
 };
 pub use parse_failure::ParseFailureRecord;
+/// The closed engineer-lifecycle variant token list — re-exported crate-wide so
+/// the `simard ooda record-lifecycle-decision` CLI writer enumerates the exact
+/// same accepted set the reader/mapping enforce (Group E, #4967). Never forked.
+pub(crate) use recipe_brain::LIFECYCLE_VARIANT_LIST;
 pub use recipe_brain::RecipeBrain;
 /// Shared escalation-ladder backbone + verdict-parse instrumentation reused by
 /// the recipe-backed merge-judge (issue #2419 family / #2429). Exposed
@@ -81,15 +103,73 @@ pub use recipe_brain::RecipeBrain;
 /// transport / metric as the OODA brains rather than reinventing them.
 pub(crate) use recipe_brain::{
     EscalationConfig, LadderRung, build_phase_escalation_note, extract_recipe_decision_output,
+    lifecycle_decision_choice,
+};
+pub use thread_reasoning_record::{
+    MAX_AGE_SECS, THREAD_REASONING_SCHEMA, ThreadDomain, ThreadName, ThreadReasoningReadError,
+    ThreadReasoningRecord, read_verified_thread_reasoning, sanitize_reasoning_summary,
 };
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;
 pub type RecipeEngineerLifecycleBrain = RecipeBrain;
 pub type RecipeOrientBrain = RecipeBrain;
 pub use rustyclawd::{
-    LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RustyClawdBrain, SessionLlmSubmitter,
-    build_rustyclawd_brain,
+    LlmSubmitter, PROMPT_NAME as ACT_PROMPT_NAME, RecordDecisionContext, RustyClawdBrain,
+    SessionLlmSubmitter, build_rustyclawd_brain,
 };
+
+// ---------------------------------------------------------------------------
+// Shared reasoner-seam plumbing (typed-record pattern, epic #4719)
+//
+// Every reasoner seam (RecipeBrain's decide/orient/outcome/per-goal-cycle/
+// admission/resource-admission/idea-dedup/idea-consolidation and RustyClawd's
+// per-goal-cycle) does the SAME two setup steps before running its recipe/tool:
+// resolve THIS binary so the gated `simard ooda record-*` tool can be invoked
+// deterministically, and allocate a fresh owner-only temp dir for the typed
+// record. These helpers give that boilerplate ONE definition so a seam is a
+// one-liner and the fail-CLOSED error shape can never drift between seams. The
+// caller passes its own adapter tag (`base_type`) so error attribution is
+// unchanged.
+// ---------------------------------------------------------------------------
+
+/// Resolve THIS running executable so a recipe sandbox or gated
+/// `simard ooda record-*` tool can invoke it deterministically — never a bare
+/// name that depends on `PATH`. Fail-CLOSED: if it cannot be resolved the caller
+/// writes no record and the matching `read_verified*` reader fails at R1 (a
+/// NO-FALLBACK cycle failure). Shared by every reasoner seam. `base_type` is the
+/// caller's adapter tag, preserved verbatim in the error for attribution.
+pub(super) fn resolve_simard_bin(base_type: &str) -> SimardResult<PathBuf> {
+    std::env::current_exe().map_err(|e| crate::error::SimardError::AdapterInvocationFailed {
+        base_type: base_type.to_string(),
+        reason: format!("could not resolve the running simard binary: {e}"),
+    })
+}
+
+/// Allocate a fresh, UNIQUE, owner-only temp dir (auto-removed when the returned
+/// [`tempfile::TempDir`] guard drops) plus the `record_path` inside it that a
+/// gated `simard ooda record-*` tool atomically writes its typed decision to. A
+/// stale record from a prior cycle can never live at this path; the reader still
+/// independently re-checks `goal_id`/`cycle_number`. Shared by every reasoner
+/// seam. `base_type` is the caller's adapter tag; `noun` names the seam in the
+/// error (e.g. `"per-call outcome"`); `filename` is the record file (e.g.
+/// `"outcome.json"`). The caller MUST keep the returned guard alive for as long
+/// as it needs the dir (through the recipe run and the verified read).
+pub(super) fn alloc_record_tempdir(
+    base_type: &str,
+    prefix: &str,
+    noun: &str,
+    filename: &str,
+) -> SimardResult<(tempfile::TempDir, PathBuf)> {
+    let tempdir = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .map_err(|e| crate::error::SimardError::AdapterInvocationFailed {
+            base_type: base_type.to_string(),
+            reason: format!("could not allocate a {noun} temp dir: {e}"),
+        })?;
+    let record_path = tempdir.path().join(filename);
+    Ok((tempdir, record_path))
+}
 
 // ---------------------------------------------------------------------------
 // Context fed to the brain
@@ -298,42 +378,12 @@ pub enum PerGoalAction {
 /// bound). Caps the blast radius of a runaway model response on logs/records.
 const PER_GOAL_REASON_MAX_CHARS: usize = 500;
 
-/// Raw `{"choice","reason"[,"task_hint"]}` shape emitted by the per-goal-cycle
-/// recipe/model, before validation into a [`PerGoalAction`] by
-/// [`PerGoalAction::from_recipe_envelope`].
-#[derive(serde::Deserialize)]
-struct PerGoalEnvelope {
-    choice: String,
-    #[serde(default)]
-    reason: String,
-    #[serde(default)]
-    task_hint: String,
-}
-
 impl PerGoalAction {
-    /// Parse a per-goal-cycle reasoner envelope into a [`PerGoalAction`] — the
-    /// SINGLE canonical parser shared by every brain backend (`RecipeBrain`,
-    /// `RustyClawdBrain`, …) so the "what is a valid action envelope?" contract
-    /// has exactly one definition. Returns `None` (surfaced by the caller as a
-    /// NO-FALLBACK `Err`, #1711) unless the text contains a balanced JSON object
-    /// with a known `choice` variant AND a non-empty `reason`. `choice` is
-    /// matched case-insensitively; `reason`/`task_hint` are sanitized (ANSI/C0
-    /// control stripped, whitespace collapsed) and bounded, since these
-    /// model-controlled strings flow to operator logs and persisted audit records.
-    /// A missing/empty `reason` or an unknown `choice` yields `None`, so a
-    /// compromised prompt cannot smuggle a reason-less or novel destructive
-    /// action past any backend.
-    pub fn from_recipe_envelope(text: &str) -> Option<Self> {
-        let env: PerGoalEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-        Self::from_choice_fields(&env.choice, &env.reason, &env.task_hint)
-    }
-
     /// Construct a validated [`PerGoalAction`] from already-separated
     /// `choice`/`reason`/`task_hint` fields — the scraper-free core shared by
-    /// [`from_recipe_envelope`](Self::from_recipe_envelope) (which first pulls
-    /// the fields out of a prose envelope) and the `simard ooda record-decision`
-    /// CLI tool (which gets them directly as argv). This is the SINGLE closed-
-    /// enum validation chokepoint:
+    /// the `simard ooda record-decision` CLI tool (which gets them directly as
+    /// argv) and by [`read_verified`] (which re-validates the typed record on
+    /// read). This is the SINGLE closed-enum validation chokepoint:
     ///
     /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
     /// * `reason` must be non-empty after trimming ⇒ `None` otherwise.
@@ -620,7 +670,70 @@ impl Default for GoalOutcomeDecision {
     }
 }
 
+/// Max characters retained for an outcome decision's `rationale`/`replan_hint`
+/// when validated through the shared [`GoalOutcomeDecision::from_choice_fields`]
+/// chokepoint. Mirrors the per-goal/admission bounds — caps the blast radius of
+/// a runaway/hostile model response on operator logs and persisted audit records.
+const OUTCOME_RATIONALE_MAX_CHARS: usize = 500;
+
 impl GoalOutcomeDecision {
+    /// Construct a validated [`GoalOutcomeDecision`] from already-separated
+    /// `choice`/`rationale`/`replan_hint` fields — the SINGLE shared closed-enum
+    /// validation chokepoint reused by the `simard ooda record-outcome` CLI
+    /// writer AND by [`read_verified_outcome`], so writer and reader can never
+    /// drift.
+    ///
+    /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
+    /// * `rationale` is sanitized (ANSI/C0 stripped, whitespace folded, bounded
+    ///   to [`OUTCOME_RATIONALE_MAX_CHARS`]) and MUST be non-empty afterwards ⇒
+    ///   `None` otherwise (fail CLOSED — a rationale made entirely of control
+    ///   bytes collapses to empty and is rejected, not accepted).
+    /// * `replan_hint` is OWNED ONLY by `replan` (and is optional even there): a
+    ///   non-empty `replan_hint` supplied on `mark_achieved`/`reopen`/
+    ///   `keep_open_and_report` ⇒ `None`. On `replan` it is sanitized + bounded
+    ///   the same way; an empty hint is allowed. This is the defense that keeps a
+    ///   compromised prompt or hostile CLI invocation from smuggling re-scope
+    ///   guidance onto a non-replan verdict.
+    pub fn from_choice_fields(choice: &str, rationale: &str, replan_hint: &str) -> Option<Self> {
+        let rationale =
+            sanitize::sanitize_context_var(rationale.trim(), OUTCOME_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        let replan_hint_present = !replan_hint.trim().is_empty();
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("mark_achieved") => {
+                if replan_hint_present {
+                    return None;
+                }
+                Some(Self::MarkAchieved { rationale })
+            }
+            c if c.eq_ignore_ascii_case("reopen") => {
+                if replan_hint_present {
+                    return None;
+                }
+                Some(Self::Reopen { rationale })
+            }
+            c if c.eq_ignore_ascii_case("replan") => {
+                // `replan` owns `replan_hint`; sanitize it only here (it is
+                // discarded by every other variant). An empty hint is allowed.
+                let replan_hint =
+                    sanitize::sanitize_context_var(replan_hint.trim(), OUTCOME_RATIONALE_MAX_CHARS);
+                Some(Self::Replan {
+                    rationale,
+                    replan_hint,
+                })
+            }
+            c if c.eq_ignore_ascii_case("keep_open_and_report") => {
+                if replan_hint_present {
+                    return None;
+                }
+                Some(Self::KeepOpenAndReport { rationale })
+            }
+            _ => None,
+        }
+    }
+
     /// Stable snake_case label — identical to the serde `choice` tag. Shared by
     /// the judgment record, the metric context, and the curate-seam log line.
     pub fn variant_label(&self) -> &'static str {
@@ -641,6 +754,152 @@ impl GoalOutcomeDecision {
             | Self::KeepOpenAndReport { rationale } => rationale,
         }
     }
+
+    /// The load-bearing re-scope guidance carried ONLY by [`Self::Replan`];
+    /// empty string for every other variant (which never own a `replan_hint`).
+    pub fn replan_hint(&self) -> &str {
+        match self {
+            Self::Replan { replan_hint, .. } => replan_hint,
+            _ => "",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed goal-outcome-verification decision RECORD + fail-CLOSED reader
+// (Group D of epic #4719, issue #4967).
+//
+// Replaces the forbidden "recipe prints JSON → Rust scrapes prose → Rust acts"
+// pattern on the outcome-verify seam. The `simard ooda record-outcome` tool
+// writes exactly one `OutcomeDecisionRecord`; `RecipeBrain` reads it back with
+// `read_verified_outcome` instead of scraping the agent's stdout. EVERY failure
+// mode is an `Err` — a visible cycle failure that keeps the goal open — never a
+// silent `keep_open_and_report` masquerading as a reasoned decision (#1711).
+// ---------------------------------------------------------------------------
+
+/// Pinned on-disk schema string for an [`OutcomeDecisionRecord`]. The reader
+/// rejects any other value, so a future `…v2` writer can never be honored by a
+/// `…v1` reader (bumping this is a hard, coordinated change).
+pub const OUTCOME_SCHEMA: &str = "simard.ooda.outcome.v1";
+
+/// One typed, on-disk goal-outcome-verification decision, written by the
+/// `simard ooda record-outcome` tool and read by [`RecipeBrain`] via
+/// [`read_verified_outcome`]. NEVER scraped from agent prose.
+///
+/// The `choice` discriminator + its per-variant fields come from
+/// [`GoalOutcomeDecision`]'s existing `#[serde(tag = "choice", rename_all =
+/// "snake_case")]` representation, flattened into the record — so the tool and
+/// the enum can never disagree on the wire shape:
+///
+/// ```json
+/// {"schema":"simard.ooda.outcome.v1","goal_id":"…","cycle_number":0,
+///  "choice":"replan","rationale":"…","replan_hint":"…"}
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutcomeDecisionRecord {
+    /// Schema pin. Must equal [`OUTCOME_SCHEMA`].
+    pub schema: String,
+    /// The goal this outcome decision is for. Re-verified against the live ctx.
+    pub goal_id: String,
+    /// The cycle this decision is for. Re-verified against the live ctx.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + fields).
+    #[serde(flatten)]
+    pub decision: GoalOutcomeDecision,
+}
+
+/// Read and FULLY verify a goal-outcome-verification record, returning the
+/// validated closed-enum decision.
+///
+/// Returns `Ok(GoalOutcomeDecision)` ONLY when the record exists, deserializes
+/// into an [`OutcomeDecisionRecord`], pins [`OUTCOME_SCHEMA`], its embedded
+/// `goal_id`/`cycle_number` match the live ctx, and its fields re-validate
+/// through [`GoalOutcomeDecision::from_choice_fields`]. EVERY other outcome is
+/// an `Err` — the caller (`decide_goal_outcome_verification`) surfaces it as a
+/// NO-FALLBACK cycle failure that keeps the goal open, never a default
+/// `keep_open_and_report` masquerading as a reasoned decision (#1711).
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R4 unknown choice, R5 missing/empty(-after-
+/// sanitize) rationale, R6 goal_id mismatch, R7 cycle_number mismatch. R8 (all
+/// pass) ⇒ `Ok`.
+///
+/// `replan_hint` ownership (a hint smuggled onto a non-`replan` variant) is
+/// authoritatively enforced on the WRITE path via
+/// [`GoalOutcomeDecision::from_choice_fields`]. The read path re-invokes that
+/// same chokepoint below as defense-in-depth, but its ownership arm is
+/// structurally unreachable here: serde tagged-enum deserialization drops any
+/// non-owned field, so `record.decision` only ever carries its own variant's
+/// fields. In practice only R5 (empty-after-sanitize) can reject at that step.
+pub fn read_verified_outcome(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<GoalOutcomeDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-outcome-verify-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED. The tool writes nothing
+    // when it cannot resolve its binary or fails validation, so a missing file
+    // is the common "the reasoner produced no valid decision" path.
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "outcome-verify record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2/R4(unknown-choice)/R5(missing) — malformed JSON, an unknown `choice`,
+    // or a missing required field all fail deserialization into the closed type.
+    let record: OutcomeDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "outcome-verify record did not deserialize (malformed/unknown-choice/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != OUTCOME_SCHEMA {
+        return Err(fail(format!(
+            "outcome-verify record schema {:?} != expected {OUTCOME_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+
+    // R6 — goal identity.
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "outcome-verify record goal_id {:?} != live ctx {:?} (stale/other-goal; fail-CLOSED)",
+            record.goal_id, goal_id
+        )));
+    }
+
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "outcome-verify record cycle_number {} != live ctx {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R5(empty-after-sanitize) + defense-in-depth — re-validate + re-sanitize the
+    // free text through the SAME closed-enum chokepoint the writer uses,
+    // independently of the tool. The `choice` tag is already known-valid (it
+    // deserialized into the closed enum), so only the empty-after-sanitize case
+    // can reject at this step.
+    GoalOutcomeDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+        record.decision.replan_hint(),
+    )
+    .ok_or_else(|| {
+        fail(
+            "outcome-verify record rationale is empty after sanitization (fail-CLOSED)".to_string(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -705,6 +964,26 @@ pub struct EngineerAdmissionCtx {
     /// Resolved target repo root (used for merge-base resolution + rendering).
     #[serde(default)]
     pub repo_root: String,
+}
+
+/// Max characters retained for an admission decision's `rationale` (and the
+/// variant-owned identifier fields) when validated through the shared
+/// [`EngineerAdmissionDecision::from_choice_fields`] /
+/// [`ResourceAdmissionDecision::from_choice_fields`] chokepoint. Mirrors the
+/// per-goal reason bound — caps the blast radius of a runaway/hostile model
+/// response on operator logs and persisted audit records.
+const ADMISSION_RATIONALE_MAX_CHARS: usize = 500;
+
+/// Sanitize every element of a variant-owned admission list (`blocked_by` /
+/// `overlap_files`) through the same ANSI/C0-stripping, whitespace-folding,
+/// length-bounding chokepoint as the free text. Goal-ids / repo-relative paths
+/// pass through unchanged; a hostile control-laden element is cleaned before it
+/// can reach an operator log or persisted record.
+fn sanitize_admission_list(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|s| sanitize::sanitize_context_var(s.trim(), ADMISSION_RATIONALE_MAX_CHARS))
+        .collect()
 }
 
 /// What the brain decided about admitting a NEW engineer for a candidate goal
@@ -780,6 +1059,83 @@ impl EngineerAdmissionDecision {
             Self::Admit { .. } => Vec::new(),
             Self::Defer { blocked_by, .. } => blocked_by.clone(),
             Self::SerializeAfter { after_goal_id, .. } => vec![after_goal_id.clone()],
+        }
+    }
+
+    /// Construct a validated [`EngineerAdmissionDecision`] from already-separated
+    /// `choice` + field inputs — the SINGLE shared closed-enum validation
+    /// chokepoint reused by the `simard ooda record-admission` CLI writer AND by
+    /// [`read_verified_admission`], so writer and reader can never drift.
+    ///
+    /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
+    /// * `rationale` is sanitized (ANSI/C0 stripped, whitespace folded, bounded
+    ///   to [`ADMISSION_RATIONALE_MAX_CHARS`]) and MUST be non-empty afterwards
+    ///   ⇒ `None` otherwise (fail CLOSED — a rationale made entirely of control
+    ///   bytes collapses to empty and is rejected, not accepted).
+    /// * Per-variant field OWNERSHIP is enforced: a field supplied on a variant
+    ///   that does not own it ⇒ `None`. `admit` owns NOTHING; `defer` owns
+    ///   `blocked_by` + `retry_after_secs`; `serialize_after` owns
+    ///   `after_goal_id` (required, non-empty) + `overlap_files`. This is the
+    ///   defense that keeps a compromised prompt or hostile CLI invocation from
+    ///   smuggling a defer-only field onto an admit (or vice versa).
+    pub fn from_choice_fields(
+        choice: &str,
+        rationale: &str,
+        blocked_by: &[String],
+        after_goal_id: &str,
+        overlap_files: &[String],
+        retry_after_secs: Option<u64>,
+    ) -> Option<Self> {
+        let rationale =
+            sanitize::sanitize_context_var(rationale.trim(), ADMISSION_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        let after_goal_id_present = !after_goal_id.trim().is_empty();
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("admit") => {
+                // `admit` owns no extra fields — any smuggled field fails CLOSED.
+                if !blocked_by.is_empty()
+                    || after_goal_id_present
+                    || !overlap_files.is_empty()
+                    || retry_after_secs.is_some()
+                {
+                    return None;
+                }
+                Some(Self::Admit { rationale })
+            }
+            c if c.eq_ignore_ascii_case("defer") => {
+                // `defer` owns blocked_by + retry_after_secs; reject the
+                // serialize_after-owned fields.
+                if after_goal_id_present || !overlap_files.is_empty() {
+                    return None;
+                }
+                Some(Self::Defer {
+                    blocked_by: sanitize_admission_list(blocked_by),
+                    rationale,
+                    retry_after_secs,
+                })
+            }
+            c if c.eq_ignore_ascii_case("serialize_after") => {
+                // `serialize_after` owns after_goal_id (required) + overlap_files;
+                // reject the defer-owned fields.
+                if !blocked_by.is_empty() || retry_after_secs.is_some() {
+                    return None;
+                }
+                let after_goal_id = sanitize::sanitize_context_var(
+                    after_goal_id.trim(),
+                    ADMISSION_RATIONALE_MAX_CHARS,
+                );
+                if after_goal_id.is_empty() {
+                    return None;
+                }
+                Some(Self::SerializeAfter {
+                    after_goal_id,
+                    overlap_files: sanitize_admission_list(overlap_files),
+                    rationale,
+                })
+            }
+            _ => None,
         }
     }
 }
@@ -896,6 +1252,286 @@ impl ResourceAdmissionDecision {
             | Self::ReclaimFirst { rationale } => rationale,
         }
     }
+
+    /// Construct a validated [`ResourceAdmissionDecision`] from a `choice` tag +
+    /// `rationale` — the SINGLE shared closed-enum validation chokepoint reused
+    /// by the `simard ooda record-resource-admission` CLI writer AND by
+    /// [`read_verified_resource_admission`], so writer and reader can never
+    /// drift. `choice` is matched case-insensitively (unknown ⇒ `None`);
+    /// `rationale` is sanitized and MUST be non-empty afterwards (fail CLOSED).
+    /// All three variants carry ONLY `rationale`, so there are no variant-owned
+    /// extra fields to police here.
+    pub fn from_choice_fields(choice: &str, rationale: &str) -> Option<Self> {
+        let rationale =
+            sanitize::sanitize_context_var(rationale.trim(), ADMISSION_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("admit") => Some(Self::Admit { rationale }),
+            c if c.eq_ignore_ascii_case("defer") => Some(Self::Defer { rationale }),
+            c if c.eq_ignore_ascii_case("reclaim_first") => Some(Self::ReclaimFirst { rationale }),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed engineer- + resource-ADMISSION decision RECORDS + fail-CLOSED readers
+// (Group B of epic #4719, issue #4906).
+//
+// Replace the forbidden "recipe prints JSON → Rust scrapes prose → Rust acts"
+// pattern on the two admission seams. The `simard ooda record-admission` /
+// `record-resource-admission` tools write exactly one typed record;
+// `RecipeBrain` reads it back with `read_verified_admission` /
+// `read_verified_resource_admission` instead of scraping stdout. EVERY failure
+// mode is an `Err`; HOW that `Err` is surfaced is UNCHANGED by this rework — the
+// engineer-admission act-site turns it into a loud `Admit` (fail-OPEN), the
+// resource-admission act-site into a benign `Defer` (fail-CLOSED).
+// ---------------------------------------------------------------------------
+
+/// Pinned on-disk schema string for an [`AdmissionDecisionRecord`]. The reader
+/// rejects any other value, so a future `…v2` writer can never be honored by a
+/// `…v1` reader (bumping this is a hard, coordinated change).
+pub const ADMISSION_SCHEMA: &str = "simard.ooda.admission.v1";
+
+/// Pinned on-disk schema string for a [`ResourceAdmissionDecisionRecord`].
+pub const RESOURCE_ADMISSION_SCHEMA: &str = "simard.ooda.resource_admission.v1";
+
+/// One typed, on-disk engineer-admission verdict, written by the
+/// `simard ooda record-admission` tool and read by [`RecipeBrain`] via
+/// [`read_verified_admission`]. NEVER scraped from agent prose.
+///
+/// The `choice` discriminator + its per-variant fields come from
+/// [`EngineerAdmissionDecision`]'s existing `#[serde(tag = "choice",
+/// rename_all = "snake_case")]` representation, flattened into the record — so
+/// the tool and the enum can never disagree on the wire shape.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdmissionDecisionRecord {
+    /// Schema pin. Must equal [`ADMISSION_SCHEMA`].
+    pub schema: String,
+    /// The candidate goal this verdict is for. Re-verified against the live ctx.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified against the live ctx.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + fields).
+    #[serde(flatten)]
+    pub decision: EngineerAdmissionDecision,
+}
+
+/// One typed, on-disk resource-admission verdict, written by the
+/// `simard ooda record-resource-admission` tool and read by [`RecipeBrain`] via
+/// [`read_verified_resource_admission`]. NEVER scraped from agent prose.
+///
+/// Derives `PartialEq` only (no `Eq`, no `Default`): [`ResourceAdmissionDecision`]
+/// deliberately carries no `Eq`/`Default` (the fail-closed `Defer` is chosen in
+/// the seam, never by defaulting the enum), so this record mirrors that.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceAdmissionDecisionRecord {
+    /// Schema pin. Must equal [`RESOURCE_ADMISSION_SCHEMA`].
+    pub schema: String,
+    /// The candidate goal this verdict is for. Re-verified against the live ctx.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified against the live ctx.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + `rationale`).
+    #[serde(flatten)]
+    pub decision: ResourceAdmissionDecision,
+}
+
+/// Read and FULLY verify an engineer-admission record, returning the validated
+/// closed-enum decision.
+///
+/// Returns `Ok(EngineerAdmissionDecision)` ONLY when the record exists,
+/// deserializes into an [`AdmissionDecisionRecord`], pins [`ADMISSION_SCHEMA`],
+/// its embedded `goal_id`/`cycle_number` match the live ctx, and its fields
+/// re-validate through [`EngineerAdmissionDecision::from_choice_fields`]. EVERY
+/// other outcome is an `Err` — the caller (`decide_engineer_admission`) surfaces
+/// it on the EXISTING Rail-2 path (a loud `Admit`, fail-OPEN). This reader never
+/// picks a default; it only reports Ok/Err.
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R4 unknown choice, R5 missing/empty(-after-
+/// sanitize) rationale, R6 goal_id mismatch, R7 cycle_number mismatch. R8 (all
+/// pass) ⇒ `Ok`.
+///
+/// Field ownership (e.g. a defer-only field smuggled onto an admit) is
+/// authoritatively enforced on the WRITE path via
+/// [`EngineerAdmissionDecision::from_choice_fields`]. The read path re-invokes
+/// that same chokepoint below as defense-in-depth, but its field-ownership arm
+/// is structurally unreachable here: serde tagged-enum deserialization drops any
+/// non-owned field, so `record.decision` only ever carries its own variant's
+/// fields, and the tuple fed back to `from_choice_fields` always matches. In
+/// practice only R5 (empty-after-sanitize) can reject at that step.
+pub fn read_verified_admission(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<EngineerAdmissionDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-engineer-admission-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED (surfaced as a loud Admit).
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "engineer-admission record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2/R4(unknown-choice)/R5(missing) — malformed JSON, an unknown `choice`,
+    // or a missing required field all fail deserialization into the closed type.
+    let record: AdmissionDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "engineer-admission record did not deserialize (malformed/unknown-choice/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != ADMISSION_SCHEMA {
+        return Err(fail(format!(
+            "engineer-admission record schema {:?} != expected {ADMISSION_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — goal identity (candidate goal).
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "engineer-admission record goal_id {:?} != live ctx {:?} (stale/other-goal; fail-CLOSED)",
+            record.goal_id, goal_id
+        )));
+    }
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "engineer-admission record cycle_number {} != live ctx {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R5(empty-after-sanitize) + defense-in-depth — extract the variant-owned
+    // fields and re-validate + re-sanitize through the SAME closed-enum chokepoint
+    // the writer uses, independently of the tool. The chokepoint's field-ownership
+    // arm cannot trip here: the tuple below is extracted from the already-typed
+    // `record.decision`, so it always matches its variant's ownership (serde dropped
+    // any non-owned field on deserialize). Field ownership is authoritatively
+    // enforced on the write path; this re-check reduces to the empty-rationale case.
+    let (blocked_by, after_goal_id, overlap_files, retry_after_secs): (
+        &[String],
+        &str,
+        &[String],
+        Option<u64>,
+    ) = match &record.decision {
+        EngineerAdmissionDecision::Admit { .. } => (&[], "", &[], None),
+        EngineerAdmissionDecision::Defer {
+            blocked_by,
+            retry_after_secs,
+            ..
+        } => (blocked_by.as_slice(), "", &[], *retry_after_secs),
+        EngineerAdmissionDecision::SerializeAfter {
+            after_goal_id,
+            overlap_files,
+            ..
+        } => (&[], after_goal_id.as_str(), overlap_files.as_slice(), None),
+    };
+    EngineerAdmissionDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+        blocked_by,
+        after_goal_id,
+        overlap_files,
+        retry_after_secs,
+    )
+    .ok_or_else(|| {
+        fail(
+            "engineer-admission record failed chokepoint re-validation (empty rationale after \
+             sanitize / field-ownership violation; fail-CLOSED)"
+                .to_string(),
+        )
+    })
+}
+
+/// Read and FULLY verify a resource-admission record, returning the validated
+/// closed-enum decision.
+///
+/// Returns `Ok(ResourceAdmissionDecision)` ONLY when the record exists,
+/// deserializes into a [`ResourceAdmissionDecisionRecord`], pins
+/// [`RESOURCE_ADMISSION_SCHEMA`], its embedded `goal_id`/`cycle_number` match the
+/// live ctx, and its rationale re-validates through
+/// [`ResourceAdmissionDecision::from_choice_fields`]. EVERY other outcome is an
+/// `Err` — the caller (`decide_resource_admission`) surfaces it on the EXISTING
+/// fail-closed path (a benign `Defer`). This reader never picks a default.
+///
+/// Same R1–R8 matrix as [`read_verified_admission`]; the resource variants own
+/// no extra fields, so R4's field-ownership arm reduces to the unknown-choice
+/// check.
+pub fn read_verified_resource_admission(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<ResourceAdmissionDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-resource-admission-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED (surfaced as a benign Defer).
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "resource-admission record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2/R4/R5(missing) — malformed JSON, an unknown `choice`, or a missing
+    // rationale field all fail deserialization into the closed type.
+    let record: ResourceAdmissionDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "resource-admission record did not deserialize (malformed/unknown-choice/missing-rationale): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin (also rejects an engineer-admission record).
+    if record.schema != RESOURCE_ADMISSION_SCHEMA {
+        return Err(fail(format!(
+            "resource-admission record schema {:?} != expected {RESOURCE_ADMISSION_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — goal identity.
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "resource-admission record goal_id {:?} != live ctx {:?} (stale/other-goal; fail-CLOSED)",
+            record.goal_id, goal_id
+        )));
+    }
+    // R7 — cycle identity.
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "resource-admission record cycle_number {} != live ctx {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R5(empty-after-sanitize) + defense-in-depth — re-validate + re-sanitize
+    // through the SAME closed-enum chokepoint the writer uses.
+    ResourceAdmissionDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+    )
+    .ok_or_else(|| {
+        fail(
+            "resource-admission record failed chokepoint re-validation (empty rationale after \
+             sanitize; fail-CLOSED)"
+                .to_string(),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +1603,59 @@ impl IdeaDedupDecision {
             | Self::EnhanceExisting { rationale, .. } => rationale,
         }
     }
+
+    /// Construct a validated [`IdeaDedupDecision`] from already-separated
+    /// `choice` + field inputs — the SINGLE shared closed-enum validation
+    /// chokepoint reused by the `simard ooda record-idea-dedup` CLI writer AND
+    /// by [`read_verified_idea_dedup`], so writer and reader can never drift
+    /// (issue #2925, Group C of epic #4719).
+    ///
+    /// * `choice` is matched case-insensitively; an unknown tag ⇒ `None`.
+    /// * `reason` is sanitized (ANSI/C0 stripped, whitespace folded, bounded to
+    ///   [`IDEA_RATIONALE_MAX_CHARS`]) and MUST be non-empty afterwards ⇒ `None`
+    ///   otherwise (fail CLOSED — a rationale made entirely of control bytes
+    ///   collapses to empty and is rejected, not accepted).
+    /// * Per-variant field OWNERSHIP is enforced: `target_node_id` is owned ONLY
+    ///   by `enhance_existing`, where it is REQUIRED (non-empty after sanitize).
+    ///   `create_new` / `skip` REJECT any `target_node_id` (⇒ `None`). An
+    ///   `enhance_existing` without a target is unactionable — guessing a target
+    ///   is a wrong-node write, so it fails CLOSED here.
+    pub fn from_choice_fields(choice: &str, reason: &str, target_node_id: &str) -> Option<Self> {
+        let rationale = sanitize::sanitize_context_var(reason.trim(), IDEA_RATIONALE_MAX_CHARS);
+        if rationale.is_empty() {
+            return None;
+        }
+        let target_present = !target_node_id.trim().is_empty();
+        match choice.trim() {
+            c if c.eq_ignore_ascii_case("create_new") => {
+                // `create_new` owns no target — any smuggled target fails CLOSED.
+                if target_present {
+                    return None;
+                }
+                Some(Self::CreateNew { rationale })
+            }
+            c if c.eq_ignore_ascii_case("skip") => {
+                // `skip` owns no target — any smuggled target fails CLOSED.
+                if target_present {
+                    return None;
+                }
+                Some(Self::Skip { rationale })
+            }
+            c if c.eq_ignore_ascii_case("enhance_existing") => {
+                let target =
+                    sanitize::sanitize_context_var(target_node_id.trim(), IDEA_RATIONALE_MAX_CHARS);
+                if target.is_empty() {
+                    // enhance without a target is unactionable → fail CLOSED.
+                    return None;
+                }
+                Some(Self::EnhanceExisting {
+                    target_node_id: target,
+                    rationale,
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The whole existing pool, fed to the consolidation brain to cluster by
@@ -992,6 +1681,305 @@ pub struct IdeaCluster {
     /// Optional supporting evidence text/links appended to the canonical.
     #[serde(default)]
     pub evidence: Vec<String>,
+}
+
+/// Max characters retained for an idea decision's free text (dedup `rationale`,
+/// cluster `merged_rationale`, and each list element) when validated through the
+/// shared [`IdeaDedupDecision::from_choice_fields`] / [`IdeaCluster::sanitized`]
+/// chokepoints. Mirrors the admission/per-goal reason bound — caps the blast
+/// radius of a runaway/hostile model response on operator logs and records.
+const IDEA_RATIONALE_MAX_CHARS: usize = 500;
+
+/// Max clusters retained in one consolidation record, and max elements retained
+/// in a cluster's `redundant_ids` / `evidence` lists. Mirrors the 64-entry
+/// prompt-cost DoS guard in `render_existing_shortlist` — an over-long list is
+/// capped (never trusted whole), never an error.
+const IDEA_CLUSTER_LIST_MAX: usize = 64;
+
+/// Sanitize every element of a cluster list (`redundant_ids` / `evidence`)
+/// through the same ANSI/C0-stripping, whitespace-folding, length-bounding
+/// chokepoint as the free text; drop elements that collapse to empty, and cap
+/// the list length. `node_id`s / evidence lines pass through unchanged; a
+/// hostile control-laden or empty element is dropped before it can reach an
+/// operator log or persisted record.
+fn sanitize_idea_list(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|s| sanitize::sanitize_context_var(s.trim(), IDEA_RATIONALE_MAX_CHARS))
+        .filter(|s| !s.is_empty())
+        .take(IDEA_CLUSTER_LIST_MAX)
+        .collect()
+}
+
+impl IdeaCluster {
+    /// Sanitize + validate one cluster — the SINGLE shared per-cluster
+    /// chokepoint reused by the `simard ooda record-idea-consolidation` CLI
+    /// writer AND by [`read_verified_idea_consolidation`], so writer and reader
+    /// can never drift (issue #2925).
+    ///
+    /// Returns `None` (⇒ the cluster is DROPPED, not an error) when
+    /// `canonical_id` is empty after sanitizing — a headless cluster names
+    /// nothing to keep. Otherwise sanitizes `merged_rationale` (ANSI/C0
+    /// stripped, whitespace folded, bounded) and sanitizes + drops-empty + caps
+    /// the `redundant_ids` / `evidence` lists.
+    pub fn sanitized(&self) -> Option<IdeaCluster> {
+        let canonical_id =
+            sanitize::sanitize_context_var(self.canonical_id.trim(), IDEA_RATIONALE_MAX_CHARS);
+        if canonical_id.is_empty() {
+            return None;
+        }
+        Some(IdeaCluster {
+            canonical_id,
+            redundant_ids: sanitize_idea_list(&self.redundant_ids),
+            merged_rationale: sanitize::sanitize_context_var(
+                self.merged_rationale.trim(),
+                IDEA_RATIONALE_MAX_CHARS,
+            ),
+            evidence: sanitize_idea_list(&self.evidence),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed, on-disk creative-ideas records + fail-CLOSED readers (issue #2925;
+// Group C of epic #4719). The reasoning recipe ACTS by calling a gated
+// `simard ooda record-idea-dedup` / `record-idea-consolidation` tool that writes
+// exactly one of these records; `RecipeBrain` reads it back with
+// `read_verified_idea_dedup` / `read_verified_idea_consolidation` instead of
+// scraping the agent's stdout. EVERY failure mode is an `Err`; HOW that `Err` is
+// surfaced is UNCHANGED — the dedup gate maps it to a fail-CLOSED drop, and the
+// consolidation applier maps it to "write nothing, retry later". The
+// `Some(vec![])` vs `None` distinction is preserved EXACTLY: a present-but-empty
+// consolidation record reads back `Ok(vec![])`, an absent/malformed/mismatched
+// record is `Err`.
+// ---------------------------------------------------------------------------
+
+/// Pinned on-disk schema string for an [`IdeaDedupDecisionRecord`]. The reader
+/// rejects any other value, so a future `…v2` writer can never be honored by a
+/// `…v1` reader (bumping this is a hard, coordinated change).
+pub const IDEA_DEDUP_SCHEMA: &str = "simard.creative.idea_dedup.v1";
+
+/// Pinned on-disk schema string for an [`IdeaConsolidationRecord`].
+pub const IDEA_CONSOLIDATION_SCHEMA: &str = "simard.creative.idea_consolidation.v1";
+
+/// The fixed synthetic per-seam `goal_id` sentinel for the semantic-dedup seam.
+/// Neither [`IdeaDedupCtx`] nor [`IdeaConsolidationCtx`] is naturally
+/// goal-scoped, so R6 enforces write/read self-consistency against these
+/// sentinels (the fresh per-call temp dir already defeats cross-cycle replay).
+pub const IDEA_DEDUP_GOAL_SENTINEL: &str = "creative-idea-dedup";
+
+/// The fixed synthetic per-seam `goal_id` sentinel for the consolidation seam.
+pub const IDEA_CONSOLIDATION_GOAL_SENTINEL: &str = "creative-idea-consolidation";
+
+/// One typed, on-disk creative-idea dedup verdict, written by the
+/// `simard ooda record-idea-dedup` tool and read by [`RecipeBrain`] via
+/// [`read_verified_idea_dedup`]. NEVER scraped from agent prose.
+///
+/// The `choice` discriminator + its per-variant fields come from
+/// [`IdeaDedupDecision`]'s existing `#[serde(tag = "choice",
+/// rename_all = "snake_case")]` representation, flattened into the record — so
+/// the tool and the enum can never disagree on the wire shape.
+///
+/// [`RecipeBrain`]: recipe_brain::RecipeBrain
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdeaDedupDecisionRecord {
+    /// Schema pin. Must equal [`IDEA_DEDUP_SCHEMA`].
+    pub schema: String,
+    /// The per-seam sentinel this verdict is for. Re-verified on read.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified on read.
+    pub cycle_number: u32,
+    /// The validated, closed-enum decision (flattened `choice` + fields).
+    #[serde(flatten)]
+    pub decision: IdeaDedupDecision,
+}
+
+/// One typed, on-disk creative-ideas consolidation verdict, written by the
+/// `simard ooda record-idea-consolidation` tool and read by [`RecipeBrain`] via
+/// [`read_verified_idea_consolidation`]. NEVER scraped from agent prose.
+///
+/// Unlike the dedup record this carries a validated cluster `Vec` (NOT a
+/// flattened choice enum); a present-but-empty `clusters` is a VALID "nothing to
+/// consolidate" result, distinct from an absent record.
+///
+/// [`RecipeBrain`]: recipe_brain::RecipeBrain
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IdeaConsolidationRecord {
+    /// Schema pin. Must equal [`IDEA_CONSOLIDATION_SCHEMA`].
+    pub schema: String,
+    /// The per-seam sentinel this verdict is for. Re-verified on read.
+    pub goal_id: String,
+    /// The cycle this verdict is for. Re-verified on read.
+    pub cycle_number: u32,
+    /// The validated cluster list (re-sanitized + re-capped on read).
+    #[serde(default)]
+    pub clusters: Vec<IdeaCluster>,
+}
+
+/// Read and FULLY verify a creative-idea dedup record, returning the validated
+/// closed-enum decision.
+///
+/// Returns `Ok(IdeaDedupDecision)` ONLY when the record exists, deserializes
+/// into an [`IdeaDedupDecisionRecord`], pins [`IDEA_DEDUP_SCHEMA`], its embedded
+/// `goal_id` / `cycle_number` match the seam sentinels, and its fields
+/// re-validate through [`IdeaDedupDecision::from_choice_fields`]. EVERY other
+/// outcome is an `Err` — the caller (`decide_idea_dedup`) surfaces it and the
+/// dedup gate fails CLOSED (drops the candidate this cycle). This reader never
+/// picks a default; it only reports Ok/Err.
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R4 unknown choice / enhance-without-target,
+/// R5 missing/empty(-after-sanitize) rationale, R6 goal_id mismatch,
+/// R7 cycle_number mismatch. R8 (all pass) ⇒ `Ok`. Fields are re-sanitized on
+/// read through the same chokepoint the writer uses.
+pub fn read_verified_idea_dedup(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<IdeaDedupDecision> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-idea-dedup-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED.
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "idea-dedup record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2 / R4(unknown-choice) / R5(missing-field) — malformed JSON, an unknown
+    // `choice`, or a missing required field all fail deserialization.
+    let record: IdeaDedupDecisionRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "idea-dedup record did not deserialize (malformed/unknown-choice/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != IDEA_DEDUP_SCHEMA {
+        return Err(fail(format!(
+            "idea-dedup record schema {:?} != expected {IDEA_DEDUP_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — seam identity (no other-seam replay).
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "idea-dedup record goal_id {:?} != seam sentinel {goal_id:?} (stale/other-seam; fail-CLOSED)",
+            record.goal_id
+        )));
+    }
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "idea-dedup record cycle_number {} != expected {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // R4(enhance-without-target) + R5(empty-after-sanitize) — re-validate +
+    // re-sanitize through the SAME closed-enum chokepoint the writer uses,
+    // independently of the tool. `target_node_id` is extracted from the
+    // already-typed `record.decision`, so field ownership always matches its
+    // variant (serde dropped any non-owned field on deserialize).
+    let target: &str = match &record.decision {
+        IdeaDedupDecision::CreateNew { .. } | IdeaDedupDecision::Skip { .. } => "",
+        IdeaDedupDecision::EnhanceExisting { target_node_id, .. } => target_node_id.as_str(),
+    };
+    IdeaDedupDecision::from_choice_fields(
+        record.decision.variant_label(),
+        record.decision.rationale(),
+        target,
+    )
+    .ok_or_else(|| {
+        fail(
+            "idea-dedup record failed chokepoint re-validation (empty rationale after sanitize / \
+             enhance without a target; fail-CLOSED)"
+                .to_string(),
+        )
+    })
+}
+
+/// Read and FULLY verify a creative-ideas consolidation record, returning the
+/// validated (re-sanitized + re-capped) cluster list.
+///
+/// Returns `Ok(Vec<IdeaCluster>)` when the record exists, deserializes into an
+/// [`IdeaConsolidationRecord`], pins [`IDEA_CONSOLIDATION_SCHEMA`], and its
+/// embedded `goal_id` / `cycle_number` match the seam sentinels. A
+/// present-but-empty `clusters` reads back `Ok(vec![])` — a VALID "nothing to
+/// consolidate" result, distinct from an absent record. Each surviving cluster
+/// is re-run through [`IdeaCluster::sanitized`] (headless clusters dropped) and
+/// the list is re-capped at [`IDEA_CLUSTER_LIST_MAX`] on read (never trusted
+/// whole).
+///
+/// Fail-CLOSED matrix (each row is an `Err`): R1 absent/unreadable, R2 malformed
+/// JSON, R3 wrong/missing schema, R6 goal_id mismatch, R7 cycle_number mismatch.
+/// (There is no R4/R5 for consolidation — an empty list is valid, and headless
+/// clusters are dropped, not rejected.)
+pub fn read_verified_idea_consolidation(
+    path: &std::path::Path,
+    goal_id: &str,
+    cycle_number: u32,
+) -> SimardResult<Vec<IdeaCluster>> {
+    use crate::error::SimardError;
+
+    let fail = |reason: String| SimardError::AdapterInvocationFailed {
+        base_type: "recipe-idea-consolidation-brain".to_string(),
+        reason,
+    };
+
+    // R1 — absence (or any read error) is fail-CLOSED (distinct from a
+    // present-but-empty Ok(vec![])).
+    let bytes = std::fs::read(path).map_err(|e| {
+        fail(format!(
+            "idea-consolidation record absent/unreadable at {}: {e} (fail-CLOSED)",
+            path.display()
+        ))
+    })?;
+
+    // R2 — malformed JSON / missing required field.
+    let record: IdeaConsolidationRecord = serde_json::from_slice(&bytes).map_err(|e| {
+        fail(format!(
+            "idea-consolidation record did not deserialize (malformed/missing-field): {e} (fail-CLOSED)"
+        ))
+    })?;
+
+    // R3 — schema version pin.
+    if record.schema != IDEA_CONSOLIDATION_SCHEMA {
+        return Err(fail(format!(
+            "idea-consolidation record schema {:?} != expected {IDEA_CONSOLIDATION_SCHEMA:?} (fail-CLOSED)",
+            record.schema
+        )));
+    }
+    // R6 — seam identity (no other-seam replay).
+    if record.goal_id != goal_id {
+        return Err(fail(format!(
+            "idea-consolidation record goal_id {:?} != seam sentinel {goal_id:?} (stale/other-seam; fail-CLOSED)",
+            record.goal_id
+        )));
+    }
+    // R7 — cycle identity (no replay of a prior cycle's verdict).
+    if record.cycle_number != cycle_number {
+        return Err(fail(format!(
+            "idea-consolidation record cycle_number {} != expected {cycle_number} (prior-cycle; fail-CLOSED)",
+            record.cycle_number
+        )));
+    }
+
+    // Re-sanitize + re-cap on read through the SAME per-cluster chokepoint the
+    // writer uses. Headless clusters are dropped (not an error); a present-empty
+    // list reads back Ok(vec![]).
+    Ok(record
+        .clusters
+        .iter()
+        .filter_map(IdeaCluster::sanitized)
+        .take(IDEA_CLUSTER_LIST_MAX)
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

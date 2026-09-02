@@ -9,12 +9,12 @@ description: >
   alongside OODA. This page is the single source of truth for each thread's
   kind, cadence, priority, env gate, recipe, memory prefixes, goal-board
   authority, cross-thread composition, and its live acceptance signal. All ten
-  are OFF by default behind a double env gate.
-last_updated: 2026-07-08
+  are ENABLED by default (opt-out) behind a default-ON double env gate (#4845).
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: specification — issue #5 (ten threads, OFF by default)
+status: reference — issue #5 (ten threads); default-ON since issue #4845
 related:
   - ./cognitive-thread-scheduling.md
   - ./recipe-invoker-seam.md
@@ -44,15 +44,16 @@ env-gated registrations + **one** shared brick
 ([salience → Decide](../concepts/salience-and-decide.md)). Recipes and prompts
 over new Rust.
 
-!!! note "Status — specification for issue #5, OFF by default"
-    This page documents the ten threads as the **build target** for issue #5.
-    Every thread ships **OFF by default** behind a double env gate
-    (`SIMARD_COGNITIVE_THREADS_ENABLED` **and**
-    `SIMARD_THREAD_<NAME>_ENABLED`) and is **additive**: with the master gate
-    unset, nothing registers and there are zero side effects. The batch lands as
-    a reviewed, **unmerged** pull request; each thread carries an offline unit
-    test and a live-smoke acceptance check, and none uses `--admin` or
-    `--no-verify`. To enable and operate them, see
+!!! note "Status — default-ON since issue #4845"
+    This page documents the ten threads' catalog metadata. As of issue #4845
+    every thread is **ENABLED by default (opt-out)** behind a **default-ON**
+    double env gate (`SIMARD_COGNITIVE_THREADS_ENABLED` and
+    `SIMARD_THREAD_<NAME>_ENABLED`) — a thread runs unless a gate is set to an
+    explicit falsy token (`0`/`false`/`no`/`off`). The threads are **additive**
+    and none uses `--admin` or `--no-verify`. For the always-on scheduling,
+    per-thread telemetry, and Overseer auto-remediation contract see
+    [Cognitive-thread full activation](./cognitive-thread-full-activation.md);
+    to enable, disable, and tune them see
     [Configure the cognitive-thread batch](../howto/configure-cognitive-thread-batch.md).
 
 ## The ten threads at a glance
@@ -479,6 +480,7 @@ with **no recipe** (deterministic sensing). Prompts live inline in each recipe's
 
 ## See also
 
+- [Cognitive-thread full activation (#4845)](./cognitive-thread-full-activation.md) — the default-ON opt-out env model, the full cadence roster, the **durable thread-intent table**, and the `ThreadKind` reconciliation (15 variants = 14 live + 1 reserved `SensoryProcessing`).
 - [Configure the cognitive-thread batch](../howto/configure-cognitive-thread-batch.md) — enable and tune the ten threads.
 - [The RecipeInvoker seam](./recipe-invoker-seam.md) — the shared brick and its security contract.
 - [Salience and the OODA Decide handoff](../concepts/salience-and-decide.md) — the next-cycle durable signal and overseer-vs-values separation of powers.

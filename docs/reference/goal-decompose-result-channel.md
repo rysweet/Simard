@@ -47,14 +47,14 @@ This is the goal-side sibling of the distillation
 [clean result channel](./distill-recipe-output-capture.md): the same
 brittle-parsing-of-LLM-output antipattern, closed the same structural way. The
 goal reader is **modeled on** — not a byte-for-byte copy of — distill's
-`harvest_facts_file`: it keeps the same file-channel shape and the same
-"non-zero exit surfaces stderr **and** stdout" diagnostic, but adds two guards
-the distill reader does **not** yet enforce — a **1 MiB size cap** and an
-**empty / whitespace-only rejection** — so `parse_subgoals_json` never receives
-empty or oversized input. Back-porting those two guards to `harvest_facts_file`
-for true parity is a recommended follow-up (see
-[Out of scope](#out-of-scope)); until then the two readers are deliberately
-described as *stricter here*, not identical.
+*former* file-channel reader (`harvest_facts_file`, shipped for #2622 / #2619
+and since **retired** when distillation moved to a direct-to-memory
+[semantic handoff](../architecture/distillation-semantic-handoff.md), #2679 /
+#2658). This channel keeps that reader's file-channel shape and its "non-zero
+exit surfaces stderr **and** stdout" diagnostic, and adds two guards the retired
+distill reader did **not** enforce — a **1 MiB size cap** and an **empty /
+whitespace-only rejection** — so `parse_subgoals_json` never receives empty or
+oversized input.
 
 ---
 
@@ -150,9 +150,12 @@ Two functions capture the **sub-goals document** (the file contents):
   (> 1 MiB) / non-UTF-8 file loudly **before** delegating. The empty /
   whitespace-only check lives here, in `harvest_subgoals_file` — **not** in
   `parse_subgoals_json` — so the deserializer only ever sees a non-empty,
-  size-bounded string. This is stricter than distill's `harvest_facts_file`,
-  which reads the file directly with no size cap and returns `Ok("")` for an
-  empty file (deferring the empty case to its caller). Subprocess-free, so the
+  size-bounded string. This is stricter than distill's now-retired
+  `harvest_facts_file` was: that reader read the file directly with no size cap
+  and returned `Ok("")` for an empty file (deferring the empty case to its
+  caller); distillation has since replaced that reader with a direct-to-memory
+  [semantic handoff](../architecture/distillation-semantic-handoff.md).
+  Subprocess-free, so the
   "stdout is inert" contract is unit-testable with a synthetic `Output`.
 - `pub fn parse_subgoals_json(text: &str) -> SimardResult<Vec<SubGoalProposal>>`
   — the strict deserializer over the **file contents**. Its name, signature,
@@ -380,9 +383,12 @@ status):
 ## Migration — from a dedicated file to the durable channel
 
 The dedicated `sub_goals_output` file is the **available-now** clean substrate,
-matching the shape of the shipped distill file channel (with the added
-size-cap / empty-rejection hardening noted above). The durable substrate is the
-`semanticchannel` clean-result-channel work in `amplihack-rs`: once
+matching the shape of the distill file channel that shipped for #2622 / #2619
+(with the added size-cap / empty-rejection hardening noted above; distillation
+has since moved past that file channel to its direct-to-memory
+[semantic handoff](../architecture/distillation-semantic-handoff.md)). The
+durable substrate is the `semanticchannel` clean-result-channel work in
+`amplihack-rs`: once
 `recipe-runner-rs` exposes a first-class structured result channel, the
 agent → Simard handoff migrates from the temp file to that channel with no
 change to `parse_subgoals_json`, the `SubGoalProposal` model, or
@@ -392,7 +398,10 @@ graph writes are stable across the migration.
 
 A **fully-agentic** variant — where the decomposition agent writes each
 sub-goal directly through the goal-store interface as a structured tool-call,
-leaving no payload for Simard to read — is the longer-term direction. It is
+leaving no payload for Simard to read — is the longer-term direction. This is
+exactly the step distillation already took in its
+[semantic handoff](../architecture/distillation-semantic-handoff.md) (#2679 /
+#2658), where the distiller writes facts straight into cognitive memory. It is
 **not** implemented here (the recipe agent has no wired goal-store tool-call
 today); the dedicated-file channel is the feasible clean handoff now.
 
@@ -404,11 +413,13 @@ today); the dedicated-file channel is the feasible clean handoff now.
   (#2622 / #2619, [reference](./distill-recipe-output-capture.md)) and the
   `recipe_output/extract.rs` family (#2679 / #2658) are the same antipattern in
   other passes; this change fixes only the goal-decompose transport.
-- **Back-porting the reader hardening to distillation.** `harvest_subgoals_file`
-  adds a 1 MiB size cap and an empty / whitespace-only rejection that distill's
-  `harvest_facts_file` does not yet enforce. Applying those two guards to
-  `harvest_facts_file` for true reader parity is a recommended follow-up, out of
-  scope for the #2708 goal-decompose fix.
+- **Reader hardening.** `harvest_subgoals_file` adds a 1 MiB size cap and an
+  empty / whitespace-only rejection. Distill's former file reader
+  (`harvest_facts_file`) lacked both and has since been **removed** when
+  distillation moved to a direct-to-memory
+  [semantic handoff](../architecture/distillation-semantic-handoff.md), so there
+  is no sibling file reader left to bring to parity — the guards live only in
+  this channel.
 - **`semanticchannel` implementation** in `amplihack-rs` (the durable
   substrate) is tracked upstream; this Simard-side fix uses the dedicated file
   now and migrates later.

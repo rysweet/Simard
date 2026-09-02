@@ -6,8 +6,9 @@
 //! OODA/maintenance/engineer-log threads are implemented. Issue #5 adds the ten
 //! reflective threads ([`threads`]) as thin rails over agentic recipes plus one
 //! shared invoke seam ([`recipe_rail`]) and the salience→Decide durable signal
-//! ([`salience_signal`]); each is OFF by default behind a double env gate. See
-//! `docs/reference/cognitive-threads-catalog.md`.
+//! ([`salience_signal`]); each is ENABLED by default (opt-out) behind a
+//! default-ON double env gate (issue #4845). See
+//! `docs/reference/cognitive-thread-full-activation.md`.
 
 mod mind;
 mod schedule;
@@ -31,6 +32,11 @@ mod tests_catalog;
 
 #[cfg(test)]
 mod tests_rework_contract;
+
+// Issue #4970: TDD contract for the ThreadReasoningRecord typed handoff, its
+// fail-closed reader, and the `run_reflective_thread` rail helper.
+#[cfg(test)]
+mod tests_thread_reasoning_record;
 
 // Issue #4786: TDD contract for cognitive-thread observability instrumentation
 // (per-thread OTel series + durable error propagation).

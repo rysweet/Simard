@@ -39,9 +39,9 @@ use crate::goal_curation::{
 
 use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
-    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
-    MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
-    RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
+    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, HealthReviewStatus, InFlightItem,
+    IssueOutcome, MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode,
+    RecalledFact, RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
 };
 use crate::overseer::config::{
     claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
@@ -572,6 +572,34 @@ fn observed_details_from(cycle: &CycleReport) -> Vec<String> {
             out.push(sig.describe());
         }
     }
+    // Surface the agentic health-review verdict ([standing]) so a pass that RAN
+    // is never a silent no-op at the OPERATOR surface — not just on the
+    // `ObservedState` field. A HEALTHY pass (zero decisions) still leaves a
+    // `health-review: <verdict>` breadcrumb in the `simard status` / TUI /
+    // dashboard feed (via `humanize_tick_details`), a DEGRADED pass is surfaced
+    // LOUD rather than vanishing, and an operator OPT-OUT (`Disabled`) is
+    // surfaced LOUD too — naming the knob — so the self-heal reflex being off is
+    // never silent (#4097), exactly as its status field. Only `NotRun` (rail
+    // unwired / off cadence) stays quiet — the same "explain what ran, stay quiet
+    // on what genuinely didn't" discipline the rest of this feed follows. The
+    // recipe-authored `summary` may echo journal-derived text, so it is sanitised
+    // like every other observed line.
+    match &cycle.observed.health_review_status {
+        HealthReviewStatus::Reviewed { summary, .. } => {
+            out.push(sanitize_detail(&format!("health-review: {summary}")));
+        }
+        HealthReviewStatus::Degraded => {
+            out.push(
+                "health-review: degraded — no verdict this pass, took no remediation".to_string(),
+            );
+        }
+        HealthReviewStatus::Disabled { reason } => {
+            out.push(sanitize_detail(&format!(
+                "health-review: disabled — {reason}"
+            )));
+        }
+        HealthReviewStatus::NotRun => {}
+    }
     out
 }
 
@@ -615,6 +643,7 @@ fn intervention_target(iv: &Intervention) -> String {
             pr,
             duplicate_of,
         } => format!("close duplicate PR {repo}#{pr} (dup of #{duplicate_of})"),
+        Intervention::ReworkPr { repo, pr, .. } => format!("rework PR {repo}#{pr}"),
     }
 }
 
@@ -1291,6 +1320,16 @@ pub fn build_overseer(
         }
         None => overseer,
     };
+
+    // Auto-doc PR reconciliation client (goal_hygiene): wire the production
+    // `gh` client so the additive reconciliation pass can enforce the
+    // single-open invariant for auto-generated `"Update documentation with …"`
+    // PRs across the governed roster (closing stale / superseded drafts). Always
+    // wired here; the pass itself is gated at run time behind the governed roster
+    // being non-empty, the shared gap-scan opt-out, and the every-N cadence, and
+    // is fully fail-closed per repo.
+    let overseer =
+        overseer.with_doc_pr_reconcile_client(Box::new(crate::stewardship::RealPrGhClient));
 
     // Live agentic health-review rail ([standing]): on the Overseer cadence the
     // thin rail invokes the `overseer-health-review` recipe — an AGENT reads the
@@ -2474,7 +2513,98 @@ mod tests {
         );
     }
 
-    // ── #4420: a red canary must NEVER be misclassified as transient ────────
+    // ── health-review verdict surfacing ([standing]) ────────────────────────
+    //
+    // The pass sets `ObservedState.health_review_status`, but the "never a
+    // silent no-op" guarantee must reach the OPERATOR feed, not just the struct
+    // field. `observed_details_from` renders the verdict so a HEALTHY /
+    // DEGRADED pass leaves a visible `health-review:` breadcrumb, while an
+    // off/unwired `NotRun` tick stays quiet.
+
+    /// Build a bare `CycleReport` carrying only a health-review verdict — no
+    /// problems, signals, or plan — to isolate the verdict rendering.
+    fn cycle_with_health_review(status: HealthReviewStatus) -> CycleReport {
+        CycleReport {
+            observed: ObservedState {
+                health_review_status: status,
+                ..ObservedState::default()
+            },
+            signals: Vec::new(),
+            problems: Vec::new(),
+            plan: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn health_review_verdict_surfaces_in_the_operator_feed() {
+        // A HEALTHY pass (zero decisions) must still leave an operator-visible
+        // breadcrumb — the whole point of the "never a silent no-op" guarantee.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Reviewed {
+            summary: "healthy — no crash-loop, no blocked goal".to_string(),
+            decisions: 0,
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:"),
+            "a reviewed pass must surface a `health-review:` line: {joined:?}"
+        );
+        assert!(
+            joined.contains("healthy — no crash-loop, no blocked goal"),
+            "the operator line must carry the recipe's verdict summary: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_degraded_surfaces_loud_in_the_operator_feed() {
+        // A degraded pass took no remediation; it must be LOUD in the feed, not
+        // a silent gap that reads identical to "healthy".
+        let cycle = cycle_with_health_review(HealthReviewStatus::Degraded);
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("degraded"),
+            "a degraded pass must surface a loud `health-review: degraded` line: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_disabled_surfaces_loud_in_the_operator_feed() {
+        // An operator OPT-OUT (dedicated knob or the shared gap-scan throttle)
+        // must be LOUD in the feed too — naming WHY the self-heal reflex is off —
+        // never a silent gap that reads identical to a healthy-but-quiet tick.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Disabled {
+            reason: format!(
+                "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV
+            ),
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("disabled"),
+            "a disabled pass must surface a loud `health-review: disabled` line: {joined:?}"
+        );
+        assert!(
+            joined.contains(crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+            "the disabled line must name the knob that turned the reflex off: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_not_run_stays_quiet_in_the_operator_feed() {
+        // An unwired / off-cadence tick must NOT spam the feed with a
+        // health-review line — only a pass that RAN (or an explicit opt-out,
+        // rendered as `Disabled`) earns a line; a bare `NotRun` stays quiet.
+        let cycle = cycle_with_health_review(HealthReviewStatus::NotRun);
+        let details = observed_details_from(&cycle);
+        assert!(
+            !details.iter().any(|d| d.contains("health-review")),
+            "a NotRun health-review must add no line: {details:?}"
+        );
+    }
+
     //
     // The reddening-gate detail STEP 1 now threads into `OverseerError::Capability`
     // can contain transient-looking words (a gate whose failure text mentions a

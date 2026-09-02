@@ -125,7 +125,13 @@ fn is_iso_timestamp(s: &str) -> bool {
 }
 
 fn normalize_for_signature(msg: &str) -> String {
-    normalize(msg)
+    // `normalize()` strips ANSI then collapses whitespace into a full
+    // throwaway String that we would immediately re-split here.
+    // `split_whitespace()` already collapses runs and trims, so strip ANSI
+    // once and split once: identical tokens => byte-identical signature
+    // input, without the extra allocation and second whitespace pass.
+    let stripped = crate::recipe_output::strip_ansi(msg);
+    stripped
         .split_whitespace()
         .map(redact_token)
         .collect::<Vec<_>>()

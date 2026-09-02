@@ -1,5 +1,6 @@
 # ooda-engineer-admission.yaml — Recipe-runner recipe for the OODA engineer
-# ADMISSION brain (issue #2690): dependency/overlap-aware scheduling.
+# ADMISSION brain (issue #2690; Group B typed-record rework, #4906):
+# dependency/overlap-aware scheduling.
 #
 # Runs at the spawn/admission decision point, BEFORE a NEW engineer is spawned
 # for a candidate goal on a DIFFERENT goal from every in-flight engineer. It
@@ -9,13 +10,20 @@
 #
 # Sibling of ooda-engineer-lifecycle.yaml; resolved beside it by recipe_brain.rs.
 #
-# Context vars (passed via -c, each already sanitized by the Rust shim):
-#   candidate_goal_id, candidate_goal_title, candidate_predicted_scope,
-#   live_engineers, repo_root
+# Context vars (passed via -c by RecipeBrain::run_admission_recipe; each free-text
+# var is already sanitized by the Rust shim):
+#   record_path, simard_bin, goal_id, cycle_number, candidate_goal_id,
+#   candidate_goal_title, candidate_predicted_scope, live_engineers, repo_root
 #
-# Output: a JSON decision envelope (see OUTPUT FORMAT). The Rust shim
-# (recipe_brain.rs::parse_admission_decision) reads `decision` plus the
-# load-bearing `blocked_by` / `after_goal_id` / `overlap_files` fields.
+# Output: NONE scraped from stdout. The agent RECORDS its verdict by calling the
+# `simard ooda record-admission` tool exactly once (writing a typed
+# AdmissionDecisionRecord to {{record_path}}). RecipeBrain reads that typed record
+# via `read_verified_admission` — it never parses this agent's prose. The tool
+# validates the closed choice enum + per-variant field ownership and requires a
+# non-empty rationale; an absent, malformed, out-of-enum, or goal/cycle-mismatched
+# record surfaces as an Err, which the spawn seam's Rail-2 turns into a loud,
+# audited `admit` (this seam fails OPEN — wrongly stalling a spawn is worse than
+# wrongly parallelizing).
 #
 # THE RECIPE NEVER CARRIES THE HARD INVARIANT. A deterministic exact-path rail
 # in Rust (admission.rs) blocks a CERTAIN collision (candidate scope ⊆ one live
@@ -72,7 +80,7 @@ steps:
 
       ## OPTIONS
 
-      Pick exactly one `decision`:
+      Pick exactly one `choice`:
 
       - `admit` — No blocking overlap. The candidate's files are independent of
         every live engineer's changes (or the overlap is trivial/incidental).
@@ -80,13 +88,13 @@ steps:
       - `defer` — A live engineer is actively rewriting the SAME file(s) this goal
         must edit, and doing both in parallel would certainly collide at merge.
         Skip spawning this cycle; the goal is retried naturally next OODA round
-        once the in-flight engineer lands. Name the blocking goal id(s) in
-        `blocked_by`.
+        once the in-flight engineer lands. Name the blocking goal id(s) with
+        `--blocked-by` (optionally add `--retry-after-secs`).
       - `serialize_after` — There is a real overlap, but the candidate can still
         make progress if it rebases onto the other engineer's landed work before
-        editing the shared files. Spawn now, but set `after_goal_id` to the goal
-        to rebase behind and `overlap_files` to the shared paths. Prefer this over
-        `defer` when the candidate has substantial independent work to do first.
+        editing the shared files. Spawn now, but set `--after-goal-id` to the goal
+        to rebase behind and `--overlap-files` to the shared paths. Prefer this
+        over `defer` when the candidate has substantial independent work first.
 
       ## HOW TO WEIGH OVERLAP
 
@@ -99,43 +107,71 @@ steps:
       - Disjoint file sets, or an empty candidate scope (unknown footprint), mean
         no knowable collision → `admit`.
 
-      ## OUTPUT FORMAT
+      ## HOW TO RECORD YOUR DECISION (call the tool — do NOT print anything)
 
-      Respond with a single JSON object (a fenced ```json block is fine; the
-      daemon strips any surrounding banner/prose before parsing):
+      Record your verdict by calling the `simard ooda record-admission` tool
+      EXACTLY ONCE, using your shell/bash tool. The daemon reads the typed record
+      the tool writes; it does NOT read your prose. Anything you print to stdout
+      is ignored.
 
-      ```json
-      {"decision": "<admit|defer|serialize_after>", "rationale": "<short reason>", "blocked_by": ["<goal_id>", ...], "after_goal_id": "<goal_id>", "overlap_files": ["<path>", ...]}
+      Run (substitute your chosen `<choice>` and a concrete `<rationale>`):
+
+      ```bash
+      "{{simard_bin}}" ooda record-admission \
+        --choice <choice> \
+        --rationale "<short concrete rationale>" \
+        --record-path "{{record_path}}" \
+        --goal-id "{{goal_id}}" \
+        --cycle-number {{cycle_number}}
       ```
 
-      - `admit`: omit `blocked_by` / `after_goal_id` / `overlap_files` (or leave empty).
-      - `defer`: set `blocked_by` to the overlapping goal id(s).
-      - `serialize_after`: set `after_goal_id` and `overlap_files`.
+      Per-choice fields (the tool enforces per-choice ownership — supplying a
+      field a choice does not own is rejected):
 
-      A genuine "these are independent, parallelize" answer is a REAL decision:
-      emit `admit` explicitly. If your output is unparseable the daemon does NOT
-      default on your behalf — it records a `brain_parse_error` and FAILS OPEN
-      (admits, audited), because wrongly stalling a spawn is worse than wrongly
+      - `admit`: no extra fields.
+      - `defer`: add `--blocked-by <goal_id>` (comma-separated for several) and,
+        optionally, `--retry-after-secs <seconds>`.
+      - `serialize_after`: add `--after-goal-id <goal_id>` (required, non-empty)
+        and `--overlap-files <path,path,...>`.
+
+      For a LARGE rationale, write it to a file first and pass
+      `--rationale-path <FILE>` instead of the inline flag.
+
+      `<choice>` is exactly one of: `admit`, `defer`, `serialize_after`.
+      `--rationale` is MANDATORY and must be non-empty; an unknown `--choice` is
+      rejected by the tool. Call the tool EXACTLY ONCE. If you do not record a
+      valid decision, the daemon does NOT default on your behalf here — it
+      surfaces the failure, and the spawn seam's Rust rail fails OPEN (admits,
+      audited), because wrongly stalling a spawn is worse than wrongly
       parallelizing. The one certain-collision block is enforced in Rust, not here.
 
-      ## EXAMPLES
+      ## EXAMPLES (the command to run, one per situation)
 
       Independent work — parallelize:
 
-      ```json
-      {"decision": "admit", "rationale": "candidate touches src/meeting/*, no live engineer is changing those files"}
+      ```bash
+      "{{simard_bin}}" ooda record-admission --choice admit \
+        --rationale "candidate touches src/meeting/*, no live engineer is changing those files" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
 
       The goals_status.rs collision — a live engineer is already rewriting the one
       file this goal must edit:
 
-      ```json
-      {"decision": "defer", "blocked_by": ["fix-goals-status-render"], "rationale": "live engineer already rewriting src/operator_commands_ooda/goals_status.rs, the file this goal must edit — parallel edits would collide at merge"}
+      ```bash
+      "{{simard_bin}}" ooda record-admission --choice defer \
+        --blocked-by "fix-goals-status-render" \
+        --rationale "live engineer already rewriting src/operator_commands_ooda/goals_status.rs, the file this goal must edit — parallel edits would collide at merge" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
 
       The Adapter-rename incident — a broad rename is in flight; serialize behind it:
 
-      ```json
-      {"decision": "serialize_after", "after_goal_id": "rename-adapter-to-clients", "overlap_files": ["src/ooda_loop/types.rs", "src/ooda_actions/mod.rs"], "rationale": "an in-flight engineer is renaming Adapter→OodaClients across these files; rebase onto its landed work before editing them to avoid breaking main"}
+      ```bash
+      "{{simard_bin}}" ooda record-admission --choice serialize_after \
+        --after-goal-id "rename-adapter-to-clients" \
+        --overlap-files "src/ooda_loop/types.rs,src/ooda_actions/mod.rs" \
+        --rationale "an in-flight engineer is renaming Adapter→OodaClients across these files; rebase onto its landed work before editing them to avoid breaking main" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{cycle_number}}
       ```
     output: "admission_result"

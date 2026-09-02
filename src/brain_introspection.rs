@@ -32,11 +32,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::warn;
 
+use crate::brain_introspection_record::read_verified_brain_introspection;
 use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::error::{SimardError, SimardResult};
 use crate::runtime_config::RuntimeConfig;
@@ -162,7 +163,7 @@ pub fn run_memory_hygiene(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Report + marker grammar
+// Report
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Structured result of one brain-introspection run.
@@ -170,7 +171,9 @@ pub fn run_memory_hygiene(
 /// The memory-count fields (`live_memories`, `sensory_pruned`,
 /// `consolidated_facts`) are **hook-measured**; the narrative fields
 /// (`brain_health`, `patterns`, `regressions`, `issue_url`) and the clamped
-/// `prune_requested` come from the agentic recipe's text markers.
+/// `prune_requested` come from the agentic recipe's typed record (read
+/// fail-closed via
+/// [`read_verified_brain_introspection`](crate::brain_introspection_record::read_verified_brain_introspection)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrainIntrospectionReport {
     /// Non-sensory live memory count (hook-measured; includes consolidated).
@@ -215,105 +218,9 @@ impl BrainIntrospectionReport {
     }
 }
 
-/// Parse the recipe's plain-text markers from the agent step output.
-///
-/// Grammar (one marker per line; unknown lines silently ignored):
-/// ```text
-/// BRAIN_HEALTH: <line>        # >=1 required; missing → parse error
-/// PATTERN: <line>            # 0..n
-/// REGRESSION: <line>         # 0..n
-/// PRUNE_CANDIDATE: <line>    # 0..n (human-readable; not stored as a field)
-/// PRUNE_REQUESTED=<usize>    # count of candidates (defaults to 0)
-/// CONSOLIDATED_FACTS=<u64>   # advisory echo only; hook delta is authoritative
-/// ISSUE_URL=<url>            # optional
-/// ```
-///
-/// The hook-measured fields are left at `0`/`None`; the caller fills them in.
-pub fn parse_brain_introspection_text(stdout: &str) -> Result<BrainIntrospectionReport, String> {
-    let mut brain_health: Vec<String> = Vec::new();
-    let mut patterns: Vec<String> = Vec::new();
-    let mut regressions: Vec<String> = Vec::new();
-    let mut prune_requested: usize = 0;
-    let mut consolidated_facts: u64 = 0;
-    let mut issue_url: Option<String> = None;
-
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(v) = trimmed.strip_prefix("BRAIN_HEALTH:") {
-            let v = v.trim();
-            if !v.is_empty() {
-                brain_health.push(v.to_string());
-            }
-        } else if let Some(v) = trimmed.strip_prefix("PATTERN:") {
-            let v = v.trim();
-            if !v.is_empty() {
-                patterns.push(v.to_string());
-            }
-        } else if let Some(v) = trimmed.strip_prefix("REGRESSION:") {
-            let v = v.trim();
-            if !v.is_empty() {
-                regressions.push(v.to_string());
-            }
-        } else if trimmed.strip_prefix("PRUNE_CANDIDATE:").is_some() {
-            // Human-readable candidate description for the issue body; the count
-            // is carried by PRUNE_REQUESTED, so nothing to store here.
-        } else if let Some(v) = trimmed.strip_prefix("PRUNE_REQUESTED=") {
-            prune_requested = v
-                .trim()
-                .parse::<usize>()
-                .map_err(|e| format!("invalid PRUNE_REQUESTED value '{}': {e}", v.trim()))?;
-        } else if let Some(v) = trimmed.strip_prefix("CONSOLIDATED_FACTS=") {
-            // Advisory echo: the hook's measured delta is authoritative, so a
-            // malformed value is tolerated rather than failing the parse.
-            if let Ok(n) = v.trim().parse::<u64>() {
-                consolidated_facts = n;
-            }
-        } else if let Some(v) = trimmed.strip_prefix("ISSUE_URL=") {
-            let v = v.trim();
-            if !v.is_empty() {
-                issue_url = Some(v.to_string());
-            }
-        }
-        // Unknown lines are silently ignored (forward-compatible with LLM noise).
-    }
-
-    if brain_health.is_empty() {
-        return Err("missing required BRAIN_HEALTH line in recipe output".to_string());
-    }
-
-    Ok(BrainIntrospectionReport {
-        live_memories: 0,
-        sensory_pruned: 0,
-        consolidated_facts,
-        prune_requested,
-        brain_health,
-        patterns,
-        regressions,
-        issue_url,
-    })
-}
-
 // ───────────────────────────────────────────────────────────────────────────
 // Recipe resolution + invocation
 // ───────────────────────────────────────────────────────────────────────────
-
-/// JSON envelope returned by `recipe-runner-rs --output-format json`.
-#[derive(Debug, Deserialize)]
-struct RecipeOutput {
-    success: bool,
-    step_results: Vec<StepResult>,
-}
-
-/// A single step's result inside the [`RecipeOutput`] envelope.
-#[derive(Debug, Deserialize)]
-struct StepResult {
-    #[allow(dead_code)] // Part of the JSON contract; not consumed by the hook.
-    step_id: String,
-    output: String,
-}
 
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `<home>/.simard/prompt_assets/simard/recipes/<name>` (hot-reload path)
@@ -344,27 +251,26 @@ pub(crate) fn resolve_recipe_path(
     None
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let prefix: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        prefix + "…"
-    } else {
-        prefix
-    }
-}
-
 fn record_metric_best_effort(name: &str, value: f64) {
     if let Err(e) = crate::self_metrics::record_metric(name, value, ADAPTER_TAG) {
         warn!("brain introspection: failed to record metric {name}: {e}");
     }
 }
 
-/// Spawn the agentic `brain-introspection` recipe and parse its markers.
+/// The per-run record path: one file under the state root, pre-truncated each
+/// invocation so a prior run's record can never be read as current. The recipe's
+/// gated ACT step writes here; the rail reads here fail-closed.
+fn brain_record_path(state_root: &Path) -> PathBuf {
+    state_root.join("brain_introspection").join("record.json")
+}
+
+/// Spawn the agentic `brain-introspection` recipe and read the typed record it
+/// wrote via the gated `simard cognition record-brain-introspection` verb.
 ///
 /// Returns `Err(SimardError::AdapterInvocationFailed)` on every failure mode
-/// (recipe missing, spawn failure, non-zero exit, bad JSON, missing markers);
-/// [`run_brain_introspection`] treats those as best-effort and degrades.
+/// (recipe missing, spawn failure, non-zero exit, or a fail-closed record read
+/// R1–R7 — the reason carries the R-code); [`run_brain_introspection`] treats
+/// those as best-effort and degrades. NEVER scrapes stdout.
 fn run_agentic_recipe(
     repo_root: &Path,
     state_root: &Path,
@@ -385,7 +291,15 @@ fn run_agentic_recipe(
     let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
     let stats_json = serde_json::to_string(hygiene).unwrap_or_else(|_| "{}".to_string());
 
-    let output = Command::new("recipe-runner-rs")
+    // Anti-replay: derive + PRE-TRUNCATE the record path, then capture
+    // `invoke_start` BEFORE spawn, so a record written this invocation has
+    // `mtime >= invoke_start` (R7) and a leftover file can never be read as
+    // current. A missing file is fine.
+    let record_path = brain_record_path(state_root);
+    let _ = std::fs::remove_file(&record_path);
+    let invoke_start = SystemTime::now();
+
+    let status = Command::new("recipe-runner-rs")
         .arg(recipe_path.as_os_str())
         .arg("--output-format")
         .arg("json")
@@ -395,61 +309,41 @@ fn run_agentic_recipe(
         .arg("-c")
         .arg(format!("repo_path={}", repo_root.display()))
         .arg("-c")
+        .arg(format!("record_path={}", record_path.display()))
+        .arg("-c")
         .arg(format!("max_prune={cap}"))
         .arg("-c")
         .arg(format!("baseline_runs={baseline_runs}"))
         .arg("-c")
         .arg(format!("stats={stats_json}"))
-        .output()
+        .status()
         .map_err(|e| SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
             reason: format!("recipe-runner-rs spawn failed: {e}"),
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
         return Err(SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
-            reason: format!(
-                "recipe exited with {}: {}",
-                output.status,
-                truncate(&stderr, 500)
-            ),
+            reason: format!("recipe exited with {status}"),
         });
     }
 
-    let envelope: RecipeOutput = serde_json::from_slice(&output.stdout).map_err(|e| {
-        SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!("failed to deserialize recipe JSON output: {e}"),
-        }
-    })?;
+    // The recipe exited 0 — the ONLY source of truth is the typed record it
+    // wrote via its gated tool call. Read it FAIL-CLOSED (R1–R7): a recipe that
+    // "ran" but wrote no valid record is a FAILURE, never a silent default.
+    let record = read_verified_brain_introspection(&record_path, invoke_start)?;
 
-    if !envelope.success {
-        return Err(SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: "recipe reported success=false in JSON output".to_string(),
-        });
-    }
-
-    if envelope.step_results.is_empty() {
-        return Err(SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: "no step results in recipe JSON output".to_string(),
-        });
-    }
-
-    // Markers may be emitted across several steps, so parse the concatenation.
-    let combined = envelope
-        .step_results
-        .iter()
-        .map(|s| s.output.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    parse_brain_introspection_text(&combined).map_err(|e| SimardError::AdapterInvocationFailed {
-        base_type: ADAPTER_TAG.to_string(),
-        reason: format!("failed to parse recipe text output: {e}"),
+    Ok(BrainIntrospectionReport {
+        // Hook-measured fields are filled by the caller from the hygiene pass.
+        live_memories: 0,
+        sensory_pruned: 0,
+        consolidated_facts: 0,
+        prune_requested: record.prune_requested,
+        brain_health: record.brain_health,
+        patterns: record.patterns,
+        regressions: record.regressions,
+        issue_url: record.issue_url,
     })
 }
 

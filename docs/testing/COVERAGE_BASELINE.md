@@ -12,9 +12,13 @@
 > their per-crate targets as Simard work.
 
 This document records the most recent line-coverage baseline for each Cargo
-target group and links each group to the issue that drove it to the **per-group
-≥ 70% aggregate line-coverage target** (not a single workspace-wide
-percentage). Update this file whenever a coverage-targeted PR lands.
+target group. Since 2026-07-26 the recurring goal's **done-gate is the
+whole-repo aggregate line coverage ≥ 70%** (measured by
+`scripts/coverage-gate.sh`; see the charter's §2). This per-group ledger is
+retained as the **map for choosing what to test next** when that total is
+short — it is no longer itself the done-gate. Each group links to the issue
+that drove it toward the ≥ 70% aggregate. Update this file whenever a
+coverage-targeted PR lands.
 
 The numbers below come from:
 

@@ -5,7 +5,7 @@
 //! trigger the recipe through the shared [`RecipeInvoker`](super::super::recipe_rail)
 //! and record ran/health from its EXIT STATUS alone. The recipe's own `simard …`
 //! tool calls (writing `postmortem:` facts) ARE the effect — the thread parses NOTHING
-//! back and performs NO durable write itself. OFF by default behind the double
+//! back and performs NO durable write itself. ENABLED by default (opt-out) behind the default-ON double
 //! env gate.
 //!
 //! **Status (issue #5):** implemented; [`ReflectionThread::tick`] is covered by
@@ -21,6 +21,7 @@ use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
+use crate::ooda_brain::ThreadName;
 
 /// Stable telemetry id.
 pub const ID: &str = "reflection";
@@ -179,9 +180,16 @@ impl CognitiveThread for ReflectionThread {
         // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
         // recipe writes each `postmortem:` fact / `lesson:` procedure itself via
         // `simard memory remember` / `remember-procedure`.
-        let result = self.invoker.invoke(RECIPE, &ctx_vars);
-        self.note_run(ctx.now_epoch, result.is_success());
-        result.into_outcome(RECIPE, start.elapsed())
+        let outcome = recipe_rail::run_reflective_thread(
+            self.invoker.as_ref(),
+            RECIPE,
+            ThreadName::Reflection,
+            ctx.state_root,
+            ctx_vars,
+            start,
+        );
+        self.note_run(ctx.now_epoch, outcome.success);
+        outcome
     }
 
     fn health(&self) -> ThreadHealth {

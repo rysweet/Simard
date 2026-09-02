@@ -49,7 +49,7 @@ implemented; acceptance test is the definition of done) · **OUT-OF-SCOPE**.
 | ID | Criterion | Acceptance check | Status | Evidence |
 |----|-----------|------------------|--------|----------|
 | KGP-M1 | `knowledge.list_packs` returns installed packs with name/description/article/section counts | `native_knowledge_transport_list_packs` green | DONE | `native_knowledge.rs::discover_packs`, `register_knowledge_handlers` |
-| KGP-M2 | `knowledge.pack_info` returns one pack's metadata; errors on unknown pack | `native_knowledge_transport_pack_info`, `native_knowledge_transport_pack_not_found` green | DONE | `native_knowledge.rs` `knowledge.pack_info` handler |
+| KGP-M2 | `knowledge.pack_info` returns one pack's metadata **plus the upstream computed booleans** `db_exists` / `urls_file_exists`; errors on unknown pack | `native_knowledge_transport_pack_info`, `native_knowledge_transport_pack_not_found`, `native_knowledge_transport_pack_info_reports_computed_file_flags` green | DONE | `native_knowledge.rs` `knowledge.pack_info` handler (`db_exists`/`urls_file_exists` from `discover_packs`) |
 | KGP-M3 | `manifest.json` (`graph_stats`) parsed with directory-name fallback | `discover_packs_finds_packs_with_manifests` green | DONE | `native_knowledge.rs::PackManifest`, `discover_packs` |
 
 ### Query & retrieval
@@ -298,3 +298,21 @@ multi-hop retrieval — closed 2026-07-21. KGP-T3 — reuse an open `Connection`
   its configured weight). With this, **every in-scope parity criterion is
   DONE** and both done-gate commands (`cargo test --lib native_knowledge` +
   `cargo test --lib knowledge_client`) are green.
+- **2026-07-27** — **KGP-M2 hardened to full `pack_info` equivalence** (closes
+  the last ⚠️ row — F2 — in the issue #4321 equivalence matrix). The port's
+  `knowledge.pack_info` previously returned only manifest metadata (`name`,
+  `description`, `article_count`, `section_count`); the upstream agent-kgpacks
+  `pack_info` also returns the two **computed booleans** `db_exists` and
+  `urls_file_exists`. `discover_packs` now computes both at discovery — `db_exists`
+  from the pack's `pack.db` path and `urls_file_exists` from a `urls.json`
+  provenance file (`URLS_FILE_NAME`) in the pack directory — and the handler
+  projects them into the RPC response, so the observable `knowledge.pack_info`
+  JSON contract is now at parity with the original. Native packs keep citations
+  in the database `url` column (KGP-Q1), so `urls_file_exists` is truthfully
+  `false` for them (never a stubbed constant); the flag reports genuine on-disk
+  state. `list_packs` is unchanged (the original `list_packs` likewise omits the
+  computed flags). Acceptance test:
+  `native_knowledge_transport_pack_info_reports_computed_file_flags` (a pack with
+  `pack.db` + `urls.json` reports both `true`; a manifest-only pack reports both
+  `false`). Docs: `docs/reference/rpc-wire-protocol.md` `knowledge.pack_info`.
+  Both done-gate commands remain green (48 + 8 tests).

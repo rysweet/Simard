@@ -15,19 +15,18 @@ related:
 
 # Configure and monitor cognitive-thread scheduling
 
-!!! note "Status — shipped, additive, OFF by default (#2419)"
+!!! note "Status — shipped; default-ON (opt-out) since #4845"
     The cognitive-thread scheduler (the **Mind**), the `src/cognitive_threads/`
-    module, its `simard.thread.*` metrics/spans, and the two exemplar threads
-    (`MaintenanceThread`, `EngineerLogAnalysisThread`) **have shipped**. In the
-    live daemon they are **inactive until you opt in** with
-    `SIMARD_COGNITIVE_THREADS_ENABLED` (see [Enable the scheduler](#enable-the-scheduler)).
-    Two design goals are intentionally **deferred to follow-ups** and are *not*
-    active yet: (1) driving the OODA cycle itself **through** the Mind (today the
-    daemon keeps its existing inline OODA cycle for byte-for-byte parity, and the
-    Mind runs only the two background threads *after* it), and (2) migrating the
-    six pre-existing periodic tasks onto the Mind (they remain hand-rolled). See
+    module, its `simard.thread.*` metrics/spans, and the full thread roster
+    **have shipped** and are **ENABLED by default (opt-out)** in the live daemon
+    (silence them with `SIMARD_COGNITIVE_THREADS_ENABLED=0`; see
+    [Enable the scheduler](#enable-the-scheduler)). The daemon keeps its existing
+    inline OODA cycle for byte-for-byte parity, and the Mind runs the background
+    threads *after* it. See
+    [Cognitive-thread full activation](../reference/cognitive-thread-full-activation.md)
+    for the always-on scheduling, telemetry, and auto-remediation contract, and
     [Cognitive-thread scheduling](../reference/cognitive-thread-scheduling.md)
-    for the design and rollout scope.
+    for the scheduler design.
 
 Simard's daemon does more than run the OODA loop. Every background mental
 process — housekeeping, backups, brain introspection, the monthly self-audit,
@@ -101,22 +100,23 @@ scheduler runs *alongside* them.
 
 ## Enable the scheduler
 
-The scheduler is **off by default**. Turn it on with a single truthy env var
-(`1`, `true`, `yes`, or `on`), then launch the daemon:
+The scheduler is **enabled by default (opt-out)** since #4845. It runs unless you
+set the master gate to a falsy value (`0`, `false`, `no`, or `off`). To silence
+the whole roster:
 
 ```bash
-# Enable the cognitive-thread scheduler (maintenance + engineer-log analysis)
-export SIMARD_COGNITIVE_THREADS_ENABLED=1
+# Opt OUT of the cognitive-thread scheduler entirely
+export SIMARD_COGNITIVE_THREADS_ENABLED=0
 ```
 
 | Knob | Env var | Default | What it controls |
 | --- | --- | --: | --- |
-| Master switch | `SIMARD_COGNITIVE_THREADS_ENABLED` | `false` | When truthy, the daemon builds the `Mind` and runs the background threads after each OODA cycle. Unset ⇒ zero behaviour change. |
+| Master switch | `SIMARD_COGNITIVE_THREADS_ENABLED` | `on` | Default-ON opt-out: the daemon builds the `Mind` and runs the background threads after each OODA cycle unless this is set to a falsy token. |
 
-When it is enabled, the daemon logs at startup:
+At startup the daemon logs:
 
 ```
-[simard] OODA daemon: cognitive-thread scheduler ENABLED (2 background thread(s))
+[simard] OODA daemon: cognitive-thread scheduler ENABLED (13 background thread(s))
 ```
 
 Recommended first rollout: enable it with **maintenance in dry-run** and

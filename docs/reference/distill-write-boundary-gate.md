@@ -294,8 +294,9 @@ but does **not** change them:
 
 - `extract_verdict` callers — merge-readiness / recipe-merge judge verdict
   ([#2716](https://github.com/rysweet/Simard/issues/2716)).
-- Remaining `extract_json_payload` / `balanced_objects` callers — the OODA brain
+- Remaining `balanced_objects` callers — the OODA brain
   decide/orient verdict in `recipe-brain`
-  ([#2715](https://github.com/rysweet/Simard/issues/2715)).
+  ([#2715](https://github.com/rysweet/Simard/issues/2715)). (The former
+  `extract_json_payload` wrapper was retired as dead code in #4991.)
 - A possible `amplihack-memory-lib` gated-write primitive (R2) to eventually
   home the gate inside the library rather than the Simard-side IPC handler.

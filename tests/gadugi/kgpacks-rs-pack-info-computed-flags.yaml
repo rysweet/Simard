@@ -1,0 +1,55 @@
+name: "kgpacks-rs pack_info computed-flags parity (KGP-M2)"
+description: "Outside-in coverage for kgpacks-rs parity criterion KGP-M2 (issue #4321 F2): Simard's native Rust knowledge client (the agent-kgpacks port) must return, from knowledge.pack_info, the upstream computed booleans db_exists and urls_file_exists alongside the manifest metadata, each faithfully tracking on-disk state. See Specs/agent-kgpacks-rs-parity.md."
+version: "1.0.0"
+
+config:
+  timeout: 600000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 600000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "native knowledge pack_info reports db_exists/urls_file_exists"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/kgpacks-rs-pack-info-computed-flags.sh"
+    timeout: 600000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "kgpacks-rs"
+    - "knowledge"
+    - "parity"
+    - "pack-info"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

@@ -37,8 +37,8 @@ honesty of the whole batch lives here.
     This describes the intended model for the salience and values threads and
     the scoped Decide-context read. The salience thread and its numeric signal
     file ship first; the Decide-side read is an explicitly-separated,
-    security-gated follow-up (below). Everything is OFF by default behind the
-    double env gate.
+    security-gated follow-up (below). Everything is ENABLED by default (opt-out)
+    behind the default-ON double env gate (#4845).
 
 ## Threads advise the *next* cycle, never the current one
 

@@ -5,10 +5,9 @@
 //!
 //! Before: the distiller agent printed a `{ "facts": [...] }` envelope; Simard
 //! scraped it back out of noisy recipe stdout (launcher banner + ANSI + tracing
-//! lines) via `extract_json_payload` → `balanced_objects` →
-//! `serde_json::from_str`, and a single malformed token (a trailing comma)
-//! failed the strict parse and discarded the ENTIRE batch — the
-//! `parse_fail` / 91%→100% failure mode.
+//! lines) via a bespoke JSON-recovery/`serde_json::from_str` pass, and a single
+//! malformed token (a trailing comma) failed the strict parse and discarded the
+//! ENTIRE batch — the `parse_fail` / 91%→100% failure mode.
 //!
 //! After: the distiller agentic step writes each fact DIRECTLY through the
 //! gated cognitive-memory write boundary during its run. There is **no return
