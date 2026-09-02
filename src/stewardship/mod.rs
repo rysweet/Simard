@@ -16,16 +16,24 @@
 
 pub mod dedup;
 pub mod gh_client;
+pub mod liaison_decision_store;
+#[cfg(test)]
+mod liaison_decision_store_tests;
 pub mod merge_authority;
 pub mod merge_judge;
+pub mod merge_verdict_store;
+#[cfg(test)]
+mod merge_verdict_store_rework_tests;
+#[cfg(test)]
+mod merge_verdict_store_tests;
 pub mod recipe_merge_judge;
+pub mod record_io;
 pub mod routing;
-pub mod types;
-
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_extra;
+pub mod types;
 
 pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
@@ -38,6 +46,10 @@ pub use merge_authority::{
 pub use merge_judge::{
     Blocker, JudgeOutcome, LlmMergeJudge, MergeJudge, MergeJudgeKind, RefusingMergeJudge, Verdict,
     build_merge_judge,
+};
+pub use merge_verdict_store::{
+    MergeVerdictRecord, ReadOutcome, VerdictKind, delete_record, read_verified, record_path,
+    write_record,
 };
 pub use recipe_merge_judge::RecipeMergeJudge;
 pub use routing::route_failure;

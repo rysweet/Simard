@@ -440,6 +440,7 @@ guided retry per goal:
 ## See also
 
 - [Concept: the breaker explains WHY and self-resolves before escalating](../concepts/no-progress-root-cause-resolution.md)
+- [Issue-storm suppression API reference](./no-progress-breaker-storm-suppression-api.md) — the durable suppression marker that makes `escalate_with_tracking_issue` idempotent and restart-surviving (stops the duplicate `ooda-stuck` filing storm), plus the `derive_criteria` terminal-rung helper.
 - [No-progress breaker API reference](./no-progress-breaker-api.md) — the base breaker this layer sits on.
 - [The `ooda-no-progress-why` recipe reference](./ooda-no-progress-why-recipe.md) — the optional agentic narrator.
 - [Completion-evidence gate API](./completion-evidence-gate-api.md) — the done-gate the classifier reuses.

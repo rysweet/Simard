@@ -7,6 +7,7 @@ owner: simard
 doc_type: reference
 status: implemented
 related:
+  - ./deterministic-canary-unit-test-gate.md
   - ./self-deploy-api.md
   - ./overseer-operator-notifications.md
   - ./overseer-tick-details.md
@@ -377,6 +378,12 @@ weakened or disabled to mask a real regression.
 
 ## See also
 
+- [Canary gate isolation and self-deploy convergence](./canary-gate-convergence.md) —
+  the #4440 root-cause repair that acts on these diagnostics: per-gate spans, the
+  `canary_env` allow-list that supplies a gate's missing signal, and the loop
+  advancing past the stuck SHA once the canary goes green.
+- [How to converge a stuck red-canary self-deploy](../howto/converge-a-stuck-red-canary-self-deploy.md) —
+  the operator runbook.
 - [Self-deploy API reference](./self-deploy-api.md) — the `GuardedDeployer`,
   `DeployRefusal`, `evaluate_deploy_gate`, and the `OrchestratedBinaryDeployer`
   swap path.

@@ -22,10 +22,9 @@ use crate::goal_curation::completion_gate::{
     CompletionEvidenceGate, CompletionVerdict, DependencyState, EvidenceSource,
 };
 use crate::goal_curation::no_progress_breaker::{
-    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker,
-    SURFACED_INVESTIGATION_FAILURE_LIMIT, needs_reinvestigation,
-    no_progress_blocked_reason_with_why, obsolescence_reason, resolution_for_why,
-    surfaced_failure_escalation_issue, verify_stuck_goal,
+    NO_PROGRESS_BREAKER_THRESHOLD, NoProgressResolution, NoProgressTracker, is_quarantined,
+    needs_reinvestigation, no_progress_blocked_reason_with_why, obsolescence_reason,
+    quarantine_marker, resolution_for_why, surfaced_failure_escalation_issue, verify_stuck_goal,
 };
 use crate::goal_curation::no_progress_why::{
     Evidence, NoProgressClass, NoProgressWhy, NoProgressWhyReasoner,
@@ -61,11 +60,72 @@ fn is_breaker_defer_ref(wip: &WipRef) -> bool {
 ///   never re-filed, so a re-stall can never spam duplicate `ooda-stuck` issues.
 const NO_PROGRESS_TRACKING_LABEL_PREFIX: &str = "[no-progress-tracking] ";
 
-/// True when `wip` is a breaker-authored tracking-issue link (the escalation
-/// artifact authored by [`link_tracking_issue`]).
+/// `WipRef.kind` for the breaker's durable *suppression marker* — the
+/// restart-surviving record that this goal has already been escalated by the
+/// no-progress breaker, written BEFORE and INDEPENDENT of any `gh` issue link.
+///
+/// Its sole job is idempotence: a goal carrying this marker is never re-filed,
+/// even if [`NoProgressIssueFiler::file_issue`] returned `None` (gh failed, or
+/// its URL did not parse to a bare issue number). It is distinct from the linked
+/// tracking ref (`kind = "issue"`, label-prefixed `[no-progress-tracking] `)
+/// that a *successful* filing upgrades it into. The kind is novel, so every
+/// other `wip_refs` consumer (`has_derivable_signal`, `stuck_evidence`,
+/// `artifact_evidence`, the stale-assignment sweep) ignores it via their
+/// `_ => None` fall-through — the marker is inert to completion/liveness logic
+/// and only the breaker's idempotence guard reads it.
+const NO_PROGRESS_SUPPRESSION_MARKER_KIND: &str = "ooda-breaker-marker";
+
+/// Fixed sentinel `WipRef.ref_id` for the suppression marker. A constant — NEVER
+/// derived from goal text — so goal descriptions can never smuggle content into
+/// the marker (no argv/flag injection, no path traversal).
+const NO_PROGRESS_SUPPRESSION_MARKER_REF_ID: &str = "ooda-breaker";
+
+/// True when `wip` is a breaker-authored escalation artifact — EITHER the durable
+/// suppression marker ([`NO_PROGRESS_SUPPRESSION_MARKER_KIND`], written
+/// before/independent of linking) OR the upgraded linked tracking issue
+/// (`kind = "issue"`, label-prefixed `[no-progress-tracking] `). Either one means
+/// "this goal has already been escalated by the breaker", so the idempotence
+/// guard in [`escalate_with_tracking_issue`] suppresses re-filing whether or not
+/// the `gh` link ever landed. Recognizing the bare marker is what makes storm
+/// suppression durable and restart-surviving (issue-storm suppression fix).
 fn is_breaker_tracking_ref(wip: &WipRef) -> bool {
-    wip.kind.eq_ignore_ascii_case("issue")
-        && wip.label.starts_with(NO_PROGRESS_TRACKING_LABEL_PREFIX)
+    wip.kind
+        .eq_ignore_ascii_case(NO_PROGRESS_SUPPRESSION_MARKER_KIND)
+        || (wip.kind.eq_ignore_ascii_case("issue")
+            && wip.label.starts_with(NO_PROGRESS_TRACKING_LABEL_PREFIX))
+}
+
+/// True when `wip` is specifically the *bare* durable suppression marker (not a
+/// linked tracking issue). Used by [`upgrade_suppression_marker_to_link`] to drop
+/// the marker when a later filing succeeds, so the `<= 1 breaker ref per goal`
+/// invariant holds (the marker is replaced by the linked ref, never supplemented).
+fn is_suppression_marker(wip: &WipRef) -> bool {
+    wip.kind
+        .eq_ignore_ascii_case(NO_PROGRESS_SUPPRESSION_MARKER_KIND)
+}
+
+/// The durable, link-independent suppression [`WipRef`] the breaker writes to a
+/// stuck goal's board record BEFORE attempting the `gh` filing. Persisted through
+/// the existing atomic goal-board save path as an ordinary `WipRef` — no schema
+/// change. A fixed sentinel identity (`ref_id` is a constant, never goal-derived).
+fn suppression_marker() -> WipRef {
+    WipRef {
+        kind: NO_PROGRESS_SUPPRESSION_MARKER_KIND.to_string(),
+        ref_id: NO_PROGRESS_SUPPRESSION_MARKER_REF_ID.to_string(),
+        label: format!("{NO_PROGRESS_TRACKING_LABEL_PREFIX}ooda-breaker (unlinked)"),
+        url: None,
+    }
+}
+
+/// Fold the bare suppression marker into a linked tracking `WipRef` when a filing
+/// succeeds: drop the bare marker, then append the linked tracking ref via
+/// [`link_tracking_issue`]. This keeps at most **one** breaker artifact per goal
+/// (marker upgraded in place, never duplicated) so the storm-suppression
+/// invariant `<= 1 breaker ref per goal` holds even after a failed-then-successful
+/// filing sequence.
+fn upgrade_suppression_marker_to_link(goal: &mut ActiveGoal, filed: &FiledIssue) {
+    goal.wip_refs.retain(|w| !is_suppression_marker(w));
+    link_tracking_issue(goal, filed);
 }
 
 /// A tracking issue the breaker successfully filed for an escalated goal.
@@ -186,19 +246,30 @@ fn link_tracking_issue(goal: &mut ActiveGoal, filed: &FiledIssue) {
 }
 
 /// The escalation side effect shared by every breaker path: set the goal
-/// `Blocked` with `blocked_reason`, then file a tracking issue and **link it
-/// back to the goal** as a tracked artifact — unless the goal already carries a
-/// breaker-authored tracking issue, in which case no duplicate is filed
-/// (idempotent).
+/// `Blocked` with `blocked_reason`, DURABLY mark it suppressed so it is never
+/// re-filed, then best-effort file + link a `gh` tracking issue. Storm-safe and
+/// restart-surviving.
+///
+/// Ordering (the storm fix): the durable suppression marker and the `Blocked`
+/// status are written FIRST, through the existing atomic goal-board save path, so
+/// the goal is idempotently suppressed BEFORE [`NoProgressIssueFiler::file_issue`]
+/// is attempted. A `None` from `file_issue` (a `gh` outage, or a URL that did not
+/// parse to a bare issue number) therefore leaves the goal `Blocked` + suppressed
+/// (no re-file next cycle) instead of `Blocked` + untracked (re-file forever) —
+/// the exact loop that produced the ~15-duplicate `UNCLEAR-CRITERIA` issue storm.
+/// On a `Some`, the bare marker is UPGRADED IN PLACE to the linked tracking ref
+/// via [`upgrade_suppression_marker_to_link`] — never appended as a duplicate.
 ///
 /// Linking the issue is what makes an `UNCLEAR-CRITERIA` goal's done-criteria
-/// measurable: without it the breaker filed a tracking issue but *orphaned* it,
-/// so the goal's `wip_refs` stayed empty, `has_derivable_signal` stayed `false`,
-/// and the done-gate could never verify completion — the exact WHY
-/// ("no tracked PR/issue the done-gate can verify") that stranded the synthetic
-/// `simard-identity-*` goals. With the link the done-gate can observe the
-/// tracking issue as `CLOSED` and certify the goal, or a human can navigate
-/// goal → issue to resolve/re-scope it.
+/// measurable: with the link the done-gate can observe the tracking issue as
+/// `CLOSED` and certify the goal, or a human can navigate goal → issue to
+/// resolve/re-scope it.
+///
+/// Deliberate trade-off: a goal that received a *bare* marker from a failed first
+/// filing is never re-linked on a later cycle (the idempotence guard short-circuits
+/// before `file_issue`). Storm suppression is prioritized over eventual linking;
+/// the stall is still durably surfaced via the `Blocked` status and its WHY. The
+/// escape hatch is manual (remove the bare marker; the next cycle re-escalates).
 fn escalate_with_tracking_issue(
     state: &mut OodaState,
     goal_id: &str,
@@ -207,31 +278,34 @@ fn escalate_with_tracking_issue(
     issue_body: &str,
     filer: &dyn NoProgressIssueFiler,
 ) {
-    // Idempotence: never file a second tracking issue for a goal already linked
-    // to one (a re-stall must not spam duplicate `ooda-stuck` issues).
-    let already_tracked = state
-        .active_goals
-        .active
-        .iter()
-        .find(|g| g.id == goal_id)
-        .is_some_and(|g| g.wip_refs.iter().any(is_breaker_tracking_ref));
-
-    let filed = if already_tracked {
-        None
-    } else {
-        filer.file_issue(issue_title, issue_body)
-    };
-
-    if let Some(g) = state
+    // Idempotence: a goal already carrying any breaker artifact (a bare
+    // suppression marker OR a linked tracking ref) is never re-filed — a re-stall
+    // must not spam duplicate `ooda-stuck` issues, even across a daemon restart.
+    let Some(g) = state
         .active_goals
         .active
         .iter_mut()
         .find(|g| g.id == goal_id)
-    {
-        g.status = GoalProgress::Blocked(blocked_reason);
-        if let Some(issue) = &filed {
-            link_tracking_issue(g, issue);
-        }
+    else {
+        return;
+    };
+    let already_tracked = g.wip_refs.iter().any(is_breaker_tracking_ref);
+
+    // 1. Durable, link-independent suppression FIRST. Always block the goal; an
+    //    already-suppressed goal stops here so it is never re-filed (idempotence
+    //    across a `gh` failure and a daemon restart, since the marker lives on the
+    //    goal board, not the in-memory tracker).
+    g.status = GoalProgress::Blocked(blocked_reason);
+    if already_tracked {
+        return;
+    }
+    g.wip_refs.push(suppression_marker());
+
+    // 2. Best-effort link SECOND, holding the same borrow (`file_issue` does not
+    //    touch `state`). On success upgrade the bare marker in place to the linked
+    //    ref; on `None` the goal stays Blocked + suppressed and is not re-filed.
+    if let Some(filed) = filer.file_issue(issue_title, issue_body) {
+        upgrade_suppression_marker_to_link(g, &filed);
     }
 }
 
@@ -283,14 +357,23 @@ pub(crate) struct NoProgressBreakerReport {
     /// ("idle") cycle. For a standing cognition-research goal an idle cycle is a
     /// **FAULT**, not the benign bursty idle of [`perpetual_idled`]: its charter
     /// is continuous exploration, so it must generate a NEW source/experiment
-    /// every cycle. The never-idle rail therefore re-orients the goal
-    /// ([`ActiveGoal::roll_to_new_cycle`]) so the next OODA cycle re-enters work
-    /// generation, resets its no-action counter, and records the fault here so it
-    /// is visible in the cycle log — the opposite of the old silent exemption.
-    /// It stays **fail-closed**: the goal is never blocked/killed/parked, and
-    /// this is deliberately NOT a [`fired`](Self::fired) firing (it is a
-    /// re-orient, not a terminal breaker action).
+    /// every cycle. The breaker records the fault here (so it is visible in the
+    /// cycle log — the opposite of the old silent exemption) and resets its
+    /// no-action counter. Issue #4453: the breaker no longer re-orients the goal
+    /// itself — the destructive [`ActiveGoal::roll_to_new_cycle`] is owned solely
+    /// by the agentic per-goal reasoner's `reorient` action, so this is purely a
+    /// SIGNAL. It stays **fail-closed**: the goal is never blocked/killed/parked,
+    /// and this is deliberately NOT a [`fired`](Self::fired) firing.
     pub research_idle_faults: Vec<String>,
+    /// Goals **terminally quarantined** (process_health): an `UNCLEAR-CRITERIA` /
+    /// `GENUINELY-STUCK` goal that stayed evidence-less past
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`](crate::goal_curation::no_progress_breaker::SURFACED_INVESTIGATION_FAILURE_LIMIT)
+    /// surfaced failures. It is Blocked WITH the surfaced count as evidence, the
+    /// durable [`quarantine_marker`](crate::goal_curation::no_progress_breaker::quarantine_marker)
+    /// is written, and it is thereafter skipped by
+    /// [`reinvestigate_bare_blocked_goals`] — ending the re-schedule/re-file
+    /// churn. A terminal firing.
+    pub quarantined: Vec<String>,
 }
 
 impl NoProgressBreakerReport {
@@ -305,6 +388,7 @@ impl NoProgressBreakerReport {
             || !self.healed.is_empty()
             || !self.deferred.is_empty()
             || !self.engineer_spawned.is_empty()
+            || !self.quarantined.is_empty()
     }
 
     /// Compact one-line summary for the cycle log.
@@ -312,7 +396,7 @@ impl NoProgressBreakerReport {
         format!(
             "done={} dropped={} escalated={} healed={} deferred={} engineer={} \
              auto_cleared={} reinvestigated={} errors={} perpetual_idled={} \
-             research_faults={}",
+             research_faults={} quarantined={}",
             self.marked_done.len(),
             self.dropped.len(),
             self.escalated.len(),
@@ -324,6 +408,7 @@ impl NoProgressBreakerReport {
             self.investigation_errors.len(),
             self.perpetual_idled.len(),
             self.research_idle_faults.len(),
+            self.quarantined.len(),
         )
     }
 
@@ -375,8 +460,10 @@ pub(crate) enum StandingIdle {
     BenignExempt,
     /// Standing RESEARCH goal ([`ActiveGoal::is_standing_research_goal`]). Idling
     /// is a FAULT (issue #4399): record the goal in `research_idle_faults`, warn
-    /// with the `fault` category, reset the counter, and re-orient via
-    /// [`ActiveGoal::roll_to_new_cycle`]. Never block/kill/park.
+    /// with the `fault` category, and reset the counter. Issue #4453 demoted this
+    /// to a pure SIGNAL — the breaker no longer re-orients here; the destructive
+    /// [`ActiveGoal::roll_to_new_cycle`] is owned solely by the agentic per-goal
+    /// reasoner's `reorient` action. Never block/kill/park.
     ResearchFault { fault: ResearchIdleFault },
     /// Standing RESEARCH goal that still holds a LIVE in-flight artifact — an
     /// open PR / working branch / engineer session
@@ -574,7 +661,7 @@ fn apply_standing_idle(
     report: &mut NoProgressBreakerReport,
     goal_id: &str,
 ) -> bool {
-    let Some(goal) = board.active.iter_mut().find(|g| g.id == goal_id) else {
+    let Some(goal) = board.active.iter().find(|g| g.id == goal_id) else {
         return false;
     };
     let Some(classification) = classify_standing_idle(goal) else {
@@ -582,9 +669,10 @@ fn apply_standing_idle(
     };
 
     // Every standing-idle path — benign OR research-fault — resets the no-action
-    // counter and keeps the goal active for the next cycle; only the reporting and
-    // re-orient differ. Hoisted so that "a standing idle never advances the breaker
-    // toward a firing" is a single, unmissable invariant.
+    // counter and keeps the goal active for the next cycle; only the reporting
+    // differs (re-orient is no longer done here — issue #4453). Hoisted so that
+    // "a standing idle never advances the breaker toward a firing" is a single,
+    // unmissable invariant.
     tracker.record_progress(goal_id);
 
     match classification {
@@ -602,25 +690,29 @@ fn apply_standing_idle(
             );
         }
         StandingIdle::ResearchFault { fault } => {
-            // Never-idle rail (issue #4399): a standing research goal that idles
-            // is a FAULT. Record the fault and re-orient it (roll_to_new_cycle:
-            // NotStarted + stale WIP dropped) so the NEXT cycle re-enters work
-            // generation and yields a NEW source or a NEW experiment — while
-            // staying fail-closed (never block/kill/park, never a firing).
+            // Never-idle rail (issue #4399), demoted to a pure SIGNAL by the
+            // agentic per-goal-per-cycle rail (issue #4453): a standing research
+            // goal that idles is recorded as a FAULT signal and its no-action
+            // counter is reset (done above) so the breaker never fires on it — but
+            // this imperative path NO LONGER re-orients it. The re-orient decision
+            // (and the destructive `roll_to_new_cycle`) is owned exclusively by the
+            // reasoner's `reorient` action in `drive_per_goal_cycle`, which runs
+            // once per active goal every cycle and reads this same idle condition
+            // via `classify_standing_idle`. Rolling here as well would double-drive
+            // the goal — resetting it to `NotStarted` and dropping WIP even when the
+            // reasoner decided to `wait`/`continue`/`investigate` — which was the
+            // 70ab8541 idle→reset fault-loop. Stays fail-closed: never
+            // block/kill/park, never a firing; the goal stays active for the
+            // reasoner to decide on next.
             report.research_idle_faults.push(goal_id.to_string());
             tracing::warn!(
                 target: "simard::ooda",
                 goal = %goal_id,
                 category = fault.as_str(),
-                "no-progress breaker: research goal idled — FAULT: re-orienting to \
-                 generate a novel source/experiment next cycle \
-                 (counter reset, goal stays active, never blocked)",
+                "no-progress breaker: research goal idled — FAULT signal recorded \
+                 (counter reset, goal stays active, never blocked); re-orient is \
+                 owned by the agentic per-goal reasoner, not this imperative path",
             );
-            // Re-orient the SAME goal we already located and classified — no
-            // second board scan. roll_to_new_cycle returns it to the canonical
-            // re-dispatchable state (`NotStarted`, stale WIP dropped) so the next
-            // cycle re-enters work generation; it is never Blocked/killed/parked.
-            goal.roll_to_new_cycle();
         }
         StandingIdle::ResearchInFlight => {
             // Live in-flight progress (issue #4399, crusty finding 1): the
@@ -822,7 +914,8 @@ pub(crate) fn apply_no_progress_breaker_with_threshold(
             NoProgressResolution::Heal { .. }
             | NoProgressResolution::Defer { .. }
             | NoProgressResolution::SpawnEngineer { .. }
-            | NoProgressResolution::SurfaceInvestigationFailure { .. } => {
+            | NoProgressResolution::SurfaceInvestigationFailure { .. }
+            | NoProgressResolution::QuarantineTerminal { .. } => {
                 tracing::warn!(
                     target: "simard::ooda",
                     goal = %goal_id,
@@ -968,7 +1061,16 @@ pub(crate) fn apply_no_progress_breaker_investigated(
         };
 
         let guided_retry_used = tracker.guided_retry_used(goal_id);
-        let resolution = resolution_for_why(consecutive, why, guided_retry_used);
+        let class = why.class;
+        // PRE-bump read: this is the surfaced-failure count as it stands ENTERING
+        // this cycle. `resolution_for_why` compares it `>= LIMIT` before the surface
+        // arm below records this cycle's own failure via `record_surfaced_failure`,
+        // so the evidence-less stall is surfaced for its first LIMIT observations and
+        // quarantine fires on the (LIMIT + 1)th — a deliberate one-observation shift
+        // from the old post-bump escalate-at-LIMIT trigger, pinned by
+        // `quarantine_fires_on_the_cycle_after_the_limit_th_surface`.
+        let surfaced_failures = tracker.surfaced_failures(goal_id);
+        let resolution = resolution_for_why(consecutive, why, guided_retry_used, surfaced_failures);
 
         // On-transition path: the goal is not in a Blocked state, so the
         // non-terminal `Heal` / `SpawnEngineer` rungs leave its status untouched
@@ -977,6 +1079,7 @@ pub(crate) fn apply_no_progress_breaker_investigated(
             state,
             goal_id,
             consecutive,
+            class,
             resolution,
             healer,
             dispatcher,
@@ -1008,6 +1111,9 @@ pub(crate) fn apply_no_progress_breaker_investigated(
 /// re-investigation pass ([`reinvestigate_bare_blocked_goals`], issue #17) so the
 /// class → action mapping can never drift between the two populations.
 /// `consecutive` renders into any authored block reason / clone-error escalation.
+/// `class` is the investigated root-cause classification; it authors the WHY on
+/// the terminal [`NoProgressResolution::QuarantineTerminal`] block reason and its
+/// single deduplicated escalation issue.
 ///
 /// `unblock_nonterminal` distinguishes the callers' starting state. The
 /// on-transition path acts on a goal that is *not* Blocked, so the non-terminal
@@ -1023,6 +1129,7 @@ fn apply_resolution_side_effects(
     state: &mut OodaState,
     goal_id: &str,
     consecutive: u32,
+    class: NoProgressClass,
     resolution: NoProgressResolution,
     healer: &dyn PreconditionHealer,
     dispatcher: &dyn NoProgressEngineerDispatcher,
@@ -1214,65 +1321,24 @@ fn apply_resolution_side_effects(
                 "no-progress breaker: stuck after guided retry — BLOCKED WITH why + issue filed and linked",
             );
         }
-        NoProgressResolution::SurfaceInvestigationFailure { class, reason } => {
-            // Bound the evidence-less re-investigation (issue #16 follow-up). The
-            // first fix (#4096) made this rung non-terminal so a goal is never
-            // parked with a bare `evidence=[(none)]` block — but an *unbounded*
-            // re-investigation is its own livelock: a goal whose done-criteria are
-            // permanently unclear surfaces → resets → forever, making no shippable
-            // progress and never reaching a human. After
-            // `SURFACED_INVESTIGATION_FAILURE_LIMIT` consecutive surfaced failures,
-            // stop spinning and escalate to a human WITH the re-investigation count
-            // as concrete evidence (so the never-`evidence=[(none)]` invariant
-            // holds — the count is real evidence, not `(none)`) and a measurable
-            // "make the done-criteria machine-checkable" ask.
-            let surfaced = tracker.record_surfaced_failure(goal_id);
-            if surfaced >= SURFACED_INVESTIGATION_FAILURE_LIMIT {
-                let why = NoProgressWhy::new(
-                    class,
-                    vec![Evidence::new(
-                        "re-investigation",
-                        goal_id,
-                        format!("{surfaced} consecutive evidence-less investigations"),
-                    )],
-                );
-                let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
-                let (issue_title, issue_body) =
-                    surfaced_failure_escalation_issue(goal_id, class, surfaced);
-                escalate_with_tracking_issue(
-                    state,
-                    goal_id,
-                    blocked_reason,
-                    &issue_title,
-                    &issue_body,
-                    filer,
-                );
-                tracker.clear_surfaced_failures(goal_id);
-                tracker.reset_count(goal_id);
-                report.escalated.push(goal_id.to_string());
-                tracing::warn!(
-                    target: "simard::ooda",
-                    goal = %goal_id,
-                    why = %class.token(),
-                    surfaced_failures = surfaced,
-                    "no-progress breaker: evidence-less re-investigation bounded out after \
-                     {surfaced} surfaced failures — BLOCKED WITH re-investigation count as \
-                     evidence + human triage issue filed and linked to make the done-criteria measurable",
-                );
-                return;
-            }
-
-            // Below the bound: the independent investigation reached the terminal
-            // rung with NO evidence. A goal must NEVER be parked with
+        NoProgressResolution::SurfaceInvestigationFailure { class: _, reason } => {
+            // The independent investigation reached the terminal rung with NO
+            // evidence, but the goal has NOT yet exhausted its bounded
+            // re-investigation budget (the routing in
+            // [`resolution_for_why`] returns [`NoProgressResolution::QuarantineTerminal`]
+            // once the PRE-bump surfaced count reaches
+            // `SURFACED_INVESTIGATION_FAILURE_LIMIT`, so reaching THIS arm means we
+            // are still below the bound). A goal must NEVER be parked with
             // `evidence=[(none)]`, so this is a SURFACED failure — not a bare
-            // block. Take no terminal action: record it in `investigation_errors`
-            // (fail visible) and leave the goal retriable so the next investigation
-            // can recover real evidence (fail closed). The guided-retry flag is
-            // preserved, so a future terminal rung goes straight here again rather
-            // than spawning a second engineer. On the re-investigation path the
-            // goal starts in a bare / `(none)` Blocked state, so un-block it to
-            // `NotStarted` so the brain can re-select it and a later cycle can
-            // re-investigate.
+            // block. Take no terminal action: bump the surfaced-failure counter,
+            // record it in `investigation_errors` (fail visible) and leave the goal
+            // retriable so the next investigation can recover real evidence (fail
+            // closed). The guided-retry flag is preserved, so a future terminal
+            // rung goes straight here again rather than spawning a second engineer.
+            // On the re-investigation path the goal starts in a bare / `(none)`
+            // Blocked state, so un-block it to `NotStarted` so the brain can
+            // re-select it and a later cycle can re-investigate.
+            let surfaced = tracker.record_surfaced_failure(goal_id);
             if unblock_nonterminal
                 && let Some(g) = state
                     .active_goals
@@ -1291,6 +1357,68 @@ fn apply_resolution_side_effects(
                 surfaced_failures = surfaced,
                 "no-progress breaker: evidence-less terminal outcome SURFACED as an \
                  investigation failure (never parked with evidence=[(none)]) — retriable",
+            );
+        }
+        NoProgressResolution::QuarantineTerminal { surfaced_count } => {
+            // Terminal quarantine (process_health, HIGH). An evidence-less goal
+            // whose done-criteria are permanently UNCLEAR-CRITERIA /
+            // GENUINELY-STUCK has now exhausted its bounded re-investigation budget
+            // (`surfaced_count >= SURFACED_INVESTIGATION_FAILURE_LIMIT`). The old
+            // behaviour escalated (filed an issue) EVERY time it re-crossed the
+            // bound, and `reinvestigate_bare_blocked_goals` kept re-selecting the
+            // goal — so each cycle re-blocked and re-filed a near-identical
+            // `ooda-stuck` issue: unbounded churn. Quarantine ends the churn by
+            // (a) blocking WITH the surfaced count as concrete evidence (so the
+            // never-`evidence=[(none)]` invariant still holds), (b) filing exactly
+            // ONE deduplicated triage issue, (c) writing a durable
+            // [`quarantine_marker`] onto the goal, after which
+            // [`reinvestigate_bare_blocked_goals`] skips it permanently — no more
+            // re-schedule, no more re-file. A human must make the done-criteria
+            // machine-checkable and clear the marker to revive it.
+            let why = NoProgressWhy::new(
+                class,
+                vec![Evidence::new(
+                    "re-investigation",
+                    goal_id,
+                    format!("{surfaced_count} consecutive evidence-less investigations"),
+                )],
+            );
+            let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
+            let (issue_title, issue_body) =
+                surfaced_failure_escalation_issue(goal_id, class, surfaced_count);
+            escalate_with_tracking_issue(
+                state,
+                goal_id,
+                blocked_reason,
+                &issue_title,
+                &issue_body,
+                filer,
+            );
+            // Idempotently mark the goal quarantined so the re-investigation pass
+            // stops re-selecting it. Only push the marker once — a goal that trips
+            // this arm again (e.g. a stale in-flight cycle) must not accrete
+            // duplicate markers.
+            if let Some(g) = state
+                .active_goals
+                .active
+                .iter_mut()
+                .find(|g| g.id == goal_id)
+                && !is_quarantined(g)
+            {
+                g.wip_refs.push(quarantine_marker());
+            }
+            tracker.clear_surfaced_failures(goal_id);
+            tracker.reset_count(goal_id);
+            report.quarantined.push(goal_id.to_string());
+            tracing::warn!(
+                target: "simard::ooda",
+                goal = %goal_id,
+                why = %class.token(),
+                surfaced_failures = surfaced_count,
+                "no-progress breaker: evidence-less re-investigation bounded out after \
+                 {surfaced_count} surfaced failures — TERMINALLY QUARANTINED (blocked WITH \
+                 re-investigation count as evidence, one triage issue filed, goal removed from \
+                 re-scheduling); a human must make the done-criteria measurable to revive it",
             );
         }
     }
@@ -1361,6 +1489,21 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         .collect();
 
     for goal_id in bare_ids {
+        // Churn-stopper (process_health, HIGH): a durably quarantined goal is
+        // NEVER re-investigated, re-classified, re-escalated, or re-filed again —
+        // even if a restart re-parked it in a bare block. Short-circuit BEFORE the
+        // reasoner is consulted so the terminal quarantine truly ends the
+        // re-schedule/re-file loop (the reasoner is a `PanicReasoner` in the
+        // churn test to prove it is never reached).
+        if state
+            .active_goals
+            .active
+            .iter()
+            .any(|g| g.id == goal_id && is_quarantined(g))
+        {
+            continue;
+        }
+
         // Investigate the bare goal ONCE. Fail closed on error: no terminal
         // action, marker left exactly as-is, nothing recorded in the dedupe set.
         let why = {
@@ -1435,7 +1578,8 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
         }
 
         let guided_retry_used = tracker.guided_retry_used(&goal_id);
-        let resolution = resolution_for_why(threshold, why, guided_retry_used);
+        let surfaced_failures = tracker.surfaced_failures(&goal_id);
+        let resolution = resolution_for_why(threshold, why, guided_retry_used, surfaced_failures);
 
         // An evidence-less terminal outcome takes NO terminal action (it is
         // surfaced + retried), so it must NOT be recorded in the (goal, class)
@@ -1449,6 +1593,7 @@ pub(crate) fn reinvestigate_bare_blocked_goals(
             state,
             &goal_id,
             threshold,
+            class,
             resolution,
             healer,
             dispatcher,
@@ -1558,6 +1703,59 @@ fn stuck_evidence(goal: &ActiveGoal) -> Vec<Evidence> {
         .collect()
 }
 
+/// Attempt to derive checkable done-criteria for a stalled goal from its OWN
+/// `description` — no external clarification, no brain call. Consulted at the
+/// terminal rung of [`DeterministicNoProgressReasoner::investigate`] *before* an
+/// empty-artifact stall defaults to `UNCLEAR-CRITERIA`.
+///
+/// Returns:
+/// * `Some(evidence)` — non-empty, bounded — when the description carries a
+///   machine-checkable finish condition: **either** an explicit, self-contained
+///   criteria section (a recognized [`crate::done_criteria::CRITERIA_HEADINGS`]
+///   heading with at least one concrete [`crate::done_criteria::has_checkable_item`]
+///   item) **or** an operator done-gate finish line
+///   ([`crate::goal_board_store::DONE_WHEN_MARKER`]) written by a
+///   [`crate::goal_board_store::DoneGatePin`] repair. The caller proceeds as
+///   `GENUINELY-STUCK` with this evidence, so a goal that already spelled out
+///   concrete done-criteria — or was *repaired* to have them — is not
+///   misclassified `UNCLEAR-CRITERIA` and swept into the storm-feeding
+///   population, and is not re-blocked cycle after cycle (issue #4930).
+/// * `None` — when nothing checkable can be derived. The caller falls to the
+///   legacy `UNCLEAR-CRITERIA` classification (byte-identical to before).
+///
+/// Both signals come from the single shared, hardened
+/// [`crate::done_criteria::detect_measurable_criteria`] detector so admission,
+/// classification and the done-gate repair path share exactly one definition
+/// (issue #4930): one length cap, one heading set, one checkable-item scan, and
+/// one finish-line marker — no drifting second copy, and the repair mechanism can
+/// never disagree with the classifier that consumes it.
+///
+/// Totality/safety contract: never panics, never returns `Some(vec![])`, and
+/// bounds its work by [`crate::done_criteria::DERIVE_CRITERIA_MAX_SCAN`] so
+/// adversarial goal text cannot cause a panic or pathological scanning. The
+/// emitted evidence carries only the goal id and a constant token — never raw
+/// goal text — so nothing is smuggled into the WHY / log line.
+fn derive_criteria(goal: &ActiveGoal) -> Option<Vec<Evidence>> {
+    use crate::done_criteria::{CriteriaSignal, detect_measurable_criteria};
+
+    // One length-capped, lower-cased pass over the untrusted description, shared
+    // by admission and classification via the hardened `done_criteria` detector.
+    let why = match detect_measurable_criteria(&goal.description)? {
+        CriteriaSignal::Heading(heading) => {
+            format!("derivable: goal description states explicit {heading}")
+        }
+        // A `goal set-done-gate` repair (issue #4930): the finish line is a
+        // machine-checkable anchor an operator pinned, so the goal is genuinely
+        // stuck-with-criteria rather than UNCLEAR-CRITERIA — and must not be
+        // re-blocked on the next cycle even when it carries no markdown bullet.
+        CriteriaSignal::DoneGateFinishLine => {
+            "derivable: goal carries an operator-pinned done-gate finish line".to_string()
+        }
+    };
+
+    Some(vec![Evidence::new("done-criteria", goal.id.clone(), why)])
+}
+
 /// Evidence for an `UNCLEAR-CRITERIA` goal (issue #16 follow-up): a stalled goal
 /// that reached the terminal rung with **no** tracked artifact the done-gate can
 /// ever check — no open/closed PR or issue, no absent precondition, no upstream.
@@ -1652,23 +1850,30 @@ impl NoProgressWhyReasoner for DeterministicNoProgressReasoner<'_> {
                 ));
             }
         }
-        // 5. No machine-resolvable cause found. Split the terminal rung by whether
-        //    the goal still references open work the done-gate could ever track:
+        // 5. No machine-resolvable cause found. Split the terminal rung:
         //      - open artifacts present  -> GENUINELY-STUCK (evidence = them);
-        //      - no tracked artifact     -> UNCLEAR-CRITERIA (evidence = the named
-        //        unmeasurable criterion) — the synthetic simard-identity-* goals.
+        //      - else, criteria DERIVABLE from the goal's own description
+        //        -> GENUINELY-STUCK (evidence = the derived criterion), so a goal
+        //        that already spelled out concrete done-criteria is not
+        //        misclassified UNCLEAR-CRITERIA and swept into the issue-storm
+        //        population;
+        //      - else no tracked artifact and nothing derivable -> UNCLEAR-CRITERIA
+        //        (evidence = the named unmeasurable criterion) — the synthetic
+        //        simard-identity-* goals.
         //    Never emit an empty-evidence GENUINELY-STUCK block: that is the exact
         //    live-daemon `evidence=[(none)]` defect (issue #16 follow-up).
         let open_artifacts = stuck_evidence(goal);
-        if open_artifacts.is_empty() {
-            Ok(NoProgressWhy::new(
-                NoProgressClass::UnclearCriteria,
-                unclear_criteria_evidence(goal),
-            ))
-        } else {
+        if !open_artifacts.is_empty() {
             Ok(NoProgressWhy::new(
                 NoProgressClass::GenuinelyStuck,
                 open_artifacts,
+            ))
+        } else if let Some(derived) = derive_criteria(goal) {
+            Ok(NoProgressWhy::new(NoProgressClass::GenuinelyStuck, derived))
+        } else {
+            Ok(NoProgressWhy::new(
+                NoProgressClass::UnclearCriteria,
+                unclear_criteria_evidence(goal),
             ))
         }
     }
@@ -1831,6 +2036,439 @@ mod tests_tracking_issue_link {
             goal.wip_refs.len(),
             1,
             "no duplicate ref for an issue number the goal already carries",
+        );
+    }
+}
+
+/// TDD (Step 7) — FAILING tests pinning the storm-suppression contract for the
+/// UNCLEAR-CRITERIA / no-progress-breaker duplicate-issue storm defect.
+///
+/// # The defect these tests lock down
+///
+/// `escalate_with_tracking_issue` only writes a durable breaker-tracking
+/// [`WipRef`] when [`NoProgressIssueFiler::file_issue`] returns `Some`. When
+/// `gh issue create` fails (`file_issue` → `None`) the goal is Blocked but
+/// carries **no** breaker ref, so the next firing sees `already_tracked == false`
+/// and re-files. Over ~2 days of cycles that produced ~15 duplicate
+/// "no-progress breaker: goal stuck after guided retry (UNCLEAR-CRITERIA)"
+/// issues off a handful of stuck goals — the observed storm.
+///
+/// # The contract (what the fix must make true)
+///
+/// Suppression must be **durable and independent of `gh` URL-parse success**:
+///   * a firing whose `file_issue` returns `None` STILL writes a durable
+///     per-goal suppression marker to the goal's `wip_refs`;
+///   * that marker is recognised by [`is_breaker_tracking_ref`], so the existing
+///     `already_tracked` guard suppresses every subsequent re-file;
+///   * because the marker lives in `wip_refs` (serialized on the goal board) the
+///     suppression survives a daemon restart (the in-memory tracker resets, the
+///     marker does not);
+///   * a later successful filing UPGRADES the bare marker to a real linked
+///     tracking ref WITHOUT appending a second breaker ref (≤ 1 breaker marker
+///     per goal);
+///   * a truly-unclear goal therefore yields exactly ONE deduplicated breaker
+///     outcome (a single filing/annotation) even when link-parsing fails.
+///
+/// These tests compile against the CURRENT symbols and fail on BEHAVIOUR:
+/// today `file_issue` → `None` leaves no marker, so re-filing happens and the
+/// filing counter climbs past 1.
+#[cfg(test)]
+mod tests_storm_suppression {
+    use std::cell::Cell;
+
+    use super::{NoProgressIssueFiler, escalate_with_tracking_issue, is_breaker_tracking_ref};
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+    use crate::ooda_loop::OodaState;
+
+    /// A filer that always FAILS to file (models a `gh` outage / unresolved
+    /// issue number) and counts how many times the escalation path invoked it.
+    #[derive(Default)]
+    struct FailingCountingFiler {
+        calls: Cell<usize>,
+    }
+
+    impl NoProgressIssueFiler for FailingCountingFiler {
+        fn file_issue(&self, _title: &str, _body: &str) -> Option<super::FiledIssue> {
+            self.calls.set(self.calls.get() + 1);
+            None
+        }
+    }
+
+    /// A filer that SUCCEEDS, returning a fixed issue number, and counts calls.
+    struct SucceedingCountingFiler {
+        number: String,
+        calls: Cell<usize>,
+    }
+
+    impl SucceedingCountingFiler {
+        fn new(number: &str) -> Self {
+            Self {
+                number: number.to_string(),
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl NoProgressIssueFiler for SucceedingCountingFiler {
+        fn file_issue(&self, _title: &str, _body: &str) -> Option<super::FiledIssue> {
+            self.calls.set(self.calls.get() + 1);
+            Some(super::FiledIssue {
+                number: self.number.clone(),
+                url: Some(format!("https://github.com/o/r/issues/{}", self.number)),
+            })
+        }
+    }
+
+    fn state_with_active(goal: ActiveGoal) -> OodaState {
+        let mut board = GoalBoard::new();
+        board.active.push(goal);
+        OodaState::new(board)
+    }
+
+    fn only_goal(state: &OodaState) -> &ActiveGoal {
+        &state.active_goals.active[0]
+    }
+
+    fn breaker_ref_count(goal: &ActiveGoal) -> usize {
+        goal.wip_refs
+            .iter()
+            .filter(|w| is_breaker_tracking_ref(w))
+            .count()
+    }
+
+    /// T1 — the core storm-stopper. When `file_issue` returns `None`, escalation
+    /// must STILL leave a durable suppression marker so a second escalation of
+    /// the same goal does NOT re-file. Today it re-files → `calls == 2`.
+    #[test]
+    fn failed_filing_still_suppresses_a_second_escalation() {
+        let filer = FailingCountingFiler::default();
+        let mut state = state_with_active(ActiveGoal::new(
+            "simard-identity-atelier-industrial-furniture-de",
+            "a synthetic identity goal with no tracked artifact",
+            1,
+        ));
+
+        // First firing: gh fails, but suppression must be recorded durably.
+        escalate_with_tracking_issue(
+            &mut state,
+            "simard-identity-atelier-industrial-furniture-de",
+            "[OODA-SAFEGUARD] no-progress breaker: UNCLEAR-CRITERIA".to_string(),
+            "no-progress breaker: goal stuck after guided retry (UNCLEAR-CRITERIA)",
+            "body",
+            &filer,
+        );
+        assert_eq!(
+            filer.calls.get(),
+            1,
+            "first firing attempts exactly one filing"
+        );
+
+        // Second firing of the SAME goal: the durable suppression marker written
+        // on the first (failed) firing must short-circuit re-filing.
+        escalate_with_tracking_issue(
+            &mut state,
+            "simard-identity-atelier-industrial-furniture-de",
+            "[OODA-SAFEGUARD] no-progress breaker: UNCLEAR-CRITERIA".to_string(),
+            "no-progress breaker: goal stuck after guided retry (UNCLEAR-CRITERIA)",
+            "body",
+            &filer,
+        );
+        assert_eq!(
+            filer.calls.get(),
+            1,
+            "a failed first filing must not cause the breaker to re-file every \
+             cycle — this is the duplicate-issue storm (15 dup issues in ~2 days)",
+        );
+    }
+
+    /// T1b — the marker written on a failed filing must be a durable
+    /// breaker-tracking ref (recognised by `is_breaker_tracking_ref`), because
+    /// the `already_tracked` guard keys on exactly that predicate.
+    #[test]
+    fn failed_filing_writes_a_durable_breaker_marker() {
+        let filer = FailingCountingFiler::default();
+        let mut state = state_with_active(ActiveGoal::new("g", "vague goal", 1));
+
+        escalate_with_tracking_issue(
+            &mut state,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &filer,
+        );
+
+        let goal = only_goal(&state);
+        assert!(
+            matches!(goal.status, GoalProgress::Blocked(_)),
+            "the goal is still Blocked even when filing failed",
+        );
+        assert_eq!(
+            breaker_ref_count(goal),
+            1,
+            "a failed filing must persist exactly one durable breaker suppression \
+             marker so dedup no longer depends on gh URL-parse success",
+        );
+    }
+
+    /// T2 — restart durability. The suppression marker lives on the goal board
+    /// (`wip_refs`), so it survives a daemon restart that resets the in-memory
+    /// tracker. Modelled by a serde round-trip of the goal into a fresh state.
+    #[test]
+    fn suppression_survives_a_restart_and_still_blocks_re_filing() {
+        let first = FailingCountingFiler::default();
+        let mut state = state_with_active(ActiveGoal::new("g", "vague goal", 1));
+        escalate_with_tracking_issue(
+            &mut state,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &first,
+        );
+        assert_eq!(first.calls.get(), 1);
+
+        // Simulate a restart: serialize the goal (as the board would be persisted)
+        // and rebuild a brand-new OodaState from the deserialized goal. The
+        // in-memory NoProgressTracker is fresh; only wip_refs carry over.
+        let json = serde_json::to_string(only_goal(&state)).expect("goal serializes");
+        let restored: ActiveGoal = serde_json::from_str(&json).expect("goal deserializes");
+        let mut restarted = state_with_active(restored);
+
+        let second = FailingCountingFiler::default();
+        escalate_with_tracking_issue(
+            &mut restarted,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &second,
+        );
+        assert_eq!(
+            second.calls.get(),
+            0,
+            "after a restart the durable marker must still suppress re-filing — \
+             the tracker resets but the goal-board marker does not",
+        );
+    }
+
+    /// T3 — a later successful filing must UPGRADE the bare marker to a linked
+    /// tracking ref WITHOUT appending a second breaker ref (≤ 1 marker per goal).
+    #[test]
+    fn successful_filing_upgrades_the_bare_marker_without_duplicating() {
+        // First: a failed filing writes the bare durable marker.
+        let failing = FailingCountingFiler::default();
+        let mut state = state_with_active(ActiveGoal::new("g", "vague goal", 1));
+        escalate_with_tracking_issue(
+            &mut state,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &failing,
+        );
+        assert_eq!(
+            breaker_ref_count(only_goal(&state)),
+            1,
+            "bare marker present"
+        );
+
+        // Then: `gh` recovers and a filing succeeds. The escalation must not
+        // append a SECOND breaker ref — it upgrades the existing bare marker.
+        let ok = SucceedingCountingFiler::new("4231");
+        escalate_with_tracking_issue(
+            &mut state,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &ok,
+        );
+        assert_eq!(
+            breaker_ref_count(only_goal(&state)),
+            1,
+            "the goal must carry at most one breaker marker — the successful \
+             filing upgrades the bare marker in place, never appends a duplicate",
+        );
+    }
+
+    /// T3-happy — the pre-existing happy path stays intact: a first successful
+    /// filing writes exactly one linked breaker ref and a re-escalation of an
+    /// already-tracked goal never files again.
+    #[test]
+    fn happy_path_files_once_and_never_re_files_when_already_tracked() {
+        let ok = SucceedingCountingFiler::new("5000");
+        let mut state = state_with_active(ActiveGoal::new("g", "vague goal", 1));
+
+        escalate_with_tracking_issue(
+            &mut state,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &ok,
+        );
+        assert_eq!(ok.calls.get(), 1);
+        assert_eq!(breaker_ref_count(only_goal(&state)), 1);
+
+        // Already tracked → no second filing.
+        escalate_with_tracking_issue(
+            &mut state,
+            "g",
+            "[OODA-SAFEGUARD] UNCLEAR-CRITERIA".to_string(),
+            "title",
+            "body",
+            &ok,
+        );
+        assert_eq!(
+            ok.calls.get(),
+            1,
+            "an already-tracked goal is never re-filed"
+        );
+        assert_eq!(
+            breaker_ref_count(only_goal(&state)),
+            1,
+            "still exactly one marker"
+        );
+    }
+}
+
+/// Direct unit tests for the pure `derive_criteria` terminal-rung helper — the
+/// secondary (misclassification) half of the storm fix. These pin its totality
+/// and security contract at the seam the reasoner tests can only exercise
+/// end-to-end: conservatism, bounded scan over adversarial text, and the
+/// bare-heading rejection.
+#[cfg(test)]
+mod tests_derive_criteria {
+    use super::derive_criteria;
+    use crate::done_criteria::DERIVE_CRITERIA_MAX_SCAN;
+    use crate::goal_curation::ActiveGoal;
+
+    fn goal_with_desc(desc: &str) -> ActiveGoal {
+        let mut g = ActiveGoal::new("g", "", 1);
+        g.description = desc.to_string();
+        g
+    }
+
+    #[test]
+    fn derives_from_an_explicit_criteria_section_with_items() {
+        let g = goal_with_desc(
+            "Harden supply-chain provenance.\n\n\
+             Acceptance criteria:\n\
+             - `cargo deny check` passes in CI\n\
+             - every crate has a verified provenance attestation\n",
+        );
+        let derived = derive_criteria(&g).expect("an explicit criteria section is derivable");
+        assert!(!derived.is_empty(), "never returns Some(empty)");
+        assert_eq!(derived[0].kind, "done-criteria");
+        assert!(
+            derived[0].reference == "g",
+            "evidence references the goal id, never raw goal text (no log injection)",
+        );
+    }
+
+    #[test]
+    fn recognizes_ordered_and_checkbox_items() {
+        let ordered = goal_with_desc("Definition of done:\n1. build is green\n2. docs updated\n");
+        assert!(derive_criteria(&ordered).is_some());
+        let checkbox = goal_with_desc("Success criteria:\n[ ] tests pass\n[x] reviewed\n");
+        assert!(derive_criteria(&checkbox).is_some());
+    }
+
+    #[test]
+    fn vague_goal_with_no_criteria_section_is_not_derivable() {
+        assert!(
+            derive_criteria(&goal_with_desc(
+                "a synthetic identity goal with no tracked artifact"
+            ))
+            .is_none(),
+            "conservative: nothing derivable -> None (falls to UNCLEAR-CRITERIA)",
+        );
+    }
+
+    #[test]
+    fn bare_heading_without_any_checkable_item_is_not_derivable() {
+        assert!(
+            derive_criteria(&goal_with_desc(
+                "Acceptance criteria: TBD, to be defined later"
+            ))
+            .is_none(),
+            "a heading with no concrete item must not over-trigger derivation",
+        );
+    }
+
+    #[test]
+    fn is_total_and_bounded_over_adversarial_text() {
+        // A criteria heading beyond the scan cap must NOT be matched (bounded work),
+        // and pathological text (very long, control chars, `--`-prefixed, multibyte)
+        // must never panic.
+        let mut desc = "x".repeat(DERIVE_CRITERIA_MAX_SCAN + 500);
+        desc.push_str("\nAcceptance criteria:\n- item beyond the scan cap\n");
+        assert!(
+            derive_criteria(&goal_with_desc(&desc)).is_none(),
+            "a heading past the scan cap is out of bounds and not derived",
+        );
+
+        for pathological in [
+            "\u{0}\u{1}\u{2}--\u{7}",
+            "🦀🔥\n- 日本語\nacceptance criteria",
+            "---\n* \n- ",
+            "",
+        ] {
+            let _ = derive_criteria(&goal_with_desc(pathological));
+        }
+    }
+
+    #[test]
+    fn done_gate_pin_repair_is_derivable_even_without_a_markdown_bullet() {
+        // Issue #4930 core case: an operator repairs an UNCLEAR-CRITERIA goal with
+        // `goal set-done-gate`, which appends a prose finish line (no heading, no
+        // markdown bullet). Before the fix `derive_criteria` returned None here, so
+        // the reasoner re-classified the goal UNCLEAR-CRITERIA and re-blocked it
+        // every cycle. The finish line must now be recognised as derivable so the
+        // repair actually sticks.
+        let mut g = goal_with_desc("Move the governed repo roster out of the framework.");
+        assert!(
+            derive_criteria(&g).is_none(),
+            "unrepaired prose goal is not derivable (would fall to UNCLEAR-CRITERIA)"
+        );
+        crate::goal_board_store::DoneGatePin {
+            pr: Some("4440".into()),
+            issue: None,
+            criteria: Some("roster is identity-owned".into()),
+        }
+        .apply_to(&mut g);
+        let derived =
+            derive_criteria(&g).expect("a done-gate pin repair must be derivable (issue #4930)");
+        assert!(!derived.is_empty(), "never returns Some(empty)");
+        assert_eq!(derived[0].kind, "done-criteria");
+        assert_eq!(
+            derived[0].reference, "g",
+            "evidence references only the goal id, never raw goal text",
+        );
+    }
+
+    #[test]
+    fn criteria_only_pin_without_any_wip_ref_is_still_derivable() {
+        // The "unrepairable/flag" case the reviews flagged (B1/B4): a pin that
+        // binds NO measurable wip-ref (no pr/issue) still writes the finish line.
+        // stuck_evidence() would be empty for such a goal, so derive_criteria is
+        // the ONLY thing standing between it and an UNCLEAR-CRITERIA re-block — it
+        // must recognise the finish line marker.
+        let mut g = goal_with_desc("Improve the daemon's cognition somehow.");
+        crate::goal_board_store::DoneGatePin {
+            pr: None,
+            issue: None,
+            criteria: Some("the overseer signs off on the cognition rubric".into()),
+        }
+        .apply_to(&mut g);
+        assert!(
+            g.wip_refs.is_empty(),
+            "precondition: a criteria-only pin binds no wip-ref"
+        );
+        assert!(
+            derive_criteria(&g).is_some(),
+            "a criteria-only done-gate finish line must still un-stick the goal (B4)"
         );
     }
 }

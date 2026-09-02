@@ -1,23 +1,43 @@
 mod args;
 mod ci_health;
+pub(crate) mod cognition;
 mod creative_ideas;
 mod curation;
 mod dashboard;
 mod decisions;
+mod disk;
 mod disk_reclaim;
 mod engineer;
 mod goal;
 mod gym;
+mod liaison;
 mod meeting;
 mod memory;
 mod merge;
 mod ooda;
 mod review;
+mod roster;
 mod safe_update;
 mod self_deploy;
 mod self_health;
 mod signal;
 mod status;
+#[cfg(test)]
+mod tests_liaison_and_rework_cli;
+#[cfg(test)]
+mod tests_record_admission;
+#[cfg(test)]
+mod tests_record_decision;
+#[cfg(test)]
+mod tests_record_idea_dedup_consolidation;
+#[cfg(test)]
+mod tests_record_lifecycle_decision;
+#[cfg(test)]
+mod tests_record_orient_decide;
+#[cfg(test)]
+mod tests_record_outcome;
+#[cfg(test)]
+mod tests_record_thread_reasoning;
 mod worktree_gc;
 
 use std::path::PathBuf;
@@ -91,6 +111,13 @@ Product modes:
                             exactly 'Goal <id>' (the test-fixture
                             placeholder pattern). Defence-in-depth
                             cleanup for issues #1923 / #1925.
+  roster list              — print Simard's stewarded-repo roster
+                             (identity-scoped, install-durable) to stdout
+  roster add <owner/name> [note…]
+                          — start stewarding a repo (validated slug;
+                            upsert). Durable across re-installs.
+  roster remove <owner/name>
+                          — stop stewarding a repo (idempotent)
   goal-curation run <base-type> <topology> <objective> [state-root]
   goal-curation read <base-type> <topology> [state-root]
                          — read goals from $SIMARD_STATE_ROOT (or
@@ -105,6 +132,7 @@ Product modes:
   gym compare <scenario-id>
   gym run-suite <suite-id>
   gym recall-precision
+  gym reliability-gate
   gym enrichment-ablation
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
@@ -128,6 +156,12 @@ Product modes:
                            authority (objective gates + merge-readiness judge)
                            if it is merge-ready; defaults to rysweet/Simard,
                            pass --repo to land a PR in any repo Simard governs
+  merge record-verdict --pr <N> --repo <owner/name> --verdict merge|hold
+                       --reason \"<text>\" --run-token <token> [--state-root <path>]
+                         — agent-facing tool the merge-readiness recipe calls to
+                           durably record its typed verdict; the deterministic
+                           rail reads it back and INDEPENDENTLY re-verifies the
+                           hard safety gates before authorizing a merge
   worktree-gc [--apply] [--idle-days=N] [--root=PATH ...] [--parent-repo=PATH]
                          — prune merged/stale engineer worktrees (dry-run by default)
   disk-reclaim [--apply] [--report-json] [--target-pct=N]
@@ -241,6 +275,7 @@ where
         "engineer" => engineer::dispatch_engineer_command(args),
         "meeting" => meeting::dispatch_meeting_command(args),
         "goal" => goal::dispatch_goal_command(args),
+        "roster" => roster::dispatch_roster_command(args),
         "goal-curation" => curation::dispatch_goal_curation_command(args),
         "improvement-curation" => curation::dispatch_improvement_curation_command(args),
         "creative-ideas" => creative_ideas::dispatch_creative_ideas_command(args),
@@ -250,11 +285,15 @@ where
         "dashboard" => dashboard::dispatch_dashboard_command(args),
         "signal" => signal::dispatch_signal_command(args),
         "memory" => memory::dispatch_memory_command(args),
+        "cognition" => cognition::dispatch_cognition_command(args),
         "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
+        "merge" => merge::dispatch_merge_command(args),
+        "liaison" => liaison::dispatch_liaison_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
         "disk-reclaim" => disk_reclaim::dispatch_disk_reclaim_command(args),
+        "disk" => disk::dispatch_disk_command(args),
         "handover" => dispatch_handover_command(args),
         "bootstrap" => dispatch_bootstrap_command(args),
         "act-on-decisions" => {
@@ -451,7 +490,12 @@ fn dispatch_handover_command(
         }
     }
 
-    let mut config = RelaunchConfig::default();
+    // Mirror the automated self-deploy canary: supply the same deploy-shape
+    // env allow-list so a manual handover verdict matches the daemon's (#4440).
+    let mut config = RelaunchConfig {
+        canary_env: crate::self_relaunch::canary_gate_env_allowlist(),
+        ..RelaunchConfig::default()
+    };
     if let Some(dir) = canary_dir {
         config.canary_target_dir = dir;
     }

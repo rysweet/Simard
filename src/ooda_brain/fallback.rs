@@ -1,7 +1,9 @@
 //! Deterministic lifecycle brain — preserves today's behaviour bit-for-bit
 //! when no LLM is configured (no API key, subprocess unavailable, etc.).
 
-use super::{EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain};
+use super::{
+    EngineerLifecycleCtx, EngineerLifecycleDecision, OodaBrain, PerGoalAction, PerGoalCycleCtx,
+};
 use crate::error::SimardResult;
 
 /// Always returns `ContinueSkipping`. This is exactly what the unconditional
@@ -17,6 +19,18 @@ impl OodaBrain for DeterministicLifecycleBrain {
     ) -> SimardResult<EngineerLifecycleDecision> {
         Ok(EngineerLifecycleDecision::ContinueSkipping {
             rationale: "deterministic-brain: no LLM configured".to_string(),
+        })
+    }
+
+    /// The no-LLM floor for the per-goal, per-cycle decision (issue #4453):
+    /// always `Continue`. This preserves today's no-LLM behaviour — the
+    /// fallback NEVER rolls the cycle and NEVER reaps, so the deterministic
+    /// path cannot re-introduce the idle→reset loop. No threshold or alarming
+    /// signal (standing-idle, stale-claim, effect-board-miss) may push it into a
+    /// destructive action; those are inputs a REASONER weighs, not the floor.
+    fn decide_per_goal_cycle(&self, _ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        Ok(PerGoalAction::Continue {
+            reason: "deterministic-brain: no LLM configured; leave the goal untouched".to_string(),
         })
     }
 }

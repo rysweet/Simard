@@ -26,11 +26,14 @@ infrastructure.
 ## Repository Inventory
 
 > **Stewarded roster source of truth.** The ~10 repositories Simard's Overseer
-> actively observes are defined once in
-> [`prompt_assets/simard/ecosystem_repos.toml`](../prompt_assets/simard/ecosystem_repos.toml)
+> actively observes are Simard's **identity-curated** `stewarded_repos` collection —
+> deploy-durable state at `<state_root>/identity-state/simard/stewarded_repos.toml`
+> (the single source of truth) that survives self-deploys and that she curates
+> agentically. On first use it is seeded from the committed identity data
+> [`prompt_assets/simard/identity/stewarded_repos.seed.toml`](../prompt_assets/simard/identity/stewarded_repos.seed.toml)
 > and scanned by the live agentic
 > [ecosystem-observe chain](./design/ecosystem-observe.md). The inventory below is
-> the broader human-readable map; the roster file is what the recipe reads.
+> the broader human-readable map; the durable roster is what the recipe reads.
 
 ### Active Repositories
 

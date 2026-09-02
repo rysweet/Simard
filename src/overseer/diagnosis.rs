@@ -46,6 +46,10 @@ pub enum FailureCause {
     /// No known cause matched. Still recorded structurally so the failure is
     /// never a silent drop — the agentic diagnostic step reasons over it.
     Unknown,
+    /// A cognitive-thread tick returned failure or panicked inside the [`Mind`]
+    /// scheduler (issue #4786). Recorded durably so a caught thread error flows
+    /// to the Overseer as a corrective signal instead of being swallowed.
+    CognitiveThread,
 }
 
 impl FailureCause {
@@ -60,6 +64,7 @@ impl FailureCause {
             FailureCause::OutOfMemory => "out-of-memory",
             FailureCause::NetworkOrAuth => "network-or-auth",
             FailureCause::Unknown => "unknown",
+            FailureCause::CognitiveThread => "cognitive-thread",
         }
     }
 }

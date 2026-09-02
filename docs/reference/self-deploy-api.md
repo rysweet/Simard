@@ -179,6 +179,31 @@ The memory snapshot reuses `memory_backup`; the
 binary backup reuses the existing safe-update `snapshot` phase. Backups are not
 reinvented here — they are sequenced and made mandatory.
 
+### Deleted running-image degrade (issue #4857 / #4836)
+
+The deploy trigger derives `install_path` from `current_exe()`. On Linux, once a
+prior self-deploy has swapped the on-disk binary, a still-running old image's
+`current_exe()` resolves to `<path> (deleted)` and that file no longer exists.
+The binary backup's `snapshot` phase therefore degrades to the **live running
+image** via `/proc/self/exe` (still readable while the inode is held open) rather
+than hard-failing with `snapshot read on .../simard (deleted): No such file`.
+Without this degrade the mandatory backup aborted every deploy and stranded the
+running binary behind merged main (DeployDrift). The fallback fires **only** when
+the declared path is missing; an existing path is snapshotted verbatim, so it can
+never mask a wrong-path bug, and each fallback emits a `WARN` tracing span. On
+platforms without `/proc/self/exe` the original loud failure is preserved.
+
+> **Observed failure this closes.** Production cycles saw the mandatory binary
+> backup abort with `read on /home/azureuser/.simard/bin/simard (deleted): No
+> such file or directory` — an unlinked-inode swap failure — which stranded the
+> running binary behind merged `main`. The `/proc/self/exe` degrade above makes
+> the backup robust to a deleted/unlinked source inode: the still-open running
+> image is snapshotted instead of hard-failing. This is the binary-backup
+> counterpart to the source-preparer's
+> [managed-clone reset + clean](./self-deploy-source-prep.md#managed-clone-hygiene-reset--clean-before-checkout)
+> hardening — together they keep an autonomous self-deploy from live-locking on
+> either the source checkout or the protective backup.
+
 ## Engineer-orphan reaper
 
 ```rust
@@ -729,6 +754,39 @@ The min-interval anti-thrash guard is **not** a gate variant — it is applied
 upstream at the Overseer's observe rail, so a throttled tick never constructs a
 deploy attempt (see [Autonomous deploy
 configuration](#autonomous-deploy-configuration)).
+
+### Canary gate commands
+
+`verify_canary` runs each [`RelaunchGate`](../../src/self_relaunch/types.rs)
+against the **candidate** binary under a scrubbed env (`scrub_gate_env`). Each
+gate is a real candidate-binary invocation; a non-zero exit, a spawn error, or a
+timeout is a **red** (`passed: false`) verdict — gates fail closed.
+
+| Gate | Candidate invocation | Passes when |
+| --- | --- | --- |
+| `smoke` | `simard --version` | the binary runs and prints its version |
+| `unit-test` | `cargo test` (isolated `SIMARD_STATE_ROOT` TempDir, #4628) | the candidate's own test suite is green |
+| `gym-baseline` | `simard gym list` | the gym registry loads |
+| `rpc-health` | `simard memory stats` (after a live-socket pre-flight) | the daemon socket is present **and** a real stats **RPC round-trip** succeeds |
+
+The `rpc-health` gate dials the live daemon via `simard memory stats` →
+`open_reader_client`, which connects the daemon socket resolved by
+`socket_path_for(SIMARD_STATE_ROOT)` (the allow-listed state root is re-injected
+into the scrubbed gate env). A socket that is present but unconnectable **fails
+closed** (`SimardError::RpcSpawnFailed`, bug #2896), so the gate reddens on a
+wedged daemon rather than passing blindly.
+
+Because `memory stats` legitimately falls through to a tier-2 on-disk store when
+the socket is **absent** (it would then exit 0 and green the gate without
+proving reachability), the gate runs a **liveness pre-flight** first: it resolves
+the exact socket the candidate would dial and reddens immediately if that socket
+does not exist. This closes the "green a dead daemon" gap — an absent socket, a
+present-but-unconnectable socket, a non-zero exit, a spawn error, and a timeout
+all fail closed. `memory stats` is read-only, so the probe never mutates the live
+store. The gate enforces `UpdateConfig`'s
+`health_timeout` itself (via a spawn + bounded-wait wrapper), because neither
+`memory stats` nor `status` exposes a `--timeout` flag; a probe that never
+returns is killed and reddened.
 
 ### `OrchestratedBinaryDeployer` adapter
 

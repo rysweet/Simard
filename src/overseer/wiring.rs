@@ -39,9 +39,9 @@ use crate::goal_curation::{
 
 use crate::overseer::audit::SelfQualityAuditor;
 use crate::overseer::capabilities::{
-    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, InFlightItem, IssueOutcome,
-    MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode, RecalledFact,
-    RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
+    BlockedGoal, DeployReport, Deployer, GoalBrief, GoalCurator, HealthReviewStatus, InFlightItem,
+    IssueOutcome, MemoryRecall, ObservationEpisode, OverseerError, RecallKeys, RecalledEpisode,
+    RecalledFact, RecalledProcedure, RecalledProspective, RecordOutcome, StatusReader,
 };
 use crate::overseer::config::{
     claim_reap_enabled, claim_reap_stale_secs, gap_scan_enabled, gap_scan_every_n,
@@ -163,6 +163,12 @@ pub struct OverseerTickReport {
     /// Backlog-coverage gaps SUPPRESSED this tick (a recurring gap within the
     /// dedup window — not re-notified/re-filed).
     pub workstream_gaps_suppressed: usize,
+    /// Backlog-coverage gaps REUSED this tick by the durable GitHub-side dedup
+    /// (issue #4717): a matching OPEN issue already carried the gap's
+    /// `stewardship-signature` marker, so filing was skipped even across a
+    /// process restart. A DEDICATED counter, distinct from the in-window
+    /// `workstream_gaps_suppressed`.
+    pub workstream_gaps_reused_existing: usize,
     /// Open PRs judged STALE by the agentic merge-queue reasoner (#4097) and
     /// flagged with a `gh pr comment` this tick. A DEDICATED counter, never
     /// folded into `prs_merged` / `escalations`.
@@ -504,9 +510,11 @@ fn tally_outcome(report: &mut OverseerTickReport, outcome: &ActOutcome) {
         ActOutcome::WorkstreamGapsFlagged {
             flagged,
             suppressed,
+            reused_existing,
         } => {
             report.workstream_gaps_detected += flagged;
             report.workstream_gaps_suppressed += suppressed;
+            report.workstream_gaps_reused_existing += reused_existing;
         }
         ActOutcome::StalePrFlagged { .. } => report.stale_prs_flagged += 1,
         ActOutcome::DuplicatePrClosed { .. } => report.duplicate_prs_closed += 1,
@@ -564,6 +572,34 @@ fn observed_details_from(cycle: &CycleReport) -> Vec<String> {
             out.push(sig.describe());
         }
     }
+    // Surface the agentic health-review verdict ([standing]) so a pass that RAN
+    // is never a silent no-op at the OPERATOR surface — not just on the
+    // `ObservedState` field. A HEALTHY pass (zero decisions) still leaves a
+    // `health-review: <verdict>` breadcrumb in the `simard status` / TUI /
+    // dashboard feed (via `humanize_tick_details`), a DEGRADED pass is surfaced
+    // LOUD rather than vanishing, and an operator OPT-OUT (`Disabled`) is
+    // surfaced LOUD too — naming the knob — so the self-heal reflex being off is
+    // never silent (#4097), exactly as its status field. Only `NotRun` (rail
+    // unwired / off cadence) stays quiet — the same "explain what ran, stay quiet
+    // on what genuinely didn't" discipline the rest of this feed follows. The
+    // recipe-authored `summary` may echo journal-derived text, so it is sanitised
+    // like every other observed line.
+    match &cycle.observed.health_review_status {
+        HealthReviewStatus::Reviewed { summary, .. } => {
+            out.push(sanitize_detail(&format!("health-review: {summary}")));
+        }
+        HealthReviewStatus::Degraded => {
+            out.push(
+                "health-review: degraded — no verdict this pass, took no remediation".to_string(),
+            );
+        }
+        HealthReviewStatus::Disabled { reason } => {
+            out.push(sanitize_detail(&format!(
+                "health-review: disabled — {reason}"
+            )));
+        }
+        HealthReviewStatus::NotRun => {}
+    }
     out
 }
 
@@ -607,6 +643,7 @@ fn intervention_target(iv: &Intervention) -> String {
             pr,
             duplicate_of,
         } => format!("close duplicate PR {repo}#{pr} (dup of #{duplicate_of})"),
+        Intervention::ReworkPr { repo, pr, .. } => format!("rework PR {repo}#{pr}"),
     }
 }
 
@@ -662,10 +699,15 @@ fn describe_action(iv: &Intervention, outcome: &ActOutcome) -> String {
         ActOutcome::WorkstreamGapsFlagged {
             flagged,
             suppressed,
+            reused_existing,
         } => {
             if *flagged > 0 {
                 format!(
-                    "flagged {flagged} uncovered workstream(s) — notified operator + filed deduped issue(s) ({suppressed} suppressed)"
+                    "flagged {flagged} uncovered workstream(s) — notified operator + filed deduped issue(s) ({suppressed} suppressed, {reused_existing} already open)"
+                )
+            } else if *reused_existing > 0 {
+                format!(
+                    "workstream gaps deduped — {reused_existing} already have an open issue, {suppressed} within the dedup window"
                 )
             } else {
                 format!("workstream gaps suppressed — {suppressed} within the dedup window")
@@ -1200,6 +1242,11 @@ pub fn build_overseer(
     .with_verify_merge_autonomy(true)
     .with_high_risk_autonomy(true)
     .with_identity(overseer_identity())
+    // Cognitive-thread oversight (#4786): the state root locates the metrics
+    // snapshot + `ooda.log` the deterministic thread-oversight pass reads. The
+    // thread registry itself is injected per-tick by the daemon from
+    // `Mind::health()` (the single source of truth).
+    .with_state_root(state_root.clone())
     // The Simard Whisperer: advisory steering notes onto the SAME
     // meeting-handoff inbox the OODA observe step scans. Enabled by default
     // (opt-out via SIMARD_OVERSEER_WHISPER), consistent with the acting
@@ -1227,6 +1274,13 @@ pub fn build_overseer(
     // (opt-out via SIMARD_OVERSEER_GAP_SCAN); its every-N cadence is applied
     // by the daemon tick loop.
     .with_gap_scan_enabled(gap_scan_enabled())
+    // Durable GitHub-side gap-filing dedup (issue #4717): the gap-scan queries
+    // GitHub for an OPEN issue carrying each gap's `stewardship-signature` marker
+    // BEFORE filing, so a recurring gap is filed at most once EVEN ACROSS A
+    // RESTART (the in-process gate resets to empty on boot). Wiring the real `gh`
+    // seam is what makes the durable check live in production; without it the
+    // gap-scan only notifies. A search error fails loud (never a blind create).
+    .with_gap_issue_client(Box::new(crate::stewardship::RealGhClient::new()))
     // Root-cause recall/store (issue #2635, G2): the SAME cognitive-memory
     // handle the goal board + recall seam read through, so the Overseer recalls
     // prior occurrences of a problem's root cause and records new ones — turning
@@ -1243,7 +1297,7 @@ pub fn build_overseer(
     // or parses a repo. Wiring is fail-visible: if the committed roster fails to
     // load, or `recipe-runner-rs`/the recipe is unavailable, the rail is simply
     // not wired this build (the pass is skipped) rather than aborting the tick.
-    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem) {
+    let overseer = match build_ecosystem_observer(&repo_root_for_ecosystem, &state_root) {
         Some((roster, observer)) => {
             overseer.with_ecosystem_observer(roster, observer, gap_scan_every_n())
         }
@@ -1260,12 +1314,22 @@ pub fn build_overseer(
     // agentic gate. Wiring is fail-visible: if the roster fails to load, or
     // `recipe-runner-rs`/the recipe is unavailable, the rail is simply not wired
     // this build (the pass is skipped) rather than aborting the tick.
-    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem) {
+    let overseer = match build_merge_queue_reasoner(&repo_root_for_ecosystem, &state_root) {
         Some((roster, reasoner)) => {
             overseer.with_merge_queue_reasoner(roster, reasoner, gap_scan_every_n())
         }
         None => overseer,
     };
+
+    // Auto-doc PR reconciliation client (goal_hygiene): wire the production
+    // `gh` client so the additive reconciliation pass can enforce the
+    // single-open invariant for auto-generated `"Update documentation with …"`
+    // PRs across the governed roster (closing stale / superseded drafts). Always
+    // wired here; the pass itself is gated at run time behind the governed roster
+    // being non-empty, the shared gap-scan opt-out, and the every-N cadence, and
+    // is fully fail-closed per repo.
+    let overseer =
+        overseer.with_doc_pr_reconcile_client(Box::new(crate::stewardship::RealPrGhClient));
 
     // Live agentic health-review rail ([standing]): on the Overseer cadence the
     // thin rail invokes the `overseer-health-review` recipe — an AGENT reads the
@@ -1358,52 +1422,34 @@ fn build_claim_reaper_seams(
     ))
 }
 
-/// Load the committed stewarded roster and build the production ecosystem-observe
-/// rail. Returns `None` (fail-visible log) if the roster cannot be loaded or
-/// `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
-/// the rail rather than panicking. The `owner/name` roster lives in
-/// `prompt_assets/simard/ecosystem_repos.toml` as pure DATA.
+/// Load the identity-curated stewarded roster and build the production
+/// ecosystem-observe rail. Returns `None` (fail-visible log) if the roster cannot
+/// be loaded or `recipe-runner-rs`/the recipe is unavailable, so the build
+/// proceeds without the rail rather than panicking. The `owner/name` roster is
+/// identity-scoped MUTABLE state (`identity-state/<identity>/stewarded_repos.toml`
+/// under the state root), seeded on first use from committed identity data.
 fn build_ecosystem_observer(
     repo_root: &std::path::Path,
+    state_root: &std::path::Path,
 ) -> Option<(
     Vec<String>,
     Box<dyn crate::overseer::ecosystem_observe::EcosystemObserver>,
 )> {
     use crate::overseer::ecosystem_observe::{
-        ECOSYSTEM_ROSTER_FILENAME, RecipeEcosystemObserver, SpawnEcosystemRecipeRunner,
-        load_ecosystem_roster, resolve_ecosystem_roster_path,
+        RecipeEcosystemObserver, SpawnEcosystemRecipeRunner, load_stewarded_roster,
     };
 
-    // Install-first resolution (issue #2419): the deployed daemon's `repo_root`
-    // is a stale source checkout that lacks the roster, while the roster is
-    // installed under `~/.simard`. Resolve it there first, then in-tree.
-    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
-        Some(path) => path,
-        None => {
-            let installed_candidate = dirs::home_dir().map(|home| {
-                home.join(".simard")
-                    .join("prompt_assets/simard")
-                    .join(ECOSYSTEM_ROSTER_FILENAME)
-            });
-            let in_tree_candidate = repo_root
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME);
-            tracing::warn!(
-                target: "simard::ecosystem_observe",
-                installed_candidate = ?installed_candidate.as_ref().map(|p| p.display().to_string()),
-                in_tree_candidate = %in_tree_candidate.display(),
-                "[simard] ecosystem-observe NOT wired: failed to load stewarded roster (no roster at the installed or in-tree location)",
-            );
-            return None;
-        }
-    };
-    let roster = match load_ecosystem_roster(&roster_path) {
+    // Identity-curated, deploy-durable roster: seeded from committed identity
+    // data on first use, then owned as mutable state the install never clobbers.
+    let identity = crate::identity_curated_state::active_identity();
+    let roster = match load_stewarded_roster(repo_root, &identity, Some(state_root), None) {
         Ok(roster) => roster,
         Err(error) => {
             tracing::warn!(
                 target: "simard::ecosystem_observe",
                 error = %error,
-                roster_path = %roster_path.display(),
+                identity = %identity,
+                state_root = %state_root.display(),
                 "[simard] ecosystem-observe NOT wired: failed to load stewarded roster",
             );
             return None;
@@ -1422,47 +1468,34 @@ fn build_ecosystem_observer(
     Some((roster, Box::new(RecipeEcosystemObserver::new(runner))))
 }
 
-/// Load the governed roster and build the production observe-merge-queue reasoner
-/// rail (#4097). Returns `None` (fail-visible log) if the roster cannot be loaded
-/// or `recipe-runner-rs`/the recipe is unavailable, so the build proceeds without
-/// the rail rather than panicking. Reuses the SAME committed roster
-/// (`ecosystem_repos.toml`, pure DATA) as the governed reasoning scope, per the
-/// design (Simard's governed repos are default-in-scope for merge REASONING while
-/// the merge ACTION stays behind the objective + agentic gate).
+/// Load the identity-curated governed roster and build the production
+/// observe-merge-queue reasoner rail (#4097). Returns `None` (fail-visible log)
+/// if the roster cannot be loaded or `recipe-runner-rs`/the recipe is
+/// unavailable, so the build proceeds without the rail rather than panicking.
+/// Reuses the SAME identity-curated roster as the governed reasoning scope, per
+/// the design (Simard's governed repos are default-in-scope for merge REASONING
+/// while the merge ACTION stays behind the objective + agentic gate).
 fn build_merge_queue_reasoner(
     repo_root: &std::path::Path,
+    state_root: &std::path::Path,
 ) -> Option<(
     Vec<String>,
     Box<dyn crate::overseer::merge_queue_observe::MergeQueueReasoner>,
 )> {
-    use crate::overseer::ecosystem_observe::{
-        ECOSYSTEM_ROSTER_FILENAME, load_ecosystem_roster, resolve_ecosystem_roster_path,
-    };
+    use crate::overseer::ecosystem_observe::load_stewarded_roster;
     use crate::overseer::merge_queue_observe::{
         RecipeMergeQueueReasoner, SpawnMergeQueueRecipeRunner,
     };
 
-    let roster_path = match resolve_ecosystem_roster_path(repo_root, None) {
-        Some(path) => path,
-        None => {
-            let in_tree_candidate = repo_root
-                .join("prompt_assets/simard")
-                .join(ECOSYSTEM_ROSTER_FILENAME);
-            tracing::warn!(
-                target: "simard::merge_queue_observe",
-                in_tree_candidate = %in_tree_candidate.display(),
-                "[simard] observe-merge-queue NOT wired: failed to resolve governed roster (no roster at the installed or in-tree location)",
-            );
-            return None;
-        }
-    };
-    let roster = match load_ecosystem_roster(&roster_path) {
+    let identity = crate::identity_curated_state::active_identity();
+    let roster = match load_stewarded_roster(repo_root, &identity, Some(state_root), None) {
         Ok(roster) => roster,
         Err(error) => {
             tracing::warn!(
                 target: "simard::merge_queue_observe",
                 error = %error,
-                roster_path = %roster_path.display(),
+                identity = %identity,
+                state_root = %state_root.display(),
                 "[simard] observe-merge-queue NOT wired: failed to load governed roster",
             );
             return None;
@@ -2480,7 +2513,98 @@ mod tests {
         );
     }
 
-    // ── #4420: a red canary must NEVER be misclassified as transient ────────
+    // ── health-review verdict surfacing ([standing]) ────────────────────────
+    //
+    // The pass sets `ObservedState.health_review_status`, but the "never a
+    // silent no-op" guarantee must reach the OPERATOR feed, not just the struct
+    // field. `observed_details_from` renders the verdict so a HEALTHY /
+    // DEGRADED pass leaves a visible `health-review:` breadcrumb, while an
+    // off/unwired `NotRun` tick stays quiet.
+
+    /// Build a bare `CycleReport` carrying only a health-review verdict — no
+    /// problems, signals, or plan — to isolate the verdict rendering.
+    fn cycle_with_health_review(status: HealthReviewStatus) -> CycleReport {
+        CycleReport {
+            observed: ObservedState {
+                health_review_status: status,
+                ..ObservedState::default()
+            },
+            signals: Vec::new(),
+            problems: Vec::new(),
+            plan: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn health_review_verdict_surfaces_in_the_operator_feed() {
+        // A HEALTHY pass (zero decisions) must still leave an operator-visible
+        // breadcrumb — the whole point of the "never a silent no-op" guarantee.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Reviewed {
+            summary: "healthy — no crash-loop, no blocked goal".to_string(),
+            decisions: 0,
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:"),
+            "a reviewed pass must surface a `health-review:` line: {joined:?}"
+        );
+        assert!(
+            joined.contains("healthy — no crash-loop, no blocked goal"),
+            "the operator line must carry the recipe's verdict summary: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_degraded_surfaces_loud_in_the_operator_feed() {
+        // A degraded pass took no remediation; it must be LOUD in the feed, not
+        // a silent gap that reads identical to "healthy".
+        let cycle = cycle_with_health_review(HealthReviewStatus::Degraded);
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("degraded"),
+            "a degraded pass must surface a loud `health-review: degraded` line: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_disabled_surfaces_loud_in_the_operator_feed() {
+        // An operator OPT-OUT (dedicated knob or the shared gap-scan throttle)
+        // must be LOUD in the feed too — naming WHY the self-heal reflex is off —
+        // never a silent gap that reads identical to a healthy-but-quiet tick.
+        let cycle = cycle_with_health_review(HealthReviewStatus::Disabled {
+            reason: format!(
+                "{} opt-out disables all agentic overseer scans (incl. health-review)",
+                crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV
+            ),
+        });
+        let details = observed_details_from(&cycle);
+        let joined = details.join(" | ");
+        assert!(
+            joined.contains("health-review:") && joined.to_lowercase().contains("disabled"),
+            "a disabled pass must surface a loud `health-review: disabled` line: {joined:?}"
+        );
+        assert!(
+            joined.contains(crate::overseer::config::SIMARD_OVERSEER_GAP_SCAN_ENV),
+            "the disabled line must name the knob that turned the reflex off: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn health_review_not_run_stays_quiet_in_the_operator_feed() {
+        // An unwired / off-cadence tick must NOT spam the feed with a
+        // health-review line — only a pass that RAN (or an explicit opt-out,
+        // rendered as `Disabled`) earns a line; a bare `NotRun` stays quiet.
+        let cycle = cycle_with_health_review(HealthReviewStatus::NotRun);
+        let details = observed_details_from(&cycle);
+        assert!(
+            !details.iter().any(|d| d.contains("health-review")),
+            "a NotRun health-review must add no line: {details:?}"
+        );
+    }
+
     //
     // The reddening-gate detail STEP 1 now threads into `OverseerError::Capability`
     // can contain transient-looking words (a gate whose failure text mentions a

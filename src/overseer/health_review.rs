@@ -181,9 +181,8 @@ pub struct HealthReviewReport {
 
 /// Parse the recipe's plain-text DECISION markers into typed interventions.
 ///
-/// This is the MECHANICAL rail (like `disk_health::parse_disk_health_text`): it
-/// moves the recipe's typed DECISIONS onto the capability path; it re-derives no
-/// judgment. Recognised markers, one per line:
+/// This is the MECHANICAL rail: it moves the recipe's typed DECISIONS onto the
+/// capability path; it re-derives no judgment. Recognised markers, one per line:
 ///
 /// ```text
 /// HEALTHY
@@ -201,12 +200,25 @@ pub struct HealthReviewReport {
 ///   fabricated intervention with missing text. Other decisions on the pass
 ///   still apply.
 /// - Unknown lines are ignored (a `HEALTHY` line carries no payload).
+/// - Benign markdown decoration an agent commonly wraps a decision line in — a
+///   leading `-`/`*`/`+`/`N.`/`N)` list bullet, a `>` blockquote caret, or
+///   surrounding inline-code backticks — is stripped BEFORE marker matching
+///   ([`strip_marker_decoration`]) so a well-formed decision is DISPATCHED
+///   rather than silently dropped. This never invents a marker: only the three
+///   distinctive markers are ever acted on, and a bulleted line of prose still
+///   matches nothing.
+/// - TRAILING text an agent appends after a decision's JSON object on the same
+///   line (e.g. `LAUNCH_RECIPE={…} — fixes the crash-loop`) is tolerated: the
+///   leading balanced object is extracted ([`extract_leading_json_object`])
+///   before serde parsing. This is the trailing-side sibling of decoration
+///   stripping; it stays fail-closed (an unbalanced/truncated object is still
+///   skipped, never half-parsed).
 pub fn parse_health_review_output(stdout: &str) -> Result<HealthReviewReport, String> {
     let mut interventions: Vec<Intervention> = Vec::new();
     let mut summary: Option<String> = None;
 
     for line in stdout.lines() {
-        let trimmed = line.trim();
+        let trimmed = strip_marker_decoration(line);
         if trimmed.is_empty() {
             continue;
         }
@@ -241,9 +253,129 @@ pub fn parse_health_review_output(stdout: &str) -> Result<HealthReviewReport, St
     })
 }
 
+/// Strip benign markdown decoration an agent commonly wraps a single decision
+/// line in, so a well-formed marker survives ordinary formatting instead of
+/// being silently dropped by the strict prefix match. Removes, in order:
+///
+/// 1. any leading `>` blockquote carets (each optionally space-padded),
+/// 2. a SINGLE leading list bullet — `-`/`*`/`+` or an ordered `N.`/`N)` — that
+///    is followed by whitespace (so a genuine `-`-prefixed marker is never
+///    mistaken as content, and prose bullets simply match no marker), and
+/// 3. one layer of surrounding inline-code backticks (```` ``` ```` or `` ` ``).
+///
+/// It is decoration-only and fail-closed: the returned slice is still matched
+/// against the three DISTINCTIVE markers, so this can never invent a decision —
+/// a decorated line of prose normalises to prose and matches nothing.
+fn strip_marker_decoration(line: &str) -> &str {
+    let mut s = line.trim();
+    // 1. Leading blockquote carets, possibly repeated (`> > `).
+    loop {
+        let t = s.trim_start();
+        match t.strip_prefix('>') {
+            Some(rest) => s = rest,
+            None => {
+                s = t;
+                break;
+            }
+        }
+    }
+    // 2. A single leading list bullet (unordered or ordered).
+    s = strip_leading_bullet(s.trim_start()).unwrap_or_else(|| s.trim_start());
+    // 3. One layer of surrounding inline-code backticks (triple before single).
+    s = s.trim();
+    for fence in ["```", "`"] {
+        if let Some(inner) = s.strip_prefix(fence) {
+            s = inner.strip_suffix(fence).unwrap_or(inner);
+            break;
+        }
+    }
+    s.trim()
+}
+
+/// Strip a SINGLE leading list bullet — unordered (`-`/`*`/`+`) or ordered
+/// (`N.`/`N)`) — plus its trailing whitespace, or `None` when `s` is not
+/// bulleted. The trailing-whitespace requirement keeps a bare marker (or prose)
+/// that merely starts with a bullet character from being mis-stripped.
+fn strip_leading_bullet(s: &str) -> Option<&str> {
+    for bullet in ['-', '*', '+'] {
+        if let Some(rest) = s.strip_prefix(bullet)
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(rest.trim_start());
+        }
+    }
+    let digit_len = s.chars().take_while(char::is_ascii_digit).count();
+    if digit_len > 0 {
+        let after = &s[digit_len..];
+        if let Some(rest) = after.strip_prefix('.').or_else(|| after.strip_prefix(')'))
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(rest.trim_start());
+        }
+    }
+    None
+}
+
+/// Extract the leading balanced JSON object from a decision-marker payload,
+/// tolerating any TRAILING text an agent appends after it on the same line —
+/// e.g. `{"task_description":"…"} — fixes the crash-loop` or a stray closing
+/// backtick decoration-stripping did not reach. Returns the `{…}` substring, or
+/// `None` when the payload does not START with a `{` or the braces never balance.
+///
+/// It is the trailing-side sibling of [`strip_marker_decoration`] (which removes
+/// LEADING framing): `serde_json::from_str` rejects a value with trailing
+/// non-whitespace, so without this a well-formed decision dressed with a trailing
+/// clause parses to nothing and a real remediation is dropped with no signal —
+/// exactly the silent-drop the decoration fix (#4514) closed on the leading side.
+///
+/// Fail-closed and mechanical: it never edits the JSON it returns (serde still
+/// validates it), and an UNBALANCED/truncated object yields `None` so the caller
+/// falls back to parsing the whole payload — which serde then rejects — rather
+/// than half-parsing a genuinely broken decision. JSON string contents (including
+/// escaped quotes) are respected so a `}` inside a string value never ends the
+/// object early. When several objects are concatenated it returns the FIRST,
+/// which the caller validates like any single decision.
+fn extract_leading_json_object(payload: &str) -> Option<&str> {
+    let s = payload.trim_start();
+    if !s.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[..i + c.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Parse one `LAUNCH_RECIPE=` JSON payload into an [`Intervention::LaunchRecipe`],
 /// or `None` (logged) when it is malformed or its `task_description` is empty.
-fn parse_launch_decision(json: &str) -> Option<Intervention> {
+/// Trailing text after the JSON object is tolerated via
+/// [`extract_leading_json_object`]; a payload with no balanced object falls
+/// through to the raw string, which serde then rejects (skipped fail-closed).
+fn parse_launch_decision(payload: &str) -> Option<Intervention> {
+    let json = extract_leading_json_object(payload).unwrap_or(payload);
     let decision: LaunchDecision = match serde_json::from_str(json) {
         Ok(d) => d,
         Err(e) => {
@@ -281,8 +413,10 @@ fn parse_launch_decision(json: &str) -> Option<Intervention> {
 /// [`Intervention::EscalateBlockedGoal`], or `None` (logged) when it is
 /// malformed or a required plain-English field is empty. An escalation with an
 /// empty `goal_id`/`problem`/`next_step` would surface a meaningless message to
-/// the operator, so it is dropped fail-closed.
-fn parse_escalate_decision(json: &str) -> Option<Intervention> {
+/// the operator, so it is dropped fail-closed. Trailing text after the JSON
+/// object is tolerated via [`extract_leading_json_object`].
+fn parse_escalate_decision(payload: &str) -> Option<Intervention> {
+    let json = extract_leading_json_object(payload).unwrap_or(payload);
     let decision: EscalateDecision = match serde_json::from_str(json) {
         Ok(d) => d,
         Err(e) => {
@@ -810,6 +944,203 @@ mod tests {
         let report = parse_health_review_output(out).expect("parses");
         assert!(report.interventions.is_empty());
         assert_eq!(report.summary, "healthy");
+    }
+
+    #[test]
+    fn parse_tolerates_bulleted_decision_lines() {
+        // Agents very commonly present their decisions as a markdown list. The
+        // strict prefix match used to DROP these silently, losing remediation on
+        // the critical self-heal path while still parsing "successfully".
+        let out = concat!(
+            r#"- LAUNCH_RECIPE={"task_description":"fix actor-binding crash-loop (286x)","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n",
+            r#"* ESCALATE_GOAL={"goal_id":"g-9","problem":"The done-gate cannot be measured.","next_step":"Pick a measurable target.","why":"unmeasurable done-gate","reason":"health-review:per-goal","link":null}"#,
+            "\n",
+            r#"1. LAUNCH_RECIPE={"task_description":"second systemic sweep on shared parse path","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n- HEALTH_REVIEW_COMPLETE=2 launched, 1 escalated\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 3);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert!(matches!(
+            report.interventions[1],
+            Intervention::EscalateBlockedGoal { .. }
+        ));
+        assert!(matches!(
+            report.interventions[2],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(report.summary, "2 launched, 1 escalated");
+    }
+
+    #[test]
+    fn parse_tolerates_blockquote_and_inline_code_wrapping() {
+        let out = concat!(
+            "> ",
+            r#"LAUNCH_RECIPE={"task_description":"fix crash-loop root cause","target_repo":"rysweet/Simard","sequence_group":null}"#,
+            "\n`HEALTH_REVIEW_COMPLETE=1 systemic launch`\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+        assert_eq!(report.summary, "1 systemic launch");
+    }
+
+    #[test]
+    fn parse_decoration_never_fabricates_from_bulleted_prose() {
+        // A bulleted line of ordinary prose must normalise to prose and match no
+        // marker — decoration-stripping is fail-closed, never marker-inventing.
+        let out = concat!(
+            "- The agent observed a crash-loop and reasoned about it.\n",
+            "> LAUNCH the fix soon (prose, not a marker).\n",
+            "HEALTH_REVIEW_COMPLETE=healthy\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert!(report.interventions.is_empty());
+        assert_eq!(report.summary, "healthy");
+    }
+
+    #[test]
+    fn strip_marker_decoration_is_identity_on_plain_lines() {
+        assert_eq!(strip_marker_decoration("HEALTHY"), "HEALTHY");
+        assert_eq!(
+            strip_marker_decoration("  HEALTH_REVIEW_COMPLETE=ok  "),
+            "HEALTH_REVIEW_COMPLETE=ok"
+        );
+        // A bullet char with no trailing whitespace is NOT a list bullet.
+        assert_eq!(strip_marker_decoration("-notabullet"), "-notabullet");
+    }
+
+    // ── trailing-text tolerance (the trailing-side sibling of decoration) ──
+
+    #[test]
+    fn parse_tolerates_trailing_text_after_launch_json() {
+        // Agents routinely append a short justification clause after the JSON.
+        // serde rejects trailing non-whitespace, so without extraction this
+        // well-formed systemic launch would be DROPPED and the crash-loop would
+        // go un-remediated with no signal (the terminal marker still parses).
+        let out = concat!(
+            r#"LAUNCH_RECIPE={"task_description":"fix actor-binding crash-loop (286x)","target_repo":"rysweet/Simard","sequence_group":null} — this addresses the systemic root cause"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 systemic launch\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        match &report.interventions[0] {
+            Intervention::LaunchRecipe { brief } => {
+                assert!(brief.task_description.contains("actor-binding"));
+                assert!(
+                    !brief.task_description.contains("addresses the systemic"),
+                    "the trailing clause must NOT leak into the parsed brief"
+                );
+            }
+            other => panic!("expected LaunchRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tolerates_trailing_text_after_escalate_json() {
+        let out = concat!(
+            r#"ESCALATE_GOAL={"goal_id":"g-42","problem":"The done-gate cannot be measured.","next_step":"Pick a measurable target.","why":"unmeasurable done-gate","reason":"health-review:per-goal","link":null}  (needs a human decision)"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 goal escalated\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        match &report.interventions[0] {
+            Intervention::EscalateBlockedGoal {
+                goal_id, next_step, ..
+            } => {
+                assert_eq!(goal_id, "g-42");
+                assert_eq!(
+                    next_step, "Pick a measurable target.",
+                    "the trailing clause must NOT leak into the operator-facing next_step"
+                );
+            }
+            other => panic!("expected EscalateBlockedGoal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tolerates_leading_decoration_and_trailing_text_together() {
+        // The two robustness rails compose: a bulleted decision line with a
+        // trailing justification clause is still dispatched.
+        let out = concat!(
+            r#"- LAUNCH_RECIPE={"task_description":"bound the parse-failure spike"} because it recurs across goals"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        assert!(matches!(
+            report.interventions[0],
+            Intervention::LaunchRecipe { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_trailing_text_never_ends_json_early_inside_a_string() {
+        // A `}` inside a JSON string value must NOT be mistaken for the object's
+        // close, or the brief would be truncated mid-value.
+        let out = concat!(
+            r#"LAUNCH_RECIPE={"task_description":"fix the `foo() -> Result<T, E>}` mis-binding"} trailing note"#,
+            "\nHEALTH_REVIEW_COMPLETE=1 launch\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert_eq!(report.interventions.len(), 1);
+        match &report.interventions[0] {
+            Intervention::LaunchRecipe { brief } => assert!(
+                brief.task_description.ends_with("mis-binding"),
+                "the whole quoted value (incl. its inner braces) is preserved"
+            ),
+            other => panic!("expected LaunchRecipe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_still_skips_unbalanced_truncated_json_fail_closed() {
+        // An unbalanced object must NOT be half-parsed: extraction returns None,
+        // the raw payload is handed to serde, and serde rejects it → skipped.
+        let out = concat!(
+            r#"LAUNCH_RECIPE={"task_description":"truncated pass"#,
+            "\nHEALTH_REVIEW_COMPLETE=nothing actionable\n"
+        );
+        let report = parse_health_review_output(out).expect("parses");
+        assert!(
+            report.interventions.is_empty(),
+            "a truncated/unbalanced decision is dropped fail-closed, never half-parsed"
+        );
+    }
+
+    #[test]
+    fn extract_leading_json_object_basics() {
+        // Exact object, trailing text, brace-in-string, non-object, unbalanced.
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":1}"#),
+            Some(r#"{"a":1}"#)
+        );
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":1} tail"#),
+            Some(r#"{"a":1}"#)
+        );
+        assert_eq!(
+            extract_leading_json_object(r#"  {"a":{"b":2}} x"#),
+            Some(r#"{"a":{"b":2}}"#)
+        );
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":"}"} x"#),
+            Some(r#"{"a":"}"}"#)
+        );
+        assert_eq!(extract_leading_json_object("not an object"), None);
+        assert_eq!(extract_leading_json_object(r#"{"a":1"#), None);
+        // A concatenation returns the FIRST balanced object; the caller validates.
+        assert_eq!(
+            extract_leading_json_object(r#"{"a":1}{"b":2}"#),
+            Some(r#"{"a":1}"#)
+        );
     }
 
     // ── reviewer over the injectable seam ─────────────────────────────────

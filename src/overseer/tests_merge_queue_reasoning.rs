@@ -121,6 +121,7 @@ fn green_engineer_snapshot() -> PrSnapshot {
         }],
         base_ref_name: "main".to_string(),
         labels: vec![SIMARD_ENGINEER_PR_LABEL.to_string()],
+        is_draft: Some(false),
     }
 }
 

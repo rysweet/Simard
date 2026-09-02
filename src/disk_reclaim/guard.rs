@@ -405,6 +405,45 @@ mod tests {
         );
     }
 
+    /// Regression (issue #4722, brief acceptance): a **fresh worktree at
+    /// origin/main** — a real git worktree whose branch has no positively
+    /// confirmed merged/closed PR — must NOT be reclaimed, even though its tip is
+    /// an ancestor of origin/main and even if the agent mislabels its `kind` as a
+    /// disposable build cache. The old `git merge-base --is-ancestor <branch>
+    /// origin/main` staleness test matched exactly this case and wrongly deleted
+    /// the worktree's live build cache. The production probe fail-closes such a
+    /// worktree to `UnknownPrState`; here we drive that verdict through the seam
+    /// and assert the guard rejects (never Allow). The `.git` marker forces the
+    /// tracked-worktree rails regardless of the advisory `kind`.
+    #[test]
+    fn fresh_origin_main_worktree_is_not_reclaimed() {
+        let h = Harness::new("fresh-origin-main-wt");
+        // Make it a real git worktree so the tracked-worktree rails engage even
+        // though we deliberately mislabel the kind as StaleBuildCache below.
+        std::fs::create_dir_all(h.child.join(".git")).expect(".git marker");
+        let protected = ProtectedDenySet::from_paths(vec![]);
+        let live = FakeLiveProcessProbe::default();
+        // A fresh worktree with no merged/closed PR fail-closes to UnknownPrState.
+        let wt = FixedWtProbe(WorktreeVerdict::Reject(RejectReason::UnknownPrState));
+        let measurer = MapMeasurer::default();
+        measurer.set(&h.child, 8_000_000_000);
+
+        let c = cand(&h.child, CandidateKind::StaleBuildCache);
+        let v = vet(&c, &h.allow_roots, &protected, &live, &wt, &measurer);
+        assert_eq!(
+            v,
+            Verdict::Reject {
+                reason: RejectReason::UnknownPrState
+            },
+            "a fresh origin/main worktree without a merged/closed PR must be kept, \
+             not deleted — the mislabelled kind must not bypass the PR rails",
+        );
+        assert!(
+            !matches!(v, Verdict::Allow { .. }),
+            "must never Allow a worktree whose PR is not positively merged/closed",
+        );
+    }
+
     #[test]
     fn mislabelled_orphan_that_is_a_git_worktree_is_still_veto_checked() {
         // THE BYPASS THIS FIX CLOSES: an agent labels a real engineer worktree

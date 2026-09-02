@@ -299,9 +299,19 @@ fn pressure_signals_return_none_on_non_linux() {
 
 #[test]
 fn scaler_current_max_can_override_config() {
+    use std::sync::Arc;
+
     use simard::ooda_loop::{OodaConfig, Priority, decide};
 
-    let scaler = AdaptiveScaler::new(2, 1, 8);
+    // A scaler pinned to a low cap (floor == ceiling == 2). This makes
+    // `adjust()` deterministic regardless of ambient system pressure: an
+    // additive increase clamps to the ceiling (2) and a pressure/429 decrease
+    // clamps to the floor (never above 2), so the per-cycle limit is always
+    // <= 2. Without this pin the test is non-hermetic — under `SIMARD_SCALING=
+    // auto` (set in the deploy environment) `OodaConfig::default()` builds a
+    // wide scaler that the struct-update below would inherit, and `decide`
+    // would honor that scaler instead of the value under test.
+    let scaler = Arc::new(AdaptiveScaler::new(2, 1, 2));
 
     // Create priorities that would normally produce more than 2 actions.
     let priorities: Vec<Priority> = (1..=5)
@@ -312,16 +322,20 @@ fn scaler_current_max_can_override_config() {
         })
         .collect();
 
-    // Use scaler's current_max as the config limit.
+    // The config's own `max_concurrent_actions` is deliberately HIGHER than the
+    // scaler's cap. A pass therefore proves the scaler *overrides* the config
+    // value (issue #2935): when a scaler is present, `decide` honors
+    // `scaler.adjust()`, not `max_concurrent_actions`.
     let config = OodaConfig {
-        max_concurrent_actions: scaler.current_max(),
+        max_concurrent_actions: 8,
+        scaler: Some(Arc::clone(&scaler)),
         ..OodaConfig::default()
     };
 
     let actions = decide(&priorities, &config).unwrap();
     assert!(
         actions.len() <= 2,
-        "decide should respect scaler's current_max of 2; got {} actions",
+        "scaler's current_max (2) must override the higher config max (8); got {} actions",
         actions.len()
     );
 }

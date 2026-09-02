@@ -1,0 +1,59 @@
+# SEED for Simard's identity-scoped `stewarded_repos` collection — the set of
+# repositories Simard stewards. This is IDENTITY DATA, not a framework roster
+# bound to code: it is consumed ONLY as the first-use seed by the generic
+# identity-scoped-mutable-data mechanism (`src/identity_curated_state.rs`).
+#
+# On first use the seed is copied into the DURABLE, MUTABLE roster at
+#   <state_root>/identity-state/simard/stewarded_repos.toml
+# which `install` NEVER overwrites. From then on that curated copy is the single
+# source of truth: Simard adds/removes stewarded repos agentically and her edits
+# survive every self-deploy. Editing this seed only affects a *fresh* identity
+# that has not yet seeded its roster.
+#
+# Generic curated-data shape (shared by every identity's collections): a
+# `schema_version` plus a `[[item]]` array of `{ key, note }`. For this
+# collection `key` is a GitHub `owner/name` slug and `note` is a human label.
+#
+# `amplihack` means `rysweet/amplihack-rs`; the Python `rysweet/amplihack` is
+# deprecated and is NOT stewarded.
+schema_version = 1
+
+[[item]]
+key = "rysweet/Simard"
+note = "Orchestrator / self-improving engineering identity (steward of this roster)"
+
+[[item]]
+key = "rysweet/RustyClawd"
+note = "Rust-native LLM agent SDK (base type)"
+
+[[item]]
+key = "rysweet/amplihack-rs"
+note = "Core framework — skills, workflows, recipes, hooks, CLI, fleet"
+
+[[item]]
+key = "rysweet/azlin"
+note = "Azure VM provisioning CLI"
+
+[[item]]
+key = "rysweet/amplihack-memory-lib"
+note = "Graph-based 6-type cognitive memory (Kuzu-backed)"
+
+[[item]]
+key = "rysweet/amplihack-agent-eval"
+note = "Agent evaluation harness — L1–L12 benchmarks"
+
+[[item]]
+key = "rysweet/agent-kgpacks"
+note = "Knowledge graph packages — GraphRAG grounding"
+
+[[item]]
+key = "rysweet/amplihack-recipe-runner"
+note = "Code-enforced YAML workflow execution engine"
+
+[[item]]
+key = "rysweet/amplihack-xpia-defender"
+note = "Cross-Prompt Injection Attack detection library"
+
+[[item]]
+key = "rysweet/gadugi-agentic-test"
+note = "Multi-agent outside-in testing (Electron/CLI/web/TUI)"

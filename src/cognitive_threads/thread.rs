@@ -27,6 +27,15 @@ pub trait CognitiveThread: Send {
     /// Coarse class of process.
     fn kind(&self) -> ThreadKind;
 
+    /// One-line ORIGINAL PURPOSE / intent of this thread, the single source of
+    /// truth the Overseer reads (issue #4786) when reasoning about whether the
+    /// thread is healthy. Defaults to a generic placeholder; every concrete
+    /// thread overrides it with its real intent (reusing its module doc). Must
+    /// be a short, fixed, human-readable string (SR-11: never untrusted input).
+    fn purpose(&self) -> &'static str {
+        "cognitive thread (purpose unspecified)"
+    }
+
     /// When this thread wants to run.
     fn policy(&self) -> SchedulePolicy;
 
@@ -51,9 +60,10 @@ pub trait CognitiveThread: Send {
 
 /// Coarse class of a cognitive process.
 ///
-/// The first three variants are implemented in this PR; the rest are reserved
-/// for the "mind of many processes" vision — the same [`super::Mind`] can host
-/// them later without a trait change.
+/// `ThreadKind` is **pure telemetry** — no exhaustive `match` is performed on
+/// it anywhere — so new reflective threads add a variant without any behaviour
+/// change beyond the telemetry name and the serialize round-trip. The same
+/// [`super::Mind`] hosts every variant without a trait change (issue #5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum ThreadKind {
     /// The primary active OODA loop (implemented).
@@ -64,12 +74,28 @@ pub enum ThreadKind {
     EngineerLogAnalysis,
     /// Reserved: idle associative background thought.
     BackgroundThought,
-    /// Reserved: sleep/dream memory consolidation.
+    /// Sleep/dream memory consolidation (issue #5 — thread 2, reused).
     MemoryConsolidation,
     /// Reserved: sensory pre-processing.
     SensoryProcessing,
-    /// Reserved: long-horizon planning.
+    /// Long-horizon planning / prospection (issue #5 — thread 4, reused).
     LongTermPlanning,
+    /// Self-audit of reasoning quality (issue #5 — thread 1).
+    Metacognition,
+    /// Post-mortems / lessons-learned (issue #5 — thread 3).
+    Reflection,
+    /// Valence / affective appraisal (issue #5 — thread 7).
+    Salience,
+    /// Theory-of-mind / operator model (issue #5 — thread 8).
+    OperatorModel,
+    /// Cross-domain analogy / abstraction (issue #5 — thread 9).
+    Analogy,
+    /// Deliberative values / tradeoff reasoning (issue #5 — thread 10).
+    ValuesDeliberation,
+    /// Interoception / self-maintenance sensing (issue #5 — thread 11).
+    Interoception,
+    /// Narrative / identity continuity (issue #5 — thread 12).
+    Narrative,
 }
 
 /// How a thread decides it is due to run.
@@ -91,6 +117,21 @@ pub enum SchedulePolicy {
         /// Current effective cadence.
         current: Duration,
     },
+}
+
+impl SchedulePolicy {
+    /// Expected cadence in whole seconds, or `None` for policies with no fixed
+    /// cadence (`OnDemand` / `EventDriven`). This is the single derivation the
+    /// scheduler and each thread's `health()` use to populate
+    /// [`ThreadHealth::cadence_secs`] (issue #4786), so the Overseer's
+    /// staleness/cadence oversight reads one consistent source.
+    pub fn cadence_secs(&self) -> Option<u64> {
+        match self {
+            SchedulePolicy::Interval(d) => Some(d.as_secs()),
+            SchedulePolicy::Adaptive { current, .. } => Some(current.as_secs()),
+            SchedulePolicy::OnDemand | SchedulePolicy::EventDriven => None,
+        }
+    }
 }
 
 /// Priority / resource class. Ordered so ascending sort places OODA first:
@@ -181,6 +222,14 @@ pub struct ThreadHealth {
     pub consecutive_errors: u32,
     /// If backed off, the epoch until which the thread is suppressed.
     pub backoff_until_epoch: Option<u64>,
+    /// One-line ORIGINAL PURPOSE / intent (from [`CognitiveThread::purpose`]).
+    /// The single-source-of-truth description the Overseer enumerates (#4786),
+    /// so oversight never maintains a duplicate hand-written thread list.
+    pub purpose: String,
+    /// Expected cadence in seconds, derived from the thread's
+    /// [`SchedulePolicy`]: `Some(secs)` for interval/adaptive threads, `None`
+    /// for `OnDemand`/`EventDriven` threads that have no fixed cadence.
+    pub cadence_secs: Option<u64>,
 }
 
 /// Borrowed daemon resources handed to each tick so threads do not reach into

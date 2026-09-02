@@ -37,7 +37,29 @@ pub struct StagingLayout {
 
 #[derive(Debug)]
 pub struct InstallLock {
-    _file: fs::File,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    file: fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        // Release the advisory lock explicitly instead of relying on the file
+        // close alone. `flock` locks live on the open file description, so any
+        // sibling that `fork`/`exec`s while this guard is held inherits the same
+        // locked description; the kernel keeps the lock until *every* inherited
+        // descriptor is closed, which can outlast this guard by the child's
+        // brief fork→exec window. An explicit `LOCK_UN` drops the shared lock
+        // immediately, so a subsequent acquire never races that window.
+        //
+        // SAFETY: `flock` only reads the still-open lock-file descriptor; the
+        // File is closed immediately after this returns.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 pub fn resolve(config: &InstallConfig) -> InstallResult<InstallLayout> {
@@ -170,7 +192,7 @@ pub fn acquire_install_lock(layout: &InstallLayout) -> InstallResult<InstallLock
         }
     }
 
-    Ok(InstallLock { _file: file })
+    Ok(InstallLock { file })
 }
 
 pub fn backup_path(layout: &InstallLayout, name: &str) -> PathBuf {

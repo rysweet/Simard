@@ -6,6 +6,7 @@ owner: simard
 doc_type: reference
 related:
   - ./simard-cli.md
+  - ./memory-ping-rpc-health-liveness.md
   - ./goal-board-prospective-reconcile.md
   - ./prospective-trigger-firing.md
   - ./cognitive-memory-episodic-recall.md

@@ -484,6 +484,13 @@ mod tests {
             unreachable!("resource-admission tests never take the lifecycle path")
         }
 
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
+            unreachable!("resource-admission tests never take the per-goal-cycle path")
+        }
+
         fn decide_resource_admission(
             &self,
             _ctx: &ResourceAdmissionCtx,
@@ -509,6 +516,12 @@ mod tests {
         ) -> SimardResult<EngineerLifecycleDecision> {
             unreachable!()
         }
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
+            unreachable!()
+        }
     }
 
     /// A brain that PANICS if its resource method is called — proves the
@@ -519,6 +532,12 @@ mod tests {
             &self,
             _ctx: &EngineerLifecycleCtx,
         ) -> SimardResult<EngineerLifecycleDecision> {
+            unreachable!()
+        }
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
             unreachable!()
         }
         fn decide_resource_admission(

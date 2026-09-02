@@ -54,6 +54,10 @@ impl Drop for EnvGuard {
 fn hermetic_opts(state_root: &std::path::Path) -> AssembleOptions {
     let mut opts = AssembleOptions::with_state_root(state_root.to_path_buf());
     opts.service_unit = "simard-status-test-nonexistent.service".to_string();
+    // Point the heartbeat fallback at a path under the temp state root that
+    // never exists, so the test never reads the host's live daemon heartbeat
+    // (`data_local_dir()/simard/daemon_health.json`) when systemd has no unit.
+    opts.daemon_health_path = Some(state_root.join("daemon_health.json"));
     opts
 }
 

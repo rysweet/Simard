@@ -1,0 +1,65 @@
+name: overseer-health-review-marker-decoration
+app_type: cli
+description: |
+  Outside-in proof that the Overseer's agentic HEALTH-REVIEW rail dispatches a
+  well-formed remediation decision even when the agent wraps it in ordinary
+  markdown decoration — a `- `/`*`/`N.` list bullet, a `>` blockquote caret, or
+  inline-code backticks — instead of silently dropping it.
+
+  Why this matters (the standing self-heal goal): the health-review recipe reads
+  the journal, reasons to a small set of typed DECISIONS
+  (`LAUNCH_RECIPE=`/`ESCALATE_GOAL=`/`HEALTH_REVIEW_COMPLETE=`), and the thin
+  Rust rail (`src/overseer/health_review.rs`) parses those markers onto the SAME
+  gated capability path every other fix uses. The parser matched markers with a
+  strict prefix test after `trim()`, so a decision an agent presented as a list
+  item (`- LAUNCH_RECIPE={...}`) was DROPPED. Worse, when the terminal
+  `HEALTH_REVIEW_COMPLETE=` marker was emitted plainly, the pass parsed
+  "successfully" with ZERO interventions — so the degraded-pass escalation ladder
+  never fired and a real crash-loop's remediation was lost with no signal. That
+  directly defeats "DRIVE remediation through EXISTING capabilities".
+
+  This scenario drives the hermetic, in-process unit tests that pin the
+  corrected, fail-closed contract:
+    - a bulleted / ordered-list / blockquoted / backtick-wrapped decision line is
+      still parsed and dispatched, in emission order;
+    - a bulleted or blockquoted line of ordinary PROSE normalises to prose and
+      matches no marker (decoration-stripping never fabricates a decision);
+    - a bullet character with no trailing whitespace is not treated as a bullet,
+      and plain lines are stripped to their trimmed selves (identity).
+  It also re-runs the full overseer suite to prove the existing health-review
+  parse / ladder / dispatch / gate contract is unregressed. No network, no live
+  host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The decoration-tolerant marker-parse contract in isolation.
+  - action: run
+    params:
+      command: "cargo test --locked --lib overseer::health_review::tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # The full overseer suite proves the health-review rail (parse, escalation
+  # ladder, dispatch, gate) did not regress under the new normalization rule.
+  - action: run
+    params:
+      command: "cargo test --locked --lib overseer::"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
