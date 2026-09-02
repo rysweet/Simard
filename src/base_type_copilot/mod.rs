@@ -521,7 +521,7 @@ impl CopilotSdkSession {
 
         let objective_summary = objective_metadata(&input.objective);
         let evidence = vec![
-            format!("copilot-adapter-mode=meeting"),
+            "copilot-adapter-mode=meeting".to_string(),
             format!("copilot-meeting-session-id={session_id}"),
             format!("copilot-adapter-command={MEETING_COPILOT_BINARY}"),
             format!("copilot-adapter-turn={}", self.turn_count),

@@ -1,170 +1,126 @@
 #!/usr/bin/env bash
-# Outside-in scenario for the merge-judge verdict-parse cluster
-# (#2428 / #2430 / #2435 / #2462 / #2463) — `simard merge-pr` never surfaces a
-# verdict because the recipe-runner-backed judge parses the TEXT-MODE banner.
+# Outside-in scenario for issue #4721 (WS-2) — rework the merge-judge to REMOVE
+# the forbidden "recipe emits JSON → Rust scrapes stdout → Rust acts" pattern.
 #
-# Root cause (identical to #2419, different surface): RecipeMergeJudge::judge
-# invokes recipe-runner-rs in its DEFAULT `text` output mode, which prints only
-# a summary banner ("Recipe: merge-readiness-judge ... SUCCESS ...") to stdout.
-# The agent's actual {"verdict": "ready"|"not_ready"|"unclear"} JSON is exposed
-# ONLY via `--output-format json` (step_results[].output). The keyword/JSON
-# scan over the banner therefore finds NO verdict and every gated merge is
-# blocked with: "no verdict keyword (ready/not_ready/unclear) found".
+# The old flow (this file's previous incarnation, #2428/#2462/#2463) proved the
+# judge surfaced its verdict through the recipe-runner JSON envelope. #4721
+# DELETES that transport: the merge-readiness recipe now RECORDS a typed verdict
+# via the agent-facing `simard merge record-verdict` tool (the same act-via-tool
+# pattern as `distill-episodes.yaml` → `simard memory remember`), prints NO JSON
+# envelope, and the thin deterministic rail READS the typed record and
+# INDEPENDENTLY re-verifies the hard safety gates (mergeable, not draft, CI
+# green, allow-listed base) before authorizing any merge.
 #
-# This scenario validates the contract at the recipe-runner boundary WITHOUT an
-# LLM: a deterministic bash-step recipe emits a known JSON verdict, and we
-# assert that
-#   (a) text mode hides it behind the banner (the bug — no verdict on stdout),
-#   (b) json mode exposes it as the final step output (the fix), parseable as a
-#       structured {"verdict": ...} object.
-#
-# It also exercises the in-tree Rust parse-composition + fail-closed unit tests
-# via `cargo test` (issue_2428_tests) so the JSON-envelope verdict extraction,
-# prose keyword fallback, and the empty-output fail-closed contract are all
-# validated end-to-end.
-#
-# Steps (d)/(e) extend this to the REAL agent wire format reported in
-# #2501 / #2555 (duplicates of the above): the GitHub Copilot CLI launcher
-# prints a preamble line (`ℹ … NODE_OPTIONS=… (saved preference)…`) to stdout
-# BEFORE the agent answer, so recipe-runner captures it into
-# step_results[].output PREPENDED to the verdict JSON. (d) reproduces that exact
-# shape deterministically (no LLM) and proves json mode still surfaces a
-# parseable `ready`; (e) runs the in-tree production-path regression module
-# (issue_2501_2555_real_envelope_tests) that drives the real
-# `extract_recipe_decision_output` on the same preamble-bearing envelope.
+# What this scenario proves, deterministically (no LLM):
+#   (a) The recipe records via the tool and emits no JSON verdict envelope.
+#   (b) The rail source no longer contains the forbidden scrape (no
+#       parse_merge_verdict_from_text / step_results / --output-format json) and
+#       never weakens the gate (no --admin / --no-verify).
+#   (c) The in-tree store + rail + CLI unit tests pass (the decision matrix:
+#       merge+red-CI ⇒ refused, merge+draft ⇒ refused, hold ⇒ not-ready,
+#       merge+green ⇒ ready, missing/stale record ⇒ unclear).
+#   (d) End-to-end at the binary boundary: `simard merge record-verdict` writes
+#       a durable, typed, freshness-tokened record a rail can read; a bogus
+#       verdict is rejected with exit 2 and writes nothing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-if ! command -v recipe-runner-rs >/dev/null 2>&1; then
-  echo "SKIP: recipe-runner-rs not on PATH (required for this scenario)" >&2
-  exit 0
-fi
-if ! command -v jq >/dev/null 2>&1; then
-  echo "SKIP: jq not on PATH (required for this scenario)" >&2
-  exit 0
-fi
+RECIPE="prompt_assets/simard/recipes/merge-readiness-judge.yaml"
+RAIL="src/stewardship/recipe_merge_judge.rs"
 
-WORK="$(mktemp -d /tmp/simard-merge-judge-verdict.XXXXXX)"
+# --- (a) recipe records via the tool and prints no JSON verdict envelope ------
+echo "== (a) recipe acts via 'simard merge record-verdict', no JSON envelope =="
+grep -qF 'merge record-verdict' "$RECIPE" \
+  || { echo "FAIL: $RECIPE does not record its verdict via the record-verdict tool" >&2; exit 1; }
+grep -qF 'run_token' "$RECIPE" \
+  || { echo "FAIL: $RECIPE does not thread the rail-supplied run_token to the tool" >&2; exit 1; }
+if grep -qF '{"verdict"' "$RECIPE"; then
+  echo "FAIL: $RECIPE still prints a JSON verdict envelope for the daemon to scrape" >&2
+  exit 1
+fi
+echo "OK: recipe records via the tool and emits no JSON envelope."
+
+# --- (b) the rail no longer scrapes stdout and never weakens the gate ----------
+echo "== (b) rail has no JSON scrape and no gate-weakening flags =="
+for forbidden in parse_merge_verdict_from_text step_results extract_recipe_decision_output '--output-format'; do
+  if grep -qF -- "$forbidden" "$RAIL"; then
+    echo "FAIL: $RAIL still references the forbidden scrape token '$forbidden'" >&2
+    exit 1
+  fi
+done
+if grep -qF -- '--admin' "$RAIL" || grep -qF -- '--no-verify' "$RAIL"; then
+  echo "FAIL: $RAIL must NEVER pass --admin/--no-verify to gh pr merge" >&2
+  exit 1
+fi
+grep -qF 'merge_verdict_store' "$RAIL" \
+  || { echo "FAIL: $RAIL must READ the typed verdict via merge_verdict_store" >&2; exit 1; }
+grep -qF 'evaluate_objective_gates' "$RAIL" \
+  || { echo "FAIL: $RAIL must INDEPENDENTLY re-verify the objective gates" >&2; exit 1; }
+echo "OK: rail reads the typed record and independently re-verifies gates."
+
+# --- (c) in-tree store + rail + CLI unit tests --------------------------------
+echo "== (c) in-tree store + rail + CLI unit tests (#4721) =="
+WORK="$(mktemp -d /tmp/simard-merge-judge-4721.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
+TEST_LOG="$WORK/cargo-test.log"
+cargo test --lib --locked \
+  -- merge_verdict_store_tests issue_4721 --nocapture >"$TEST_LOG" 2>&1 \
+  || { echo "FAIL: #4721 in-tree tests did not pass" >&2; cat "$TEST_LOG" >&2; exit 1; }
+for must_run in \
+  merge_verdict_store_tests::write_then_read_verified_round_trips_all_fields \
+  issue_4721_rail_tests::merge_verdict_with_red_ci_is_refused \
+  issue_4721_rail_tests::merge_verdict_with_draft_pr_is_refused \
+  issue_4721_rail_tests::hold_verdict_is_not_ready_even_when_gates_green \
+  issue_4721_rail_tests::missing_record_is_unclear \
+  issue_4721_record_verdict_tests::run_records_merge_and_rail_reads_it_back ; do
+  grep -qF "$must_run" "$TEST_LOG" \
+    || { echo "FAIL: expected test '$must_run' did not run (module renamed?)" >&2; cat "$TEST_LOG" >&2; exit 1; }
+done
+echo "OK: store + rail decision-matrix + CLI round-trip tests all ran and passed."
 
-RECIPE="$WORK/merge-judge-fixture.yaml"
-VERDICT_JSON='{"verdict": "ready", "rationale": "all six skill sections present and substantive"}'
+# --- (d) end-to-end at the binary boundary ------------------------------------
+echo "== (d) e2e: 'simard merge record-verdict' writes a typed, tokened record =="
+cargo build --locked --bin simard >"$WORK/build.log" 2>&1 \
+  || { echo "FAIL: could not build the simard binary" >&2; cat "$WORK/build.log" >&2; exit 1; }
+SIMARD="target/debug/simard"
 
-cat > "$RECIPE" <<EOF
-name: "merge-judge-fixture-2428"
-description: "deterministic merge-readiness verdict fixture (no LLM)"
-version: "1.0.0"
-context: {}
-steps:
-  - id: "judge-merge-readiness"
-    type: "bash"
-    command: |
-      echo '${VERDICT_JSON}'
-    output: "judge_result"
-EOF
+STATE_ROOT="$WORK/state"
+mkdir -p "$STATE_ROOT"
+"$SIMARD" merge record-verdict \
+  --pr 4721 --repo rysweet/Simard --verdict merge \
+  --reason "crusty passed; CI green; diff reviewed" \
+  --run-token "e2e-token-1" --state-root "$STATE_ROOT" \
+  || { echo "FAIL: record-verdict merge exited non-zero" >&2; exit 1; }
 
-# --- (a) text mode reproduces the bug: the banner hides the verdict ----------
-echo "== (a) text mode: verdict is hidden behind the SUCCESS banner =="
-TEXT_OUT="$(recipe-runner-rs "$RECIPE" 2>/dev/null)"
-printf '%s\n' "$TEXT_OUT"
-printf '%s\n' "$TEXT_OUT" | grep -qE '^Recipe:' \
-  || { echo "FAIL: expected a 'Recipe:' summary banner in text mode" >&2; exit 1; }
-# The verdict JSON must NOT appear on text-mode stdout — that is the #2462 bug.
-if printf '%s' "$TEXT_OUT" | grep -qF '"verdict"'; then
-  echo "FAIL: text mode unexpectedly exposed the verdict JSON" >&2
-  exit 1
+RECORD="$STATE_ROOT/merge_verdicts/rysweet__Simard/4721.json"
+[ -f "$RECORD" ] \
+  || { echo "FAIL: record file not written at $RECORD" >&2; exit 1; }
+if command -v jq >/dev/null 2>&1; then
+  [ "$(jq -r '.verdict' "$RECORD")" = "merge" ] \
+    || { echo "FAIL: recorded verdict is not 'merge'" >&2; cat "$RECORD" >&2; exit 1; }
+  [ "$(jq -r '.run_token' "$RECORD")" = "e2e-token-1" ] \
+    || { echo "FAIL: recorded run_token mismatch" >&2; cat "$RECORD" >&2; exit 1; }
+  [ "$(jq -r '.pr' "$RECORD")" = "4721" ] \
+    || { echo "FAIL: recorded pr mismatch" >&2; cat "$RECORD" >&2; exit 1; }
+else
+  grep -qF '"verdict"' "$RECORD" || { echo "FAIL: record missing verdict field" >&2; exit 1; }
 fi
-# And the banner carries no bare verdict keyword (only 'readiness', not 'ready').
-if printf '%s' "$TEXT_OUT" | grep -qiwE 'ready|not_ready|unclear'; then
-  echo "FAIL: text-mode banner unexpectedly contains a verdict keyword" >&2
-  exit 1
-fi
-echo "OK: text mode surfaces no verdict (reproduces 'no verdict keyword' bug)."
+echo "OK: durable typed record written and readable."
 
-# --- (b) json mode exposes the real verdict as the final step output (fix) ----
-echo "== (b) json mode: verdict surfaced as the final step output =="
-JSON_OUT="$(recipe-runner-rs "$RECIPE" --output-format json 2>/dev/null)"
-printf '%s' "$JSON_OUT" | jq -e '.success == true' >/dev/null \
-  || { echo "FAIL: recipe did not report success in json mode" >&2; exit 1; }
+# A bogus verdict must be rejected (exit 2) and write nothing new.
+echo "== (d2) a bogus verdict is rejected with exit 2 =="
+set +e
+"$SIMARD" merge record-verdict \
+  --pr 4722 --repo rysweet/Simard --verdict yes \
+  --reason "x" --run-token "t" --state-root "$STATE_ROOT" 2>"$WORK/bogus.err"
+RC=$?
+set -e
+[ "$RC" -eq 2 ] \
+  || { echo "FAIL: bogus --verdict should exit 2, got $RC" >&2; cat "$WORK/bogus.err" >&2; exit 1; }
+[ ! -f "$STATE_ROOT/merge_verdicts/rysweet__Simard/4722.json" ] \
+  || { echo "FAIL: a rejected invocation must not write a record" >&2; exit 1; }
+echo "OK: bogus verdict rejected with exit 2 and wrote nothing."
 
-STEP_OUTPUT="$(printf '%s' "$JSON_OUT" | jq -r '.step_results | last | .output')"
-echo "json-mode final step output: ${STEP_OUTPUT}"
-printf '%s' "$STEP_OUTPUT" | grep -qF '"verdict"' \
-  || { echo "FAIL: json-mode final step output is missing the verdict JSON" >&2; exit 1; }
-VERDICT="$(printf '%s' "$STEP_OUTPUT" | jq -r '.verdict')"
-echo "parsed verdict: ${VERDICT}"
-[ "$VERDICT" = "ready" ] \
-  || { echo "FAIL: json-mode verdict is not the expected 'ready'" >&2; exit 1; }
-echo "OK: json mode exposes a parseable structured verdict."
-
-# --- (c) in-tree Rust parse-composition + fail-closed unit tests -------------
-echo "== (c) in-tree merge-judge unit tests (issue_2428_tests) =="
-TEST_LOG="$WORK/issue-2428-cargo-test.log"
-cargo test --lib --locked issue_2428_tests -- --nocapture >"$TEST_LOG" 2>&1
-PASSED="$(grep -oE 'test result: ok\. [0-9]+ passed' "$TEST_LOG" | grep -oE '[0-9]+' | head -1)"
-PASSED="${PASSED:-0}"
-echo "issue_2428 tests passed: ${PASSED}"
-[ "$PASSED" -ge 1 ] \
-  || { echo "FAIL: issue_2428_tests filter matched zero tests (module renamed?)" >&2; cat "$TEST_LOG" >&2; exit 1; }
-grep -qF 'issue_2428_tests::json_envelope_fenced_verdict_parses_ready' "$TEST_LOG" \
-  || { echo "FAIL: the JSON-envelope verdict-extraction test did not run" >&2; exit 1; }
-grep -qF 'issue_2428_tests::empty_final_step_output_fails_closed' "$TEST_LOG" \
-  || { echo "FAIL: the fail-closed contract test did not run" >&2; exit 1; }
-echo "OK: JSON-envelope verdict extraction + fail-closed contract pass (${PASSED} tests)."
-
-# --- (d) REAL agent wire format (#2501/#2555): launcher preamble + verdict -----
-# recipe-runner captures the Copilot launcher preamble into step_results[].output
-# ahead of the verdict JSON. Reproduce that exact shape (no LLM) and prove the
-# verdict is still surfaced and parses to `ready` — the preamble must not shadow
-# the real answer, and the merge must NOT abort with "no verdict keyword".
-echo "== (d) real agent wire format: launcher preamble + verdict JSON =="
-PREAMBLE='ℹ NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: /home/azureuser/.amplihack/config'
-RECIPE_D="$WORK/merge-judge-preamble.yaml"
-cat > "$RECIPE_D" <<EOF
-name: "merge-judge-preamble-2501"
-description: "deterministic real-wire-format fixture: launcher preamble + verdict (no LLM)"
-version: "1.0.0"
-context: {}
-steps:
-  - id: "judge-merge-readiness"
-    type: "bash"
-    command: |
-      printf '%s\n%s\n' '${PREAMBLE}' '${VERDICT_JSON}'
-    output: "judge_result"
-EOF
-JSON_OUT_D="$(recipe-runner-rs "$RECIPE_D" --output-format json 2>/dev/null)"
-printf '%s' "$JSON_OUT_D" | jq -e '.success == true' >/dev/null \
-  || { echo "FAIL: preamble fixture did not report success in json mode" >&2; exit 1; }
-STEP_OUTPUT_D="$(printf '%s' "$JSON_OUT_D" | jq -r '.step_results | last | .output')"
-echo "json-mode final step output (with preamble):"
-printf '%s\n' "$STEP_OUTPUT_D"
-# The captured output must carry BOTH the launcher preamble AND the verdict JSON.
-printf '%s' "$STEP_OUTPUT_D" | grep -qF 'NODE_OPTIONS=' \
-  || { echo "FAIL: expected the launcher preamble in the captured step output" >&2; exit 1; }
-printf '%s' "$STEP_OUTPUT_D" | grep -qF '"verdict"' \
-  || { echo "FAIL: verdict JSON missing from the preamble-prefixed step output" >&2; exit 1; }
-# The verdict (last line) must still parse to `ready` despite the leading preamble.
-VERDICT_D="$(printf '%s\n' "$STEP_OUTPUT_D" | tail -1 | jq -r '.verdict')"
-echo "parsed verdict (past preamble): ${VERDICT_D}"
-[ "$VERDICT_D" = "ready" ] \
-  || { echo "FAIL: verdict past the launcher preamble is not the expected 'ready'" >&2; exit 1; }
-echo "OK: json mode surfaces a parseable verdict even behind the launcher preamble."
-
-# --- (e) in-tree production-path regression on the real 0.3.6 envelope ---------
-echo "== (e) production extractor on the real 0.3.6 envelope (#2501/#2555) =="
-TEST_LOG_E="$WORK/issue-2501-cargo-test.log"
-cargo test --lib --locked issue_2501_2555_real_envelope_tests -- --nocapture >"$TEST_LOG_E" 2>&1
-PASSED_E="$(grep -oE 'test result: ok\. [0-9]+ passed' "$TEST_LOG_E" | grep -oE '[0-9]+' | head -1)"
-PASSED_E="${PASSED_E:-0}"
-echo "issue_2501/2555 real-envelope tests passed: ${PASSED_E}"
-[ "$PASSED_E" -ge 1 ] \
-  || { echo "FAIL: issue_2501_2555_real_envelope_tests matched zero tests (module renamed?)" >&2; cat "$TEST_LOG_E" >&2; exit 1; }
-grep -qF 'real_copilot_envelope_recovers_ready_verdict' "$TEST_LOG_E" \
-  || { echo "FAIL: the real-envelope ready-verdict test did not run" >&2; exit 1; }
-grep -qF 'real_copilot_envelope_preamble_only_fails_closed_never_ready' "$TEST_LOG_E" \
-  || { echo "FAIL: the preamble-only fail-closed test did not run" >&2; exit 1; }
-echo "OK: production extractor recovers a verdict from the real preamble-bearing envelope."
-
-echo "PASS: merge-judge-verdict scenario (#2428/#2430/#2435/#2462/#2463, #2501/#2555)"
+echo "PASS: merge-judge record-verdict rework scenario (#4721)"

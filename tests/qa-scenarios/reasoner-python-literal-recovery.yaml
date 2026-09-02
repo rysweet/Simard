@@ -1,0 +1,130 @@
+name: reasoner-python-literal-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  JSON envelope carrying a PYTHON/JS-STYLE BARE LITERAL (a `True`, `False`, or
+  `None` value token outside a string) instead of silently discarding the
+  model's whole structured decision — a reasoner-reliability axis of the
+  standing cognition-improvement goal (extends the trailing-comma #2658,
+  unescaped-control-character #4424, invalid-backslash-escape #4434, and
+  JavaScript-comment #4458 recoveries).
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM. A
+  model that reasons in Python (or pretty-prints a Python `dict`/`repr`) routinely
+  emits a capitalised bare literal for a boolean/null field — `"ready": True`,
+  `"blocked": False`, `"error": None` — the shape it has seen throughout its
+  training data. `serde_json` is spec-strict: the JSON grammar's only bare-word
+  literals are the lowercase `true`/`false`/`null`, so the capitalised token
+  survives into the extracted payload and fails a strict parse (`expected value`
+  / `expected ident`). Before this change every reasoner site parsed strictly
+  (`extract_json_payload(text)?` -> `serde_json::from_str(..).ok()?`), so one
+  capitalised literal dropped the entire decision and the phase fell back to its
+  deterministic default — a PARSE-FAILURE default, not a real model decision.
+
+  Recovery is composed by `recover_json_view`, which FIRST strips any `//`/`/*`
+  comment outside a string literal, THEN doubles any invalid backslash escape
+  inside a string literal, THEN escapes any unescaped control byte inside a string
+  literal, THEN strips trailing commas, THEN normalises any Python/JS bare literal
+  (`True`->`true`, `False`->`false`, `None`->`null`) OUTSIDE a string literal. The
+  literal view runs last, after comments are already stripped, so its own
+  `in_string` scan is aligned with the real string boundaries: a `True`/`False`/
+  `None` word inside a string value (a quoted sentence, a code snippet) is content
+  and is preserved untouched. Only a token OUTSIDE a string is rewritten, and only
+  when the maximal identifier run (`[A-Za-z0-9_]+`) equals `True`/`False`/`None`
+  EXACTLY — a longer word (`Truthy`, `Nonexistent`, `Falsehood`, `xNone`) is left
+  verbatim for the strict parse to reject. On a literal-free payload the view
+  borrows unchanged, so the pre-existing four-view recovery and its ordering are
+  preserved exactly. All reasoner sites route through the one shared chokepoint
+  `recipe_output::extract_and_parse_json`, which retries the strict parse on the
+  recovered view — but ONLY when a view actually rewrote the payload (the
+  `Cow::Owned` arm). Each sub-view is a provable no-op (`Cow::Borrowed`) on valid
+  JSON — valid JSON has no capitalised bare word outside a string — so any OTHER
+  malformed shape (unquoted key, elided element, missing value) still returns
+  `None`: leniency never widens beyond the five named defects and a genuine parse
+  error is never masked. A `True`/`False`/`None` that is legitimate string content
+  is preserved because the scan is string-literal aware.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+  `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the `normalize_python_json_literals` view: borrows valid JSON unchanged
+      (including lowercase `true`/`false`/`null` and a `True`/`False`/`None` word
+      INSIDE a string); rewrites bare `True`/`False`/`None` to `true`/`false`/
+      `null`; leaves a longer identifier run (`Truthy`, `xNone`) untouched;
+      handles tight array/object delimiters (`[True,False,None]`, `{"k":None}`);
+      respects an escaped quote before the literal; preserves multibyte UTF-8;
+    - the composed `recover_json_view`: recovers a literal alone, composes it with
+      the trailing-comma view, and composes all five defects together;
+    - the shared `extract_and_parse_json` helper end-to-end: recovers a bare
+      literal envelope to the correct typed decision (alone, through banner + ANSI
+      + log noise, and composed with all four other defects), while a `True`/`None`
+      inside a string is preserved as content.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Recovery views: python-literal normalisation (borrow on valid incl. lowercase
+  # literals and a `True`/`False`/`None` inside a string; rewrite bare literals;
+  # leave longer words untouched; tight delimiters; escaped-quote and multibyte
+  # preserved) and the composed recover_json_view (recovers a literal alone;
+  # composes with the trailing comma; composes all five defects).
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output::extract::tests::normalize_python_literals recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Shared chokepoint end-to-end: a bare-literal envelope now parses to the
+  # correct typed decision (literal alone, through banner+ANSI+log noise, and
+  # composed with the other four defects); a `True`/`None` inside a string is
+  # preserved as content.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict/trailing-comma/
+  # control-char/invalid-escape/comment behaviour is unregressed by appending the
+  # literal view after the existing recovery steps.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

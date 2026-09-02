@@ -1,0 +1,70 @@
+// Simard metacognitive atlas — Diagram 3: OODA loop drill-down.
+//
+// Code-first: the authoritative loop lives in `src/ooda_loop/` (the cycle and
+// its phases) and reasons through `src/ooda_brain/` (the orient/decide
+// reasoners). The CLI entrypoint is `src/operator_cli/ooda.rs`. Phase
+// boundaries are typed records — `orient_decide_record.rs` and
+// `judgment_record.rs` in `ooda_brain` — so each transition carries an
+// inspectable, verified artifact rather than an opaque boolean.
+//
+// Render (optional, CI-safe): dot -Tsvg ooda-loop.dot -o ooda-loop.svg
+digraph simard_ooda_loop {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", shape=box, style=rounded];
+    edge [fontname="Helvetica"];
+    labelloc="t";
+    label="OODA loop drill-down — observe → orient → decide → act, with typed record boundaries";
+
+    // Entry / driver.
+    cli   [label="operator_cli/ooda.rs\n(CLI entrypoint)"];
+    cycle [label="ooda_loop/cycle.rs\n(per-goal cycle driver)"];
+    cli -> cycle [label="runs"];
+
+    // Phases (src/ooda_loop/*).
+    subgraph cluster_phases {
+        label="Phases — src/ooda_loop/*";
+        style=rounded;
+        color="#A3BE8C";
+        observe [label="observe.rs"];
+        orient  [label="orient.rs"];
+        decide  [label="decide.rs"];
+        review  [label="review.rs"];
+        curate  [label="curate.rs"];
+        coverage    [label="coverage.rs"];
+        no_progress [label="no_progress.rs"];
+    }
+
+    // Reasoners (src/ooda_brain/*).
+    subgraph cluster_brain {
+        label="Reasoners — src/ooda_brain/*";
+        style=rounded;
+        color="#5E81AC";
+        b_orient  [label="orient.rs"];
+        b_decide  [label="decide.rs"];
+        recipe_brain [label="recipe_brain.rs"];
+        rustyclawd   [label="rustyclawd.rs"];
+    }
+
+    // Typed record boundaries.
+    od_record  [label="OrientDecideRecord\nooda_brain/orient_decide_record.rs",
+                shape=note, color="#EBCB8B", style="filled,rounded", fillcolor="#FFF6D6"];
+    j_record   [label="JudgmentRecord\nooda_brain/judgment_record.rs",
+                shape=note, color="#EBCB8B", style="filled,rounded", fillcolor="#FFF6D6"];
+
+    // Flow.
+    cycle -> observe;
+    observe -> orient;
+    orient  -> b_orient [label="reason"];
+    b_orient -> od_record [label="writes"];
+    od_record -> decide  [label="typed boundary"];
+    decide  -> b_decide [label="reason"];
+    b_decide -> recipe_brain [label="select recipe"];
+    recipe_brain -> rustyclawd [label="act via agent"];
+    rustyclawd -> j_record [label="writes"];
+    j_record -> review     [label="typed boundary"];
+    review  -> curate;
+    curate  -> coverage;
+    coverage -> no_progress [label="stall check"];
+    no_progress -> cycle    [label="loop / escalate", style=dashed];
+}

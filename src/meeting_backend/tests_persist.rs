@@ -1,6 +1,7 @@
 use super::persist::*;
 use super::types::{ConversationMessage, Role};
 use super::*;
+use serial_test::serial;
 
 #[test]
 fn sanitize_basic() {
@@ -242,6 +243,7 @@ fn extract_decisions_none_found() {
 // ── Handoff markdown report — agenda section (issue #1615) ──────
 
 #[test]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn handoff_report_omits_agenda_section_when_no_template_applied() {
     use std::fs;
 
@@ -268,6 +270,7 @@ fn handoff_report_omits_agenda_section_when_no_template_applied() {
 }
 
 #[test]
+#[serial(simard_meetings_dir_env, cognitive_memory)]
 fn handoff_report_includes_agenda_section_when_template_applied() {
     use std::fs;
 

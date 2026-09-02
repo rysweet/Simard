@@ -8,14 +8,15 @@ description: >
   a cheap coarse pre-filter and fail-closed backstop, why ENHANCE strengthens an
   existing idea instead of minting a near-duplicate node, and the one-time
   operator consolidation pass that collapses the pre-existing duplicates.
-last_updated: 2026-07-07
+last_updated: 2026-07-28
 review_schedule: as-needed
 owner: simard
 doc_type: concept
-status: draft
+status: implemented
 related:
   - ../reference/creative-ideas-dedup-gate-api.md
   - ../reference/creative-idea-dedup-recipe.md
+  - ../reference/ooda-record-idea-dedup-consolidation-cli.md
   - ../howto/configure-creative-ideas-semantic-dedup.md
   - ../operations/creative-ideas-semantic-dedup-kill-switch.md
   - ./resource-aware-engineer-admission.md
@@ -90,9 +91,11 @@ So the authority is a **prompt asset + recipe**:
   — the reasoning, including a **semantic-equivalence rubric** (judge meaning,
   not shared tokens).
 - `prompt_assets/simard/recipes/creative-idea-dedup.yaml`
-  — the hot-reloadable recipe that runs it as a single agent step and returns a
-  **machine-readable structured result** (a JSON decision envelope on the clean
-  result channel — never scraped from stdout).
+  — the hot-reloadable recipe that runs it as a single agent step. The agent
+  **records** its verdict by calling the gated `simard ooda record-idea-dedup`
+  tool (a typed, owner-only `0o600`, freshness-checked record) — Rust reads that
+  record fail-closed via `read_verified_idea_dedup`, never scraping the agent's
+  stdout (epic [#4719](https://github.com/rysweet/Simard/issues/4719) Group C).
 
 Editing the prompt changes dedup **quality** on the next tick — no rebuild. This
 is the "repeated execution of structured thought" the issue asks for: the
@@ -205,8 +208,11 @@ candidates were deduped, enhanced, and created. See the
   `IdeaDedupCtx` / `IdeaDedupDecision` types, `OodaBrain::decide_idea_dedup`, the
   `plan_candidate` seam and its rails, config, and the test matrix.
 - [Creative-idea dedup recipe & prompt schema](../reference/creative-idea-dedup-recipe.md)
-  — the recipe layout, context variables, decision envelope, the semantic-
-  equivalence rubric, and the consolidation recipe.
+  — the recipe layout, context variables, the tool-call the agent makes, the
+  semantic-equivalence rubric, and the consolidation recipe.
+- [`simard ooda record-idea-dedup` / `record-idea-consolidation` tools](../reference/ooda-record-idea-dedup-consolidation-cli.md)
+  — the typed records the recipes write and the fail-closed readers RecipeBrain
+  uses instead of scraping prose.
 - [How to configure and operate semantic dedup](../howto/configure-creative-ideas-semantic-dedup.md).
 - [Semantic-dedup kill switch](../operations/creative-ideas-semantic-dedup-kill-switch.md).
 - [Resource-aware engineer admission](./resource-aware-engineer-admission.md) —

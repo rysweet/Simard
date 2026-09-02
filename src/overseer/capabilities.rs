@@ -162,12 +162,15 @@ pub struct ObservedState {
     pub merge_reasoning_status: MergeReasoningStatus,
     /// WHAT the agentic health-review pass concluded this tick ([standing]).
     /// Default [`HealthReviewStatus::NotRun`] (additive — existing constructors
-    /// compile unchanged), left unchanged when the rail is unwired, the
-    /// dedicated opt-out disabled it, or the pass is off-cadence this tick. A
-    /// pass that RAN and parsed a verdict sets [`HealthReviewStatus::Reviewed`]
-    /// with the agent's one-line `HEALTH_REVIEW_COMPLETE` summary + the count of
-    /// typed decisions it drove — so a HEALTHY pass (zero interventions) still
-    /// leaves an OBSERVABLE trace instead of a silent no-op, exactly as
+    /// compile unchanged), left unchanged when the rail is unwired or the pass is
+    /// off-cadence this tick. An operator OPT-OUT — the dedicated
+    /// `SIMARD_OVERSEER_HEALTH_REVIEW` knob or the shared `SIMARD_OVERSEER_GAP_SCAN`
+    /// throttle — surfaces LOUD as [`HealthReviewStatus::Disabled`] naming the
+    /// knob, never a silent `NotRun` (#4097). A pass that RAN and parsed a verdict
+    /// sets [`HealthReviewStatus::Reviewed`] with the agent's one-line
+    /// `HEALTH_REVIEW_COMPLETE` summary + the count of typed decisions it drove —
+    /// so a HEALTHY pass (zero interventions) still leaves an OBSERVABLE trace
+    /// instead of a silent no-op, exactly as
     /// [`merge_reasoning_status`](Self::merge_reasoning_status) surfaces WHY
     /// reasoning ran. A pass that RAN but DEGRADED (a truncated report the
     /// bounded escalation ladder could not recover, or a base infra fault) sets
@@ -312,11 +315,19 @@ pub enum MergeReasoningStatus {
 /// [`Self::Degraded`] so the weak pass is LOUD in status rather than a silent OFF.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum HealthReviewStatus {
-    /// No pass ran this tick: the rail is unwired, the dedicated opt-out disabled
-    /// it, or it is off-cadence (the additive default so existing constructors
-    /// compile unchanged).
+    /// No pass ran this tick because the rail is UNWIRED (the build could not
+    /// resolve `recipe-runner-rs`/the recipe) or the tick is simply OFF-CADENCE
+    /// (the additive default so existing constructors compile unchanged). An
+    /// operator OPT-OUT is NOT folded in here — that surfaces LOUD as
+    /// [`Self::Disabled`], never a silent `NotRun`.
     #[default]
     NotRun,
+    /// An operator EXPLICITLY disabled the pass — either the dedicated
+    /// `SIMARD_OVERSEER_HEALTH_REVIEW` opt-out or the shared
+    /// `SIMARD_OVERSEER_GAP_SCAN` throttle that disables ALL agentic overseer
+    /// scans. `reason` names WHICH knob so the disable is observable, mirroring
+    /// [`MergeReasoningStatus::Disabled`] — #4097 exists to kill silent hard-OFFs.
+    Disabled { reason: String },
     /// A pass RAN and parsed an honest verdict. `summary` is the recipe's
     /// one-line `HEALTH_REVIEW_COMPLETE` text; `decisions` is the count of typed
     /// remediation interventions it drove (`0` on a HEALTHY pass — an observable

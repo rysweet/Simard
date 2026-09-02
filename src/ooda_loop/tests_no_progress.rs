@@ -405,9 +405,9 @@ fn perpetual_goal(id: &str) -> ActiveGoal {
 /// A STANDING/PERPETUAL **research** goal (issue #4399): standing/perpetual AND
 /// marked cognition-research, i.e. `is_standing_research_goal()` holds. Modeled
 /// on the live `continuously-research-and-improve-your-own-cogn-70ab8541` goal.
-/// For this class an idle cycle is a FAULT — the never-idle rail records it in
-/// `research_idle_faults` (never `perpetual_idled`) and re-orients the goal so
-/// the next cycle generates a novel source/experiment.
+/// For this class an idle cycle is a FAULT — the breaker records it in
+/// `research_idle_faults` (never `perpetual_idled`) as a SIGNAL; re-orienting the
+/// goal is the agentic per-goal reasoner's job (#4453), not the breaker's.
 fn standing_research_goal(id: &str) -> ActiveGoal {
     let g = ActiveGoal::new(
         id,
@@ -712,12 +712,18 @@ fn research_goal_with_live_pr_is_in_flight_progress_not_a_fault() {
 }
 
 #[test]
-fn research_goal_idle_with_no_live_ref_faults_and_reorients() {
-    // Fail-closed re-orient of a GENUINELY idle research goal (empty wip_refs — no
-    // live in-flight artifact). On an idle fault it must be driven back to a fresh,
-    // re-dispatchable cycle (`roll_to_new_cycle`: status NotStarted, stale WIP
-    // dropped) so the NEXT OODA cycle re-enters work generation — while NEVER being
-    // blocked/parked, its no-action counter reset each cycle, and staying active.
+fn research_goal_idle_with_no_live_ref_faults_but_does_not_reorient() {
+    // Issue #4453: the imperative no-progress breaker records a GENUINELY idle
+    // research goal (empty wip_refs — no live in-flight artifact) as a FAULT
+    // SIGNAL, but it must NOT itself re-orient the goal. The re-orient decision
+    // (and the destructive `roll_to_new_cycle`) is owned exclusively by the
+    // agentic per-goal-per-cycle reasoner (`drive_per_goal_cycle`). If this
+    // imperative path also rolled the goal it would double-drive it — resetting
+    // it to `NotStarted` and dropping WIP even when the reasoner decided to
+    // `wait`/`continue` — which was the 70ab8541 idle→reset fault-loop. So the
+    // goal's status and WIP must survive the breaker unchanged, while it stays
+    // fail-closed: never blocked/parked, its no-action counter reset each cycle,
+    // and staying active for the reasoner to decide on.
     let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
     let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
     let mut goal = standing_research_goal(id);
@@ -743,17 +749,14 @@ fn research_goal_idle_with_no_live_ref_faults_and_reorients() {
         assert_eq!(
             report.research_idle_faults,
             vec![id.to_string()],
-            "cycle {cycle}: a genuinely idle research goal must be recorded as a FAULT"
+            "cycle {cycle}: a genuinely idle research goal must be recorded as a FAULT signal"
         );
         let goal = &state.active_goals.active[0];
         assert!(
-            matches!(goal.status, GoalProgress::NotStarted),
-            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            matches!(goal.status, GoalProgress::InProgress { percent: 40 }),
+            "cycle {cycle}: the imperative breaker must NOT re-orient the goal \
+             (re-orient is the reasoner's job, #4453) — status must be unchanged, got {:?}",
             goal.status
-        );
-        assert!(
-            goal.wip_refs.is_empty(),
-            "cycle {cycle}: re-orient must drop stale WIP so the next cycle starts fresh"
         );
         assert!(
             !matches!(goal.status, GoalProgress::Blocked(_)),
@@ -992,8 +995,9 @@ fn research_goal_whose_only_ref_is_a_merged_pr_faults_after_liveness_reconcile()
 
         let goal = &state.active_goals.active[0];
         assert!(
-            matches!(goal.status, GoalProgress::NotStarted),
-            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            matches!(goal.status, GoalProgress::InProgress { percent: 40 }),
+            "cycle {cycle}: the imperative breaker records the fault signal but must NOT \
+             re-orient the goal (that is the reasoner's job, #4453) — status unchanged, got {:?}",
             goal.status
         );
         assert!(
@@ -1024,9 +1028,10 @@ fn research_goal_whose_only_ref_is_a_merged_pr_faults_after_liveness_reconcile()
 /// engineer's assignment but LEFT its session/branch refs, so the goal kept
 /// reading as `has_live_in_flight_ref` and idled forever as `ResearchInFlight`.
 /// After Prong 1 the sweep also drops the dead session's session/branch/engineer
-/// refs, so the next NO-ACTION cycle correctly faults and re-orients.
+/// refs, so the next NO-ACTION cycle correctly faults (the re-orient itself is the
+/// agentic per-goal reasoner's job, #4453 — the breaker only records the signal).
 #[test]
-fn research_goal_with_dead_session_ref_is_swept_then_faults_and_reorients() {
+fn research_goal_with_dead_session_ref_is_swept_then_faults_as_signal() {
     let threshold = NO_PROGRESS_BREAKER_THRESHOLD;
     let id = "continuously-research-and-improve-your-own-cogn-70ab8541";
     let mut goal = standing_research_goal(id);
@@ -1076,7 +1081,9 @@ fn research_goal_with_dead_session_ref_is_swept_then_faults_and_reorients() {
         let goal = &state.active_goals.active[0];
         assert!(
             matches!(goal.status, GoalProgress::NotStarted),
-            "cycle {cycle}: an idle research goal must be re-oriented to NotStarted, got {:?}",
+            "cycle {cycle}: status is NotStarted from the dead-assignment SWEEP (which \
+             makes the goal re-dispatchable), not from the breaker — the breaker only \
+             records the fault signal and never re-orients (#4453); got {:?}",
             goal.status
         );
         assert!(

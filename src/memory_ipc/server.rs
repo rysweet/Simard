@@ -76,7 +76,18 @@ pub fn spawn_server(
                                 .name("memory-ipc-conn".into())
                                 .spawn(move || {
                                     if let Err(e) = serve_connection(stream, m) {
-                                        eprintln!("[simard] memory-ipc: connection error: {e}");
+                                        // Structured, single-shot per failed
+                                        // connection (issue #4929): a severed
+                                        // peer used to flood the journal with
+                                        // `eprintln!` broken-pipe lines. Route
+                                        // through tracing so it is filterable
+                                        // and rate-observable, never a stray
+                                        // stderr write.
+                                        tracing::warn!(
+                                            endpoint = "memory-ipc",
+                                            error = %e,
+                                            "memory-ipc connection error"
+                                        );
                                     }
                                 })
                         {
@@ -84,11 +95,19 @@ pub fn spawn_server(
                                 "ipc_spawn_failed",
                                 "spawn_server:per_conn",
                             );
-                            eprintln!("[simard] memory-ipc: failed to spawn handler thread: {e}");
+                            tracing::error!(
+                                endpoint = "memory-ipc",
+                                error = %e,
+                                "memory-ipc failed to spawn handler thread"
+                            );
                         }
                     }
                     Err(e) => {
-                        eprintln!("[simard] memory-ipc: accept failed: {e}");
+                        tracing::error!(
+                            endpoint = "memory-ipc",
+                            error = %e,
+                            "memory-ipc accept failed; listener loop exiting"
+                        );
                         break;
                     }
                 }

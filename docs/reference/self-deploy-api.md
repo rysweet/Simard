@@ -1,7 +1,7 @@
 ---
 title: Self-deploy API reference
 description: Reference for the reconciliation detector, build-from-source self-deploy orchestrator extensions, the DaemonRestarter abstraction, the dual protective backup, the engineer-orphan reaper, the simard self-health probe (including the entrypoint-parity probe that verifies the PATH-resolved `simard` matches the installed version), the Overseer autonomous deploy wiring (its security prerequisites/trust model, Signal::DeployDriftDetected, ProblemKind::DeployDrift, Intervention::Deploy, GuardedDeployer, the OrchestratedBinaryDeployer adapter, notify-on-every-outcome, and the min-interval anti-thrash guard), and the UpdateConfig / environment fields that govern self-deploy.
-last_updated: 2026-07-21
+last_updated: 2026-07-22
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -179,6 +179,31 @@ The memory snapshot reuses `memory_backup`; the
 binary backup reuses the existing safe-update `snapshot` phase. Backups are not
 reinvented here — they are sequenced and made mandatory.
 
+### Deleted running-image degrade (issue #4857 / #4836)
+
+The deploy trigger derives `install_path` from `current_exe()`. On Linux, once a
+prior self-deploy has swapped the on-disk binary, a still-running old image's
+`current_exe()` resolves to `<path> (deleted)` and that file no longer exists.
+The binary backup's `snapshot` phase therefore degrades to the **live running
+image** via `/proc/self/exe` (still readable while the inode is held open) rather
+than hard-failing with `snapshot read on .../simard (deleted): No such file`.
+Without this degrade the mandatory backup aborted every deploy and stranded the
+running binary behind merged main (DeployDrift). The fallback fires **only** when
+the declared path is missing; an existing path is snapshotted verbatim, so it can
+never mask a wrong-path bug, and each fallback emits a `WARN` tracing span. On
+platforms without `/proc/self/exe` the original loud failure is preserved.
+
+> **Observed failure this closes.** Production cycles saw the mandatory binary
+> backup abort with `read on /home/azureuser/.simard/bin/simard (deleted): No
+> such file or directory` — an unlinked-inode swap failure — which stranded the
+> running binary behind merged `main`. The `/proc/self/exe` degrade above makes
+> the backup robust to a deleted/unlinked source inode: the still-open running
+> image is snapshotted instead of hard-failing. This is the binary-backup
+> counterpart to the source-preparer's
+> [managed-clone reset + clean](./self-deploy-source-prep.md#managed-clone-hygiene-reset--clean-before-checkout)
+> hardening — together they keep an autonomous self-deploy from live-locking on
+> either the source checkout or the protective backup.
+
 ## Engineer-orphan reaper
 
 ```rust
@@ -354,7 +379,7 @@ Exit code: 0 when every probe is healthy; non-zero when any probe fails.
     "memory_intact":    { "healthy": false, "live_facts": 1180, "baseline_facts": 1206 },
     "goal_board_intact":{ "healthy": true,  "active_goals": 5 },
     "brains_llm_backed":{ "healthy": true,  "fallback_records": 0 },
-    "no_quarantine":    { "healthy": true,  "quarantined": false },
+    "no_quarantine":    { "healthy": true,  "quarantined": false, "fresh_quarantines": 0, "retained": 3 },
     "entrypoint_parity":{ "healthy": true,  "installed_version": "simard 0.35.0", "path_version": "simard 0.35.0", "resolved_path": "/home/you/.local/bin/simard", "canonical_path": "/home/you/.simard/bin/simard", "path_mismatch": false, "foreign_shadow": false }
   }
 }
@@ -362,6 +387,74 @@ Exit code: 0 when every probe is healthy; non-zero when any probe fails.
 
 `healthy` is the logical AND of every probe's `healthy`. A `false` from any probe
 fails the health check and triggers rollback when invoked by the orchestrator.
+
+### `NoQuarantineProbe`
+
+```rust
+/// Probe: no *fresh* corrupt cognitive-memory quarantine appeared in the live
+/// store directory since the deploy window opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoQuarantineProbe {
+    pub healthy: bool,
+    /// `true` when at least one corrupt-store quarantine in the live-store
+    /// directory has an mtime at/after `fallback_window_start` (a fresh event).
+    /// Retained historical snapshots (mtime before the window) never set this.
+    pub quarantined: bool,
+    /// Count of quarantines with mtime at/after `fallback_window_start`
+    /// (the events that drive `quarantined` / failure). `quarantined ==
+    /// (fresh_quarantines > 0)`.
+    pub fresh_quarantines: u64,
+    /// Count of quarantines present in the directory whose mtime is *before*
+    /// the window — retained forensic snapshots the probe deliberately ignores.
+    /// Lets operators distinguish "0 quarantines total" from "0 fresh + N
+    /// retained" without shelling into the store directory.
+    pub retained: u64,
+}
+```
+
+The probe scans the **live cognitive-store directory** — `resolve_subdir("state")`
+(i.e. `<state_root>/state/`, the directory the daemon actually opens the store
+in and where LadybugDB drops `cognitive*.corrupt-<ts>` quarantines), resolved via
+the [`state_root`](./state-root-resolution.md) helpers. It is **window-scoped**,
+mirroring [`brains_llm_backed`](#self-health-output): a quarantine counts only
+when its filesystem mtime is **at or after** the `fallback_window_start` instant
+already passed to `run_self_health_probe`. The entry mtime is converted to
+`DateTime<Utc>` and compared against the window start; entries whose metadata
+cannot be read are skipped (fail-safe: never counted fresh, never deleted).
+
+This resolves a permanent-failure trap. Cleanup deliberately **retains** the
+newest [`CORRUPT_DB_KEEP`](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)
+quarantines as forensic recovery assets, so a naive "quarantine count > 0" test
+would fail on exactly the snapshots retention is designed to keep — the probe
+could never clear, and the daemon (which rolls back on any unhealthy probe) would
+freeze on a stale build. The window filter distinguishes a *historical retained
+snapshot* (mtime before the window → `quarantined: false`, healthy) from a
+*genuinely fresh* post-deploy corruption event (mtime at/after the window →
+`quarantined: true`, fails and rolls back). The probe is **not** neutered:
+real corruption during or after the deploy still fails it.
+
+The probe scans the **same** directory that [`simard cleanup`](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)
+reclaims (`resolve_subdir("state")`); both route through the `state_root` helpers
+with no hardcoded duplicate path, so "where corruption is detected" and "where it
+is reclaimed" can never drift apart.
+
+The probe surfaces two diagnostic counts alongside the boolean. `fresh_quarantines`
+is the number of in-window quarantines (`quarantined == (fresh_quarantines > 0)`),
+and `retained` is the number of out-of-window snapshots the probe ignored. Emitting
+both lets operators tell "clean store" (`0` / `0`) apart from "clean since deploy,
+N forensic snapshots retained" (`0` / `N`) directly from the health JSON, without
+inspecting the store directory by hand.
+
+> **Known limitation — mtime freshness.** Freshness is keyed on filesystem mtime.
+> Any operation that rewrites the mtime of a *retained* historical snapshot —
+> a rename, a `.bak` copy that preserves the original name, or a manual `touch` —
+> can push that snapshot's mtime past `fallback_window_start` and be misread as a
+> fresh corruption event, spuriously failing the probe. This is acceptable because
+> [`simard cleanup`](../operations/verified-backups.md#bounded-corrupt-quarantine-retention)
+> only deletes retained assets (it never rewrites their mtimes), so under normal
+> operation retained snapshots keep their original quarantine timestamps. Operators
+> performing manual forensics on the live-store directory should copy snapshots
+> *out* rather than mutate them in place.
 
 ### `EntrypointParityProbe`
 
@@ -661,6 +754,39 @@ The min-interval anti-thrash guard is **not** a gate variant — it is applied
 upstream at the Overseer's observe rail, so a throttled tick never constructs a
 deploy attempt (see [Autonomous deploy
 configuration](#autonomous-deploy-configuration)).
+
+### Canary gate commands
+
+`verify_canary` runs each [`RelaunchGate`](../../src/self_relaunch/types.rs)
+against the **candidate** binary under a scrubbed env (`scrub_gate_env`). Each
+gate is a real candidate-binary invocation; a non-zero exit, a spawn error, or a
+timeout is a **red** (`passed: false`) verdict — gates fail closed.
+
+| Gate | Candidate invocation | Passes when |
+| --- | --- | --- |
+| `smoke` | `simard --version` | the binary runs and prints its version |
+| `unit-test` | `cargo test` (isolated `SIMARD_STATE_ROOT` TempDir, #4628) | the candidate's own test suite is green |
+| `gym-baseline` | `simard gym list` | the gym registry loads |
+| `rpc-health` | `simard memory stats` (after a live-socket pre-flight) | the daemon socket is present **and** a real stats **RPC round-trip** succeeds |
+
+The `rpc-health` gate dials the live daemon via `simard memory stats` →
+`open_reader_client`, which connects the daemon socket resolved by
+`socket_path_for(SIMARD_STATE_ROOT)` (the allow-listed state root is re-injected
+into the scrubbed gate env). A socket that is present but unconnectable **fails
+closed** (`SimardError::RpcSpawnFailed`, bug #2896), so the gate reddens on a
+wedged daemon rather than passing blindly.
+
+Because `memory stats` legitimately falls through to a tier-2 on-disk store when
+the socket is **absent** (it would then exit 0 and green the gate without
+proving reachability), the gate runs a **liveness pre-flight** first: it resolves
+the exact socket the candidate would dial and reddens immediately if that socket
+does not exist. This closes the "green a dead daemon" gap — an absent socket, a
+present-but-unconnectable socket, a non-zero exit, a spawn error, and a timeout
+all fail closed. `memory stats` is read-only, so the probe never mutates the live
+store. The gate enforces `UpdateConfig`'s
+`health_timeout` itself (via a spawn + bounded-wait wrapper), because neither
+`memory stats` nor `status` exposes a `--timeout` flag; a probe that never
+returns is killed and reddened.
 
 ### `OrchestratedBinaryDeployer` adapter
 

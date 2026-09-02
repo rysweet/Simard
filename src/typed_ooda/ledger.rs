@@ -265,6 +265,17 @@ impl CapabilityHandler {
         })
     }
 
+    /// Delete every transient actor-session lease.
+    ///
+    /// Intended for authoritative daemon startup, when no actor session can
+    /// still be in flight. Runtime scope enforcement remains unchanged.
+    pub(crate) fn purge_actor_sessions(&self) -> CapabilityResult<()> {
+        self.lock()?
+            .execute("DELETE FROM actor_sessions", [])
+            .map_err(persistence)?;
+        Ok(())
+    }
+
     /// Inject the authoritative engineer-liveness provider used by the
     /// `engineer_claims` reclaim gate. Without a provider the gate is
     /// fail-closed: an existing claim is treated as live and a duplicate spawn

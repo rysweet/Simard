@@ -363,3 +363,241 @@ fn wired_daemon_behind_main_autonomously_emits_and_executes_a_guarded_deploy() {
         "operator notified before the autonomous deploy swap"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (Problem 1 — canary-gate convergence): FAILING tests, written first.
+//
+// A refused RED-canary self-deploy must be DIAGNOSABLE and CREDENTIAL-SAFE, must
+// stay FATAL (never retried away — guardrail A4), and once the gate is REPAIRED
+// the loop must CONVERGE (advance past the stuck SHA) instead of re-refusing the
+// identical deploy every tick (the observed pathology on deploy 928cd7da).
+//
+// Constraints: additive, intent-revealing names only, `tracing`/OTel only.
+use crate::overseer::deploy::DeployRefusal;
+use crate::overseer::wiring::is_transient;
+
+/// A canary that reddens on a specific named gate, optionally carrying that
+/// gate's own failure detail (its stderr/probe message) — mirrors the #4420
+/// enrichment the real `SharedTargetCanaryVerifier` produces.
+struct FakeRedCanary {
+    gate: String,
+    detail: Option<String>,
+}
+impl CanaryRunner for FakeRedCanary {
+    fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+        Ok(CanaryResult {
+            passed: false,
+            detail: "3/4 gates".to_string(),
+            failing_gate: Some(self.gate.clone()),
+            failing_detail: self.detail.clone(),
+        })
+    }
+}
+
+/// A canary that is RED until `repaired` flips true, then GREEN — models the
+/// gate fix landing so the next self-deploy tick can converge.
+struct SwitchableCanary(Arc<Mutex<bool>>);
+impl CanaryRunner for SwitchableCanary {
+    fn run_canary(&self, _t: &str) -> Result<CanaryResult, OverseerError> {
+        let repaired = *self.0.lock().unwrap();
+        Ok(CanaryResult {
+            passed: repaired,
+            detail: if repaired {
+                "4/4 gates".into()
+            } else {
+                "3/4 gates".into()
+            },
+            failing_gate: (!repaired).then(|| "rpc-health".to_string()),
+            failing_detail: (!repaired).then(|| "probe rpc: connection refused".to_string()),
+        })
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn guarded_with(
+    canary: Box<dyn CanaryRunner>,
+    is_ancestor: bool,
+    churn: u64,
+    running: &str,
+) -> (
+    GuardedDeployer,
+    Arc<Mutex<usize>>,
+    Arc<Mutex<Vec<OperatorNotification>>>,
+) {
+    let deployed = Arc::new(Mutex::new(0));
+    let seen = Arc::new(Mutex::new(vec![]));
+    let notifier = DualChannelNotifier::new(vec![Box::new(Capture(seen.clone()))]);
+    let gd = GuardedDeployer::new(
+        canary,
+        Box::new(CountingDeployer(deployed.clone())),
+        Box::new(FakeAncestry(is_ancestor)),
+        notifier,
+        running.to_string(),
+        churn,
+        "rysweet/Simard".to_string(),
+    );
+    (gd, deployed, seen)
+}
+
+#[test]
+fn red_canary_refusal_names_the_specific_gate() {
+    // The opaque "one or more gates failed" is replaced by a NAMED reason so the
+    // stuck self-deploy is diagnosable in logs/OTel (#4420 enrichment).
+    let (gd, deployed, seen) = guarded_with(
+        Box::new(FakeRedCanary {
+            gate: "rpc-health".into(),
+            detail: None,
+        }),
+        false,
+        0,
+        "runningOLD",
+    );
+    let err = gd.deploy("mergedNEW").unwrap_err();
+    let OverseerError::Capability { what, detail } = err else {
+        panic!("a red canary must surface as a deploy_gate capability error");
+    };
+    assert_eq!(what, "deploy_gate");
+    assert!(
+        detail.contains("rpc-health"),
+        "reason must NAME the gate: {detail}"
+    );
+    assert!(
+        detail.contains("red canary"),
+        "reason must say red canary: {detail}"
+    );
+    assert_eq!(*deployed.lock().unwrap(), 0, "a red canary leaves no swap");
+    assert_eq!(seen.lock().unwrap()[0].kind, "deploy-refused");
+}
+
+#[test]
+fn red_canary_refusal_redacts_credentials_in_surfaced_detail() {
+    // A gate's stderr can embed a token-bearing remote URL. The surfaced reason
+    // + operator notification must NOT carry a live token. Current code only
+    // truncates (`bound_detail`) — it does NOT redact — so this FAILS until the
+    // fix threads credential redaction through the refusal reason.
+    let leaky = "fatal: unable to access \
+        'https://x-access-token:ghp_LIVE0123456789abcdefTOKEN@github.com/rysweet/Simard.git/': gate blew up";
+    let (gd, _deployed, seen) = guarded_with(
+        Box::new(FakeRedCanary {
+            gate: "gym-baseline".into(),
+            detail: Some(leaky.into()),
+        }),
+        false,
+        0,
+        "runningOLD",
+    );
+    let err = gd.deploy("mergedNEW").unwrap_err();
+    let OverseerError::Capability { detail, .. } = err else {
+        panic!("expected a deploy_gate capability error");
+    };
+    assert!(
+        !detail.contains("ghp_LIVE0123456789abcdefTOKEN"),
+        "a live token must be redacted from the surfaced refusal reason: {detail}"
+    );
+    // The operator notification carries the same reason and must be clean too.
+    let notified = format!("{:?}", seen.lock().unwrap()[0]);
+    assert!(
+        !notified.contains("ghp_LIVE0123456789abcdefTOKEN"),
+        "the operator notification must not leak the token: {notified}"
+    );
+}
+
+#[test]
+fn refusal_reason_redacts_credentials_at_the_unit_boundary() {
+    // Unit-level companion: `CanaryResult::refusal_reason` itself must redact,
+    // while still naming the gate.
+    let canary = CanaryResult {
+        passed: false,
+        detail: "3/4 gates".into(),
+        failing_gate: Some("gym-baseline".into()),
+        failing_detail: Some(
+            "https://x-access-token:ghp_UNITBOUNDARY0123456789TOKEN@github.com/rysweet/Simard.git"
+                .into(),
+        ),
+    };
+    let reason = canary.refusal_reason(&DeployRefusal::RedCanary);
+    assert!(
+        reason.contains("gym-baseline"),
+        "must still name the gate: {reason}"
+    );
+    assert!(
+        !reason.contains("ghp_UNITBOUNDARY0123456789TOKEN"),
+        "refusal_reason must redact embedded credentials: {reason}"
+    );
+}
+
+#[test]
+fn red_canary_refusal_is_fatal_and_never_retried_away() {
+    // Guardrail A4 (#4420): a deploy-gate red canary is a DECISION, never a
+    // transient upstream blip — even if the gate detail mentions "timeout".
+    let err = OverseerError::Capability {
+        what: "deploy_gate",
+        detail: "red canary (gate rpc-health: probe rpc: timeout after 30s)".into(),
+    };
+    assert!(
+        !is_transient(&err),
+        "a red-canary refusal must be fatal (fail-closed), not retried away"
+    );
+}
+
+#[test]
+fn red_canary_refusal_is_deterministic_across_ticks() {
+    // The observed pathology: the SAME refusal every tick. That refusal must be
+    // idempotent — identical reason, zero swaps — with no partial state mutation
+    // that could diverge tick to tick.
+    let (gd, deployed, _seen) = guarded_with(
+        Box::new(FakeRedCanary {
+            gate: "rpc-health".into(),
+            detail: Some("probe rpc: refused".into()),
+        }),
+        false,
+        0,
+        "runningOLD",
+    );
+    let first = gd.deploy("mergedNEW").unwrap_err().to_string();
+    let second = gd.deploy("mergedNEW").unwrap_err().to_string();
+    assert_eq!(
+        first, second,
+        "a red canary must refuse identically each tick"
+    );
+    assert_eq!(*deployed.lock().unwrap(), 0, "no swap while RED");
+}
+
+#[test]
+fn repaired_canary_converges_and_advances_past_the_stuck_sha() {
+    // Convergence acceptance: while RED the loop refuses and the stuck SHA is not
+    // deployed; once the gate is REPAIRED (canary GREEN) the next tick for the
+    // SAME target advances — the swap runs and the deployed commit matches —
+    // instead of re-refusing 928cd7da forever.
+    let repaired = Arc::new(Mutex::new(false));
+    let (gd, deployed, _seen) = guarded_with(
+        Box::new(SwitchableCanary(repaired.clone())),
+        false,
+        0,
+        "runningOLD",
+    );
+
+    // Tick 1 — still RED: refuse, no swap, SHA stays undeployed.
+    let err = gd.deploy("mergedNEW").unwrap_err();
+    assert!(format!("{err}").contains("red canary"));
+    assert_eq!(
+        *deployed.lock().unwrap(),
+        0,
+        "stuck SHA must not deploy while RED"
+    );
+
+    // The gate fix lands.
+    *repaired.lock().unwrap() = true;
+
+    // Tick 2 — GREEN: the loop converges and advances past the stuck SHA.
+    let report = gd
+        .deploy("mergedNEW")
+        .expect("a repaired canary must deploy");
+    assert!(report.gates_passed);
+    assert_eq!(report.deployed_commit, "mergedNEW");
+    assert_eq!(
+        *deployed.lock().unwrap(),
+        1,
+        "convergence: the swap ran exactly once"
+    );
+}

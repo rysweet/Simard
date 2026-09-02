@@ -444,6 +444,12 @@ Each pass records a `distill_reliability_gate` metric whose value is the
 block-rate (`quarantined / candidate_facts`), with the counts in the context
 payload, so the gate's effect is measurable before/after from `metrics.jsonl`.
 
+That live block-rate is complemented by a fixed-corpus **reliability-gate
+benchmark** — a run-over-run comparable classification-accuracy score for the
+same gate, wired into the gym signal machinery — so a silent regression in the
+gate's *discrimination* raises a gym `Regression` signal. See the
+[reliability-gate benchmark reference](../reference/reliability-gate-benchmark.md).
+
 ### Reduction ratio
 
 The textual `consolidate_episodes` step reports a **compression

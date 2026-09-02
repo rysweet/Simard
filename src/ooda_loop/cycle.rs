@@ -205,7 +205,10 @@ fn run_ooda_cycle_inner(
     }
 
     // --- Resource cleanup: proactive disk/process management (issue #373) ---
-    {
+    // Production-only: this walks the real filesystem and can kill orphaned
+    // cargo processes, so it is gated behind `config.run_resource_cleanup`
+    // (default off) to keep cargo-test hermetic and fast. See `OodaConfig`.
+    if config.run_resource_cleanup {
         use crate::cmd_cleanup::handle_cleanup;
         eprintln!("[simard] OODA cycle: running resource cleanup");
         if let Err(e) = handle_cleanup() {
@@ -316,6 +319,35 @@ fn run_ooda_cycle_inner(
         "[simard] OODA cycle: Orient complete ({} priorities)",
         priorities.len()
     );
+
+    // --- Salience advisory bias (issue #5, thread 7) ---
+    // Reorder priorities by a FRESH, numeric-only salience signal so Decide
+    // considers the most salient goals first under the concurrency cap. Fully
+    // fail-closed: an absent / stale / oversized / malformed signal (the default,
+    // since salience is OFF by default) yields no reordering and behaves exactly
+    // as before. Salience ADVISES; it never changes an action's kind. The signal
+    // carries validated goal ids + clamped numbers only — no free text reaches
+    // Decide. See docs/concepts/salience-and-decide.md.
+    let mut priorities = priorities;
+    let salience_order = crate::cognitive_threads::salience_signal::advisory_priority_order(
+        &crate::goal_curation::simard_state_root(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        crate::cognitive_threads::salience_signal::DEFAULT_INTERVAL_SECS,
+    );
+    if !salience_order.is_empty() {
+        let rank = |goal_id: &str| salience_order.iter().position(|g| g == goal_id);
+        // Stable sort: salient goals move to the front in salience order; every
+        // other priority keeps its Orient-produced relative order.
+        priorities.sort_by(|a, b| match (rank(&a.goal_id), rank(&b.goal_id)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+    }
 
     // --- Decide ---
     state.current_phase = OodaPhase::Decide;
@@ -569,6 +601,28 @@ fn run_ooda_cycle_inner(
                 target_dimension: None,
             });
         }
+    }
+
+    // --- Per-goal, per-cycle agentic decision (issue #4453) ---
+    // Run EXACTLY ONE reasoned decision per active goal per cycle
+    // (continue / spawn / reorient / investigate / wait / complete), replacing
+    // the imperative never-idle / reap / grace-window predicates with a thin
+    // deterministic rail that dispatches to the reasoner. A non-destructive
+    // verdict (continue / spawn / wait / investigate) PRESERVES the goal's
+    // in-flight `wip_refs` — the root-cause fix for the 70ab8541 idle->reset
+    // fault-loop: a standing research goal holding a live PR is never silently
+    // reset by a threshold. Destructive ref mutation is reachable only via a
+    // reasoned `reorient` / `complete` (a stale-worker concern goes through
+    // `investigate` first). NO silent fallback: a reasoner `Err` fails the cycle
+    // loudly (#1711) rather than masquerading as a no-op decision.
+    let per_goal_outcomes = drive_per_goal_cycle(state, memories.brain.as_ref())?;
+    if !per_goal_outcomes.is_empty() {
+        tracing::info!(
+            target: "simard::ooda",
+            decisions = per_goal_outcomes.len(),
+            reoriented = per_goal_outcomes.iter().filter(|o| o.touched_refs).count(),
+            "OODA per-goal-cycle: one agentic decision per active goal",
+        );
     }
 
     // --- Fix 3: no-progress breaker (issue #1) ---
@@ -1529,6 +1583,191 @@ fn learn_from_refuted_goals(
         report.lessons_distilled,
         report.repeat_failures,
     );
+}
+
+// ===========================================================================
+// Per-goal, per-cycle agentic decision driver (issue #4453)
+//
+// Runs EXACTLY ONE agentic reasoning decision per active goal per cycle
+// (continue / spawn / reorient / investigate / wait / complete), replacing the
+// imperative never-idle / reap / grace-window predicates with a thin
+// deterministic rail that dispatches to the reasoner and executes the returned
+// action. The three former imperative deciders (classify_standing_idle, the
+// claim-reaper staleness sweep, and the effect board-miss) survive ONLY as
+// read-only INPUTS on `PerGoalCycleCtx` — never as the decision.
+// ===========================================================================
+
+/// The observable outcome of one per-goal, per-cycle decision. Returned per
+/// active goal so the caller (and the regression tests) can assert routing and
+/// the A6 invariant (only `reorient`/`complete` touch refs).
+#[derive(Clone, Debug)]
+pub struct PerGoalDecisionOutcome {
+    /// The goal this decision was made for.
+    pub goal_id: String,
+    /// Stable snake_case label of the chosen action (`"continue"`, `"spawn"`, …).
+    pub action_label: String,
+    /// The reasoner's mandatory reason for the chosen action.
+    pub reason: String,
+    /// `true` when the applied action performed a DESTRUCTIVE ref mutation
+    /// (cleared `wip_refs` / rolled or completed the goal). Only `reorient` and
+    /// `complete` do so — the code-level guarantee that a `continue` / `spawn` /
+    /// `wait` / `investigate` verdict never reproduces the 70ab8541 idle→reset
+    /// loop.
+    pub touched_refs: bool,
+}
+
+/// Gather the DURABLE per-goal context for one per-cycle reasoning decision
+/// (issue #4453). Best-effort and total: a goal id absent from the board yields
+/// a defaulted ctx (never panics). Reads only in-memory durable state — never a
+/// live worker's mere presence as the decision input. The three demoted
+/// imperative deciders are surfaced here as read-only signals.
+pub(crate) fn gather_per_goal_cycle_ctx(
+    state: &OodaState,
+    goal_id: &str,
+) -> crate::ooda_brain::PerGoalCycleCtx {
+    use crate::ooda_brain::PerGoalCycleCtx;
+
+    let Some(goal) = state.active_goals.active.iter().find(|g| g.id == goal_id) else {
+        return PerGoalCycleCtx {
+            goal_id: goal_id.to_string(),
+            cycle_number: state.cycle_count,
+            ..PerGoalCycleCtx::default()
+        };
+    };
+
+    // Durable in-flight work (NOT live-worktree presence).
+    let open_pr_refs: Vec<String> = goal
+        .wip_refs
+        .iter()
+        .filter(|w| w.kind.trim().eq_ignore_ascii_case("pr"))
+        .map(|w| w.ref_id.clone())
+        .collect();
+    // Issue #4631 (fail-OPEN counterpart to the #4437 fail-CLOSE hardening in
+    // PRs #4574 / #4608): a mere `engineer_worktrees` map entry only proves a
+    // claim once existed, not that a live engineer is still pursuing the goal.
+    // A leaked / idle worktree claim would otherwise read "present … alive"
+    // forever and the dead engineer would never be reclaimed. Gate presence on
+    // a VERIFIED-LIVE engineer (PID + starttime) via the same on-disk verifier
+    // the #4437 fail-close path uses. The cheap `contains_key` guard preserves
+    // the IO-free fast path for the common "no claim" case; the filesystem scan
+    // only runs when a claim exists. Unverifiable → NOT present → the existing
+    // `stale_claim_secs` reclaim path re-engages automatically below.
+    let worker_present = state.engineer_worktrees.contains_key(goal_id)
+        && crate::ooda_actions::advance_goal::find_live_engineer_for_goal(
+            &crate::goal_curation::simard_state_root(),
+            goal_id,
+        )
+        .is_some();
+
+    // DEMOTED decider #1 — classify_standing_idle: a standing goal that looks
+    // idle (no live in-flight ref) becomes a SIGNAL, not a roll.
+    let standing_idle_signal = matches!(
+        crate::ooda_loop::no_progress::classify_standing_idle(goal),
+        Some(crate::ooda_loop::no_progress::StandingIdle::ResearchFault { .. })
+    ) || (goal.is_perpetual() && !goal.has_live_in_flight_ref());
+
+    // DEMOTED decider #2 — claim-reaper staleness: when a worker claim is
+    // EXPECTED (assignment or engineer/session/branch ref) but no live worktree
+    // is present, surface how long since the claim was last observed alive as a
+    // read-only INPUT. STALE_SECS survives only as the threshold that populates
+    // this field, never as the reap trigger; no new SIMARD_*_SECS is added.
+    let expects_worker = goal.assigned_to.is_some()
+        || goal.wip_refs.iter().any(|w| {
+            let kind = w.kind.trim();
+            kind.eq_ignore_ascii_case("engineer")
+                || kind.eq_ignore_ascii_case("session")
+                || kind.eq_ignore_ascii_case("branch")
+        });
+    let stale_claim_secs = if expects_worker && !worker_present {
+        Some(claim_age_secs(goal))
+    } else {
+        None
+    };
+
+    PerGoalCycleCtx {
+        goal_id: goal.id.clone(),
+        goal_description: goal.description.clone(),
+        goal_status: goal.status.to_string(),
+        cycle_number: state.cycle_count,
+        history_summary: goal.current_activity.clone().unwrap_or_default(),
+        effect_jobs_in_flight: 0,
+        open_pr_refs,
+        last_outcomes: Vec::new(),
+        wip_ref_count: goal.wip_refs.len() as u32,
+        worker_present,
+        worker_log_tail: String::new(),
+        standing_idle_signal,
+        stale_claim_secs,
+        // DEMOTED decider #3 — effect board-miss: gathered by the caller from
+        // the durable effect-dispatch ledger when available; defaulted false
+        // here so the pure gather stays IO-free.
+        effect_board_missed: false,
+    }
+}
+
+/// Seconds since a goal's worker claim was last observed making durable
+/// progress. `u64::MAX` means "a claim is expected but was never observed
+/// progressing" (no `last_progress_update_at` recorded). A FACT fed to the
+/// reasoner — never a reap threshold.
+fn claim_age_secs(goal: &crate::goal_curation::ActiveGoal) -> u64 {
+    match goal.last_progress_update_at {
+        Some(ts) => (chrono::Utc::now() - ts).num_seconds().max(0) as u64,
+        None => u64::MAX,
+    }
+}
+
+/// Run EXACTLY ONE agentic reasoning decision per active goal for this cycle
+/// (issue #4453), routing each outcome through the thin deterministic state
+/// rail [`crate::ooda_brain::apply_per_goal_action_to_state`] and recording a
+/// [`BrainJudgmentRecord`] for EVERY goal (an action + a reason each cycle —
+/// none left idle without both).
+///
+/// NO silent fallback: an `Err` from the reasoner surfaces as a cycle failure
+/// (#1711). Destructive ref mutation is reachable only via a reasoned
+/// `reorient`/`complete` (a worker-health concern goes through `investigate`
+/// first) — never a threshold/counter/grace-window.
+pub fn drive_per_goal_cycle<B: crate::ooda_brain::OodaBrain + ?Sized>(
+    state: &mut OodaState,
+    brain: &B,
+) -> SimardResult<Vec<PerGoalDecisionOutcome>> {
+    use crate::ooda_brain::{
+        BrainJudgmentRecord, apply_per_goal_action_to_state, push_brain_judgment,
+    };
+
+    // Snapshot the active goal ids first (cf. the pre-cycle active-id snapshot)
+    // so the per-goal `apply_*` mutation cannot invalidate the iteration.
+    let active_ids: Vec<String> = state
+        .active_goals
+        .active
+        .iter()
+        .map(|g| g.id.clone())
+        .collect();
+
+    let mut outcomes = Vec::with_capacity(active_ids.len());
+    for goal_id in active_ids {
+        let ctx = gather_per_goal_cycle_ctx(state, &goal_id);
+        // One agentic decision for this goal this cycle. Err => cycle failure.
+        let action = brain.decide_per_goal_cycle(&ctx)?;
+        let touched_refs = action.mutates_refs();
+
+        // Thin deterministic rail: apply the chosen action to in-memory state.
+        let detail = apply_per_goal_action_to_state(&action, state, &goal_id);
+
+        // Record the judgment for EVERY goal — an action + a reason each cycle.
+        push_brain_judgment(BrainJudgmentRecord::from_per_goal_cycle(
+            &goal_id, &action, false, "",
+        ));
+
+        eprintln!("[simard] OODA per-goal-cycle: {} -> {}", goal_id, detail);
+
+        outcomes.push(PerGoalDecisionOutcome {
+            goal_id,
+            action_label: action.variant_label().to_string(),
+            reason: action.reason().to_string(),
+            touched_refs,
+        });
+    }
+    Ok(outcomes)
 }
 
 #[cfg(test)]
@@ -2692,6 +2931,234 @@ mod tests_objective_probe {
             "objective probe must fire the stored goal trigger; probe={probe:?}, \
              got {} triggers",
             triggered.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4631 — worker_present must reflect a VERIFIED-LIVE engineer, not mere
+// engineer_worktrees map-membership. This is the fail-OPEN counterpart to the
+// #4437 fail-CLOSE hardening (PRs #4574 / #4608): a leaked / idle worktree
+// claim currently satisfies `contains_key(goal_id)` and is therefore reported
+// as "worker present … alive" forever, so a dead/leaked engineer is never
+// reclaimed. These tests pin the corrected contract:
+//
+//   worker_present == engineer_worktrees.contains_key(goal_id)
+//                  && find_live_engineer_for_goal(state_root, goal_id).is_some()
+//
+// TDD status: `leaked_claim_reads_not_present_and_is_reclaimable` FAILS against
+// the current map-membership-only implementation (it asserts `false` where the
+// present code yields `true`) and PASSES once the liveness gate is added. The
+// live-engineer and no-entry tests are guards proving the fix must not
+// over-correct (reclaim a genuinely-live worker) or change the short-circuit.
+#[cfg(test)]
+mod tests_worker_present_liveness {
+    use crate::engineer_worktree::{ENGINEER_CLAIM_FILE, EngineerWorktree};
+    use crate::goal_curation::{ActiveGoal, GoalBoard, GoalProgress};
+    use crate::ooda_loop::OodaState;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    // -- fixtures -----------------------------------------------------------
+
+    /// Scope `SIMARD_STATE_ROOT` to a temp dir and restore it on drop. The fix
+    /// reads the live-engineer scan root via `simard_state_root()`, which is
+    /// backed by this process-global env var — hence the `#[serial]` group.
+    struct StateRootGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl StateRootGuard {
+        fn set(root: &Path) -> Self {
+            let prev = std::env::var_os("SIMARD_STATE_ROOT");
+            // SAFETY: every test here is serialized via
+            // #[serial_test::serial(cognitive_memory)], the canonical group
+            // guarding the process-global SIMARD_STATE_ROOT env var.
+            unsafe { std::env::set_var("SIMARD_STATE_ROOT", root) };
+            Self { prev }
+        }
+    }
+
+    impl Drop for StateRootGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized via #[serial_test::serial(cognitive_memory)].
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("SIMARD_STATE_ROOT", v) },
+                None => unsafe { std::env::remove_var("SIMARD_STATE_ROOT") },
+            }
+        }
+    }
+
+    /// `git` with a scrubbed environment (only PATH + HOME re-injected) so a
+    /// process-global GIT_DIR/GIT_WORK_TREE cannot poison the fixture repo.
+    fn git_cmd(repo: &Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(repo).env_clear();
+        if let Ok(p) = std::env::var("PATH") {
+            cmd.env("PATH", p);
+        }
+        if let Ok(h) = std::env::var("HOME") {
+            cmd.env("HOME", h);
+        }
+        cmd
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = git_cmd(repo, args).output().expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A parent repo with a committed `main` so `EngineerWorktree::allocate`
+    /// (which branches off `main` HEAD) succeeds.
+    fn init_parent_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("create parent repo dir");
+        run_git(dir, &["init", "--initial-branch=main", "--quiet"]);
+        run_git(dir, &["config", "user.email", "test@example.com"]);
+        run_git(dir, &["config", "user.name", "test"]);
+        run_git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("README.md"), "seed\n").expect("seed file");
+        run_git(dir, &["add", "README.md"]);
+        run_git(dir, &["commit", "-m", "seed", "--quiet"]);
+    }
+
+    /// A goal that EXPECTS a worker (so `stale_claim_secs` populates whenever
+    /// `worker_present` is false), placed on the board and marked in-progress.
+    fn expecting_goal(id: &str) -> ActiveGoal {
+        let mut g = ActiveGoal::new(id, "ship the fix", 1);
+        g.status = GoalProgress::InProgress { percent: 50 };
+        g.assigned_to = Some(format!("engineer-{id}"));
+        g
+    }
+
+    /// Allocate a REAL per-engineer worktree under `state_root` (which also
+    /// writes a live `.simard-engineer-claim` naming THIS process's PID +
+    /// starttime) and register it in `state.engineer_worktrees` keyed by
+    /// `goal_id`. Returns the on-disk worktree path.
+    fn attach_engineer(
+        state: &mut OodaState,
+        parent_repo: &Path,
+        state_root: &Path,
+        goal_id: &str,
+    ) -> PathBuf {
+        let wt = EngineerWorktree::allocate(parent_repo, state_root, goal_id)
+            .expect("allocate engineer worktree");
+        let path = wt.path().to_path_buf();
+        assert!(
+            path.is_dir(),
+            "freshly allocated worktree must exist on disk"
+        );
+        state.engineer_worktrees.insert(goal_id.to_string(), wt);
+        path
+    }
+
+    /// Overwrite a worktree's claim sentinel so it names a PID that can never
+    /// be alive — i.e. the engineer leaked / died but the map entry lingers.
+    fn poison_claim_dead(worktree: &Path) {
+        // 2147483646 (i32::MAX - 1) is never a live PID on the test host;
+        // `is_pid_alive_public` returns false → the scan yields no live worker.
+        std::fs::write(worktree.join(ENGINEER_CLAIM_FILE), "2147483646\n")
+            .expect("overwrite claim sentinel with dead pid");
+    }
+
+    // -- Test 1 (the failing TDD driver): leaked claim reads NOT present -----
+
+    /// CORE #4631 regression: a lingering `engineer_worktrees` entry whose
+    /// on-disk claim names a DEAD pid must read `worker_present == false` so
+    /// the existing `stale_claim_secs` reclaim signal re-engages. FAILS against
+    /// the map-membership-only implementation (which reports `true`).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn leaked_claim_reads_not_present_and_is_reclaimable() {
+        let parent = tempdir().expect("tempdir");
+        let state_dir = tempdir().expect("tempdir");
+        init_parent_repo(parent.path());
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "leaked-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let mut state = OodaState::new(board);
+
+        // Map entry present (contains_key == true) but its claim is now dead.
+        let wt_path = attach_engineer(&mut state, parent.path(), state_dir.path(), goal_id);
+        poison_claim_dead(&wt_path);
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(
+            !ctx.worker_present,
+            "a leaked/idle engineer claim (dead pid) must NOT read as present; \
+             map-membership alone is the #4631 fail-open bug"
+        );
+        assert!(
+            ctx.stale_claim_secs.is_some(),
+            "with no live worker the stale-claim reclaim signal must re-engage \
+             so the leaked worktree can be reclaimed"
+        );
+    }
+
+    // -- Test 2 (guard): a genuinely-live engineer still reads present ------
+
+    /// The fix must NOT over-correct: a map entry whose claim names THIS live
+    /// process (real pid + matching starttime, as written by `allocate`) must
+    /// still read `worker_present == true` with no stale-claim signal.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn live_engineer_reads_present() {
+        let parent = tempdir().expect("tempdir");
+        let state_dir = tempdir().expect("tempdir");
+        init_parent_repo(parent.path());
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "live-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let mut state = OodaState::new(board);
+
+        // Live claim written by allocate (this test process's pid + starttime).
+        attach_engineer(&mut state, parent.path(), state_dir.path(), goal_id);
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(
+            ctx.worker_present,
+            "a verified-live engineer (real pid + matching starttime) must read present"
+        );
+        assert!(
+            ctx.stale_claim_secs.is_none(),
+            "a live worker must not surface a stale-claim reclaim signal"
+        );
+    }
+
+    // -- Test 3 (guard): no map entry short-circuits to absent -------------
+
+    /// No `engineer_worktrees` entry → `worker_present == false` via the
+    /// `contains_key(..) && ..` short-circuit (no filesystem scan performed),
+    /// and the expected-but-absent worker surfaces a stale-claim signal.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn no_worktree_entry_short_circuits_to_absent() {
+        let state_dir = tempdir().expect("tempdir");
+        let _guard = StateRootGuard::set(state_dir.path());
+
+        let goal_id = "absent-goal";
+        let mut board = GoalBoard::new();
+        board.active.push(expecting_goal(goal_id));
+        let state = OodaState::new(board); // no engineer_worktrees entry
+
+        let ctx = super::gather_per_goal_cycle_ctx(&state, goal_id);
+
+        assert!(!ctx.worker_present, "no worktree entry must read as absent");
+        assert!(
+            ctx.stale_claim_secs.is_some(),
+            "an expected-but-absent worker must surface the stale-claim signal"
         );
     }
 }

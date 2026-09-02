@@ -1,0 +1,101 @@
+name: reliability-gate-benchmark
+app_type: cli
+description: |
+  Verify the fixed-corpus reliability-gate BENCHMARK rail (perpetual-cognition
+  goal: reasoner reliability). The distilled-fact reliability gate
+  (`fact_reliability::fact_passes_gate`) is the store-vs-quarantine decision on
+  every write boundary. It had unit tests (binary pass/fail) and a live per-pass
+  `distill_reliability_gate` block-rate metric, but — unlike the recall-quality
+  axis (`recall_precision_bench`) — no fixed-corpus, run-over-run comparable
+  benchmark wired into the gym signal machinery, so a silent regression in the
+  gate's *discrimination* raised no gym `Regression` signal. `fact_reliability_bench`
+  closes that gap: it scores a frozen, rubric-labeled corpus through the SAME
+  gate the live path uses (accuracy `1.0` by construction; a regression drops it)
+  and persists one `ScoreRecord{suite:"cognition", scenario:"reliability_gate_accuracy"}`
+  that flows through the existing `generate_signals` unchanged.
+
+  Behavior is proven by the hermetic in-crate unit tests this scenario drives.
+  All tests are pure (the corpus is an in-repo constant; the gate is a pure
+  function; history runs are `:memory:`), so no live-host state is mutated. The
+  CLI runner rejects any non-zero exit, so a failing test fails the scenario.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # Determinism: the fixed corpus scores identically on every call — the core
+  # property that makes it a benchmark, not a live sample.
+  # First invocation may compile the test binary; subsequent filters reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_bench_tests::tests::corpus_score_is_deterministic"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Hollow-benchmark guard: the corpus is discriminating (>= 1 store-expected AND
+  # >= 1 quarantine-expected case), so a degenerate constant classifier cannot
+  # reach accuracy 1.0.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_bench_tests::tests::corpus_is_discriminating_across_both_dispositions"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Baseline: the current, correct gate classifies every frozen, rubric-labeled
+  # case as prescribed, so accuracy is exactly 1.0 — the regression floor.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_bench_tests::tests::baseline_accuracy_is_one"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Contract ScoreRecord: suite `cognition`, scenario `reliability_gate_accuracy`,
+  # deterministic score, stamped commit hash, retrievable via `latest`.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_bench_tests::tests::run_persists_contract_score_record"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Reuse, not fork: the record flows through the existing `generate_signals`
+  # machinery — two identical fixed-corpus scores yield a `Stable` signal.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_bench_tests::tests::run_feeds_existing_generate_signals"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

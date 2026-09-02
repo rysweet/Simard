@@ -66,6 +66,12 @@ pub struct PrSnapshot {
     /// human-review gate: a PR carrying
     /// [`crate::creative_ideas::CREATIVE_IDEA_PR_LABEL`] is never auto-merged.
     pub labels: Vec<String>,
+    /// `isDraft` from `gh pr view --json ...,isDraft`. A draft PR can NEVER be
+    /// merged server-side (`gh pr merge` returns "Pull Request is still a
+    /// draft"), so the deterministic rail refuses it. Fail-closed: `None`
+    /// (field absent/unknown) is treated as NOT-mergeable — the draft gate
+    /// admits ONLY `Some(false)`. Mirrors [`OpenPrSummary::is_draft`].
+    pub is_draft: Option<bool>,
 }
 
 /// One row from `statusCheckRollup`. Both check runs and statuses get
@@ -142,6 +148,7 @@ impl OpenPrSummary {
             checks: self.checks.clone(),
             base_ref_name: self.base_ref_name.clone(),
             labels: Vec::new(),
+            is_draft: self.is_draft,
         }
     }
 }
@@ -216,6 +223,25 @@ pub trait PrGhClient {
         Err(SimardError::MergeAuthorityGhCommandFailed {
             reason: "run_gh not wired on this PrGhClient (fail-closed)".to_string(),
         })
+    }
+
+    /// `gh pr close <pr> --repo <repo> --comment <comment>`.
+    ///
+    /// Added for the overseer's auto-doc-PR reconciliation pass (goal_hygiene):
+    /// it closes stale / superseded auto-generated `"Update documentation with
+    /// …"` drafts so at most one stays open. The `comment` is authored by the
+    /// reconciler (never operator-supplied free text) and explains WHY the PR was
+    /// closed (superseded by the canonical PR / stale CONFLICTING draft).
+    ///
+    /// The default impl is a **no-op** returning `Ok(())` so every existing
+    /// fake / unwired client performs NO mutation without needing a stub;
+    /// [`RealPrGhClient`] overrides it to shell out to `gh pr close` (argv-only,
+    /// never shell-interpolated). A no-op default (rather than the fail-closed
+    /// [`run_gh`](Self::run_gh) posture) is safe here because closing is a
+    /// hygiene convenience, not a correctness gate — a client that cannot close
+    /// simply leaves the duplicates open rather than erroring the cycle.
+    fn close_pr(&self, _repo: &str, _pr_number: u32, _comment: &str) -> SimardResult<()> {
+        Ok(())
     }
 }
 
@@ -474,6 +500,18 @@ impl PrGhClient for RealPrGhClient {
         run_gh_checked(&label, &refs)?;
         Ok(())
     }
+
+    /// Close a PR with an explanatory comment. Single attempt (a close is a
+    /// mutation, like [`squash_merge`](Self::squash_merge)); fail-visible on a
+    /// non-zero exit. Argv is positional / never shell-interpolated.
+    fn close_pr(&self, repo: &str, pr_number: u32, comment: &str) -> SimardResult<()> {
+        let pr = pr_number.to_string();
+        run_gh_checked(
+            &format!("gh pr close {pr} --repo {repo}"),
+            &["pr", "close", &pr, "--repo", repo, "--comment", comment],
+        )?;
+        Ok(())
+    }
 }
 
 /// Parse `gh pr view --json body,statusCheckRollup,mergeable,reviewDecision,baseRefName`
@@ -494,6 +532,8 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
         base_ref_name: String,
         #[serde(default)]
         labels: Vec<RawLabel>,
+        #[serde(default, rename = "isDraft")]
+        is_draft: Option<bool>,
     }
     #[derive(serde::Deserialize)]
     struct RawLabel {
@@ -552,6 +592,7 @@ pub fn parse_pr_view_json(stdout: &[u8]) -> SimardResult<PrSnapshot> {
             .map(|l| l.name)
             .filter(|n| !n.is_empty())
             .collect(),
+        is_draft: raw.is_draft,
     })
 }
 
@@ -765,6 +806,26 @@ pub fn evaluate_objective_gates(
             ));
         }
     }
+    // Gate 3: not a draft. A draft PR can never be merged server-side, so the
+    // rail refuses it deterministically. Fail-closed: an unknown draft state
+    // (`None` — `gh` did not report `isDraft`) is treated AS a draft, never
+    // waved through. Only an explicit `Some(false)` passes.
+    match snapshot.is_draft {
+        Some(false) => {}
+        Some(true) => {
+            return Err(
+                "PR is a draft (isDraft=true); a draft can never be merged — mark it ready first"
+                    .to_string(),
+            );
+        }
+        None => {
+            return Err(
+                "PR draft state is unknown (isDraft absent from `gh pr view`); failing closed \
+                 (treated as draft) rather than risk merging a draft"
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -929,6 +990,7 @@ mod tests {
             ],
             base_ref_name: "main".to_string(),
             labels: Vec::new(),
+            is_draft: Some(false),
         }
     }
 

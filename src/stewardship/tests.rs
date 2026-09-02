@@ -254,6 +254,31 @@ fn find_existing_ignores_when_signature_absent() {
     assert!(find_existing(&issues, "deadbeefdeadbeef").is_none());
 }
 
+/// Regression (#4962): the fast dedup search now passes the *bare* 16-hex
+/// signature (`"{sig} in:body"`), so GitHub full-text search may surface issues
+/// that merely mention the hex (e.g. inside a commit range or code block)
+/// WITHOUT carrying the durable `stewardship-signature: <sig>` marker. That
+/// makes `find_existing` the sole load-bearing guard against a false-positive
+/// match — a false positive would silently suppress filing a real tracking
+/// issue. Pin that the exact-marker filter rejects a bare-signature mention.
+#[test]
+fn find_existing_rejects_bare_signature_mention_without_marker() {
+    let sig = "abcdef0123456789";
+    let issues = vec![GhIssue {
+        number: 9,
+        url: "u".into(),
+        // Body mentions the bare hex (as the broadened search could surface)
+        // but lacks the `stewardship-signature: <sig>` marker.
+        title: "unrelated".into(),
+        body: "see commit range abcdef0123456789..deadbeef for details".into(),
+    }];
+    assert!(
+        find_existing(&issues, sig).is_none(),
+        "a bare-signature mention without the `stewardship-signature:` marker \
+         must NOT dedup-match, or a real failure would go unrecorded"
+    );
+}
+
 // ─────────────────────────── End-to-end tests ───────────────────────────
 
 #[test]

@@ -174,11 +174,11 @@ stdout consumption.
 
 - **The batch, labels, threshold, and marking rules** are unchanged; see
   [Episode distillation](./episode-distillation.md).
-- **The shared `recipe_output` extract helpers** (`extract_json_payload`,
-  `balanced_objects`, `extract_verdict`) are **not deleted** — other,
-  out-of-scope agent→agent stdout-scrape sites (merge-readiness judge, progress
-  reviewer, recipe-brain) still use them. Those are filed as **follow-on
-  candidates** for the same semantic-handoff treatment
+- **The shared `recipe_output` extract helpers** (`balanced_objects`,
+  `extract_verdict`, and the retained JSON-hardening views) are **not deleted**
+  by this change — other, out-of-scope agent→agent stdout-scrape sites
+  (merge-readiness judge, progress reviewer, recipe-brain) still use them. Those
+  are filed as **follow-on candidates** for the same semantic-handoff treatment
   ([#2715](https://github.com/rysweet/Simard/issues/2715) — OODA brain
   decide/orient verdict; [#2716](https://github.com/rysweet/Simard/issues/2716) —
   merge-readiness judge verdict); migrating them is out of scope here.

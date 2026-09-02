@@ -191,3 +191,91 @@ fn dependency_state_error_downgrades_to_genuinely_stuck_with_nonempty_evidence()
         why.render_evidence(),
     );
 }
+
+// ---------------------------------------------------------------------------
+// TDD (Step 7) — FAILING tests for the terminal-rung criteria-derivation fix.
+//
+// The secondary defect: at the terminal rung a stalled goal with NO tracked
+// artifact is classified `UNCLEAR-CRITERIA` unconditionally, even when the
+// goal's OWN description already expresses concrete, checkable done-criteria
+// (an explicit acceptance-criteria / definition-of-done block). Such a goal is
+// not criteria-unclear — its criteria are derivable — so routing it through the
+// UNCLEAR-CRITERIA guided-retry → breaker path is a misclassification that
+// widens the population feeding the duplicate-issue storm.
+//
+// Contract the fix must satisfy (via `investigate`, the observable seam):
+//   * a no-artifact goal whose description carries DERIVABLE criteria proceeds
+//     as `GENUINELY-STUCK` (non-empty evidence), NOT `UNCLEAR-CRITERIA`;
+//   * derivation is CONSERVATIVE — a vague no-artifact goal with nothing to
+//     derive still classifies `UNCLEAR-CRITERIA` (no over-triggering); and
+//   * the terminal rung never emits empty evidence (the standing invariant).
+//
+// "Derivable" = the description contains a self-contained, checkable criteria
+// section (e.g. an "Acceptance criteria:" / "Definition of Done" list with
+// concrete, verifiable items) obtainable without external clarification.
+// ---------------------------------------------------------------------------
+
+/// A no-artifact goal whose DESCRIPTION spells out explicit, checkable
+/// done-criteria must proceed as GENUINELY-STUCK (its criteria are derivable),
+/// not be swept into UNCLEAR-CRITERIA. Today the terminal rung ignores the
+/// description and returns UNCLEAR-CRITERIA → this fails until derivation lands.
+#[test]
+fn no_artifact_goal_with_derivable_criteria_is_genuinely_stuck_not_unclear() {
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+
+    let mut g = goal("harden-supply-chain-provenance");
+    g.description = "Harden supply-chain provenance.\n\n\
+         Acceptance criteria:\n\
+         - `cargo deny check` passes in CI\n\
+         - every crate has a verified provenance attestation\n\
+         - the `supply-chain/audits.toml` lists no unaudited dependencies\n"
+        .to_string();
+
+    let why = reasoner
+        .investigate(&g)
+        .expect("deterministic reasoner returns Ok");
+
+    assert_eq!(
+        why.class,
+        NoProgressClass::GenuinelyStuck,
+        "a goal whose description already expresses concrete, checkable \
+         done-criteria has DERIVABLE criteria — it must proceed as \
+         GENUINELY-STUCK, not be misclassified UNCLEAR-CRITERIA: {why:?}",
+    );
+    assert!(
+        !why.evidence.is_empty(),
+        "the terminal rung must never emit empty evidence: {why:?}",
+    );
+    assert_ne!(
+        why.render_evidence(),
+        "(none)",
+        "a derivable-criteria goal must carry concrete evidence, never `(none)`",
+    );
+}
+
+/// Conservatism guard (must PASS before and after the fix): a vague no-artifact
+/// goal with nothing derivable stays UNCLEAR-CRITERIA. This pins that criteria
+/// derivation does not over-trigger and mask genuine ambiguity.
+#[test]
+fn vague_no_artifact_goal_still_classifies_unclear_criteria() {
+    let evidence = FakeEvidence::stuck();
+    let reasoner = DeterministicNoProgressReasoner::new(&evidence);
+
+    // The canonical live-daemon defect population: a vague synthetic goal with
+    // no artifacts and no derivable criteria in its description.
+    let why = reasoner
+        .investigate(&goal("simard-identity-atelier-industrial-furniture-de"))
+        .expect("returns Ok");
+
+    assert_eq!(
+        why.class,
+        NoProgressClass::UnclearCriteria,
+        "a vague goal with no artifacts and nothing derivable must remain \
+         UNCLEAR-CRITERIA — derivation must be conservative, never over-trigger",
+    );
+    assert!(
+        !why.evidence.is_empty(),
+        "even the truly-unclear terminal rung must carry non-empty evidence",
+    );
+}

@@ -182,6 +182,7 @@ self-heal — they are reclaimed the next time their goal attempts a spawn.
 ## Related
 
 - Reference / API: [Engineer-Claim Release & Reclaim API](../reference/engineer-claim-release-api.md)
+- [Worker-Presence Liveness Verification](./worker-presence-liveness-verification.md) — the fail-OPEN counterpart (#4631): the same "trust an in-memory claim over real process liveness" bug, pointed the other way
 - [Engineer-Agent Orchestration](../architecture/engineer-agent-orchestration.md)
 - [OODA Engineer-Lifecycle Recipe](../reference/ooda-engineer-lifecycle-recipe.md)
 - [Engineer-Admission Kill Switch](../operations/engineer-admission-kill-switch.md)
