@@ -31,7 +31,7 @@ use crate::memory_cognitive::{
 ///
 /// Each field scales one scoring term; weights are un-normalized (only relative
 /// magnitudes matter). [`Default`] is the library-balanced baseline.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecallWeightSet {
     /// Weight on keyword overlap between the query and the fact text.
     pub text_relevance: f64,
@@ -505,14 +505,21 @@ pub trait CognitiveMemoryOps: Send + Sync {
         Ok(vec![])
     }
 
-    /// Return up to `limit` recent episodes whose `content` contains
-    /// at least one of the supplied keywords (case-insensitive
-    /// substring). Newest first.
+    /// Return up to `limit` recent episodes whose `content` matches at least
+    /// one of the supplied keywords, newest first.
     ///
-    /// Default impl returns empty so legacy backends keep compiling.
-    /// [`LibraryCognitiveMemory`] overrides this with a case-insensitive
-    /// keyword-overlap scan ordered newest-first. Issue #2281, PR-C, problem 4;
-    /// #2299.
+    /// [`LibraryCognitiveMemory`] matches a **clean** keyword (non-empty, all
+    /// alphanumeric — the shape the natural-language callers emit) at a **word
+    /// boundary** (the keyword is a prefix of a whole content word), so a short
+    /// token embedded in the interior/suffix of an unrelated word ("test" in
+    /// "latest") no longer spuriously recalls, while its inflected forms still do
+    /// ("deploy" -> "deployed"). A keyword carrying any non-alphanumeric char —
+    /// a phrase or a bracketed provenance marker (`[reflect-occ=…]`) — keeps the
+    /// exact case-insensitive **substring** semantics its `reflection_lessons`
+    /// callers re-filter on.
+    ///
+    /// Default impl returns empty so legacy backends keep compiling. Issue #2281,
+    /// PR-C, problem 4; #2299.
     fn search_episodes_by_keywords(
         &self,
         _keywords: &[String],
@@ -627,6 +634,18 @@ pub trait CognitiveMemoryOps: Send + Sync {
     }
 
     fn get_statistics(&self) -> SimardResult<CognitiveStatistics>;
+
+    /// Recompute the cached statistics snapshot that
+    /// [`get_statistics`](Self::get_statistics) serves (issue #4756).
+    ///
+    /// Default is a **no-op**: backends without a snapshot fast path compute
+    /// their statistics on demand, so there is nothing to refresh and every
+    /// existing impl / test-double keeps compiling untouched.
+    /// [`LibraryCognitiveMemory`](crate::cognitive_memory::LibraryCognitiveMemory)
+    /// overrides it to recompute its snapshot *off* the heavy read lock via
+    /// `try_lock`, so a long-held write lock during canary startup can no longer
+    /// starve the memory-stats RPC into the 30s rpc-health timeout.
+    fn refresh_stats_snapshot(&self) {}
 
     /// Probe whether the store is *confirmed* empty, **failing closed** on a
     /// read error (issue #2561).
@@ -829,6 +848,12 @@ pub mod creative_idea;
 mod library_adapter;
 pub use library_adapter::LibraryCognitiveMemory;
 
+// Cross-process open serialization for the lbug-backed store. Prevents a
+// transient lock conflict between two processes from being mis-classified by
+// the library as catalog corruption (which quarantines the DB and rebuilds it
+// empty, wiping cognitive memory). See the module docs for the full rationale.
+mod open_guard;
+
 // Issue #2420: migration-aware live-store path resolution. Re-exported at the
 // module root so the verified-backup path (`memory_backup`) and the daemon both
 // reference `cognitive_memory::live_store_path` — the single source of truth for
@@ -960,3 +985,30 @@ mod tests_recall_precision_bench;
 // Simard), and that the move is behaviour-preserving (parity gate).
 #[cfg(test)]
 mod tests_recall_precision_delegation;
+
+// Issue #4378: characterization teeth pinning the THREE deliberately-divergent
+// "text relevance" definitions — served word-boundary gate (`search_facts`),
+// ungated ranker (`recall_facts_ranked`), and the substring-proxy precision
+// metric (`metrics::precision_at_k`). Pins the divergence (so it cannot silently
+// widen) and the agreement case (so it is specific to interior/suffix substring
+// hits), keeping any future convergence a deliberate, test-visible edit.
+#[cfg(test)]
+mod tests_relevance_definition_divergence;
+
+// Recall quality: `search_episodes_by_keywords` matches CLEAN alphanumeric
+// keywords at a WORD BOUNDARY (marker-safe), extending the word-boundary gate
+// `recall_episodes_ranked` already uses to the flat keyword scan while keeping
+// the exact-marker substring path `reflection_lessons` depends on. Pins the
+// end-to-end contract against the live `LibraryCognitiveMemory` backend.
+#[cfg(test)]
+mod tests_whole_word_episode_recall;
+
+// Recall quality: `search_facts` gates a CLEAN natural-language query token at a
+// WORD BOUNDARY (concept OR content), extending the word-boundary recall gate
+// already applied to episodic recall to the FACT path so an interior/suffix
+// substring (`act` in "reactor", `own` in "download") no longer floats an
+// off-topic fact into the capped turn/OODA working-context recall. Concept and
+// colon-marker queries keep the library's exact substring semantics. Pins the
+// end-to-end contract against the live `LibraryCognitiveMemory` backend.
+#[cfg(test)]
+mod tests_fact_recall_word_boundary;

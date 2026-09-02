@@ -42,13 +42,91 @@ pub fn ooda_interval_secs_from_env(raw: Option<&str>) -> u64 {
     }
 }
 
+/// Total attempts for [`exe_mtime_resolved`]: 1 initial + 4 retries. A fixed,
+/// caller-independent budget so no input can drive the loop count (no
+/// amplification/DoS surface). Worst-case added latency is the sum of the four
+/// between-attempt backoffs (~2 + 4 + 8 + 16 = 30 ms), paid only when every
+/// attempt hits a transient error; the steady state succeeds on attempt 1 with
+/// zero added latency.
+const EXE_MTIME_MAX_ATTEMPTS: u32 = 5;
+
+/// One resolution attempt with **no error swallowing**:
+/// `current_exe()? -> metadata()? -> modified()?`. The io error kind flows out
+/// so [`exe_mtime_resolved`] can classify transient vs. genuine failures.
+fn try_exe_mtime_once() -> std::io::Result<SystemTime> {
+    let path = std::env::current_exe()?;
+    let meta = std::fs::metadata(path)?;
+    meta.modified()
+}
+
+/// Whether an io error is a *transient*, allow-listed failure worth a bounded
+/// retry. Conservative by default (do-not-swallow): only `EINTR`
+/// (`Interrupted`), `EAGAIN`/`EWOULDBLOCK` (`WouldBlock`), and the fd-exhaustion
+/// errnos `EMFILE`/`ENFILE` are transient. Everything else — notably `NotFound`
+/// (binary deleted/replaced) and `PermissionDenied` — is genuine and MUST NOT be
+/// retried, so a real "binary missing/tampered" signal is never masked as a blip.
+fn is_transient_exe_mtime_error(err: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    // EMFILE (per-process fd table full) and ENFILE (system-wide fd table full)
+    // have no dedicated ErrorKind on stable Rust; match them by raw errno.
+    const EMFILE: i32 = 24;
+    const ENFILE: i32 = 23;
+    if matches!(err.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) {
+        return true;
+    }
+    matches!(err.raw_os_error(), Some(EMFILE) | Some(ENFILE))
+}
+
+/// Bounded-retry resolver over [`try_exe_mtime_once`]. Retries only allow-listed
+/// transient errors up to [`EXE_MTIME_MAX_ATTEMPTS`] with exponential backoff
+/// (~2, 4, 8, 16 ms). Sleeps happen **between** attempts only — never after the
+/// terminal attempt — so the fail-closed `None` is not needlessly delayed.
+/// Genuine errors short-circuit to `Err` with no retry. Returns the resolved
+/// mtime, or the last error on exhaustion (with one structured `tracing::warn!`).
+fn exe_mtime_resolved() -> std::io::Result<SystemTime> {
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..EXE_MTIME_MAX_ATTEMPTS {
+        match try_exe_mtime_once() {
+            Ok(mtime) => return Ok(mtime),
+            Err(err) => {
+                if !is_transient_exe_mtime_error(&err) {
+                    // Genuine failure (NotFound/PermissionDenied/unclassified):
+                    // do not swallow, do not retry — fail-closed straight through.
+                    return Err(err);
+                }
+                let is_last_attempt = attempt + 1 == EXE_MTIME_MAX_ATTEMPTS;
+                last_err = Some(err);
+                if is_last_attempt {
+                    break;
+                }
+                // Backoff BETWEEN attempts only: ~2, 4, 8, 16 ms.
+                std::thread::sleep(Duration::from_millis(2u64 << attempt));
+            }
+        }
+    }
+    let err = last_err.unwrap_or_else(|| std::io::Error::other("exe_mtime: retries exhausted"));
+    // At most one structured line on exhaustion — attempt count + errno only,
+    // never the executable path or any sensitive payload.
+    tracing::warn!(
+        attempts = EXE_MTIME_MAX_ATTEMPTS,
+        errno = err.raw_os_error(),
+        "exe_mtime: transient resolution failed after bounded retries; failing closed to None"
+    );
+    Err(err)
+}
+
 /// Return the mtime of the currently-running executable, or `None` if it
-/// cannot be determined (e.g. the binary was deleted after launch).
+/// genuinely cannot be determined (binary deleted/replaced after launch,
+/// permission denied, or a filesystem that does not report mtime). A *transient*
+/// syscall failure under load (`EINTR`/`EAGAIN`/`EMFILE`/`ENFILE`) is retried
+/// within a small bounded budget and resolves to `Some(mtime)` rather than a
+/// false `None`. Never panics.
+///
+/// Public signature is unchanged (`-> Option<SystemTime>`); only the transient
+/// case changed (it no longer coerces to `None`). [`binary_changed`] stays
+/// fail-closed on a genuine `None`.
 pub fn exe_mtime() -> Option<SystemTime> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
+    exe_mtime_resolved().ok()
 }
 
 /// Whether the on-disk binary is a **genuinely different image** than the one
@@ -214,7 +292,28 @@ pub fn exec_self_reload() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Sleep that wakes early when the shutdown flag is set.
+///
+/// Thin wrapper over [`interruptible_sleep_with`] that supplies the real
+/// `std::thread::sleep`. The seam exists so the tick/interrupt contract can be
+/// asserted deterministically with a fake sleeper — no wall-clock, no
+/// `Instant::elapsed()` — so those tests behave identically on an idle laptop
+/// and on a host under heavy parallel load (the canary-redder root cause).
 pub fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
+    interruptible_sleep_with(total, shutdown, std::thread::sleep);
+}
+
+/// Injectable-clock core of [`interruptible_sleep`].
+///
+/// Sleeps `total` in chunks of at most 250ms, re-checking `shutdown` at the top
+/// of every tick and returning early the moment it is observed set. `sleep_fn`
+/// receives each tick-clamped chunk, so tests can drive the loop with a fake
+/// sleeper that records the chunks and flips `shutdown` mid-sleep — proving the
+/// interrupt path by causality/ordering rather than by measuring elapsed time.
+pub(crate) fn interruptible_sleep_with<F: FnMut(Duration)>(
+    total: Duration,
+    shutdown: &AtomicBool,
+    mut sleep_fn: F,
+) {
     let tick = Duration::from_millis(250);
     let mut remaining = total;
     while remaining > Duration::ZERO {
@@ -222,7 +321,7 @@ pub fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
             return;
         }
         let chunk = remaining.min(tick);
-        std::thread::sleep(chunk);
+        sleep_fn(chunk);
         remaining = remaining.saturating_sub(chunk);
     }
 }
@@ -231,7 +330,6 @@ pub fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::time::Instant;
 
     // ── daemon_log ──────────────────────────────────────────────────
 
@@ -294,6 +392,145 @@ mod tests {
             elapsed < Duration::from_secs(365 * 86400),
             "binary should have been built within the last year"
         );
+    }
+
+    // ── exe_mtime transient-resilience contract (deterministic) ─────
+    //
+    // These pin the *mechanism* that makes `exe_mtime()` deterministic under
+    // heavy parallel load — the exit-101 red-canary fix. They are load-
+    // independent (they construct synthetic io errors and inspect a fixed
+    // budget), so unlike the happy-path `exe_mtime_returns_some_*` tests they
+    // cannot flake regardless of scheduling. The security invariant they
+    // encode: only allow-listed *transient* errnos are retried; every genuine
+    // failure short-circuits (fail-closed), so a real "binary missing/tampered"
+    // signal is never masked as a load blip.
+
+    #[test]
+    fn transient_classifier_retries_eintr() {
+        let err = std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert!(
+            is_transient_exe_mtime_error(&err),
+            "EINTR (Interrupted) must be treated as transient and retried"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_retries_eagain_ewouldblock() {
+        let err = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(
+            is_transient_exe_mtime_error(&err),
+            "EAGAIN/EWOULDBLOCK (WouldBlock) must be treated as transient and retried"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_retries_emfile_fd_exhaustion() {
+        // EMFILE (24): per-process fd table full — the classic symptom under a
+        // storm of concurrent test binaries. Must be transient/retryable.
+        const EMFILE: i32 = 24;
+        let err = std::io::Error::from_raw_os_error(EMFILE);
+        assert!(
+            is_transient_exe_mtime_error(&err),
+            "EMFILE (per-process fd exhaustion) must be treated as transient"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_retries_enfile_fd_exhaustion() {
+        // ENFILE (23): system-wide fd table full. Must be transient/retryable.
+        const ENFILE: i32 = 23;
+        let err = std::io::Error::from_raw_os_error(ENFILE);
+        assert!(
+            is_transient_exe_mtime_error(&err),
+            "ENFILE (system-wide fd exhaustion) must be treated as transient"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_does_not_retry_not_found() {
+        // SECURITY: a deleted/replaced binary (NotFound) is a genuine signal —
+        // it MUST short-circuit to a fail-closed None, never be retried away.
+        let err = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(
+            !is_transient_exe_mtime_error(&err),
+            "NotFound (binary deleted/replaced) must NOT be retried — fail closed"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_does_not_retry_permission_denied() {
+        // SECURITY: PermissionDenied is a genuine failure, not a load blip.
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(
+            !is_transient_exe_mtime_error(&err),
+            "PermissionDenied must NOT be retried — fail closed"
+        );
+    }
+
+    #[test]
+    fn transient_classifier_is_conservative_on_unclassified_errors() {
+        // Default posture is do-not-swallow: anything not on the transient
+        // allow-list (here a generic Other error) must be treated as genuine.
+        let err = std::io::Error::other("unclassified");
+        assert!(
+            !is_transient_exe_mtime_error(&err),
+            "unclassified errors must default to NON-transient (conservative)"
+        );
+    }
+
+    #[test]
+    fn exe_mtime_retry_budget_is_bounded_and_small() {
+        // The budget must be a fixed, caller-independent constant so no input
+        // can drive the loop count (no amplification/DoS surface) and the
+        // worst-case added latency stays tiny. 1 initial + 4 retries = 5.
+        // `== 5` already guarantees the `>= 1` "at least one attempt" invariant,
+        // so a separate `assert!(EXE_MTIME_MAX_ATTEMPTS >= 1)` would be a
+        // constant-value assertion (clippy::assertions_on_constants) with no
+        // added coverage.
+        assert_eq!(
+            EXE_MTIME_MAX_ATTEMPTS, 5,
+            "retry budget must be exactly 5 (1 initial + 4 retries)"
+        );
+    }
+
+    #[test]
+    fn exe_mtime_resolved_is_ok_for_running_binary() {
+        // The internal resolver — the seam `exe_mtime()` delegates to — must
+        // succeed for the live test binary in steady state.
+        assert!(
+            exe_mtime_resolved().is_ok(),
+            "resolver must produce a value for the running binary"
+        );
+    }
+
+    #[test]
+    fn exe_mtime_matches_resolver_ok_value() {
+        // `exe_mtime()` is exactly `exe_mtime_resolved().ok()` — the transient
+        // case no longer coerces to a false None. When resolution succeeds the
+        // two must agree, proving no lossy coercion sits between them.
+        let resolved = exe_mtime_resolved().ok();
+        let public = exe_mtime();
+        assert_eq!(
+            resolved.is_some(),
+            public.is_some(),
+            "exe_mtime() and exe_mtime_resolved().ok() must agree on presence"
+        );
+        if let (Some(a), Some(b)) = (resolved, public) {
+            assert_eq!(a, b, "the two seams must resolve the identical mtime");
+        }
+    }
+
+    #[test]
+    fn exe_mtime_is_stable_under_repeated_calls() {
+        // Regression guard for the exit-101 canary: in steady state the running
+        // binary always resolves, so a tight burst of calls must be uniformly
+        // Some (never a transient false None). Deterministic in-process.
+        for i in 0..256 {
+            assert!(
+                exe_mtime().is_some(),
+                "exe_mtime() returned None on iteration {i}; transient coercion regressed"
+            );
+        }
     }
 
     // ── binary_changed ──────────────────────────────────────────────
@@ -446,46 +683,108 @@ mod tests {
         assert!(!mtime_advanced(SystemTime::now(), None));
     }
 
-    // ── interruptible_sleep ─────────────────────────────────────────
+    // ── interruptible_sleep (public wrapper) ────────────────────────
+    //
+    // Delegation smoke test with NO wall-clock upper-bound assertion (those were
+    // the canary redders: `elapsed() < 50ms/1s/2s` flakes when a loaded host
+    // overshoots the deadline). The tick/interrupt contract is proven
+    // deterministically by the `interruptible_sleep_with` seam tests below; here
+    // we only prove the real wrapper delegates and terminates for the two paths
+    // that must not sleep — a zero total and an already-set shutdown.
 
     #[test]
-    fn interruptible_sleep_zero_duration_returns_immediately() {
-        let shutdown = AtomicBool::new(false);
-        let start = Instant::now();
-        interruptible_sleep(Duration::ZERO, &shutdown);
-        assert!(start.elapsed() < Duration::from_millis(50));
-    }
+    fn interruptible_sleep_returns_for_zero_and_already_shutdown() {
+        // Zero total → returns without sleeping.
+        let idle = AtomicBool::new(false);
+        interruptible_sleep(Duration::ZERO, &idle);
 
-    #[test]
-    fn interruptible_sleep_completes_short_sleep() {
-        let shutdown = AtomicBool::new(false);
-        let start = Instant::now();
-        interruptible_sleep(Duration::from_millis(100), &shutdown);
-        assert!(start.elapsed() >= Duration::from_millis(100));
-        assert!(start.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
-    fn interruptible_sleep_exits_immediately_when_already_shutdown() {
+        // Already shutdown → returns before the first tick even for a huge total.
         let shutdown = AtomicBool::new(true);
-        let start = Instant::now();
         interruptible_sleep(Duration::from_secs(60), &shutdown);
-        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    // ── interruptible_sleep_with (deterministic injectable-clock seam) ──
+    //
+    // TDD (written first): these specify the private seam the fix must add so the
+    // interrupt/tick contract is asserted WITHOUT wall-clock. They drive a FAKE
+    // sleeper — zero real sleeping, zero `Instant::elapsed()` — so they pass
+    // identically on an idle laptop and on a host at load 150. They fail to
+    // compile until `interruptible_sleep_with(total, shutdown, sleep_fn)` exists;
+    // the public `interruptible_sleep` must delegate to it with `thread::sleep`.
+
+    #[test]
+    fn interruptible_sleep_with_zero_duration_never_sleeps() {
+        use std::cell::RefCell;
+        let shutdown = AtomicBool::new(false);
+        let chunks = RefCell::new(Vec::new());
+        interruptible_sleep_with(Duration::ZERO, &shutdown, |d| chunks.borrow_mut().push(d));
+        assert!(
+            chunks.into_inner().is_empty(),
+            "a zero total must not invoke the sleeper at all"
+        );
     }
 
     #[test]
-    fn interruptible_sleep_exits_on_mid_sleep_shutdown() {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&shutdown);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            flag.store(true, Ordering::SeqCst);
+    fn interruptible_sleep_with_already_shutdown_never_sleeps() {
+        use std::cell::RefCell;
+        let shutdown = AtomicBool::new(true);
+        let chunks = RefCell::new(Vec::new());
+        interruptible_sleep_with(Duration::from_secs(60), &shutdown, |d| {
+            chunks.borrow_mut().push(d)
         });
-        let start = Instant::now();
-        interruptible_sleep(Duration::from_secs(60), &shutdown);
         assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "should wake within ~350ms of shutdown signal, not wait 60s"
+            chunks.into_inner().is_empty(),
+            "an already-set shutdown must exit before the first sleep"
+        );
+    }
+
+    #[test]
+    fn interruptible_sleep_with_full_duration_sums_to_total_in_tick_chunks() {
+        use std::cell::RefCell;
+        let shutdown = AtomicBool::new(false);
+        let chunks = RefCell::new(Vec::new());
+        interruptible_sleep_with(Duration::from_millis(1000), &shutdown, |d| {
+            chunks.borrow_mut().push(d)
+        });
+        let recorded = chunks.into_inner();
+        let tick = Duration::from_millis(250);
+        assert!(
+            recorded.iter().all(|d| *d <= tick),
+            "each requested chunk must be tick-clamped (<= 250ms): {recorded:?}"
+        );
+        assert_eq!(
+            recorded.iter().copied().sum::<Duration>(),
+            Duration::from_millis(1000),
+            "the summed chunks must equal the requested total exactly: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn interruptible_sleep_with_wakes_before_total_on_mid_sleep_shutdown() {
+        use std::cell::RefCell;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flip = Arc::clone(&shutdown);
+        let chunks = RefCell::new(Vec::new());
+        let mut calls = 0usize;
+        // The fake sleeper flips shutdown as its 2nd chunk "elapses"; the loop's
+        // next top-of-iteration check must then exit — deterministically after
+        // exactly 2 chunks, never running the 60s total to completion.
+        interruptible_sleep_with(Duration::from_secs(60), &shutdown, |d| {
+            chunks.borrow_mut().push(d);
+            calls += 1;
+            if calls == 2 {
+                flip.store(true, Ordering::SeqCst);
+            }
+        });
+        let recorded = chunks.into_inner();
+        assert_eq!(
+            recorded.len(),
+            2,
+            "the loop must exit the tick after shutdown is observed, not run to 60s: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().copied().sum::<Duration>() < Duration::from_secs(60),
+            "the wake must happen strictly before the full total elapses"
         );
     }
 }

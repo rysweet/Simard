@@ -37,6 +37,9 @@ pub mod cognitive_threads;
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
 // `#[cfg(test)]` sibling so release/debug builds never compile them.
 pub mod brain_introspection;
+// #4968: typed brain-introspection record + fail-closed reader (sibling of the
+// adapter, NOT an ooda_brain seam) that retires the text-marker scrape.
+pub mod brain_introspection_record;
 #[cfg(test)]
 mod brain_introspection_tests;
 mod copilot_status_probe;
@@ -57,6 +60,7 @@ pub mod creative_ideas;
 pub mod disk_health;
 pub mod disk_pressure;
 pub mod disk_reclaim;
+pub mod done_criteria;
 pub mod engineer_loop;
 pub mod engineer_worktree;
 // Issue #2942: the enrichment-observability emit seam — proves recalled memory
@@ -71,6 +75,9 @@ pub mod error;
 pub mod eval_watchdog;
 pub mod evidence;
 pub mod fact_reliability;
+pub mod fact_reliability_bench;
+#[cfg(test)]
+mod fact_reliability_bench_tests;
 #[cfg(test)]
 mod fact_reliability_tests;
 pub mod git_guardrails;
@@ -97,6 +104,7 @@ pub mod hive_event_bus;
 pub mod identity;
 pub mod identity_auth;
 pub mod identity_composition;
+pub mod identity_curated_state;
 pub mod identity_precedence;
 pub mod improvements;
 pub mod install;
@@ -168,6 +176,9 @@ pub mod self_metrics;
 // recipe invoker (mirrors `disk_health`) with disk-backed last-run persistence
 // so the ~30-day cadence survives daemon restarts.
 pub mod self_quality_audit;
+// #4968: typed self-quality-audit record + fail-closed reader (sibling of the
+// adapter, NOT an ooda_brain seam) that retires the text-marker scrape.
+pub mod self_quality_audit_record;
 #[cfg(test)]
 mod self_quality_audit_tests;
 pub mod self_relaunch;
@@ -212,6 +223,7 @@ mod tests_hermetic_guard;
 #[cfg(test)]
 mod tests_memory_ipc;
 pub mod trace_collector;
+pub mod typed_ooda;
 pub mod update_check;
 pub mod util;
 pub mod worktree_gc;

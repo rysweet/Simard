@@ -30,7 +30,10 @@ fn score_record_construction() {
 
 #[test]
 fn open_creates_schema() {
-    let _h = mem_history();
+    let h = mem_history();
+    // A fresh store must have a usable schema: querying an absent record
+    // returns None rather than erroring on a missing table.
+    assert!(h.latest("progressive", "nonexistent").is_none());
 }
 
 #[test]

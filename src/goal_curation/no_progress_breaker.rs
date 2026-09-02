@@ -51,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::completion_gate::{CompletionEvidenceGate, CompletionVerdict, EvidenceSource};
 use super::no_progress_why::{Evidence, NoProgressClass, NoProgressWhy};
-use super::types::ActiveGoal;
+use super::types::{ActiveGoal, WipRef};
 
 /// Consecutive no-action cycles on one goal before the breaker fires. Kept
 /// deliberately small (2–3) so a livelock is broken quickly, matching the
@@ -89,6 +89,45 @@ pub fn is_no_progress_marker(reason: &str) -> bool {
     reason.starts_with(NO_PROGRESS_BLOCKED_PREFIX)
 }
 
+/// Translate a stored block `reason` into a PLAIN-ENGLISH sentence for operator
+/// surfaces — the dashboard and any human-facing feed (issue #4276). A
+/// safeguard-authored marker (`🔒 [OODA-SAFEGUARD] … why=… evidence=[…]`) is
+/// opaque jargon to a person; this renders it as a plain sentence, free of every
+/// machine token (`OODA-SAFEGUARD`, `UNCLEAR-CRITERIA`, `evidence=[`, `why=`, the
+/// 🔒 lock). A NON-marker reason (an operator-set or dependency block) is already
+/// human-readable and returned unchanged.
+pub fn humanize_block_reason(reason: &str) -> String {
+    if !is_no_progress_marker(reason) {
+        return reason.to_string();
+    }
+    // Marker shape: `{PREFIX}{count}{SUFFIX}` (legacy) or
+    // `{PREFIX}{count} consecutive no-action cycles; why={TOKEN} evidence=[…]`.
+    // Extract the leading consecutive-cycle count without surfacing the marker.
+    let tail = reason
+        .strip_prefix(NO_PROGRESS_BLOCKED_PREFIX)
+        .unwrap_or(reason);
+    let count: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let cycles = if count.is_empty() {
+        String::new()
+    } else {
+        format!(" for {count} cycles")
+    };
+    // Detect the unclear/unmeasurable-criteria class for a more specific sentence,
+    // WITHOUT ever echoing the class token to the operator.
+    if reason.contains(crate::goal_curation::NoProgressClass::UnclearCriteria.token()) {
+        format!(
+            "Simard couldn't tell when this goal is finished{cycles}, so it made no \
+             shippable progress. It needs a checkable finish condition (a specific \
+             issue CLOSED, PR MERGED, or file/command the done-gate can verify)."
+        )
+    } else {
+        format!(
+            "Simard couldn't make shippable progress on this goal{cycles} and needs \
+             human review to re-scope or unblock it."
+        )
+    }
+}
+
 /// True when `reason` is a **bare** no-progress safeguard block (issue #17): it
 /// carries the [`NO_PROGRESS_BLOCKED_PREFIX`] marker (so
 /// [`is_no_progress_marker`] holds) but has **no** [`NoProgressClass`] WHY token
@@ -110,6 +149,37 @@ pub fn is_bare_no_progress_block(reason: &str) -> bool {
         && !NoProgressClass::ALL
             .iter()
             .any(|class| reason.contains(class.token()))
+}
+
+/// The evidence-less `(none)` variant of a safeguard block — the exact
+/// live-daemon defect (verified 2026-07-15): a WHY-bearing block whose evidence
+/// rendered `(none)` because the goal never produced a tracked issue/PR (the six
+/// `simard-identity-*` goals, the coverage/coin/parity goals). Shape:
+/// `🔒 [OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`.
+///
+/// Crucially this is NOT [`is_bare_no_progress_block`] — it carries a class
+/// token, so the legacy "bare" predicate skips it, which is precisely why ~12–13
+/// goals stayed stranded with a generic, evidence-free stamp. The
+/// re-investigation pass must treat it as a first-class member of its population
+/// so the goal is driven away from `(none)` (to a concrete WHY, a fixer, or a
+/// surfaced investigation failure) rather than parked forever.
+///
+/// Keys on the marker plus the literal `evidence=[(none)]` segment authored by
+/// [`no_progress_blocked_reason_with_why`] via [`NoProgressWhy::render_evidence`]
+/// — so once re-investigation attaches real evidence (or unblocks the goal) the
+/// reason no longer matches and the pass never re-processes it (idempotent).
+pub fn is_evidenceless_no_progress_block(reason: &str) -> bool {
+    is_no_progress_marker(reason) && reason.contains("evidence=[(none)]")
+}
+
+/// True when `reason` is a safeguard block the re-investigation pass must
+/// re-examine (issue #16/#17): either a legacy **bare** block
+/// ([`is_bare_no_progress_block`]) or an evidence-less `(none)` block
+/// ([`is_evidenceless_no_progress_block`]). Both denote a goal parked WITHOUT a
+/// concrete, evidence-backed WHY — the population that must never be left
+/// stranded.
+pub fn needs_reinvestigation(reason: &str) -> bool {
+    is_bare_no_progress_block(reason) || is_evidenceless_no_progress_block(reason)
 }
 
 /// Render the sentinel [`GoalProgress::Blocked`] reason for a goal escalated
@@ -205,13 +275,126 @@ pub enum NoProgressResolution {
         issue_title: String,
         issue_body: String,
     },
+    /// `UNCLEAR-CRITERIA` / `GENUINELY-STUCK`, terminal rung reached but the
+    /// independent investigation produced **no evidence** (issue #16). The old
+    /// code stamped a bare `evidence=[(none)]` block here — the exact live-daemon
+    /// defect (2026-07-15): the six `simard-identity-*` goals and the
+    /// coverage/coin/parity goals never produced a tracked issue/PR, so their
+    /// evidence rendered `(none)`. A goal must NEVER be parked with
+    /// `evidence=[(none)]`: an evidence-less terminal outcome is itself a
+    /// **surfaced investigation failure**, not a silent generic block. The caller
+    /// records the goal in
+    /// [`investigation_errors`](crate::ooda_loop::no_progress::NoProgressBreakerReport::investigation_errors),
+    /// takes **no** terminal action, and leaves the goal retriable (fail
+    /// visible + fail closed) so the next investigation can recover real evidence.
+    ///
+    /// `class` is carried so that once the surfaced-failure retries are bounded
+    /// out (see
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`]) the human escalation names the
+    /// accurate root cause (`UNCLEAR-CRITERIA` vs `GENUINELY-STUCK`) and tailors
+    /// the "make the done-criteria measurable" ask to it.
+    SurfaceInvestigationFailure {
+        class: NoProgressClass,
+        reason: String,
+    },
+    /// `UNCLEAR-CRITERIA` / `GENUINELY-STUCK`, **terminal quarantine** rung
+    /// (process_health): the goal has spent its guided retry AND surfaced an
+    /// evidence-less terminal failure at least
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] times — its done-criteria are
+    /// *permanently* unclear. Surfacing-and-retrying forever is the churn this
+    /// ends (~13 `ooda-stuck` "goal stuck after guided retry (UNCLEAR-CRITERIA)"
+    /// issues in a single field day). Instead of surfacing again the breaker
+    /// terminally quarantines the goal: the caller Blocks it with a WHY-bearing
+    /// reason that renders `surfaced_count` as REAL evidence (never
+    /// `evidence=[(none)]`), writes the durable, injection-safe
+    /// [`quarantine_marker`] so [`is_quarantined`] reads `true`, and files exactly
+    /// one deduplicated tracking issue. A quarantined goal is thereafter never
+    /// re-scheduled, re-classified, or re-filed by
+    /// [`reinvestigate_bare_blocked_goals`](crate::ooda_loop::no_progress::reinvestigate_bare_blocked_goals),
+    /// so the duplicate-issue storm stops. This **replaces** the adapter's prior
+    /// inline escalate-at-limit branch — the two must not coexist.
+    ///
+    /// `surfaced_count` is the goal's persisted consecutive surfaced-failure count
+    /// (`>= SURFACED_INVESTIGATION_FAILURE_LIMIT`), carried so the authored block
+    /// reason renders a concrete, positive count as evidence.
+    QuarantineTerminal { surfaced_count: u32 },
+}
+
+/// How many **consecutive** evidence-less
+/// [`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)
+/// outcomes a single goal may accrue before the breaker stops re-investigating
+/// and escalates it to a human (issue #16 follow-up).
+///
+/// `SurfaceInvestigationFailure` (issue #16) fixed the live defect of parking a
+/// goal with a bare `evidence=[(none)]` block by making the evidence-less
+/// terminal rung *non-terminal*: it resets the counter and lets the goal
+/// re-investigate next cycle. But an *unbounded* re-investigation is its own
+/// livelock — a goal whose done-criteria are **permanently** unclear (the six
+/// `simard-identity-*` codename goals) re-investigates → produces no evidence →
+/// surfaces → resets → forever, making **no shippable progress** and **never
+/// reaching a human**. This bound closes that livelock: after this many
+/// consecutive surfaced failures the goal is escalated to a human WITH the
+/// re-investigation count as concrete evidence — so the never-`evidence=[(none)]`
+/// invariant is preserved (the count is real evidence, not `(none)`) while the
+/// spin is broken and a human is finally asked to make the done-criteria
+/// measurable.
+pub const SURFACED_INVESTIGATION_FAILURE_LIMIT: u32 = 3;
+
+/// The `WipRef.kind` of the durable OODA breaker **terminal-quarantine** marker
+/// (process_health). A novel kind string that no other `wip_refs` consumer
+/// matches (they fall through their `kind` `match` arms), so attaching it is
+/// inert to every other subsystem — it exists solely for [`is_quarantined`].
+pub const NO_PROGRESS_QUARANTINE_MARKER_KIND: &str = "ooda-breaker-quarantine";
+
+/// The `WipRef.ref_id` of the quarantine marker: a **fixed compile-time
+/// sentinel**, never derived from goal text. [`is_quarantine_ref`] keys on this
+/// exact value, so a goal description / activity can neither forge a quarantine
+/// for itself nor smuggle attacker-controlled content into a marker — the
+/// injection-safety invariant the tests pin.
+pub const NO_PROGRESS_QUARANTINE_MARKER_REF_ID: &str = "ooda-breaker-quarantine::terminal-sentinel";
+
+/// Build the durable [`WipRef`] that marks a goal terminally quarantined by the
+/// no-progress breaker. The `ref_id` is the fixed
+/// [`NO_PROGRESS_QUARANTINE_MARKER_REF_ID`] sentinel (never goal-derived) and the
+/// `kind` is [`NO_PROGRESS_QUARANTINE_MARKER_KIND`], so the marker is recognised
+/// only by [`is_quarantine_ref`] and can never be forged from goal text.
+pub fn quarantine_marker() -> WipRef {
+    WipRef {
+        kind: NO_PROGRESS_QUARANTINE_MARKER_KIND.to_string(),
+        ref_id: NO_PROGRESS_QUARANTINE_MARKER_REF_ID.to_string(),
+        label: "OODA breaker terminal quarantine (UNCLEAR-CRITERIA after guided retry)".to_string(),
+        url: None,
+    }
+}
+
+/// True when `wip` is the breaker-authored quarantine marker. Keys on BOTH the
+/// fixed [`NO_PROGRESS_QUARANTINE_MARKER_KIND`] and the fixed sentinel
+/// [`NO_PROGRESS_QUARANTINE_MARKER_REF_ID`] `ref_id` — never on goal-derived
+/// text — so a `WipRef` carrying the right `kind` but a goal-supplied `ref_id`
+/// can never be mistaken for a quarantine marker (injection-safe).
+pub fn is_quarantine_ref(wip: &WipRef) -> bool {
+    wip.kind == NO_PROGRESS_QUARANTINE_MARKER_KIND
+        && wip.ref_id == NO_PROGRESS_QUARANTINE_MARKER_REF_ID
+}
+
+/// True when `goal` carries the durable quarantine marker in its `wip_refs`.
+/// Only the breaker-authored fixed-sentinel marker counts — no goal-derived
+/// `WipRef` can forge a quarantine.
+pub fn is_quarantined(goal: &ActiveGoal) -> bool {
+    goal.wip_refs.iter().any(is_quarantine_ref)
 }
 
 impl NoProgressResolution {
-    /// `true` for every resolution except [`NoProgressResolution::Continue`] —
-    /// i.e. the breaker fired and the goal is leaving the no-action loop.
+    /// `true` for every resolution that removes the goal from the no-action loop
+    /// with a definitive action. [`Continue`](Self::Continue) (below threshold)
+    /// and [`SurfaceInvestigationFailure`](Self::SurfaceInvestigationFailure) (an
+    /// evidence-less terminal outcome that is surfaced and retried, taking NO
+    /// terminal action) are the two non-terminal resolutions.
     pub fn is_terminal(&self) -> bool {
-        !matches!(self, Self::Continue)
+        !matches!(
+            self,
+            Self::Continue | Self::SurfaceInvestigationFailure { .. }
+        )
     }
 }
 
@@ -370,6 +553,56 @@ fn why_escalation_issue(consecutive: u32, why: &NoProgressWhy) -> (String, Strin
     (title, body)
 }
 
+/// Build the escalation `(title, body)` for a goal whose evidence-less
+/// re-investigation was bounded out (issue #16 follow-up): after
+/// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] consecutive surfaced failures the
+/// breaker stops spinning and asks a **human** to make the done-criteria
+/// *measurable* so the done-gate can eventually certify (or the operator can
+/// re-scope / drop). The body is deliberately concrete and actionable — it names
+/// the exact, machine-checkable shapes the daemon can verify.
+pub(crate) fn surfaced_failure_escalation_issue(
+    goal_id: &str,
+    class: NoProgressClass,
+    surfaced_failures: u32,
+) -> (String, String) {
+    let token = class.token();
+    let title = format!(
+        "OODA no-progress breaker: goal '{goal_id}' has unmeasurable done-criteria ({token})"
+    );
+    let clarify = match class {
+        NoProgressClass::UnclearCriteria => {
+            "The goal's done-criteria are **not expressed as anything the done-gate \
+             can machine-check**, so the daemon can never certify it complete and \
+             its re-investigation produced no evidence every cycle."
+        }
+        _ => {
+            "The daemon found **no machine-resolvable cause** across repeated \
+             independent investigations, and each produced no evidence."
+        }
+    };
+    let body = format!(
+        "The OODA no-progress breaker re-investigated goal `{goal_id}` \
+         **{surfaced_failures} consecutive times** and each investigation classified \
+         it **{token}** while producing **no supporting evidence**. To avoid an \
+         unbounded evidence-less re-investigation livelock (which makes no shippable \
+         progress and never reaches a human), the goal has now been Blocked and \
+         surfaced for human triage.\n\n\
+         {clarify}\n\n\
+         **Action — make the done-criteria measurable.** Re-scope the goal so \
+         completion is machine-verifiable, e.g. one of:\n\
+         - a specific issue the daemon can observe as `CLOSED`,\n\
+         - a specific PR the daemon can observe as `MERGED`,\n\
+         - a specific file/command whose presence or output the done-gate can check.\n\n\
+         Alternatively, drop the goal if it is out of scope. The block reason \
+         carries the re-investigation count as evidence (never a bare \
+         `evidence=[(none)]`).\n\n\
+         Triggered by the surfaced-failure bound in \
+         `src/goal_curation/no_progress_breaker.rs` \
+         (`SURFACED_INVESTIGATION_FAILURE_LIMIT`)."
+    );
+    (title, body)
+}
+
 /// Map a classified [`NoProgressWhy`] to the resolution the breaker takes at the
 /// threshold (issue #16). This is the **pure** heart of the root-cause ladder;
 /// the side effects (transition, clone, defer, spawn, escalate) are performed by
@@ -381,10 +614,31 @@ fn why_escalation_issue(consecutive: u32, why: &NoProgressWhy) -> (String, Strin
 /// engineer ([`NoProgressResolution::SpawnEngineer`]); only once that retry is
 /// spent and the goal is *still* stuck does it [`Escalate`](NoProgressResolution::Escalate)
 /// — always WITH the concrete WHY + evidence attached.
+///
+/// `surfaced_failures` is the goal's persisted consecutive evidence-less
+/// surfaced-failure count as it stands **entering** this cycle — i.e. the
+/// PRE-bump count, BEFORE this cycle records its own surfaced failure
+/// (process_health). The bound is checked pre-bump
+/// (`surfaced_failures >= SURFACED_INVESTIGATION_FAILURE_LIMIT`), which gives an
+/// exact firing timing worth spelling out so the doc never reads as
+/// fire-at-LIMIT: the evidence-less stall is
+/// [`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)d
+/// (retriable, one recorded surfaced failure per cycle) for its first
+/// `SURFACED_INVESTIGATION_FAILURE_LIMIT` observations, and only the NEXT
+/// (`LIMIT + 1`)th observation — where the pre-bump count has finally reached the
+/// bound — returns [`NoProgressResolution::QuarantineTerminal`], the terminal
+/// stop that ends the `UNCLEAR-CRITERIA` re-schedule/re-file churn. This is a
+/// DELIBERATE one-observation shift from the old post-bump escalate-at-LIMIT
+/// trigger (which fired ON the LIMIT-th observation); it is pinned end-to-end by
+/// `quarantine_fires_on_the_cycle_after_the_limit_th_surface`. Below the bound
+/// the surfacing rung's *action* is unchanged (still a plain surfaced failure);
+/// only the trigger observation moved by one. The parameter is ignored for every
+/// other class and for evidence-backed stalls.
 pub fn resolution_for_why(
     consecutive: u32,
     why: NoProgressWhy,
     guided_retry_used: bool,
+    surfaced_failures: u32,
 ) -> NoProgressResolution {
     match why.class {
         NoProgressClass::AlreadyComplete => NoProgressResolution::MarkDone,
@@ -401,6 +655,30 @@ pub fn resolution_for_why(
         }
         NoProgressClass::UnclearCriteria | NoProgressClass::GenuinelyStuck => {
             if guided_retry_used {
+                // Terminal rung: the guided (independent) investigation is spent
+                // and the goal is still stuck. NEVER author a bare
+                // `evidence=[(none)]` block — the exact live-daemon defect. If the
+                // investigation produced concrete evidence, escalate WITH it;
+                // otherwise the outcome is evidence-less: quarantine terminally
+                // once the surfaced-failure bound is reached (process_health —
+                // ends the re-schedule/re-file churn), else surface it as a
+                // retriable investigation failure exactly as before.
+                if why.evidence.is_empty() {
+                    if surfaced_failures >= SURFACED_INVESTIGATION_FAILURE_LIMIT {
+                        return NoProgressResolution::QuarantineTerminal {
+                            surfaced_count: surfaced_failures,
+                        };
+                    }
+                    return NoProgressResolution::SurfaceInvestigationFailure {
+                        class: why.class,
+                        reason: format!(
+                            "independent investigation of a stalled goal classified {} but \
+                             produced no supporting evidence at the terminal rung — refusing to \
+                             park it with an empty-evidence block; surfaced for retry",
+                            why.class.token(),
+                        ),
+                    };
+                }
                 let blocked_reason = no_progress_blocked_reason_with_why(consecutive, &why);
                 let (issue_title, issue_body) = why_escalation_issue(consecutive, &why);
                 NoProgressResolution::Escalate {
@@ -453,6 +731,17 @@ pub struct NoProgressTracker {
     /// keeps pre-#17 snapshots deserializable (loads as an empty set).
     #[serde(default)]
     reinvestigated: HashSet<(String, String)>,
+    /// Per-goal count of **consecutive** evidence-less
+    /// [`SurfaceInvestigationFailure`](NoProgressResolution::SurfaceInvestigationFailure)
+    /// outcomes (issue #16 follow-up). Bumped every time the breaker surfaces an
+    /// evidence-less terminal failure for a goal and reset the instant the goal
+    /// makes real progress. Once it reaches
+    /// [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] the breaker stops re-investigating
+    /// and escalates the goal to a human, breaking the unbounded re-investigation
+    /// livelock. `#[serde(default)]` keeps snapshots written before this counter
+    /// existed deserializable (loads as an empty map).
+    #[serde(default)]
+    surfaced_failures: HashMap<String, u32>,
 }
 
 impl NoProgressTracker {
@@ -476,6 +765,34 @@ impl NoProgressTracker {
         self.counts.remove(goal_id);
         self.guided_retries.remove(goal_id);
         self.reinvestigated.retain(|(id, _)| id != goal_id);
+        self.surfaced_failures.remove(goal_id);
+    }
+
+    /// Record one evidence-less surfaced investigation failure for `goal_id` and
+    /// return the new **consecutive** count (issue #16 follow-up). The breaker
+    /// compares this against [`SURFACED_INVESTIGATION_FAILURE_LIMIT`] to decide
+    /// whether to keep re-investigating (below the bound) or escalate to a human
+    /// (at/above it), so an evidence-less goal can never re-investigate forever.
+    pub fn record_surfaced_failure(&mut self, goal_id: &str) -> u32 {
+        let entry = self
+            .surfaced_failures
+            .entry(goal_id.to_string())
+            .or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    /// Clear `goal_id`'s consecutive surfaced-failure count (issue #16 follow-up).
+    /// Called once the goal is escalated out of the re-investigation loop so a
+    /// later re-entry starts a fresh window rather than escalating immediately.
+    pub fn clear_surfaced_failures(&mut self, goal_id: &str) {
+        self.surfaced_failures.remove(goal_id);
+    }
+
+    /// Current consecutive surfaced-failure count for `goal_id` (`0` when
+    /// untracked) — read by tests and the breaker's bound check.
+    pub fn surfaced_failures(&self, goal_id: &str) -> u32 {
+        self.surfaced_failures.get(goal_id).copied().unwrap_or(0)
     }
 
     /// Reset only `goal_id`'s no-action counter, **preserving** any spent
@@ -526,6 +843,7 @@ impl NoProgressTracker {
         self.counts.retain(|id, _| live.contains(id));
         self.guided_retries.retain(|id| live.contains(id));
         self.reinvestigated.retain(|(id, _)| live.contains(id));
+        self.surfaced_failures.retain(|id, _| live.contains(id));
     }
 
     /// Record a no-action cycle for `goal_id` and return the breaker's

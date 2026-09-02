@@ -1,0 +1,103 @@
+name: distill-grounding-surface-form-parity
+app_type: cli
+description: |
+  Verify the distillation write-boundary gate grounds a cited `source_episode_id`
+  robustly to LLM surface-form variation (perpetual-cognition goal: distillation
+  fact-yield + reasoner reliability). Grounding is the dominant, *necessary*
+  reliability signal (0.5): a fact whose cited episode id fails the exact match
+  scores at most 0.4 and is quarantined. Both write-boundary seams — the IPC
+  server's `StoreFactGated` handler and the in-process `DistillFactSink` — must
+  decide every fact's disposition identically ("one implementation, two call
+  sites").
+
+  Before this change the two seams diverged: the IPC server trimmed each cited id
+  (`any_episode_exists`) while the in-process sink did an untrimmed `contains`, so
+  a distilled fact whose `source_episode_id` carried stray surrounding whitespace
+  (an LLM re-emitting a real id with a trailing newline/space) grounded on one
+  seam but was silently quarantined on the other — a genuinely grounded fact lost,
+  dragging fact-yield down. The shared `fact_reliability::normalize_source_episode_id`
+  now trims each cited id at BOTH seams, used for grounding AND the persisted
+  `DERIVES_FROM` provenance edge. Episode node ids (UUID-v7 / ULID) never carry
+  whitespace, so this is a no-op for well-formed ids; interior whitespace is
+  preserved so a genuinely different id stays ungrounded.
+
+  Behavior is proven by the hermetic in-crate unit tests this scenario drives. The
+  CLI runner rejects any non-zero exit, so a failing test fails the scenario. No
+  live-host state is mutated (all tests use in-memory backends / pure helpers).
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+steps:
+  # normalize_source_episode_id trims surrounding whitespace (grounding rescue).
+  # First invocation may compile the test binary; subsequent filters reuse it.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::normalize_source_episode_id_trims_surrounding_whitespace"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # No-op for well-formed ids: normalization can never alter a real id's disposition.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::normalize_source_episode_id_is_noop_for_clean_id"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Interior whitespace preserved; all-whitespace id normalizes to empty (ungrounded).
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests::normalize_source_episode_id_preserves_interior_and_empties_blank"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # In-process sink seam: a whitespace-padded cited id of a REAL batch episode is
+  # PROMOTED (grounded) and threads the TRIMMED provenance id.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_tests::distillation_grounds_whitespace_padded_source_episode_id"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # IPC server seam parity: a whitespace-padded cited id of a real episode still
+  # grounds and stores through the StoreFactGated dispatch arm.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_ipc::server::server_gate_tests::grounded_when_cited_episode_id_has_surrounding_whitespace"
+    timeout: 300000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

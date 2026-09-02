@@ -1,11 +1,11 @@
 //! `simard self-health` — run the post-deploy health probe and print a report.
 //!
-//! A sibling of `self-test`. Reports the five self-deploy health probes
-//! (version, memory, goal board, brains LLM-backed, no quarantine) against the
-//! live store, opened through the canonical reader memory (daemon socket when
-//! up, else a direct on-disk open). Exit code 0 when every probe is healthy,
-//! non-zero otherwise. The self-deploy orchestrator runs the same probe
-//! internally; this is the operator-facing entry point.
+//! A sibling of `self-test`. Reports the six self-deploy health probes
+//! (version, memory, goal board, brains LLM-backed, no quarantine, entrypoint
+//! parity) against the live store, opened through the canonical reader memory
+//! (daemon socket when up, else a direct on-disk open). Exit code 0 when every
+//! probe is healthy, non-zero otherwise. The self-deploy orchestrator runs the
+//! same probe internally; this is the operator-facing entry point.
 //!
 //! See `docs/reference/self-deploy-api.md#simard-self-health`.
 
@@ -124,6 +124,22 @@ fn print_table(report: &crate::self_deploy::SelfHealthReport) {
         "  [{}] no_quarantine      quarantined={}",
         mark(p.no_quarantine.healthy),
         p.no_quarantine.quarantined
+    );
+    println!(
+        "  [{}] entrypoint_parity  path={} version={} mismatch={} foreign={}",
+        mark(p.entrypoint_parity.healthy),
+        if p.entrypoint_parity.resolved_path.is_empty() {
+            "<unresolved>"
+        } else {
+            &p.entrypoint_parity.resolved_path
+        },
+        if p.entrypoint_parity.path_version.is_empty() {
+            "<none>"
+        } else {
+            &p.entrypoint_parity.path_version
+        },
+        p.entrypoint_parity.path_mismatch,
+        p.entrypoint_parity.foreign_shadow
     );
 }
 

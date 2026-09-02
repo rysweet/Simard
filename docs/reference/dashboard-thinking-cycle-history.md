@@ -85,8 +85,14 @@ touches the OODA reasoner or the persisted cycle reports.
 - The row's representative **Time** is the timestamp of the most-recent cycle in
   the run.
 - **Progressing** cycles (those that launched work or produced an artifact —
-  `pr #`, `commit`, `launched`, `dispatched`, or a live spawned engineer) are
+  `pr #`, `effect completed`, `completed terminal`, `commit(s)`,
+  `committed=true`, `launched`, `dispatched`, or a live spawned engineer) are
   **never** collapsed together; each distinct forward step keeps its own row.
+  Progress is keyed on these unambiguous phrases, **not** the bare token
+  `commit`: the typed OODA ledger commits *every* terminal — including the
+  no-progress `"typed no-action committed"` and `"typed blocked terminal
+  committed"` — with the verb "committed", so matching `commit` mislabelled
+  no-action and blocked cycles as progressing (fixed in #4292).
 - **Deferring** cycles (a deliberate no-action deferral to an already-active,
   healthy engineer) collapse by the goal set they defer on.
 - **Reasoning** cycles (anything else) collapse by their *normalized decision
@@ -159,7 +165,8 @@ duration, plus a text trend (`↓ Improving` / `↑ Degrading` / `→ Stable`).
 - **The duration widget (trend verdict + chart) renders only once at least
   4 cycles in the window carry a numeric `duration_secs`.** Below that
   threshold the whole widget is **absent** — no chart and no trend arrow — and
-  only a plain `N cycles recorded` line remains. The permanently-stuck
+  only a plain cycle-count line remains (`N cycles recorded`, or `Showing last N
+  of M cycles run` when the daemon has run past the window). The permanently-stuck
   "Not enough data / Need at least 4 cycles" placeholder no longer appears.
 - Legacy cycles with no recorded duration (for example a fresh state root) are
   excluded from the series; once **4** duration-bearing cycles exist, both the
@@ -198,6 +205,7 @@ Returns the most recent cycles (up to `MAX_CYCLES = 50`), newest-first,
     }
   ],
   "total_cycles": 1,
+  "latest_cycle_number": 1040,        // authoritative cumulative cycle number (#1680)
   "duration_trend": {
     "direction": "improving",        // improving | degrading | stable | insufficient_data
     "recent_avg_secs": 10.2,
@@ -212,15 +220,24 @@ Returns the most recent cycles (up to `MAX_CYCLES = 50`), newest-first,
 
 - `cycles` is **collapsed** (relaxed). A single cycle has `repeat_count: 1` and
   `cycle_number_first == cycle_number_last == cycle_number`.
-- `total_cycles` is the number of **raw** cycles read *before* collapse, so the
-  renderer's "N cycles recorded" line reflects real activity rather than the
-  (smaller) collapsed-row count.
+- `total_cycles` is the number of **raw** cycles read *before* collapse in the
+  bounded window (up to `MAX_CYCLES = 50`), so the renderer reflects real
+  activity rather than the (smaller) collapsed-row count.
+- `latest_cycle_number` is the **authoritative cumulative cycle number** — the
+  highest persisted `cycle_<N>.json` index, the single "Cycle #N" source every
+  panel reads (#1680). When it exceeds `total_cycles` (the daemon has run more
+  cycles than the `MAX_CYCLES` window shows), the renderer states `Showing last
+  N of M cycles run` instead of the capped window size, so the tab never reads
+  as "only 50 cycles ever ran" while System Status shows a far higher cycle
+  number. When `latest_cycle_number <= total_cycles` (all cycles fit the
+  window), it falls back to the plain `N cycles recorded` line.
 - `duration_trend.direction` is one of `improving | degrading | stable |
   insufficient_data`; on `insufficient_data` (fewer than 4 duration-bearing
   cycles) the object also carries a `detail` string explaining why. The
   renderer hides the **entire** duration widget (chart + verdict) while the
-  direction is `insufficient_data`, leaving only a plain `N cycles recorded`
-  line — never a broken placeholder.
+  direction is `insufficient_data`, leaving only a plain cycle-count line
+  (`N cycles recorded`, or `Showing last N of M cycles run`) — never a broken
+  placeholder.
 - `duration_secs` is `null` for legacy cycles; such cycles are excluded from the
   duration series used to compute the trend. The endpoint reads the producer's
   `duration_secs` field first, falling back to a legacy `cycle_duration_secs`

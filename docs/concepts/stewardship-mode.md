@@ -122,14 +122,21 @@ signature = sha256(failure_kind + "\n" + normalize(error_text))[..16]
 ```
 
 `normalize` strips noise that varies between otherwise-identical failures so
-that two runs of the same bug collapse to the same signature:
+that two runs of the same bug collapse to the same signature. It first strips
+ANSI escape sequences and collapses whitespace, then rewrites each
+whitespace-delimited token whose *shape* is volatile to a stable placeholder:
 
-1. ANSI escape sequences (`\x1B\[[0-9;]*[A-Za-z]`).
-2. ISO-8601 timestamps → `<TS>`.
-3. Absolute paths → `<PATH>`.
-4. Hex hashes of length ≥ 7 → `<HEX>`.
-5. Run identifiers matching `run-[A-Za-z0-9_-]+` → `<RUN>`.
-6. `:line:col` in stack frames → `:<L>:<C>`.
+1. ANSI escape sequences (CSI/OSC) are removed.
+2. Tokens beginning with `/` (absolute paths) → `<PATH>`.
+3. Tokens beginning with `run-` / `Run-` / `RUN-` (run identifiers) → `<RUNID>`.
+4. ISO-8601 timestamps (`YYYY-MM-DDT…`) → `<TS>`.
+5. All-hex tokens of length ≥ 7 (hashes/blobs) → `<HEX>`.
+6. Canonical UUIDs (`8-4-4-4-12` hex, case-insensitive) → `<UUID>`, folded
+   even when embedded in a larger token so a prefixed session id such as
+   `ooda-<uuid>` collapses to `ooda-<UUID>`. UUIDs are the system's ubiquitous
+   session / node / run identifiers (UUIDv7); without this a failure that
+   differs only in its embedded id would file a fresh issue every time and never
+   be recalled as recurring.
 7. Whitespace collapse + trim.
 
 The hex signature is embedded verbatim in every filed issue body as

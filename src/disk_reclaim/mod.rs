@@ -150,6 +150,19 @@ pub(crate) fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// The mode the guarded executor should actually run in. Refuses to *delete* as
+/// root at the guarded core: an apply run under euid 0 is downgraded to dry-run
+/// so the invariant holds for **every** caller of [`reclaim_candidates`] (CLI,
+/// daemon, future callers), not just the adapters that pre-check. Running the
+/// apply path as root would nullify the path-ownership policy the rails rely on.
+fn effective_apply_mode(mode: ReclaimMode, is_root: bool) -> ReclaimMode {
+    if mode == ReclaimMode::Apply && is_root {
+        ReclaimMode::DryRun
+    } else {
+        mode
+    }
+}
+
 /// Build the production guard context + remover and run the guarded executor over
 /// an explicit candidate list, emitting telemetry. Shared by the recipe-driven
 /// [`run_disk_reclaim`] and the operator `exec` form so the production wiring
@@ -163,6 +176,21 @@ pub fn reclaim_candidates(
     target_pct: u8,
     source: ReclaimSource,
 ) -> ReclaimReport {
+    // Defense in depth: refuse to delete as root at the guarded core so every
+    // entry point inherits the invariant — even a future caller that skips an
+    // adapter-level pre-check. Downgrade apply -> dry-run rather than delete
+    // under an euid that would nullify the path-ownership policy.
+    let mode = {
+        let effective = effective_apply_mode(mode, is_root());
+        if effective != mode {
+            tracing::warn!(
+                "refusing disk-reclaim apply as root (euid 0); downgraded to dry-run \
+                 — deletion would nullify the path-ownership policy"
+            );
+        }
+        effective
+    };
+
     let allow = allow_roots(state_root);
     let protected = ProtectedDenySet::resolve(Path::new("/proc"));
     let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
@@ -487,6 +515,28 @@ mod tests {
                         .iter()
                         .any(|(k, v)| k == names::ATTR_REASON && v == "protected_path")),
             "expected a candidates_skipped counter tagged reason=protected_path",
+        );
+    }
+
+    #[test]
+    fn effective_apply_mode_downgrades_apply_as_root() {
+        // Apply as root is downgraded to dry-run at the guarded core (no deletion).
+        assert_eq!(
+            effective_apply_mode(ReclaimMode::Apply, true),
+            ReclaimMode::DryRun,
+            "apply as root -> dry-run (refuse deletion)"
+        );
+        // Apply as non-root is preserved.
+        assert_eq!(
+            effective_apply_mode(ReclaimMode::Apply, false),
+            ReclaimMode::Apply,
+            "apply as non-root is allowed"
+        );
+        // Dry-run as root stays dry-run (already safe — no deletion).
+        assert_eq!(
+            effective_apply_mode(ReclaimMode::DryRun, true),
+            ReclaimMode::DryRun,
+            "dry-run as root is unchanged"
         );
     }
 

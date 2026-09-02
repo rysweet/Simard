@@ -191,7 +191,7 @@ fn why_aware_block_reason_preserves_sentinel_recognition_and_count_parse() {
 fn already_complete_maps_to_mark_done() {
     let why = NoProgressWhy::new(NoProgressClass::AlreadyComplete, already_done_evidence());
     assert_eq!(
-        resolution_for_why(NO_PROGRESS_BREAKER_THRESHOLD, why, false),
+        resolution_for_why(NO_PROGRESS_BREAKER_THRESHOLD, why, false, 0),
         NoProgressResolution::MarkDone,
         "a goal proven done by live artifacts must auto-complete, not block"
     );
@@ -203,7 +203,7 @@ fn missing_precondition_maps_to_heal() {
         NoProgressClass::MissingPrecondition,
         vec![Evidence::new("repo", "kgpacks-rs", "absent")],
     );
-    match resolution_for_why(NO_PROGRESS_BREAKER_THRESHOLD, why, false) {
+    match resolution_for_why(NO_PROGRESS_BREAKER_THRESHOLD, why, false, 0) {
         NoProgressResolution::Heal { why } => {
             assert_eq!(why.class, NoProgressClass::MissingPrecondition);
         }
@@ -217,7 +217,7 @@ fn upstream_dependency_maps_to_defer_with_the_blocking_ref() {
         NoProgressClass::UpstreamDependency,
         vec![Evidence::new("dependency-goal", "upstream-goal", "OPEN")],
     );
-    match resolution_for_why(NO_PROGRESS_BREAKER_THRESHOLD, why, false) {
+    match resolution_for_why(NO_PROGRESS_BREAKER_THRESHOLD, why, false, 0) {
         NoProgressResolution::Defer { blocking_ref, .. } => {
             assert!(
                 blocking_ref.contains("upstream-goal"),
@@ -241,6 +241,7 @@ fn unclear_or_stuck_maps_to_spawn_engineer_on_the_first_attempt() {
             NO_PROGRESS_BREAKER_THRESHOLD,
             why,
             /* guided_retry_used */ false,
+            /* surfaced_failures */ 0,
         ) {
             NoProgressResolution::SpawnEngineer { task, .. } => {
                 assert!(
@@ -268,6 +269,7 @@ fn stuck_escalates_with_why_only_after_the_guided_retry_is_exhausted() {
         NO_PROGRESS_BREAKER_THRESHOLD,
         why,
         /* guided_retry_used */ true,
+        /* surfaced_failures */ 0,
     ) {
         NoProgressResolution::Escalate {
             blocked_reason,
@@ -302,6 +304,53 @@ fn stuck_escalates_with_why_only_after_the_guided_retry_is_exhausted() {
             );
         }
         other => panic!("expected Escalate once the guided retry is spent, got {other:?}"),
+    }
+}
+
+#[test]
+fn terminal_stuck_with_no_evidence_surfaces_a_failure_never_a_none_block() {
+    // THE live-daemon defect (2026-07-15): a goal that never produced a tracked
+    // issue/PR (the six `simard-identity-*`, the coverage/coin/parity goals) has
+    // empty evidence, so the terminal rung used to author
+    //   `🔒 [OODA-SAFEGUARD] … why=GENUINELY-STUCK evidence=[(none)]`.
+    // The pure policy must NEVER emit an Escalate here — an evidence-less terminal
+    // outcome is a SURFACED investigation failure (fail visible + retriable), not
+    // a bare generic block.
+    for class in [
+        NoProgressClass::GenuinelyStuck,
+        NoProgressClass::UnclearCriteria,
+    ] {
+        let why = NoProgressWhy::new(class, vec![]);
+        match resolution_for_why(
+            NO_PROGRESS_BREAKER_THRESHOLD,
+            why,
+            /* guided_retry_used */ true,
+            /* surfaced_failures (below the bound ⇒ still surfaces) */ 0,
+        ) {
+            NoProgressResolution::SurfaceInvestigationFailure {
+                class: surfaced_class,
+                reason,
+            } => {
+                assert_eq!(
+                    surfaced_class, class,
+                    "the surfaced failure must carry the classified WHY so a bounded \
+                     escalation can name the accurate root cause"
+                );
+                assert!(
+                    reason.contains(class.token()),
+                    "the surfaced failure should name the classified WHY: {reason:?}"
+                );
+                assert!(
+                    !reason.contains("(none)"),
+                    "even the surfaced-failure reason must not read as an \
+                     evidence=[(none)] block: {reason:?}"
+                );
+            }
+            other => panic!(
+                "an evidence-less terminal outcome for {class:?} must surface a failure, \
+                 never Escalate/park with (none), got {other:?}"
+            ),
+        }
     }
 }
 

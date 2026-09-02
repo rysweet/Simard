@@ -128,7 +128,30 @@ fn candidates_for(problem: &Problem, observed: &ObservedState) -> Vec<CauseCandi
         ProblemKind::CrossCutting => cross_cutting_candidates(),
         ProblemKind::WorkstreamCoverage => workstream_coverage_candidates(problem),
         ProblemKind::StepFailure => step_failure_candidates(problem),
+        ProblemKind::DeployDrift => deploy_drift_candidates(problem),
     }
+}
+
+/// The WHY behind a deploy-drift problem (#2590): the running binary is behind
+/// merged `main`. A single high-likelihood telemetry candidate carrying the
+/// behind-commits count — the cause is unambiguous (a merged change has not yet
+/// been deployed), so no ranked alternatives are synthesised.
+fn deploy_drift_candidates(problem: &Problem) -> Vec<CauseCandidate> {
+    let behind = problem
+        .evidence
+        .iter()
+        .find_map(|s| match s {
+            Signal::DeployDriftDetected { behind_commits, .. } => Some(*behind_commits),
+            _ => None,
+        })
+        .unwrap_or(0);
+    vec![CauseCandidate {
+        label: "deploy-drift".to_string(),
+        likelihood: Likelihood::High,
+        evidence: vec![format!(
+            "running binary is {behind} commit(s) behind merged origin/main"
+        )],
+    }]
 }
 
 fn goal_hygiene_candidates(problem: &Problem) -> Vec<CauseCandidate> {

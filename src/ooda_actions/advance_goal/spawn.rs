@@ -4,6 +4,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
 use crate::identity_composition::max_subordinate_depth;
@@ -40,6 +42,31 @@ pub const BRAIN_FAILURE_BLOCKED_PREFIX: &str = "\u{1F512} [OODA-SAFEGUARD] OODA 
 
 /// Trailing portion of the deterministic brain-failure `Blocked` reason.
 pub const BRAIN_FAILURE_BLOCKED_SUFFIX: &str = " consecutive cycles; needs human review";
+
+/// Derive a STABLE goal-session id from a goal id (issue #4197).
+///
+/// The previous `format!("ooda-{}", Uuid::now_v7())` minted a FRESH session id
+/// every tick, so a terminal recorded on one tick — keyed by
+/// `(session_id, cycle_id)` — could never be read back on the next, and the goal
+/// was perpetually re-surfaced as blocked and re-escalated. Deriving the session
+/// id deterministically from the goal identity makes the same goal map to the
+/// same session id across ticks and process restarts, so
+/// `CapabilityHandler::terminal_for_session` can recognise a completed session.
+///
+/// The result is always a valid ledger identifier: `ooda-` followed by 32 hex
+/// characters of the SHA-256 of the goal id (37 chars total, `[a-z0-9-]`), so it
+/// satisfies `validate_identifier` even when the goal id itself contains
+/// characters that would need sanitising — and distinct goals never collide onto
+/// the same session id (hashing preserves distinctness that naive sanitising
+/// would erase).
+pub fn derive_session_id(goal_id: &str) -> String {
+    let digest = Sha256::digest(goal_id.as_bytes());
+    let mut hex = String::with_capacity(32);
+    for byte in &digest[..16] {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    format!("ooda-{hex}")
+}
 
 /// Returns `true` iff `reason` was authored by the deterministic
 /// brain-failure safeguard in `dispatch_spawn_engineer`. The predicate
@@ -745,6 +772,27 @@ fn engineer_worktree_state_root() -> std::path::PathBuf {
         })
 }
 
+/// Resolve the typed-OODA ledger state root.
+///
+/// Single source of truth for the directory that contains the typed-OODA
+/// SQLite ledger. Both the spawn-admission path (`typed_goal_session::run`,
+/// which opens the ledger for `record_action`) and the engineer-termination
+/// release path (`subordinate::cleanup_engineer_worktree_for_goal`) resolve the
+/// ledger through this helper, so a released claim always targets the exact
+/// ledger the admission gate inserted it into. Lives in `spawn` (compiled in
+/// both test and non-test builds) because `typed_goal_session` is
+/// `#[cfg(not(test))]`.
+pub(crate) fn typed_ooda_state_root() -> std::path::PathBuf {
+    std::env::var_os("SIMARD_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("SIMARD_HOME").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".simard")
+        })
+}
+
 /// Scan `<state_root>/engineer-worktrees/` for any directory whose name
 /// starts with `<goal_id>-` and whose `.simard-engineer-claim` sentinel
 /// names a live PID. Returns the first such path, or None if no live
@@ -1250,6 +1298,13 @@ mod tests {
             &self,
             _ctx: &crate::ooda_brain::EngineerLifecycleCtx,
         ) -> crate::error::SimardResult<crate::ooda_brain::EngineerLifecycleDecision> {
+            panic!("read-only cognition rail must not consult the brain");
+        }
+
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> crate::error::SimardResult<crate::ooda_brain::PerGoalAction> {
             panic!("read-only cognition rail must not consult the brain");
         }
     }

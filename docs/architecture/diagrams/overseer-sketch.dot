@@ -1,0 +1,47 @@
+// Simard metacognitive atlas — Diagram 4: Overseer drill-down (DESIGN SKETCH).
+//
+// IMPORTANT: `src/overseer/mod.rs` is a type/trait sketch. Its module header
+// declares `#![allow(dead_code)]` and states it is "not wired into `main`" — no
+// Overseer node here is constructed or scheduled at runtime. The entire diagram
+// is therefore rendered DASHED and labeled a design sketch. Do not read it as a
+// live control loop.
+//
+// Every node still maps to a real module in `src/overseer/` so the sketch stays
+// code-anchored: observer, sensor, diagnosis, root_cause, ecosystem_observe,
+// merge_queue_observe, launch, merge_ops, pr_verify, claim_reaper,
+// thread_oversight, signal_liaison, notify, deploy, guardrails.
+//
+// Render (optional, CI-safe): dot -Tsvg overseer-sketch.dot -o overseer-sketch.svg
+digraph simard_overseer_sketch {
+    rankdir=LR;
+    fontname="Helvetica";
+    node [fontname="Helvetica", shape=box, style="rounded,dashed", color="#B48EAD"];
+    edge [fontname="Helvetica", style=dashed, color="#B48EAD"];
+    labelloc="t";
+    label="Overseer meta-OODA — DESIGN SKETCH (src/overseer/*, #![allow(dead_code)], not wired into main)";
+
+    // observe → diagnose → dispatch → verify → merge → notify control loop.
+    observe   [label="observe\nobserver.rs / sensor.rs\necosystem_observe.rs\nmerge_queue_observe.rs"];
+    diagnose  [label="diagnose\ndiagnosis.rs / root_cause.rs"];
+    dispatch  [label="dispatch\nlaunch.rs"];
+    verify    [label="verify\npr_verify.rs / guardrails.rs"];
+    merge     [label="merge\nmerge_ops.rs / claim_reaper.rs"];
+    notify    [label="notify\nnotify.rs / signal_liaison.rs"];
+    deploy    [label="deploy\ndeploy.rs"];
+
+    // thread_oversight consumes cognitive-thread telemetry (design intent).
+    oversight [label="thread_oversight.rs\n(consumes thread telemetry)"];
+    telemetry [label="cognitive_threads/telemetry.rs\n(REAL, runtime)",
+               style="rounded,filled", color="#4C566A", fillcolor="#ECEFF4"];
+
+    observe -> diagnose;
+    diagnose -> dispatch;
+    dispatch -> verify;
+    verify -> merge;
+    merge -> notify;
+    notify -> deploy;
+    deploy -> observe [label="loop (design)"];
+
+    telemetry -> oversight [label="feeds"];
+    oversight -> diagnose  [label="signals problems"];
+}

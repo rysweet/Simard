@@ -44,8 +44,8 @@ use simard::goal_curation::outcome_verify::{
 use simard::goal_curation::{ActiveGoal, GoalProgress};
 use simard::ooda_brain::{
     BrainJudgmentRecord, BrainPhase, EngineerLifecycleCtx, EngineerLifecycleDecision,
-    GoalOutcomeCtx, GoalOutcomeDecision, OodaBrain, take_brain_judgments,
-    with_brain_judgment_scope,
+    GoalOutcomeCtx, GoalOutcomeDecision, OodaBrain, PerGoalAction, PerGoalCycleCtx,
+    take_brain_judgments, with_brain_judgment_scope,
 };
 
 // ===========================================================================
@@ -120,6 +120,12 @@ impl OodaBrain for StubOutcomeBrain {
             }),
         }
     }
+
+    fn decide_per_goal_cycle(&self, _ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        Ok(PerGoalAction::Continue {
+            reason: "stub".to_string(),
+        })
+    }
 }
 
 /// A hermetic [`LiveSignalSource`] returning canned signals or a hard error.
@@ -167,6 +173,10 @@ impl OodaBrain for PanicBrain {
         _ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision> {
         panic!("PanicBrain.decide_engineer_lifecycle must not be called");
+    }
+
+    fn decide_per_goal_cycle(&self, _ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        panic!("perpetual goals must skip the brain (Rail-1)");
     }
 
     fn decide_goal_outcome_verification(
@@ -782,6 +792,12 @@ impl OodaBrain for UnmigratedBrain {
     ) -> SimardResult<EngineerLifecycleDecision> {
         Ok(EngineerLifecycleDecision::ContinueSkipping {
             rationale: "unmigrated".to_string(),
+        })
+    }
+
+    fn decide_per_goal_cycle(&self, _ctx: &PerGoalCycleCtx) -> SimardResult<PerGoalAction> {
+        Ok(PerGoalAction::Continue {
+            reason: "unmigrated".to_string(),
         })
     }
     // NOTE: intentionally does NOT override decide_goal_outcome_verification.

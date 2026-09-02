@@ -229,13 +229,21 @@ are preserved; only the data is now live:
     { "id": "improve-recall-precision", "description": "Improve recall precision", "source": "From creative ideas", "score": 0.8 }
   ],
   "active_count": 1,
-  "backlog_count": 1
+  "backlog_count": 1,
+  "active_status_breakdown": {
+    "proposed": 0, "not_started": 0, "in_progress": 1,
+    "blocked": 0, "paused": 0, "completed": 0
+  }
 }
 ```
 
 `active_count` / `backlog_count` reflect the **live union**, so a newly promoted
 Proposed goal both appears in `backlog` and increments `backlog_count` on the
-very next poll.
+very next poll. `active_status_breakdown` is an **additive** per-`GoalProgress`-
+variant partition of the `active` set (always all six keys; the buckets sum to
+`active_count`), so the Goals tab can show what Simard is *actually working on
+right now* rather than a count that conflates in-progress goals with blocked,
+paused, or not-yet-archived `Completed` ones.
 
 ### `GET /api/memory` — `goal_records` tile
 

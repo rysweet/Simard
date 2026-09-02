@@ -13,6 +13,7 @@
 //! See `prompt_assets/simard/goal_session_objective.md` for the operator-
 //! facing version of this contract.
 
+#[cfg(test)]
 use crate::ooda_loop::ActionOutcome;
 
 /// The outcome of a single LLM-driven goal-advance turn.
@@ -21,20 +22,35 @@ use crate::ooda_loop::ActionOutcome;
 /// [`GoalAction`] (when the LLM emitted a non-empty response), so the
 /// upstream dispatcher in `advance_goal/mod.rs` can take side-effecting
 /// follow-up steps such as actually spawning the engineer subprocess.
+#[cfg(test)]
 pub(crate) struct GoalSessionResult {
     pub(super) outcome: ActionOutcome,
     pub(super) action: Option<GoalAction>,
 }
 
+#[cfg(test)]
 mod advance;
+#[cfg(test)]
 mod input;
+#[cfg(test)]
 mod outcome;
 
+#[cfg(test)]
 pub(crate) use advance::{
     advance_goal_with_session, apply_goal_advance_result, outcome_made_no_progress,
 };
+#[cfg(test)]
 pub(crate) use input::build_goal_advance_input;
+#[cfg(test)]
 pub(crate) use outcome::GoalAction;
+#[cfg(not(test))]
+pub(crate) fn outcome_made_no_progress(outcome: &crate::ooda_loop::ActionOutcome) -> bool {
+    outcome.success
+        && outcome
+            .detail
+            .starts_with("typed no-action committed: outcome=")
+}
+#[cfg(test)]
 use outcome::{
     GoalSessionParse, OrchestratorDecision, parse_orchestrator_response_strict,
     truncate_for_outcome,

@@ -1,0 +1,59 @@
+name: classifier-failure-signal-fidelity
+app_type: cli
+description: |
+  Outside-in proof that the episode-ingestion classifier's failure/error
+  override (issue #2327, Rule 1 / A7) detects failure signals at WORD BOUNDARIES
+  with inflection awareness, instead of the earlier naive substring scan.
+
+  The substring scan mis-fired on derivational / coincidental look-alikes —
+  "exceptional" (contains "exception"), "hispanic" (contains "panic"), and
+  "terror" / "mirror" (contain "error") — storing those benign or POSITIVE
+  episodes at full failure importance (0.9) as ActionFailures. That phantom-
+  failure noise then flowed into distillation, degrading fact-yield quality and
+  reasoner reliability (the standing cognition-improvement goal's axes).
+
+  This scenario drives the hermetic, in-process classifier unit tests that pin
+  the corrected contract:
+    - look-alike words (exceptional / hispanic / terror / mirror / terrorism)
+      do NOT trigger the failure override and down-scope as operational noise;
+    - genuine failure words and their inflections (error(s), fail(s/ed/ing),
+      failure(s), panic(s/ked/king), exception(s)) DO trigger the override at
+      full importance;
+    - the override still beats a drop marker when the failure word is inflected
+      (A7 regression guard).
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # The classifier decision function's full contract, including the new
+  # word-boundary + inflection failure-signal tests.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::classifier"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Broader consolidation suite proves no regression in the intake/distillation
+  # path that consumes the classifier's decisions.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

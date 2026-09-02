@@ -1,0 +1,102 @@
+name: reasoner-trailing-comma-recovery
+app_type: cli
+description: |
+  Outside-in proof that every recipe-backed REASONER parse site now recovers a
+  trailing-comma-defective JSON envelope instead of silently discarding the
+  model's whole structured decision — a reasoner-reliability axis of the standing
+  cognition-improvement goal.
+
+  The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI
+  / interleaved-log noise but returns the balanced `{…}` object body VERBATIM. A
+  trailing comma before a closing `}`/`]` — the single most common real-world LLM
+  JSON defect (issue #2658) — therefore survives into the extracted payload and
+  fails a strict `serde_json::from_str`. Before this change every reasoner site
+  parsed strictly (`extract_json_payload(text)?` -> `serde_json::from_str(..).ok()?`),
+  so one stray comma dropped the entire decision and the phase fell back to its
+  deterministic default — a PARSE-FAILURE default, not a real model decision.
+
+  The `strip_json_trailing_commas` recovery view already existed but was not wired
+  into these sites. All of them now route through one shared chokepoint,
+  `recipe_output::extract_and_parse_json`, which retries the strict parse on the
+  trailing-comma-stripped view — but ONLY when a comma was actually removed (the
+  `Cow::Owned` arm). The stripper is a provable no-op (`Cow::Borrowed`) on valid
+  JSON, so any OTHER malformed shape (unquoted key, elided element, missing value)
+  still returns `None`: leniency never widens beyond the trailing-comma defect and
+  a genuine parse error is never masked.
+
+  Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
+  `parse_admission_decision`, `parse_resource_admission_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+  `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
+
+  This scenario drives the hermetic, in-process tests that pin the corrected
+  contract:
+    - the pure `extract_and_parse_json` helper: parses clean JSON; recovers a
+      trailing comma before `}` and before `]`; recovers through banner + ANSI +
+      log noise; preserves a comma INSIDE string content; and still returns `None`
+      for a non-comma-malformed body or when no object is present;
+    - the reasoner sites: a trailing-comma admission/decide envelope now
+      parses to the correct typed decision (banner + array + object commas
+      compose), while a genuinely malformed (non-comma) envelope stays a loud
+      parse miss.
+  No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Shared chokepoint helper: clean parse, trailing-comma recovery (brace,
+  # bracket, banner-composed), string-content comma preserved, non-comma-malformed
+  # and no-object cases still return None.
+  - action: run
+    params:
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Reasoner admission/decide sites: trailing-comma envelopes now parse to
+  # the correct typed decision; non-comma-malformed bodies stay a loud parse miss.
+  # (The outcome seam no longer routes through this chokepoint — Group D, #4967,
+  # converted it to a typed `record-outcome` record read via read_verified_outcome.)
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- ooda_brain::recipe_brain::tests::parse_admission ooda_brain::recipe_brain::tests::extract_decision_envelope"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Whole recipe_output module and full recipe_brain test module stay green — the
+  # shared extractor and every pre-existing banner/ANSI/verdict behaviour is
+  # unregressed by routing through the new chokepoint.
+  - action: run
+    params:
+      command: "cargo test --locked --lib -- recipe_output:: ooda_brain::recipe_brain::tests"
+    timeout: 900000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000

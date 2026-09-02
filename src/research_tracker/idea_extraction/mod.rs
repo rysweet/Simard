@@ -183,14 +183,74 @@ fn is_activity_fact(fact: &CognitiveFact) -> bool {
     fact.concept.starts_with("dev-activity:") || fact.tags.iter().any(|t| t == "developer-activity")
 }
 
-/// Return the subset of `SIGNAL_KEYWORDS` that appear in `text`.
+/// Return the subset of `SIGNAL_KEYWORDS` that appear in `text` as **whole,
+/// word-boundary-delimited terms** (tolerating a trailing plural `s`).
+///
+/// This replaces an earlier raw `text.contains(keyword)` substring scan whose
+/// match spuriously fired whenever a keyword was merely *embedded* in an
+/// unrelated word — `rl` inside `world` / `curl` / `url`, `rag` inside
+/// `storage` / `average` / `fragment`, `agent` inside `reagent`. Because
+/// [`MIN_KEYWORD_HITS`] is `1`, a single such phantom hit was enough to surface
+/// an entirely off-topic `research:` proposal from ordinary developer activity,
+/// degrading fact-yield (proposal precision). Word-boundary matching aligns this
+/// seam with the policy already adopted by
+/// [`crate::memory_consolidation::classifier`], [`crate::fact_reliability`], and
+/// [`crate::knowledge_context`].
 fn matched_keywords(text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     SIGNAL_KEYWORDS
         .iter()
-        .filter(|kw| lower.contains(*kw))
+        .filter(|kw| term_at_word_boundary(&lower, kw))
         .map(|kw| (*kw).to_string())
         .collect()
+}
+
+/// `true` when `needle` occurs in `haystack` as a whole term: bordered on the
+/// left by a non-alphanumeric character (or the string start), and on the right
+/// by either such a boundary or a single tolerated plural `s` that is itself
+/// followed by a boundary. Both inputs must already be lowercased.
+///
+/// Only the two *outer* ends of `needle` are boundary-checked, so a hyphenated
+/// compound keyword (`multi-agent`, `chain-of-thought`) matches as one phrase —
+/// its internal separators are part of the needle, not term boundaries. The
+/// tolerated trailing `s` keeps pluralized signals matching (`agents`,
+/// `embeddings`, `llms`) without reopening the embedded-substring hole that
+/// motivated this function.
+fn term_at_word_boundary(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut search_from = 0;
+    while let Some(rel) = haystack[search_from..].find(needle) {
+        let start = search_from + rel;
+        let end = start + needle.len();
+        let left_ok = start == 0
+            || !haystack[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+        if left_ok && right_boundary_ok(&haystack[end..]) {
+            return true;
+        }
+        // Advance past this occurrence's first char to find any later one.
+        search_from = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// `true` when the text immediately following a keyword match ends the term:
+/// end-of-string, a non-alphanumeric character, or a single plural `s` that is
+/// itself followed by end-of-string or a non-alphanumeric character.
+fn right_boundary_ok(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        Some(c) if !c.is_alphanumeric() => true,
+        Some('s') => rest[1..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric()),
+        Some(_) => false,
+    }
 }
 
 /// Extract the developer GitHub ID from a concept like

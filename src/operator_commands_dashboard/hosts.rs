@@ -1,5 +1,172 @@
 use axum::Json;
 use serde_json::{Value, json};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Hard bound on the blocking `azlin list` VM-discovery call. `azlin list`
+/// queries Azure and routinely takes 10–20s; without a bound the `/api/hosts`
+/// handler blocks the Hosts tab (and any API client) for the full duration —
+/// or indefinitely if `azlin` hangs. Mirrors the `TMUX_LIST_TIMEOUT_SECS`
+/// bound already applied on the tmux-sessions path.
+///
+/// Overridable via `SIMARD_AZLIN_LIST_TIMEOUT_SECS` (positive integer seconds)
+/// so tests can drive the timeout path deterministically without waiting the
+/// full production bound.
+const AZLIN_LIST_TIMEOUT_SECS: u64 = 20;
+
+/// Environment override for the discovery timeout.
+const AZLIN_LIST_TIMEOUT_ENV: &str = "SIMARD_AZLIN_LIST_TIMEOUT_SECS";
+
+/// Pure: resolve the discovery timeout from an optional raw override string,
+/// falling back to `default_secs`. A missing, non-numeric, or non-positive
+/// value uses the default (never a zero/instant timeout).
+fn resolve_timeout_secs(raw: Option<&str>, default_secs: u64) -> Duration {
+    let secs = raw
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
+
+/// The effective discovery timeout, honouring the env override.
+fn azlin_list_timeout() -> Duration {
+    resolve_timeout_secs(
+        std::env::var(AZLIN_LIST_TIMEOUT_ENV).ok().as_deref(),
+        AZLIN_LIST_TIMEOUT_SECS,
+    )
+}
+
+/// How long a successful `azlin list` result is served from the in-process
+/// cache before a fresh discovery is attempted. Keeps the Hosts tab responsive
+/// on refresh (and on concurrent clients) instead of re-running the slow Azure
+/// query on every request.
+const DISCOVERY_CACHE_TTL_SECS: u64 = 60;
+
+/// Cached VM-discovery result plus the instant it was fetched.
+struct DiscoveryCache {
+    fetched_at: Instant,
+    discovered: Vec<Value>,
+}
+
+/// Process-global cache for the last successful `azlin list` discovery.
+fn discovery_cache() -> &'static Mutex<Option<DiscoveryCache>> {
+    static CACHE: OnceLock<Mutex<Option<DiscoveryCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Pure: `true` when a cache entry fetched at `fetched_at` is still within
+/// `ttl` as of `now`.
+fn cache_is_fresh(fetched_at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.duration_since(fetched_at) < ttl
+}
+
+/// Pure: parse `azlin list --output json` stdout into a Vec of VM entries.
+/// `azlin` may print version/update warnings before the JSON array, so we skip
+/// to the first `[`. Any parse failure degrades to an empty list.
+fn parse_azlin_list(raw: &str) -> Vec<Value> {
+    let json_start = raw.find('[').unwrap_or(0);
+    serde_json::from_str::<Vec<Value>>(&raw[json_start..]).unwrap_or_default()
+}
+
+/// Blocking: run `azlin list --output json` and parse the discovered VMs.
+/// Best-effort — returns an empty list when `azlin` is missing, fails, or
+/// emits unparseable output.
+fn run_azlin_list() -> Vec<Value> {
+    let output = std::process::Command::new("azlin")
+        .args(["list", "--output", "json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(o) if o.status.success() => parse_azlin_list(&String::from_utf8_lossy(&o.stdout)),
+        _ => Vec::new(),
+    }
+}
+
+/// Discovery outcome: the VM list plus whether it was served after a timeout
+/// (`timed_out`) and whether the served list is a stale cached copy (`stale`).
+struct Discovery {
+    hosts: Vec<Value>,
+    timed_out: bool,
+    stale: bool,
+}
+
+/// Resolve the discovered-VM list: serve a fresh cache hit immediately,
+/// otherwise run `azlin list` under a hard timeout, falling back to a stale
+/// cached copy (flagged) rather than blocking the Hosts tab indefinitely.
+async fn discover_vms() -> Discovery {
+    // Fast path: a fresh cached result. Read + clone under the lock, then drop
+    // the guard before any await (never hold a std Mutex across `.await`).
+    if let Some(hosts) = discovery_cache().lock().ok().and_then(|guard| {
+        guard.as_ref().and_then(|c| {
+            cache_is_fresh(
+                c.fetched_at,
+                Instant::now(),
+                Duration::from_secs(DISCOVERY_CACHE_TTL_SECS),
+            )
+            .then(|| c.discovered.clone())
+        })
+    }) {
+        return Discovery {
+            hosts,
+            timed_out: false,
+            stale: false,
+        };
+    }
+
+    // Slow path: run `azlin list` under a hard timeout. If the timeout fires
+    // first, the `spawn_blocking` thread keeps running to completion in the
+    // background (blocking tasks aren't cancellable) — its result is simply
+    // discarded. This is bounded because the Hosts tab fetches on demand
+    // (no auto-poll) and successful results are cached below.
+    let res = tokio::time::timeout(
+        azlin_list_timeout(),
+        tokio::task::spawn_blocking(run_azlin_list),
+    )
+    .await;
+
+    match res {
+        Ok(Ok(list)) => {
+            // Refresh the cache only with a non-empty result. An empty list
+            // means azlin is missing/failed or genuinely has no VMs; caching
+            // it would mask real VMs for the TTL once azlin recovers, so we
+            // let the next request re-attempt discovery instead.
+            if !list.is_empty()
+                && let Ok(mut guard) = discovery_cache().lock()
+            {
+                *guard = Some(DiscoveryCache {
+                    fetched_at: Instant::now(),
+                    discovered: list.clone(),
+                });
+            }
+            Discovery {
+                hosts: list,
+                timed_out: false,
+                stale: false,
+            }
+        }
+        // Timeout or join error: fall back to a stale cached copy if we have
+        // one, so the tab still shows the last-known VMs instead of blanking.
+        _ => {
+            let stale_hosts = discovery_cache()
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|c| c.discovered.clone()));
+            match stale_hosts {
+                Some(hosts) => Discovery {
+                    hosts,
+                    timed_out: true,
+                    stale: true,
+                },
+                None => Discovery {
+                    hosts: Vec::new(),
+                    timed_out: true,
+                    stale: false,
+                },
+            }
+        }
+    }
+}
 
 /// Hosts config file path.
 pub(crate) fn hosts_config_path() -> std::path::PathBuf {
@@ -85,25 +252,11 @@ pub(crate) fn tag_local_membership(
 pub(crate) async fn get_hosts() -> Json<Value> {
     let mut configured = load_hosts();
 
-    // Discover available VMs via `azlin list --json` (best-effort, with timeout).
-    let mut discovered: Vec<Value> = tokio::task::spawn_blocking(|| {
-        let output = std::process::Command::new("azlin")
-            .args(["list", "--output", "json"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
-                let raw = String::from_utf8_lossy(&o.stdout);
-                // azlin may print version warnings before JSON — find the first '['
-                let json_start = raw.find('[').unwrap_or(0);
-                serde_json::from_str::<Vec<Value>>(&raw[json_start..]).unwrap_or_default()
-            }
-            _ => Vec::new(),
-        }
-    })
-    .await
-    .unwrap_or_default();
+    // Discover available VMs via `azlin list` (best-effort, hard-timeout,
+    // short-cached). See `discover_vms` — `azlin list` queries Azure and can
+    // take 10–20s, so it must never block the Hosts tab unbounded.
+    let discovery = discover_vms().await;
+    let mut discovered = discovery.hosts;
 
     // Tag entries matching the local daemon's hostname so the dashboard can
     // render a "joined" badge. UI hint only — do not use for authorization.
@@ -126,6 +279,10 @@ pub(crate) async fn get_hosts() -> Json<Value> {
         "hosts": configured,
         "discovered": discovered,
         "local_hostname": local,
+        // Additive observability so the UI can distinguish "no VMs / azlin
+        // absent" from "discovery was skipped because azlin was too slow".
+        "discovery_timed_out": discovery.timed_out,
+        "discovery_stale": discovery.stale,
     }))
 }
 
@@ -293,5 +450,88 @@ mod tests {
         let mut hosts: Vec<Value> = vec![];
         tag_local_membership(&mut hosts, &["a".to_string()], "a");
         assert!(hosts.is_empty());
+    }
+
+    // ---- cache_is_fresh ---------------------------------------------------
+
+    #[test]
+    fn cache_is_fresh_within_ttl() {
+        let now = Instant::now();
+        let fetched = now - Duration::from_secs(10);
+        assert!(cache_is_fresh(fetched, now, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn cache_is_stale_past_ttl() {
+        let now = Instant::now();
+        let fetched = now - Duration::from_secs(120);
+        assert!(!cache_is_fresh(fetched, now, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn cache_at_exact_ttl_is_stale() {
+        // Strictly-less-than semantics: a cache exactly `ttl` old is stale.
+        let now = Instant::now();
+        let fetched = now - Duration::from_secs(60);
+        assert!(!cache_is_fresh(fetched, now, Duration::from_secs(60)));
+    }
+
+    // ---- parse_azlin_list -------------------------------------------------
+
+    #[test]
+    fn parses_clean_json_array() {
+        let raw = r#"[{"name":"vm-a"},{"name":"vm-b"}]"#;
+        let out = parse_azlin_list(raw);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["name"], json!("vm-a"));
+    }
+
+    #[test]
+    fn parses_json_after_version_warning_preamble() {
+        // azlin prints update warnings on stderr, but may also leak a banner
+        // to stdout before the JSON array — we skip to the first '['.
+        let raw =
+            "A newer version of azlin is available. Run 'azlin update'.\n[{\"name\":\"vm-a\"}]";
+        let out = parse_azlin_list(raw);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], json!("vm-a"));
+    }
+
+    #[test]
+    fn unparseable_output_degrades_to_empty() {
+        assert!(parse_azlin_list("not json at all").is_empty());
+        assert!(parse_azlin_list("").is_empty());
+        assert!(parse_azlin_list("[not valid json").is_empty());
+    }
+
+    // ---- resolve_timeout_secs ---------------------------------------------
+
+    #[test]
+    fn timeout_uses_default_when_unset() {
+        assert_eq!(resolve_timeout_secs(None, 20), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn timeout_honours_valid_override() {
+        assert_eq!(resolve_timeout_secs(Some("2"), 20), Duration::from_secs(2));
+        assert_eq!(
+            resolve_timeout_secs(Some("  5 "), 20),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn timeout_rejects_zero_and_garbage() {
+        // Zero would mean an instant timeout — always fall back to the default.
+        assert_eq!(resolve_timeout_secs(Some("0"), 20), Duration::from_secs(20));
+        assert_eq!(
+            resolve_timeout_secs(Some("abc"), 20),
+            Duration::from_secs(20)
+        );
+        assert_eq!(resolve_timeout_secs(Some(""), 20), Duration::from_secs(20));
+        assert_eq!(
+            resolve_timeout_secs(Some("-3"), 20),
+            Duration::from_secs(20)
+        );
     }
 }

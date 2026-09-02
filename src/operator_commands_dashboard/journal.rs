@@ -409,6 +409,81 @@ mod tests {
         assert_eq!(bad["status"], "error");
     }
 
+    #[tokio::test]
+    #[serial_test::serial(cognitive_memory)]
+    async fn dates_collapse_duplicate_day_facts_newest_wins() {
+        use crate::journal::store::{JOURNAL_TAG, journal_caller_key};
+
+        let state = HermeticState::new();
+        let mem = MemGuard::register(&state);
+        let d = ymd(2026, 7, 15);
+        let key = journal_caller_key(d);
+
+        // Forge the live-store corruption directly through the real backend:
+        // two distinct `journal:2026-07-15` facts for the SAME day. `store_fact`
+        // (no caller key) appends without dedup, so both persist — exactly the
+        // state that made the date picker list the day twice.
+        let older = JournalEntry {
+            date: d,
+            generated_at: "2026-07-15T21:20:47Z".parse().expect("ts"),
+            narrative: "older generation".to_string(),
+            draft: String::new(),
+            prs: vec![PrSummary {
+                number: 1,
+                plain_summary: "a".to_string(),
+                outcome: "open".to_string(),
+            }],
+            quiet_day: false,
+        };
+        let mut newer = older.clone();
+        newer.generated_at = "2026-07-15T22:04:00Z".parse().expect("ts");
+        newer.narrative = "newer generation".to_string();
+        newer.prs = vec![
+            PrSummary {
+                number: 1,
+                plain_summary: "a".to_string(),
+                outcome: "merged".to_string(),
+            },
+            PrSummary {
+                number: 2,
+                plain_summary: "b".to_string(),
+                outcome: "open".to_string(),
+            },
+        ];
+        for e in [&newer, &older] {
+            let content = serde_json::to_string(e).expect("serialize");
+            mem.ops()
+                .store_fact(
+                    &key,
+                    &content,
+                    1.0,
+                    &[JOURNAL_TAG.to_string()],
+                    "journal-generator",
+                )
+                .expect("inject duplicate journal fact");
+        }
+
+        // The Journal tab date picker must show the day exactly ONCE, carrying
+        // the newest generation's counts (2 PRs, 1 merged) — never the day
+        // twice with conflicting numbers.
+        let Json(dates) = journal_dates().await;
+        let list = dates["dates"].as_array().expect("dates array");
+        assert_eq!(
+            list.len(),
+            1,
+            "duplicate-day facts must collapse to one date, got: {list:?}"
+        );
+        assert_eq!(list[0]["date"], "2026-07-15");
+        assert_eq!(list[0]["pr_count"], 2, "newest generation's PR count");
+        assert_eq!(list[0]["merged"], 1, "newest generation's merged count");
+
+        // Search agrees (no duplicate day).
+        let Json(found) = journal_search(Json(json!({}))).await;
+        let results = found["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1, "search must not list the day twice");
+        assert_eq!(results[0]["pr_count"], 2);
+    }
+
     #[test]
     fn parse_range_tolerates_swapped_bounds_and_ignores_partial() {
         let swapped = parse_range(&json!({"from": "2026-07-06", "to": "2026-07-01"}));

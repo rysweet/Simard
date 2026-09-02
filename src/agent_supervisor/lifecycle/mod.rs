@@ -110,13 +110,58 @@ pub fn check_heartbeat(
     }
 }
 
+/// The outcome of a subordinate kill attempt (issue #4243). Distinguishes a
+/// verified signal from a refusal to signal a recycled PID and from a no-op on a
+/// handle that has no real process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KillAction {
+    /// A termination signal was sent to the (identity-verified) subordinate PID.
+    Signalled,
+    /// The live tmux pane PID did not match the cached PID: the OS recycled the
+    /// PID to an unrelated process, so the reaper REFUSED to signal it.
+    RefusedPidReuse,
+    /// No real process to signal (mock/test handle with `pid == 0`).
+    SkippedNoPid,
+}
+
 /// Kill a subordinate by sending SIGTERM (Unix) or terminating the process.
 ///
 /// Marks the handle as killed and sends a termination signal to the real
-/// child process. On Unix, this sends SIGTERM via `kill(2)`. The handle
-/// is mutated in place so the supervisor can track that it was explicitly
-/// terminated.
+/// child process. When the subordinate runs under a tmux session, the live pane
+/// PID is cross-checked against the cached PID first (issue #4243) so a recycled
+/// PID is never signalled. The handle is mutated in place so the supervisor can
+/// track that it was explicitly terminated.
 pub fn kill_subordinate(handle: &mut SubordinateHandle) -> SimardResult<()> {
+    // Verify the cached PID against the live tmux pane before signalling. An
+    // empty session name (no tmux) or a failed query yields `None`, which the
+    // callee treats as "unverifiable" and falls back to today's behaviour.
+    let live_pane_pid = if handle.session_name.is_empty() {
+        None
+    } else {
+        query_pane_pid(&handle.session_name)
+    };
+    kill_subordinate_with_pane_pid(handle, live_pane_pid).map(|_| ())
+}
+
+/// PID-reuse-safe core of [`kill_subordinate`] (issue #4243).
+///
+/// `live_pane_pid` is the PID currently owning the subordinate's tmux pane (or
+/// `None` when tmux is unavailable / the session is gone). Behaviour:
+///
+/// * `Some(p)` and `handle.pid > 0` and `p != handle.pid` → the cached PID was
+///   recycled to an unrelated process: REFUSE to signal ([`KillAction::RefusedPidReuse`]).
+/// * `Some(p)` and `p == handle.pid > 0` → identity verified: SIGTERM the PID
+///   ([`KillAction::Signalled`]).
+/// * `None` → identity unverifiable: fall back to signalling when `pid > 0`
+///   ([`KillAction::Signalled`]) so normal teardown is never regressed.
+/// * `handle.pid == 0` → mock handle: never signals ([`KillAction::SkippedNoPid`]).
+///
+/// In every non-error branch the handle is marked killed. An already-killed
+/// handle is an error (unchanged contract).
+pub fn kill_subordinate_with_pane_pid(
+    handle: &mut SubordinateHandle,
+    live_pane_pid: Option<u32>,
+) -> SimardResult<KillAction> {
     if handle.killed {
         return Err(SimardError::InvalidIdentityComposition {
             identity: handle.agent_name.clone(),
@@ -124,27 +169,49 @@ pub fn kill_subordinate(handle: &mut SubordinateHandle) -> SimardResult<()> {
         });
     }
 
-    // Send SIGTERM to the real child process (pid > 0).
-    if handle.pid > 0 {
-        #[cfg(unix)]
-        {
-            // SAFETY: kill(2) is safe to call with a valid PID and signal.
-            let ret = unsafe { libc::kill(handle.pid as libc::pid_t, libc::SIGTERM) };
-            if ret != 0 {
-                let err = std::io::Error::last_os_error();
-                // ESRCH means the process already exited — that's fine.
-                if err.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(SimardError::ActionExecutionFailed {
-                        action: format!("kill subordinate '{}'", handle.agent_name),
-                        reason: format!("SIGTERM to pid {} failed: {err}", handle.pid),
-                    });
-                }
+    // Mock/test handle: nothing real to signal.
+    if handle.pid == 0 {
+        handle.killed = true;
+        return Ok(KillAction::SkippedNoPid);
+    }
+
+    // PID-reuse guard: if the live pane reports a DIFFERENT pid, the cached pid
+    // was recycled by the OS — refuse to signal the innocent process.
+    if let Some(pane_pid) = live_pane_pid
+        && pane_pid != handle.pid
+    {
+        tracing::warn!(
+            target: "simard::supervisor",
+            agent = %handle.agent_name,
+            session = %handle.session_name,
+            cached_pid = handle.pid,
+            live_pane_pid = pane_pid,
+            "refusing to reap subordinate: cached PID was recycled (pane pid mismatch)"
+        );
+        handle.killed = true;
+        return Ok(KillAction::RefusedPidReuse);
+    }
+
+    // Either the identity is verified (pane pid == cached pid) or unverifiable
+    // (no pane pid); in both cases signal the real child process.
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(2) is safe to call with a valid PID and signal.
+        let ret = unsafe { libc::kill(handle.pid as libc::pid_t, libc::SIGTERM) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            // ESRCH means the process already exited — that's fine.
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(SimardError::ActionExecutionFailed {
+                    action: format!("kill subordinate '{}'", handle.agent_name),
+                    reason: format!("SIGTERM to pid {} failed: {err}", handle.pid),
+                });
             }
         }
     }
 
     handle.killed = true;
-    Ok(())
+    Ok(KillAction::Signalled)
 }
 
 /// Determine whether a subordinate's progress indicates completion.

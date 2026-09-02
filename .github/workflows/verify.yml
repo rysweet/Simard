@@ -3,6 +3,12 @@ name: verify
 on:
   push:
   pull_request:
+  # Merge-queue live-lock remediation (issue #1050): run the same required
+  # contexts against the queued, freshly-merged result so strict
+  # up-to-date-before-merge can be relaxed to merge-queue semantics. This is
+  # ADDITIVE — the existing push/pull_request triggers and every required job
+  # are preserved so no required status-check context is renamed or dropped.
+  merge_group:
 
 permissions: {}
 
@@ -37,6 +43,13 @@ jobs:
 
       - name: Rust-only gate (no new .py / .js / .ts)
         run: scripts/check-rust-only-gate.sh
+
+      # Locks in the idempotent release-publish fix: hermetic (bundles its own
+      # mock `gh`, no network/cargo), so it runs early and fast. Guards against a
+      # regression to the non-idempotent "Create release" step that raced on an
+      # unbumped version and reddened otherwise-green release runs.
+      - name: Release-create idempotency gate
+        run: scripts/qa-release-create-idempotent.sh
 
       - name: Prepare Rust runner (free disk, swap, mold, rust)
         uses: ./.github/actions/rust-runner-prep
@@ -146,6 +159,17 @@ jobs:
             -- --skip install_packages_runs_and_self_installs \
             2>&1 | tee target/ci-logs/cargo-test.log
 
+      - name: Self-deploy canary regression target (issue #4622)
+        # Proves the EXACT target name + feature the self-deploy UnitTest canary
+        # gate invokes (`cargo test --test self_deploy_canary --features
+        # canary-tests`, see src/self_relaunch/gates.rs::build_unit_test_command)
+        # stays valid on every push/PR. A rename or typo in the curated
+        # hermetic canary suite fails CI HERE — before it can redden the live
+        # self-deploy canary and wedge running_commit. The suite is
+        # hermetic-by-construction (owns its HOME/tempdir, #[serial], no network),
+        # so it is fast and deterministic.
+        run: cargo test --test self_deploy_canary --features canary-tests
+
       - name: Run full clippy gate (--all-targets --all-features --locked)
         # Runs AFTER cargo test on purpose: test compiles the entire crate
         # graph (test profile) into target/debug/deps. Clippy on `--all-targets`
@@ -172,7 +196,28 @@ jobs:
         # their own from-scratch builds entirely.
         run: cargo build --bin simard --locked
 
+      - name: coin-gym verify (LOCAL COIN Gym done-gate, issue #2713)
+        # Machine-checkable done-gate for the LOCAL COIN Gym goal
+        # (build-a-local-coin-benchmark-harness-and-a-self-improvement-loop).
+        # `coin-gym verify` runs the offline LOCAL harness acceptance self-check
+        # and exits non-zero if any criterion regresses, so the goal's
+        # done-criteria ("coin-gym verify exits 0") is expressed as a tracked,
+        # always-green CI gate the done-gate can rely on — not just prose. See
+        # docs/howto/run-the-coin-gym-harness.md ("Done-criteria for the LOCAL
+        # goal"). Incremental (~10s) — the crate is already compiled above.
+        run: cargo run --bin coin-gym --locked -- verify
+
       - name: Upload simard binary artifact
+        # The real gates above (fmt, clippy, cargo test, the minimal-feature and
+        # downstream binary builds) have all passed by this point; the binary
+        # exists locally. A transient GitHub artifact-service brownout
+        # (`Failed to CreateArtifact: Request timeout` after the action's own 5
+        # internal retries) must not turn that all-green run red. `e2e-dashboard`
+        # — the only consumer of this artifact — falls back to building the
+        # binary itself when the download misses, so a skipped upload self-heals
+        # instead of failing the fleet's default branch. See docs/reference/
+        # ci-health-sweep.md (transient-infra resilience).
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
@@ -181,7 +226,11 @@ jobs:
           retention-days: 1
 
       - name: Upload cargo-test log
+        # Diagnostics only — nothing consumes this artifact. A transient
+        # artifact-service timeout uploading a debug log must never fail an
+        # otherwise-green build.
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cargo-test-log-${{ github.run_id }}-${{ github.run_attempt }}
@@ -327,6 +376,29 @@ jobs:
         # package-lock.json (checked against the GitHub Advisory Database).
         run: npm audit --audit-level=high
 
+  scripts-tests:
+    # Unit tests for the CI helper scripts under .github/scripts (issue #4231):
+    # the resilient coverage-comment poster (retry/backoff on transient GitHub
+    # 5xx/429/network errors + non-fatal tolerance of a persistent outage, so a
+    # failed comment post never fails the required `coverage` check). Pure Node
+    # (node:test), no dependencies, lockfile-independent.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Run .github/scripts unit tests
+        run: node --test .github/scripts/*.test.mjs
+
   install-real:
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -395,14 +467,63 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      - name: Harden apt sources (drop flaky packages.microsoft.com repo, #2975)
+        # `playwright install --with-deps` runs `apt-get update` to pull the
+        # browser OS dependencies. GitHub runners ship packages.microsoft.com
+        # apt sources that periodically serve an invalid InRelease ("NOSPLIT" /
+        # "no longer signed"), which makes that update exit 100 and fails the
+        # job with a spurious red. We only need Ubuntu-archive deps here, so
+        # strip the Microsoft sources first. Idempotent and non-fatal.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-harden-apt.sh"
+
       - name: Install Playwright (chromium)
         run: npx playwright install --with-deps chromium
 
       - name: Download simard binary from pre-commit job
+        id: download-bin
+        # Transient artifact-service brownouts can make the upstream upload skip
+        # (it is `continue-on-error`) or this download time out. Don't hard-fail
+        # the job on a miss — the fallback build below reproduces the same
+        # binary, so a default-branch infra blip never reds an all-green run.
+        continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: simard-bin-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/debug
+
+      # ── Fallback: rebuild the binary when the artifact download missed ──
+      # Only runs on the rare transient artifact-service miss. Reuses the
+      # read-only shared cargo cache (single writer is pre-commit on main), so a
+      # warm cache rebuilds the dev-profile binary in a few minutes rather than
+      # from scratch. On the common fast path (download succeeded) every step
+      # here is skipped and the job is unchanged.
+      - name: Prepare Rust runner for fallback build
+        if: steps.download-bin.outcome != 'success'
+        uses: ./.github/actions/rust-runner-prep
+
+      - name: Cache cargo registry and build artifacts (fallback build)
+        if: steps.download-bin.outcome != 'success'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: simard-ci-v2
+          save-if: false
+          cache-on-failure: true
+          cache-directories: |
+            ~/.cache/simard-lbug-precommit
+
+      - name: Provision lbug native static library link path (fallback build)
+        if: steps.download-bin.outcome != 'success'
+        shell: bash
+        run: |
+          lib_dir="$HOME/.cache/simard-lbug-precommit/lib"
+          scripts/provision-lbug-prebuilt.sh "$lib_dir" >/dev/null
+          echo "LBUG_LIBRARY_DIR=$lib_dir" >> "$GITHUB_ENV"
+          echo "LBUG_INCLUDE_DIR=$lib_dir" >> "$GITHUB_ENV"
+          rm -rf target/*/build/lbug-* target/*/.fingerprint/lbug-* 2>/dev/null || true
+
+      - name: Build simard binary (fallback for missed artifact)
+        if: steps.download-bin.outcome != 'success'
+        run: cargo build --bin simard --locked
 
       - name: Make simard binary executable
         run: chmod +x target/debug/simard

@@ -1,0 +1,106 @@
+digraph simard_runtime_topology {
+  graph [rankdir=LR, compound=true, fontsize=12, labelloc=t, label="Simard runtime topology (source-derived)"];
+  node [shape=box, style="rounded,filled", fillcolor="#f8fafc", color="#475569", fontname="Helvetica"];
+  edge [color="#475569", fontname="Helvetica", fontsize=10];
+
+  subgraph cluster_systemd {
+    label="systemd user unit";
+    color="#94a3b8";
+    systemd_unit [label="simard-ooda.service\nType=simple; Restart=always", shape=component, fillcolor="#e0f2fe"];
+    exec_start [label="ExecStart: simard ooda run", shape=note, fillcolor="#e0f2fe"];
+  }
+
+  subgraph cluster_daemon {
+    label="daemon process";
+    color="#60a5fa";
+    simard_ooda [label="simard binary\noperator_cli::ooda run", shape=component, fillcolor="#dbeafe"];
+    ooda_loop [label="OODA loop + scheduler\nsrc/ooda_loop, src/ooda_scheduler", fillcolor="#dbeafe"];
+    typed_ooda [label="typed OODA actor\nsrc/typed_ooda/route.rs", fillcolor="#dbeafe"];
+    engineer_loop [label="engineer/goal sessions\nrecipe-backed actors", fillcolor="#dbeafe"];
+    overseer [label="overseer\nworkstream launch + merge/deploy rails", fillcolor="#dbeafe"];
+    cognitive_threads [label="cognitive threads\ncreative ideas, journal, hygiene", fillcolor="#dbeafe"];
+    dashboard_task [label="embedded dashboard task\noperator_commands_dashboard", fillcolor="#dbeafe"];
+    signal_thread [label="embedded Signal thread\nsignal_embed + signal_conversation", fillcolor="#dbeafe"];
+    memory_ipc_server [label="memory-ipc server thread\nUnixListener + per-conn threads", fillcolor="#dbeafe"];
+  }
+
+  subgraph cluster_spawned {
+    label="spawned CLI tools / child processes";
+    color="#f59e0b";
+    recipe_runner [label="recipe-runner-rs\nrecipes / JSON envelopes", fillcolor="#fef3c7"];
+    amplihack_cli [label="amplihack recipe run\nsmart-orchestrator", fillcolor="#fef3c7"];
+    gh_cli [label="gh CLI\nissues, PRs, CI, merge evidence", fillcolor="#fef3c7"];
+    git_cli [label="git CLI\nstatus, diff, worktrees", fillcolor="#fef3c7"];
+    systemctl_cli [label="systemctl --user\nrestart/status/install", fillcolor="#fef3c7"];
+    tmux_cli [label="tmux\nsessions / attach", fillcolor="#fef3c7"];
+    journalctl_cli [label="journalctl\nlogs/activity", fillcolor="#fef3c7"];
+    curl_cli [label="curl\nself-update/download checks", fillcolor="#fef3c7"];
+    cargo_cli [label="cargo\ncanary/build/test gates", fillcolor="#fef3c7"];
+    llm_agent [label="provider agent binary\nCopilot/Claude via stdio", fillcolor="#fef3c7"];
+  }
+
+  subgraph cluster_network {
+    label="network services / ports";
+    color="#22c55e";
+    dashboard_port [label="dashboard HTTP/WebSocket\n0.0.0.0:8080 default\nSIMARD_DASHBOARD_PORT / --dashboard-port", shape=oval, fillcolor="#dcfce7"];
+    signal_rpc [label="signal-cli JSON-RPC daemon\n127.0.0.1:7583 default", shape=oval, fillcolor="#dcfce7"];
+    loopback_listener [label="loopback listener\n127.0.0.1:0 test/probe listeners", shape=oval, fillcolor="#dcfce7"];
+  }
+
+  subgraph cluster_storage {
+    label="storage / IPC";
+    color="#a78bfa";
+    memory_socket [label="memory IPC socket\n<state_root>/memory.sock\nor SIMARD_MEMORY_SOCKET", shape=cylinder, fillcolor="#ede9fe"];
+    lbug_store [label="embedded lbug graph store\namplihack-memory-lib", shape=cylinder, fillcolor="#ede9fe"];
+    state_root [label="SIMARD_STATE_ROOT\n~/.simard/state default", shape=folder, fillcolor="#ede9fe"];
+    dashkey [label="~/.simard/.dashkey\ndashboard login code", shape=folder, fillcolor="#ede9fe"];
+    journal_files [label="journal / health / session files", shape=folder, fillcolor="#ede9fe"];
+  }
+
+  systemd_unit -> exec_start [label="unit renders"];
+  exec_start -> simard_ooda [label="starts"];
+  simard_ooda -> ooda_loop [label="runs"];
+  simard_ooda -> dashboard_task [label="spawns tokio task"];
+  simard_ooda -> signal_thread [label="spawns background thread"];
+  simard_ooda -> memory_ipc_server [label="spawns server thread"];
+  simard_ooda -> cognitive_threads [label="schedules"];
+  simard_ooda -> overseer [label="wires"];
+  ooda_loop -> typed_ooda [label="typed terminals"];
+  typed_ooda -> engineer_loop [label="goal-session action"];
+
+  dashboard_task -> dashboard_port [label="axum HTTP + WS"];
+  dashboard_task -> dashkey [label="read/write login code"];
+  dashboard_task -> memory_socket [label="tier-1 memory client"];
+  dashboard_task -> gh_cli [label="issues / PR readiness"];
+  dashboard_task -> journalctl_cli [label="logs"];
+  dashboard_task -> tmux_cli [label="session inventory / attach"];
+
+  signal_thread -> signal_rpc [label="newline JSON-RPC over TCP"];
+  signal_rpc -> signal_thread [label="receive events"];
+  signal_thread -> memory_socket [label="meeting memory via launcher"];
+  signal_thread -> llm_agent [label="meeting backend proxy"];
+
+  memory_ipc_server -> memory_socket [label="Unix-domain framed JSON"];
+  memory_socket -> lbug_store [label="CognitiveMemoryOps"];
+  state_root -> memory_socket [label="contains"];
+  state_root -> lbug_store [label="contains"];
+
+  ooda_loop -> memory_socket [label="read/write memory"];
+  cognitive_threads -> memory_socket [label="distill / creative ideas"];
+  overseer -> amplihack_cli [label="spawn smart-orchestrator"];
+  engineer_loop -> recipe_runner [label="spawn recipe"];
+  typed_ooda -> recipe_runner [label="goal-session spawn"];
+  ooda_loop -> recipe_runner [label="recipe brains"];
+  recipe_runner -> llm_agent [label="agent subprocess"];
+  amplihack_cli -> llm_agent [label="workflow agents"];
+
+  ooda_loop -> git_cli [label="observe repo state"];
+  ooda_loop -> gh_cli [label="issues/PR evidence"];
+  overseer -> git_cli [label="conflict/deploy checks"];
+  overseer -> gh_cli [label="PR merge/CI evidence"];
+  simard_ooda -> systemctl_cli [label="safe update / self deploy"];
+  simard_ooda -> cargo_cli [label="self-test gates"];
+  simard_ooda -> curl_cli [label="release download"];
+  simard_ooda -> journal_files [label="health, journal, transcripts"];
+  overseer -> loopback_listener [label="JSON-RPC test/probe path"];
+}

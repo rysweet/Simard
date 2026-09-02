@@ -1,10 +1,9 @@
 //! TDD test suite for cognitive-thread scheduling (design §12 + security §5d).
 //!
-//! These tests are authored **before** the behaviour implementation. The data
-//! surface, constructors, and the telemetry seam are real, so the identity /
-//! naming / default-invariant tests pass today; the behaviour tests exercise
-//! `todo!()` stubs and therefore FAIL (red) until the implementation step fills
-//! them in. Every test is hermetic: injected `now_epoch`, no sleeps, no
+//! These tests were authored **before** the behaviour implementation; the data
+//! surface, constructors, the telemetry seam, and the behaviour are now all
+//! implemented, so the identity / naming / default-invariant tests and the
+//! behaviour tests pass. Every test is hermetic: injected `now_epoch`, no sleeps, no
 //! network (a fake `GhClient`), and no process-global env mutation (so the
 //! `serial(cognitive_memory)` contract does not apply).
 
@@ -136,6 +135,8 @@ impl CognitiveThread for FakeThread {
             last_success: None,
             consecutive_errors: 0,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

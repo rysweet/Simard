@@ -17,9 +17,11 @@ use serde_json::{Value, json};
 
 use super::routes::resolve_state_root;
 
-/// Snapshot freshness threshold (seconds). Matches the status provider's
-/// `SNAPSHOT_FRESHNESS_SECS` so `live`/`stale` mean the same thing everywhere.
-const FRESHNESS_SECS: i64 = 300;
+/// Snapshot freshness threshold (seconds). Single-sourced from
+/// [`crate::telemetry::snapshot::FRESHNESS_SECS`] — the SAME once-per-cycle
+/// snapshot the status provider classifies — so `live`/`stale` mean the same
+/// thing everywhere and cannot drift.
+const FRESHNESS_SECS: i64 = crate::telemetry::snapshot::FRESHNESS_SECS;
 
 /// Trailing window in hours for the attach-rate/averages (default 24, clamped
 /// `1..=8760`). Out-of-range values are clamped, never rejected.

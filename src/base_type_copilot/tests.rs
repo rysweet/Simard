@@ -541,16 +541,36 @@ fn meeting_adapter(id: &str, meeting_binary: &str) -> CopilotSdkAdapter {
         .with_meeting_binary_override(meeting_binary)
 }
 
+/// Classifies the two transient, whole-suite-parallelism spawn/wait races that
+/// the multithreaded test harness — not production — can inject while exec'ing a
+/// freshly-written fake `copilot` binary alongside thousands of other
+/// subprocess-spawning unit tests:
+///
+/// * `ETXTBSY` ("Text file busy") — another parallel test thread `fork()`ed
+///   while this test's just-written fake binary was momentarily open for
+///   writing, so the exec transiently fails.
+/// * `ECHILD` ("No child processes", os error 10) — another parallel test's
+///   subprocess handling reaped this turn's child before its own
+///   `wait_with_output`, so the specific-pid wait fails spuriously even though
+///   the fake ran to completion.
+///
+/// Both are pure artifacts of running the entire unit-test suite inside a single
+/// process; production meeting turns exec the long-lived external `copilot`
+/// binary in a process that never SIG_IGNs `SIGCHLD` nor broad-reaps children,
+/// so neither race can occur in the field. Any *other* error is a real
+/// regression and is never retried, so genuine defects are still surfaced loudly.
+#[cfg(unix)]
+fn is_transient_meeting_spawn_race(reason: &str) -> bool {
+    reason.contains("Text file busy") || reason.contains("No child processes")
+}
+
 /// Open a meeting session against the fake `copilot` at `binary` and run one
 /// turn with `objective`, returning the outcome.
 ///
-/// Retries ONLY the transient `ETXTBSY` ("Text file busy") spawn race that can
-/// occur when another parallel test thread `fork()`s while this test's
-/// just-written fake binary is momentarily open for writing — a pure artifact
-/// of exec'ing a freshly-created file inside the multithreaded test harness,
-/// not a product defect (production meeting turns exec the long-lived, external
-/// `copilot` binary). Any other error fails the test immediately, so real
-/// regressions are never masked.
+/// Retries ONLY the transient, harness-only spawn/wait races classified by
+/// [`is_transient_meeting_spawn_race`] (`ETXTBSY` on exec, `ECHILD` on wait).
+/// Any other error fails the test immediately, so real regressions are never
+/// masked.
 #[cfg(unix)]
 fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOutcome {
     let mut last_reason = String::new();
@@ -563,7 +583,7 @@ fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOut
         match session.run_turn(BaseTypeTurnInput::objective_only(objective)) {
             Ok(outcome) => return outcome,
             Err(SimardError::AdapterInvocationFailed { reason, .. })
-                if reason.contains("Text file busy") =>
+                if is_transient_meeting_spawn_race(&reason) =>
             {
                 last_reason = reason;
                 std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
@@ -571,7 +591,7 @@ fn run_fake_meeting_turn(id: &str, binary: &str, objective: &str) -> BaseTypeOut
             Err(other) => panic!("meeting turn failed unexpectedly: {other:?}"),
         }
     }
-    panic!("meeting turn kept hitting a transient ETXTBSY race: {last_reason}");
+    panic!("meeting turn kept hitting a transient spawn/wait race: {last_reason}");
 }
 
 // ---------------------------------------------------------------------------
@@ -870,6 +890,134 @@ fn meeting_turn_evidence_shows_direct_copilot_command() {
         !cmd.contains("amplihack"),
         "meeting mode should NOT use 'amplihack copilot', got: {cmd}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cost accounting: meeting prompt tokens reflect the FULL enriched prompt
+// streamed on stdin, not the bare objective (issue #4164).
+// ---------------------------------------------------------------------------
+
+/// Run one hermetic meeting turn under a caller-supplied session id so the
+/// recorded cost ledger entry can be isolated from any concurrently-running
+/// meeting test that shares the default `make_request` session id. Mirrors the
+/// transient-`ETXTBSY` retry contract of [`run_fake_meeting_turn`].
+#[cfg(unix)]
+fn run_fake_meeting_turn_with_session(
+    id: &str,
+    binary: &str,
+    session_id: &str,
+    objective: &str,
+) -> BaseTypeOutcome {
+    let mut last_reason = String::new();
+    for attempt in 0..8 {
+        let request = BaseTypeSessionRequest {
+            session_id: SessionId::parse(session_id).unwrap(),
+            mode: OperatingMode::Meeting,
+            topology: RuntimeTopology::SingleProcess,
+            prompt_assets: vec![],
+            runtime_node: RuntimeNodeId::new("test-node"),
+            mailbox_address: RuntimeAddress::new("test://addr"),
+        };
+        let adapter = meeting_adapter(id, binary);
+        let mut session = adapter.open_session(request).unwrap();
+        session.open().unwrap();
+        match session.run_turn(BaseTypeTurnInput::objective_only(objective)) {
+            Ok(outcome) => return outcome,
+            Err(SimardError::AdapterInvocationFailed { reason, .. })
+                if reason.contains("Text file busy") =>
+            {
+                last_reason = reason;
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            Err(other) => panic!("meeting turn failed unexpectedly: {other:?}"),
+        }
+    }
+    panic!("meeting turn kept hitting a transient ETXTBSY race: {last_reason}");
+}
+
+/// Regression for issue #4164: a meeting turn must record the size of the FULL
+/// enriched prompt it streams to copilot on stdin — the preamble + identity
+/// context + objective wrapped in the `## Objective` / `## Instructions`
+/// scaffold — as its prompt-token cost, NOT the bare `input.objective`.
+///
+/// Before the fix, `run_meeting_turn` recorded `input.objective.len()`, so the
+/// dashboard Cost tab (`GET /api/costs`) undercounted meeting prompt tokens and
+/// showed an impossible `prompt_tokens ≪ completion_tokens` ratio, understating
+/// spend. The rendered prompt is strictly larger than the bare objective (the
+/// scaffold alone adds well over one token), so the recorded prompt tokens must
+/// exceed the bare objective's token count. This assertion FAILS on the buggy
+/// code (recorded == bare) and PASSES on the fix (recorded > bare).
+///
+/// HOME is redirected to a per-test temp dir so the cost ledger
+/// (`$HOME/.simard/costs/ledger.jsonl`) is isolated; the entry is matched by a
+/// unique session id so a concurrent meeting test sharing the process-global
+/// temp HOME cannot substitute its own entry. Mutating HOME requires the
+/// `cognitive_memory` serial key (see
+/// docs/testing/cognitive-memory-serial-isolation.md).
+#[cfg(unix)]
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective() {
+    let home = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: serialised via #[serial(cognitive_memory)] — no concurrent env
+    // mutation can tear this write (see the EnvBinding invariant in
+    // test_support::hermetic).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+    }
+
+    let result = std::panic::catch_unwind(|| {
+        let session_id = "session-00000000-0000-0000-0000-000000004164";
+        let objective = "Meeting objective body for the #4164 cost-accounting regression.";
+        let (_dir, bin) = fake_copilot("FAKE-COPILOT-OK: meeting reply");
+        run_fake_meeting_turn_with_session(
+            "copilot-meeting-cost-4164",
+            &bin,
+            session_id,
+            objective,
+        );
+
+        let ledger = home
+            .path()
+            .join(".simard")
+            .join("costs")
+            .join("ledger.jsonl");
+        let contents = std::fs::read_to_string(&ledger)
+            .expect("meeting turn must write a cost ledger entry under the temp HOME");
+        let entry = contents
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|e| {
+                e.get("session_id").and_then(|v| v.as_str()) == Some(session_id)
+                    && e.get("model").and_then(|v| v.as_str()) == Some("copilot-meeting")
+            })
+            .expect("a copilot-meeting cost entry for this session must be recorded");
+
+        let recorded_prompt_tokens = entry
+            .get("prompt_tokens_est")
+            .and_then(|v| v.as_u64())
+            .expect("prompt_tokens_est must be a number");
+        let bare_objective_tokens = crate::cost_tracking::estimate_tokens(objective.len());
+
+        assert!(
+            recorded_prompt_tokens > bare_objective_tokens,
+            "meeting prompt cost must reflect the full enriched prompt streamed on \
+             stdin (issue #4164), not the bare objective: \
+             recorded={recorded_prompt_tokens} bare_objective_tokens={bare_objective_tokens}"
+        );
+    });
+
+    // SAFETY: restore HOME before propagating any panic (same serial key).
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }
 
 // ---------------------------------------------------------------------------

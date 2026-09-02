@@ -1,3 +1,4 @@
+mod coin_gym;
 mod command_context;
 mod dispatch;
 mod evidence;
@@ -17,7 +18,7 @@ mod tests_dispatch_extra;
 pub use crate::operator_commands_engineer::{run_engineer_loop_probe, run_engineer_read_probe};
 pub use crate::operator_commands_gym::{
     run_gym_compare, run_gym_enrichment_ablation, run_gym_list, run_gym_recall_precision,
-    run_gym_scenario, run_gym_suite,
+    run_gym_reliability_gate, run_gym_scenario, run_gym_suite,
 };
 pub use crate::operator_commands_meeting::{
     run_goal_curation_probe, run_goal_curation_read_probe, run_improvement_curation_probe,
@@ -30,6 +31,7 @@ pub use crate::operator_commands_terminal::{
 };
 
 // Re-export pub items from sub-modules.
+pub use coin_gym::run_coin_gym_verify_probe;
 pub use dispatch::{
     dispatch_legacy_gym_cli, dispatch_operator_probe, dispatch_probe_with_context, gym_usage,
 };

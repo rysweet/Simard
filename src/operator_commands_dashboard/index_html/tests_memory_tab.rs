@@ -308,3 +308,116 @@ fn memory_graph_has_neutral_empty_state_message() {
          genuinely-empty store (distinct from the error overlay)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Recent-memories last-hour consistency: the headline count
+// (`#mem-recent-count` = `last_hour_count`) and the panel copy must never
+// contradict each other. On the library backend per-item listing is
+// unavailable (`available:false`, `items:[]`) yet `last_hour_count` can be
+// positive; the empty-items copy must therefore branch on `last_hour_count`,
+// not only on the aggregate `total`. Otherwise the panel shows e.g.
+// "313 items remembered in the last hour" beside "No new memories in the last
+// hour" — a self-contradiction that misreports live memory health.
+// ---------------------------------------------------------------------------
+
+/// The recent-memories empty-state must read the last-hour count and, when it is
+/// positive, must NOT emit the "No new memories in the last hour" copy — that
+/// would contradict the headline `#mem-recent-count` number.
+#[test]
+fn recent_memories_empty_state_branches_on_last_hour_count() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "fetchRecentMemories");
+    assert!(
+        body.contains("d.last_hour_count||0"),
+        "fetchRecentMemories must derive the last-hour count for its empty-state \
+         branch so a positive last-hour count is never rendered as \"No new \
+         memories in the last hour\" (which contradicts the #mem-recent-count \
+         headline); body: {body}"
+    );
+    assert!(
+        body.contains("recorded in the last hour"),
+        "when the last-hour count is positive but per-item detail is unavailable, \
+         the panel must state that memories WERE recorded in the last hour, \
+         consistent with the headline count; body: {body}"
+    );
+    // The truthful zero-window copy must still exist for last_hour_count == 0.
+    assert!(
+        body.contains("No new memories in the last hour"),
+        "the zero-last-hour branch must still say \"No new memories in the last \
+         hour\" when nothing was recorded this hour; body: {body}"
+    );
+    assert!(
+        body.contains("No memories stored yet"),
+        "the empty-store branch must still fall back to \"No memories stored yet\" \
+         when total is zero (#2358); body: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4318: honest last-hour WINDOW caption. The #mem-recent-count headline is net
+// long-term growth since the baseline snapshot; that window is ~1h in steady
+// state but can be MUCH wider when memory-history snapshots are sparse. The
+// caption must therefore reflect the true window (`last_hour_window_secs`)
+// instead of hardcoding "in the last hour".
+// ---------------------------------------------------------------------------
+
+/// The caption under the big number must be an addressable element the renderer
+/// can rewrite, not a hardcoded "in the last hour" literal.
+#[test]
+fn recent_memories_caption_is_addressable_for_honest_window() {
+    let html: &str = &INDEX_HTML;
+    assert!(
+        html.contains(r#"id="mem-recent-window""#),
+        "the last-hour caption must live in an addressable #mem-recent-window \
+         element so the renderer can label the TRUE covered window (#4318), not \
+         a hardcoded 'in the last hour' literal"
+    );
+}
+
+/// `formatWindowCaption` must implement the honest-window rule: keep "in the
+/// last hour" only near 1h (±15 min) or when the window is unknown, and
+/// otherwise render the real span in hours.
+#[test]
+fn format_window_caption_labels_the_true_window() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "formatWindowCaption");
+    assert!(
+        body.contains("in the last hour"),
+        "formatWindowCaption must keep the plain 'in the last hour' copy for the \
+         ~1h / unknown case; body: {body}"
+    );
+    assert!(
+        body.contains("900"),
+        "formatWindowCaption must apply a ±15 min (900s) tolerance around one \
+         hour before it claims 'in the last hour'; body: {body}"
+    );
+    assert!(
+        body.contains("3600"),
+        "formatWindowCaption must compare against the one-hour (3600s) edge; \
+         body: {body}"
+    );
+    assert!(
+        body.contains("/3600"),
+        "formatWindowCaption must render a wider window as hours (windowSecs/3600); \
+         body: {body}"
+    );
+}
+
+/// `fetchRecentMemories` must actually WIRE the true window into the caption
+/// element, feeding `last_hour_window_secs` through `formatWindowCaption`.
+#[test]
+fn fetch_recent_memories_wires_the_true_window_caption() {
+    let html: &str = &INDEX_HTML;
+    let body = js_function(html, "fetchRecentMemories");
+    assert!(
+        body.contains("formatWindowCaption(d.last_hour_window_secs)"),
+        "fetchRecentMemories must label the caption from the live \
+         last_hour_window_secs so a 2.6h delta is never shown as 'in the last \
+         hour' (#4318); body: {body}"
+    );
+    assert!(
+        body.contains("mem-recent-window"),
+        "fetchRecentMemories must update the #mem-recent-window caption element; \
+         body: {body}"
+    );
+}

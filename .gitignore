@@ -28,6 +28,10 @@ tests/e2e-dashboard/.audit-output/
 .simard/bin/simard.bak.*
 .local/
 
+# Stray runtime OTel/tracing log dump occasionally written to the repo root;
+# a runtime artifact, never source (issue #4505 outside-in cleanup).
+/err.log
+
 # mkdocs build output
 /site/
 
@@ -37,3 +41,4 @@ scripts/dashboard-audit/out/
 # Guard: never commit stray PR/engineer worktree dirs as gitlinks (breaks release checkout submodule step)
 pr*-worktree/
 *-worktree/
+.simard/

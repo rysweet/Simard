@@ -24,15 +24,47 @@ struct FakeEvidence {
     pr_merged: Result<bool, String>,
     issue_closed: Result<bool, String>,
     deployed: Result<bool, String>,
+    /// Models `GhCliEvidenceSource`'s issue-based merged-PR fallback (the
+    /// reconciliation fix, issue #12). `any_pr_merged` consults THIS field —
+    /// not `pr_merged` — precisely when the goal carries **no `pr` wip_ref but
+    /// does carry an `issue` wip_ref**: i.e. the merged PR's `pr` ref was pruned
+    /// by `reconcile_merged_prs` and the gate must recover the merged-PR
+    /// evidence from the linked issue.
+    ///
+    /// Additive/non-breaking: [`FakeEvidence::ok`] mirrors this to `pr_merged`,
+    /// so every pre-existing test (whose goals have a `pr` ref or no refs) is
+    /// byte-for-byte unaffected by the new dispatch.
+    issue_fallback_merged: Result<bool, String>,
 }
 
 impl FakeEvidence {
-    /// All three queries succeed with the given booleans.
+    /// All queries succeed with the given booleans. `issue_fallback_merged`
+    /// mirrors `pr_merged` so goals *without* an issue-only ref behave exactly
+    /// as they did before the fallback field existed (non-breaking).
     fn ok(pr_merged: bool, issue_closed: bool, deployed: bool) -> Self {
         Self {
             pr_merged: Ok(pr_merged),
             issue_closed: Ok(issue_closed),
             deployed: Ok(deployed),
+            issue_fallback_merged: Ok(pr_merged),
+        }
+    }
+
+    /// Model the pruned-`pr`-ref recovery path (issue #12): `any_pr_merged` must
+    /// ignore the (absent/would-be-`false`) tracked PR and instead return
+    /// `issue_fallback` resolved from the linked issue. `pr_merged` is pinned to
+    /// a would-be `false` so a passing verdict PROVES the evidence came from the
+    /// issue fallback, not a tracked PR.
+    fn issue_fallback(
+        issue_fallback: Result<bool, String>,
+        issue_closed: bool,
+        deployed: bool,
+    ) -> Self {
+        Self {
+            pr_merged: Ok(false),
+            issue_closed: Ok(issue_closed),
+            deployed: Ok(deployed),
+            issue_fallback_merged: issue_fallback,
         }
     }
 }
@@ -43,8 +75,24 @@ fn to_result(r: &Result<bool, String>) -> SimardResult<bool> {
 }
 
 impl EvidenceSource for FakeEvidence {
-    fn any_pr_merged(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
-        to_result(&self.pr_merged)
+    fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        // Faithful mirror of the production `GhCliEvidenceSource::any_pr_merged`
+        // dispatch: a tracked `pr` ref (fast path) OR no refs at all → the
+        // ordinary `pr_merged` answer; no `pr` ref but an `issue` ref present →
+        // the issue-based fallback (the reconciliation recovery path).
+        let has_pr = goal
+            .wip_refs
+            .iter()
+            .any(|r| r.kind.eq_ignore_ascii_case("pr"));
+        let has_issue = goal
+            .wip_refs
+            .iter()
+            .any(|r| r.kind.eq_ignore_ascii_case("issue"));
+        if !has_pr && has_issue {
+            to_result(&self.issue_fallback_merged)
+        } else {
+            to_result(&self.pr_merged)
+        }
     }
     fn issue_closed(&self, _goal: &ActiveGoal) -> SimardResult<bool> {
         to_result(&self.issue_closed)
@@ -135,6 +183,7 @@ fn blocked_could_not_verify_on_source_error_never_completes() {
         pr_merged: Err("gh timed out".to_string()),
         issue_closed: Ok(true),
         deployed: Ok(true),
+        issue_fallback_merged: Err("gh timed out".to_string()),
     });
     let v = gate.evaluate(&simard_goal("g", GoalProgress::Completed));
     assert!(!v.is_complete());
@@ -420,6 +469,7 @@ fn outcome_error_when_verification_query_failed() {
         pr_merged: Err("gh timed out".to_string()),
         issue_closed: Ok(true),
         deployed: Ok(true),
+        issue_fallback_merged: Err("gh timed out".to_string()),
     });
     let verdict = gate.evaluate(&goal);
     assert_eq!(
@@ -905,4 +955,264 @@ fn gh_source_first_ref_of_kind_matches_case_insensitively() {
     assert_eq!(super::first_ref_of_kind(&goal, "pr"), Some("101"));
     assert_eq!(super::first_ref_of_kind(&goal, "ISSUE"), Some("202"));
     assert_eq!(super::first_ref_of_kind(&goal, "commit"), None);
+}
+
+// --- Uniform fast-path injection guard (guard-symmetry follow-up) -----------
+//
+// The merged-PR issue fallback validated its `ref_id`/`repo_slug` before spawn,
+// but the pre-existing `pr`/`issue` fast paths forwarded raw values to
+// `gh_state`. These tests pin that `gh_state` now applies the SAME
+// `parse_ref_number` + `validate_repo_slug` guards, so a flag-like `ref_id` or
+// unsafe slug on the fast path fails **closed** (`Err`) BEFORE any `gh` spawn —
+// hermetically (no network), never reaching `gh` as an argument.
+
+#[test]
+fn gh_source_pr_fast_path_rejects_flag_like_ref_id_fail_closed() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g"); // repo_slug ⇒ valid "rysweet/amplihack-rs"
+    goal.wip_refs = vec![WipRef {
+        kind: "pr".to_string(),
+        ref_id: "-12 --json state".to_string(), // flag-injection attempt
+        label: "the pr".to_string(),
+        url: None,
+    }];
+    assert!(
+        source.any_pr_merged(&goal).is_err(),
+        "flag-like pr ref_id must fail closed before any `gh` spawn"
+    );
+}
+
+#[test]
+fn gh_source_issue_fast_path_rejects_flag_like_ref_id_fail_closed() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g");
+    goal.wip_refs = vec![WipRef {
+        kind: "issue".to_string(),
+        ref_id: "0".to_string(), // non-positive ⇒ rejected
+        label: "the issue".to_string(),
+        url: None,
+    }];
+    assert!(
+        source.issue_closed(&goal).is_err(),
+        "non-positive issue ref_id must fail closed before any `gh` spawn"
+    );
+}
+
+#[test]
+fn gh_source_fast_path_rejects_unsafe_repo_slug_fail_closed() {
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g");
+    goal.repo = Some("../evil".to_string()); // path-traversal slug
+    goal.wip_refs = vec![WipRef {
+        kind: "pr".to_string(),
+        ref_id: "101".to_string(), // otherwise-valid ref
+        label: "the pr".to_string(),
+        url: None,
+    }];
+    assert!(
+        source.any_pr_merged(&goal).is_err(),
+        "unsafe repo slug must fail closed before any `gh` spawn"
+    );
+}
+
+// ===========================================================================
+// issue #12 — completed-vs-PrNotMerged reconciliation (the systemic churn).
+//
+// Signature of the defect: 9 goals show STATUS=completed in `simard goal list`
+// yet EVERY OODA cycle re-blocks them with "completion BLOCKED … missing PR not
+// merged" (17/17 cycles = 153 identical emissions over 6h). Confirmed cause:
+// `reconcile_merged_prs` prunes the merged PR's `pr` wip_ref (not-open ⇒
+// deleted) BEFORE the gate reads it, and the documented issue-based fallback in
+// `any_pr_merged` is unimplemented — so a genuinely-merged goal is perpetually
+// reported PrNotMerged.
+//
+// The fix makes `GhCliEvidenceSource::any_pr_merged` fall back — when no `pr`
+// wip_ref exists — to detecting a merged PR referencing the goal's linked
+// issue, scoped by the goal's own `repo_slug` (cross-repo aware), fail-closed on
+// any verification error, and guarded so it never over-fetches.
+//
+// These tests are RED until that fallback + its input-validation guards exist:
+//   * The gate-level tests drive the extended `FakeEvidence` fallback contract
+//     (the reconciliation invariant, cross-repo recovery, fail-closed).
+//   * The `GhCliEvidenceSource` tests drive the PRODUCTION dispatch + argument-
+//     injection guards on the network-free (short-circuiting) paths only; the
+//     merged-happy-path is intentionally NOT exercised here (it shells out to
+//     `gh` and is non-hermetic), mirroring this module's existing convention.
+// ===========================================================================
+
+/// A goal whose merged PR's `pr` wip_ref has been pruned by
+/// `reconcile_merged_prs`, leaving only the linked `issue` ref. This is the
+/// exact on-board shape of the 9 churning goals.
+fn pruned_pr_completed_goal(id: &str, repo: Option<&str>, issue_num: &str) -> ActiveGoal {
+    let mut g = simard_goal(id, GoalProgress::Completed);
+    g.repo = repo.map(|r| r.to_string());
+    g.wip_refs = vec![WipRef {
+        kind: "issue".to_string(),
+        ref_id: issue_num.to_string(),
+        label: format!("issue #{issue_num}"),
+        url: None,
+    }];
+    g
+}
+
+#[test]
+fn reconciliation_pruned_pr_ref_completed_goal_recovers_merged_via_issue_fallback() {
+    // THE headline invariant (requirement #5 — kills the 153-emission churn):
+    // a genuinely-completed goal whose merged PR's `pr` wip_ref was pruned still
+    // carries its linked `issue` ref. The gate MUST recover merged-PR evidence
+    // via the issue fallback and return Complete instead of re-blocking with
+    // PrNotMerged every cycle. `pr_merged` is pinned false, so a Complete
+    // verdict proves the evidence came from the issue fallback, not a tracked PR.
+    let goal = pruned_pr_completed_goal(
+        "simard-example-identity-gastronome-culinary-men-84186abe",
+        Some("amplihack-rs"), // off-repo ⇒ deploy clause skipped
+        "84186",
+    );
+    let gate = CompletionEvidenceGate::new(FakeEvidence::issue_fallback(Ok(true), true, true));
+    let verdict = gate.evaluate(&goal);
+    assert!(
+        verdict.is_complete(),
+        "pruned-`pr` completed goal must recover merged via issue fallback, got {verdict:?}"
+    );
+    // And it is NOT re-blocked with PrNotMerged (the churn signal).
+    if let CompletionVerdict::Blocked { missing, .. } = &verdict {
+        assert!(
+            !missing.contains(&MissingEvidence::PrNotMerged),
+            "reconciled goal must never re-surface PrNotMerged, got {missing:?}"
+        );
+    }
+}
+
+#[test]
+fn reconciliation_still_blocks_when_no_merged_pr_recoverable() {
+    // The fallback must not fabricate completion: if the linked issue has NO
+    // merged PR (fallback ⇒ false), a completed goal is still honestly blocked
+    // with PrNotMerged. Prevents the fix from becoming a rubber-stamp.
+    let goal = pruned_pr_completed_goal("g", Some("amplihack-rs"), "12");
+    let gate = CompletionEvidenceGate::new(FakeEvidence::issue_fallback(Ok(false), true, true));
+    let verdict = gate.evaluate(&goal);
+    assert!(!verdict.is_complete());
+    assert!(
+        blocked_missing(&verdict).contains(&MissingEvidence::PrNotMerged),
+        "no recoverable merged PR ⇒ must still block PrNotMerged, got {verdict:?}"
+    );
+}
+
+#[test]
+fn reconciliation_cross_repo_agent_kgpacks_recovers_via_issue_fallback() {
+    // Cross-repo variant (requirement #7b): the 8 agent-kgpacks-rs goals
+    // (issues #12/#18/#19/#20/#21/#22/#23/#25) live in rysweet/agent-kgpacks-rs,
+    // NOT Simard. The fallback must recover their merged PRs using the goal's
+    // OWN repo slug, not Simard's default owner/repo.
+    let goal = pruned_pr_completed_goal(
+        "agent-kgpacks-rs-issue-12",
+        Some("rysweet/agent-kgpacks-rs"),
+        "12",
+    );
+    let gate = CompletionEvidenceGate::new(FakeEvidence::issue_fallback(Ok(true), true, true));
+    assert!(
+        gate.evaluate(&goal).is_complete(),
+        "cross-repo completed goal must recover merged via issue fallback"
+    );
+    // The production source must resolve the cross-repo slug VERBATIM (already-
+    // qualified `owner/repo`), so the fallback queries agent-kgpacks-rs — not
+    // rysweet/Simard — for the merged PR.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    assert_eq!(source.repo_slug(&goal), "rysweet/agent-kgpacks-rs");
+}
+
+#[test]
+fn reconciliation_fail_closed_when_issue_fallback_verify_errors() {
+    // Requirement #4 (fail-closed invariant, a security property): a `gh`
+    // failure in the issue fallback MUST surface as CouldNotVerify — never a
+    // silent Ok(false) (which would both mis-block a merged goal and, worse,
+    // risk archiving a genuinely-unmerged goal on unverifiable data).
+    let goal = pruned_pr_completed_goal("g", Some("amplihack-rs"), "12");
+    let gate = CompletionEvidenceGate::new(FakeEvidence::issue_fallback(
+        Err("gh api graphql timed out".to_string()),
+        true,
+        true,
+    ));
+    let verdict = gate.evaluate(&goal);
+    assert!(!verdict.is_complete());
+    assert!(
+        blocked_missing(&verdict)
+            .iter()
+            .any(|m| matches!(m, MissingEvidence::CouldNotVerify { .. })),
+        "issue-fallback error must be CouldNotVerify (fail-closed), got {verdict:?}"
+    );
+    // A fallback error is "unknown", never a refutation.
+    assert_eq!(
+        classify_outcome(&goal, &verdict),
+        VerificationOutcome::Error
+    );
+}
+
+// --- GhCliEvidenceSource: production dispatch + injection guards (hermetic) ---
+//
+// Only the network-free, short-circuiting paths are asserted: the over-fetch
+// guard (no `issue` ref ⇒ no query) and the argument-injection guards (malformed
+// `ref_id`/`repo_slug` ⇒ Err BEFORE any `gh` invocation). The valid-input happy
+// path deliberately shells out and is not asserted here.
+
+#[test]
+fn gh_source_no_pr_no_issue_ref_skips_fallback_without_network() {
+    // Over-fetch guard (design risk: unguarded per-cycle network call ⇒ rate
+    // limits): the issue fallback fires ONLY when an `issue` ref is present.
+    // With neither a `pr` nor an `issue` ref, `any_pr_merged` must answer
+    // `false` cheaply — no subprocess.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let goal = no_signal_goal("g"); // off-repo, no wip_refs
+    assert!(
+        !source
+            .any_pr_merged(&goal)
+            .expect("no-ref path must not error"),
+        "no `pr` and no `issue` ref ⇒ no merge evidence, no network"
+    );
+}
+
+#[test]
+fn gh_source_issue_fallback_rejects_non_numeric_ref_id_fail_closed() {
+    // Argument-injection guard: the issue `ref_id` must parse as a u64 and, on
+    // failure, return Err (→ CouldNotVerify) BEFORE any `gh` call — never
+    // Ok(false), and never passed through to `gh` where a leading `-`/space
+    // could be interpreted as a flag. Today this path returns a cheap Ok(false)
+    // (the `pr`-ref is absent), so this test is RED until the fallback + guard
+    // land.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g");
+    goal.repo = Some("rysweet/agent-kgpacks-rs".to_string());
+    goal.wip_refs = vec![WipRef {
+        kind: "issue".to_string(),
+        ref_id: "-12 --json state".to_string(), // leading `-`, space, flag-like
+        label: "malicious".to_string(),
+        url: None,
+    }];
+    let out = source.any_pr_merged(&goal);
+    assert!(
+        out.is_err(),
+        "malformed issue ref_id must fail closed (never Ok), got {out:?}"
+    );
+}
+
+#[test]
+fn gh_source_issue_fallback_rejects_path_traversal_repo_slug_fail_closed() {
+    // Argument/GraphQL-injection guard on the repo slug: a slug containing `..`
+    // path-traversal (or other metachars) must be rejected to Err before the
+    // network call. The `pr`-ref is absent and the `issue` ref is well-formed,
+    // so ONLY the slug guard can produce the Err.
+    let source = GhCliEvidenceSource::new("/nonexistent/repo/dir");
+    let mut goal = no_signal_goal("g");
+    goal.repo = Some("rysweet/../secrets".to_string()); // `..` traversal, verbatim slug
+    goal.wip_refs = vec![WipRef {
+        kind: "issue".to_string(),
+        ref_id: "12".to_string(),
+        label: "linked".to_string(),
+        url: None,
+    }];
+    let out = source.any_pr_merged(&goal);
+    assert!(
+        out.is_err(),
+        "path-traversal repo slug must fail closed (never Ok), got {out:?}"
+    );
 }

@@ -1,5 +1,5 @@
-name: "Dependabot-resolvable taiki-e/install-action pins"
-description: "Outside-in verification that every taiki-e/install-action pin in the CI workflows is SHA-pinned to a default-branch-reachable version-tag release (# v2...) with the tool selected via the `with: tool:` input, so GitHub's Dependabot github_actions updater can resolve it. Guards against reintroducing the per-tool-tag pins whose diverged commits made the default-branch dependabot-updates run fail with 'no such commit'."
+name: "Dependabot-resolvable taiki-e/install-action and dtolnay/rust-toolchain pins"
+description: "Outside-in verification that every taiki-e/install-action and dtolnay/rust-toolchain pin in the CI workflows and in-repo composite actions is SHA-pinned to a default-branch-reachable version-tag release (# v2... / # v1) with the tool/toolchain selected via the `with:` input, so GitHub's Dependabot github_actions updater can resolve it. Guards against reintroducing the per-tool-tag or per-channel-branch pins whose diverged commits made the default-branch dependabot-updates run fail with 'no such commit'."
 version: "1.0.0"
 
 config:
@@ -27,7 +27,7 @@ agents:
         logLevel: "info"
 
 steps:
-  - name: "install-action pins are SHA + version-tag (Dependabot-resolvable)"
+  - name: "install-action & rust-toolchain pins are SHA + version-tag (Dependabot-resolvable)"
     agent: "cli-agent"
     action: "execute_command"
     params:

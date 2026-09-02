@@ -753,10 +753,13 @@ fn humanize_tick_surfaces_symptom_mitigation_count() {
 // Section D — operator notification + memory accumulation
 // ════════════════════════════════════════════════════════════════════════════
 
-/// The blocked-goal escalation notification carries the WHY in its body, so the
-/// operator receives the root-cause analysis (not just the bare symptom).
+/// The blocked-goal escalation now hands off to the AGENTIC triage recipe (issue
+/// #4276): `act` LAUNCHES the triage workstream (the recipe owns the
+/// escalate-vs-course-correct decision) and, in parallel, notifies the operator
+/// in PLAIN ENGLISH — the body carries the human-readable problem + recommended
+/// next step, never the raw machine marker or the internal `why=` diagnostic.
 #[test]
-fn escalate_blocked_goal_notification_carries_the_why() {
+fn escalate_blocked_goal_notifies_operator_in_plain_english() {
     let (store, _log) = FakeGoalStore::new(vec![]);
     let (notifier, email_log, signal_log) = dual_recording_notifier();
     let mut ov = Overseer::new(caps_with(ObservedState::default(), Box::new(store)))
@@ -764,30 +767,45 @@ fn escalate_blocked_goal_notification_carries_the_why() {
         .with_goal_health_enabled(true)
         .with_operator_notifier(Box::new(notifier));
 
-    let why = "brain-failure safeguard tripped 3× — upstream reasoner regression in advance_goal";
     let out = ov.act(&Intervention::EscalateBlockedGoal {
         goal_id: "feature-x".to_string(),
         reason: brain_failure_reason(3),
-        why: why.to_string(),
+        why: "brain-failure safeguard tripped 3× — upstream reasoner regression".to_string(),
+        problem:
+            "Goal \"feature-x\" is stuck: Simard can't automatically tell when it is finished."
+                .to_string(),
+        next_step:
+            "Give the goal a checkable finish line, or close it if a merged PR delivered it."
+                .to_string(),
+        link: Some("https://github.com/rysweet/Simard/issues/4001".to_string()),
     });
     assert!(
-        matches!(out, Ok(ActOutcome::GoalEscalated { .. })),
-        "the escalation is dispatched: {out:?}"
+        matches!(out, Ok(ActOutcome::Launched(_))),
+        "the escalation launches the agentic triage workstream: {out:?}"
     );
 
     for (chan, log) in [("email", &email_log), ("signal", &signal_log)] {
         let seen = log.lock().unwrap();
         assert_eq!(seen.len(), 1, "the {chan} channel received the escalation");
         let n = &seen[0];
+        let body = n.plain_text();
         assert!(
-            n.problem.contains(why),
-            "the {chan} notification body carries the WHY: {:?}",
-            n.problem
+            !body.contains("Problem solved:"),
+            "the {chan} escalation must not claim the problem is solved: {body:?}"
         );
         assert!(
-            n.problem.to_lowercase().contains("why"),
-            "the {chan} notification labels the root-cause line: {:?}",
+            n.problem.contains("stuck"),
+            "the {chan} notification body carries the plain-English problem: {:?}",
             n.problem
+        );
+        assert_eq!(
+            n.next_step,
+            "Give the goal a checkable finish line, or close it if a merged PR delivered it.",
+            "the {chan} notification carries the recommended next step"
+        );
+        assert!(
+            !body.contains("why="),
+            "the {chan} notification never surfaces the raw diagnostic marker: {body:?}"
         );
     }
 }
@@ -903,4 +921,165 @@ fn remediation_class_and_addressed_flag_are_consistent() {
         let _: &PlannedIntervention = planned;
         check(&planned.remediation);
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Section G — issue #4128: self-observation stability (RED, TDD Step 7)
+//
+// The live incident: the Overseer re-observes its OWN emitted observation
+// (`overseer-obs:…`) and the recurrence counter self-amplifies, so a static,
+// unresolved set surfaces as "recurring signature seen 2× in cognitive memory".
+// These tests pin the two overseer-side fixes:
+//   D1  — emission hygiene: a recall-derived `overseer-obs:*` problem must NEVER
+//         re-enter the write-back, so the loop is broken at the write boundary.
+//   D2b — recurrence stability: occurrence memory UPSERTS one count-in-content
+//         fact per signature (not one appended fact per cycle), so recurrence is
+//         honest and stable, never self-amplified.
+// RED until the D1 filter + D2b count-in-content upsert land.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// A first-order problem the Overseer genuinely observed this cycle.
+fn first_order_blocked_problem() -> Problem {
+    Problem {
+        kind: ProblemKind::GoalHygiene,
+        priority: Priority::High,
+        dedup_key: "goal:blocked:research".to_string(),
+        summary: "goal research blocked — needs human review".to_string(),
+        evidence: vec![],
+        why: None,
+    }
+}
+
+/// A recall-derived problem: the Overseer's OWN prior observation, read back out
+/// of cognitive memory as a `RecurringSignature` and admitted as a ProcessHealth
+/// problem whose dedup key is the `overseer-obs:` write-back signature. Feeding
+/// THIS back into a write-back is the self-referential loop under repair.
+fn recall_derived_self_observation() -> Problem {
+    Problem {
+        kind: ProblemKind::ProcessHealth,
+        priority: Priority::High,
+        dedup_key: "overseer-obs:goal:blocked:research".to_string(),
+        summary: "recurring signature seen 2× in cognitive memory \
+                  (overseer-obs:goal:blocked:research)"
+            .to_string(),
+        evidence: vec![],
+        why: None,
+    }
+}
+
+/// D1: the write-back signature MUST exclude recall-derived `overseer-obs:*`
+/// problems, so the Overseer never records an observation OF its own observation.
+/// The only surviving key is the first-order problem's — no nested prefix.
+#[test]
+fn observation_signature_excludes_recall_derived_overseer_obs_problems() {
+    let problems = vec![
+        first_order_blocked_problem(),
+        recall_derived_self_observation(),
+    ];
+
+    let sig = super::observation_signature(&problems);
+
+    assert_eq!(
+        sig, "overseer-obs:goal:blocked:research",
+        "the write-back signature keys ONLY the first-order problem; the \
+         recall-derived overseer-obs:* key is filtered out: {sig}"
+    );
+    assert!(
+        !sig.contains("overseer-obs:overseer-obs:"),
+        "the write-back signature must never nest an overseer-obs: prefix: {sig}"
+    );
+}
+
+/// D1: a tick whose ONLY problems are recall-derived self-observations records
+/// NOTHING (`Ok(None)`). Without this, each window records an observation of the
+/// prior observation, which recall re-surfaces next window — the 2× loop.
+#[test]
+fn write_back_of_only_recall_derived_problems_records_nothing() {
+    let (store, _log) = FakeGoalStore::new(vec![]);
+    let mut ov = Overseer::new(caps_with(ObservedState::default(), Box::new(store)))
+        .with_memory_recall_enabled(true);
+
+    let only_self = vec![recall_derived_self_observation()];
+    let outcome = ov
+        .write_back_observation(&only_self)
+        .expect("write-back must not error");
+
+    assert!(
+        outcome.is_none(),
+        "a purely self-referential observation set records nothing (breaks the \
+         overseer-obs self-observation loop): {outcome:?}"
+    );
+}
+
+/// D2b: occurrence memory UPSERTS one count-in-content fact per signature rather
+/// than appending a new fact every cycle. After K record_occurrence calls for the
+/// SAME (signature, cause), exactly ONE occurrence fact exists and it carries a
+/// bounded `count` reflecting all K occurrences — so recurrence is stable and
+/// still reaches the escalation threshold, without self-amplifying row growth.
+#[test]
+fn record_occurrence_upserts_a_single_count_in_content_fact() {
+    let mem = in_memory();
+    let (store, _log) = FakeGoalStore::new(vec![]);
+    let ov = Overseer::new(caps_with(ObservedState::default(), Box::new(store)))
+        .with_memory(Arc::clone(&mem));
+
+    let entry = ProblemEntry {
+        key: "goal:blocked:research".to_string(),
+        summary: "goal research blocked".to_string(),
+        why: RootCause {
+            candidates: vec![crate::overseer::signal::CauseCandidate {
+                label: "parked-by-no-progress-safeguard".to_string(),
+                likelihood: Likelihood::High,
+                evidence: vec!["blocked_goal.reason: no-progress OODA-SAFEGUARD".to_string()],
+            }],
+            primary_rationale: "perpetual goal parked by the no-progress safeguard".to_string(),
+            confidence: Confidence::High,
+            source: CauseSource::Telemetry,
+            recurrence: 0,
+        },
+        action: "unblock_goal".to_string(),
+        remediation: Remediation {
+            class: RemediationClass::SymptomMitigation,
+            root_cause_addressed: false,
+            unaddressed_note: Some("root cause remains unaddressed".to_string()),
+        },
+    };
+    let outcome = ActOutcome::GoalUnblocked {
+        goal_id: "research".to_string(),
+    };
+
+    // Record the SAME occurrence across several cycles (as a persistently-blocked
+    // goal would each tick).
+    const K: usize = RECURRENCE_ESCALATION_THRESHOLD as usize + 2;
+    for _ in 0..K {
+        ov.record_occurrence(&entry, &outcome);
+    }
+
+    let concept = super::occurrence_concept(&entry.key);
+    let facts = mem
+        .search_facts(&concept, 256, 0.0)
+        .expect("occurrence recall must not error");
+    let occurrences: Vec<&crate::memory_cognitive::CognitiveFact> = facts
+        .iter()
+        .filter(|f| f.content.contains(&entry.key))
+        .collect();
+
+    assert_eq!(
+        occurrences.len(),
+        1,
+        "record_occurrence UPSERTS one occurrence fact per signature — appending a \
+         fresh fact every cycle is exactly the self-amplification #4128 fixes; got {} facts",
+        occurrences.len()
+    );
+
+    let value: serde_json::Value =
+        serde_json::from_str(&occurrences[0].content).expect("a stored occurrence is JSON");
+    let count = value
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .expect("the upserted occurrence carries a bounded count-in-content");
+    assert!(
+        count >= K as u64,
+        "the count-in-content reflects every occurrence (bounded/saturating): {count} >= {K}"
+    );
 }

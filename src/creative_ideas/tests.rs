@@ -1470,6 +1470,15 @@ impl OodaBrain for ScriptedDedupBrain {
         })
     }
 
+    fn decide_per_goal_cycle(
+        &self,
+        _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+    ) -> SimardResult<crate::ooda_brain::PerGoalAction> {
+        Ok(crate::ooda_brain::PerGoalAction::Continue {
+            reason: "unused".into(),
+        })
+    }
+
     fn decide_idea_dedup(&self, _ctx: &IdeaDedupCtx) -> SimardResult<IdeaDedupDecision> {
         self.decisions
             .lock()

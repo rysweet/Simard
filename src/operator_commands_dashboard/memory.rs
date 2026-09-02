@@ -18,6 +18,13 @@ const SNAPSHOT_MIN_INTERVAL_SECS: i64 = 300;
 /// (#2679). A snapshot whose `epoch_secs` is at-or-before `now - this` is the
 /// one-hour-ago baseline the live long-term total is diffed against.
 const TRAILING_WINDOW_SECS: f64 = 3600.0;
+/// Trailing window, in seconds, over which the "mem/hr" growth rate is measured
+/// (#4107). The rate is a *recent-activity* signal, so it is anchored at the
+/// newest sample and looks back at most this far — 24 hours. Older snapshots in
+/// the retained ring buffer (which spans weeks, including multi-day
+/// daemon-down gaps) are ignored so an active hour of memory formation is not
+/// diluted to ~0/hr by a multi-week denominator.
+const GROWTH_RATE_WINDOW_SECS: f64 = 86_400.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MemorySnapshot {
@@ -94,40 +101,73 @@ pub(crate) fn trend_label(deltas: &MemoryDeltas) -> &'static str {
     }
 }
 
-/// Compute a per-hour growth rate from a slice of snapshots using the oldest
-/// and newest entries within the window.
+/// A zero growth-rate payload — every rail reports `0.0/hr`. Returned when
+/// there is no usable pair of samples inside the trailing window (fewer than
+/// two snapshots, no prior sample within the window, or a degenerate zero-span
+/// pair), so the served rate is an honest "insufficient recent data" rather
+/// than a distorted whole-history figure.
+fn zero_rate() -> Value {
+    json!({
+        "total": 0.0,
+        "long_term_total": 0.0,
+        "episodic": 0.0,
+        "semantic": 0.0,
+        "procedural": 0.0,
+        "prospective": 0.0,
+    })
+}
+
+/// Compute a per-hour memory growth rate over a bounded trailing window (#4107).
+///
+/// The rate is a *recent-activity* signal. It is anchored at the **newest**
+/// snapshot and diffs against the **oldest snapshot still inside the trailing
+/// [`GROWTH_RATE_WINDOW_SECS`] window** (`epoch_secs >= newest - window`, edge
+/// inclusive). Snapshots older than the window — which in the retained
+/// ring-buffer can be weeks old and separated by multi-day daemon-down gaps —
+/// are ignored so they cannot dilute the denominator.
+///
+/// Returns [`zero_rate`] when there is no usable in-window pair:
+///   * fewer than two snapshots total;
+///   * only the newest sample lies inside the window (fresh daemon after a long
+///     gap) — an honest "insufficient recent data" rather than a distorted
+///     whole-span figure;
+///   * the in-window baseline and newest share an epoch (zero elapsed span).
+///
+/// This mirrors the bounded-window discipline of [`select_last_hour_baseline`]
+/// (#2679); the previous implementation used `snapshots[0]` (oldest *retained*)
+/// and divided by the full multi-week span, so the advertised "per hour" figure
+/// was meaningless.
 pub(crate) fn rate_per_hour(snapshots: &[MemorySnapshot]) -> Value {
     if snapshots.len() < 2 {
-        return json!({
-            "total": 0.0,
-            "long_term_total": 0.0,
-            "episodic": 0.0,
-            "semantic": 0.0,
-            "procedural": 0.0,
-            "prospective": 0.0,
-        });
+        return zero_rate();
     }
-    let oldest = &snapshots[0];
     let newest = &snapshots[snapshots.len() - 1];
-    let elapsed_hours = (newest.epoch_secs - oldest.epoch_secs) / 3600.0;
+    let window_start = newest.epoch_secs - GROWTH_RATE_WINDOW_SECS;
+
+    // Oldest snapshot at-or-after the window edge, excluding the newest itself.
+    // The buffer is appended in time order, so the first in-window entry is the
+    // oldest one inside the window.
+    let baseline = snapshots[..snapshots.len() - 1]
+        .iter()
+        .find(|s| s.epoch_secs >= window_start);
+
+    let baseline = match baseline {
+        Some(b) => b,
+        None => return zero_rate(),
+    };
+
+    let elapsed_hours = (newest.epoch_secs - baseline.epoch_secs) / 3600.0;
     if elapsed_hours < 0.001 {
-        return json!({
-            "total": 0.0,
-            "long_term_total": 0.0,
-            "episodic": 0.0,
-            "semantic": 0.0,
-            "procedural": 0.0,
-            "prospective": 0.0,
-        });
+        return zero_rate();
     }
     let rate = |newer: u64, older: u64| -> f64 { (newer as f64 - older as f64) / elapsed_hours };
     json!({
-        "total": rate(newest.total, oldest.total),
-        "long_term_total": rate(newest.long_term_total, oldest.long_term_total),
-        "episodic": rate(newest.episodic, oldest.episodic),
-        "semantic": rate(newest.semantic, oldest.semantic),
-        "procedural": rate(newest.procedural, oldest.procedural),
-        "prospective": rate(newest.prospective, oldest.prospective),
+        "total": rate(newest.total, baseline.total),
+        "long_term_total": rate(newest.long_term_total, baseline.long_term_total),
+        "episodic": rate(newest.episodic, baseline.episodic),
+        "semantic": rate(newest.semantic, baseline.semantic),
+        "procedural": rate(newest.procedural, baseline.procedural),
+        "prospective": rate(newest.prospective, baseline.prospective),
     })
 }
 
@@ -219,6 +259,7 @@ pub(crate) async fn memory_history() -> Json<Value> {
         "snapshots": history,
         "deltas": deltas,
         "rate_per_hour": rate,
+        "rate_window_secs": GROWTH_RATE_WINDOW_SECS,
         "trend": trend,
         "snapshot_count": history.len(),
         "sample_interval_seconds": SNAPSHOT_MIN_INTERVAL_SECS,
@@ -242,6 +283,26 @@ pub(crate) async fn memory_history() -> Json<Value> {
 ///   3. Empty history has no baseline (`None`); the caller then diffs the live
 ///      total against itself, yielding an honest `0`.
 pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f64) -> Option<u64> {
+    select_last_hour_baseline_snapshot(history, now_secs).map(|s| s.long_term_total)
+}
+
+/// Select the SNAPSHOT that best represents "one hour ago" for the trailing-hour
+/// delta (#2679 / #4318), returning the whole snapshot so the caller can read
+/// both its `long_term_total` (the baseline count) AND its `epoch_secs` (to
+/// compute the *actual* window the count covers).
+///
+/// The selection rule is identical to [`select_last_hour_baseline`] — the
+/// scalar helper delegates here — but exposing the snapshot lets
+/// [`memory_recent_at`] surface `last_hour_window_secs = now − baseline.epoch`.
+/// That window can legitimately exceed one hour when `memory_history.json` has a
+/// gap wider than an hour straddling the 1 h mark: the most-recent snapshot
+/// at-or-before `now − 3600` is then arbitrarily older than 1 h, so the count is
+/// net growth over that *longer* span. Surfacing the true window lets the
+/// caption stay honest instead of hardcoding "in the last hour" (#4318).
+pub(crate) fn select_last_hour_baseline_snapshot(
+    history: &[MemorySnapshot],
+    now_secs: f64,
+) -> Option<&MemorySnapshot> {
     if history.is_empty() {
         return None;
     }
@@ -256,22 +317,27 @@ pub(crate) fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f6
         .filter(|s| s.epoch_secs <= cutoff)
         .max_by(cmp_epoch)
         .or_else(|| history.iter().min_by(cmp_epoch))
-        .map(|s| s.long_term_total)
 }
 
 /// `GET /api/memory/recent` — recent-memory listing.
 ///
 /// De-fork Phase 2b (issue #2307): this panel previously enumerated every
 /// node type with raw Cypher against the deleted native LadybugDB schema. The
-/// library backend exposes no equivalent "list all nodes by type" API through
-/// `CognitiveMemoryOps`, so the per-item listing is reported as unavailable
-/// rather than reading the abandoned native store.
+/// per-item listing was then stubbed to always-empty on the library backend.
 ///
-/// The *aggregate* stored total, however, is available via the same
-/// `get_statistics()` path that `/api/memory/history` uses. We surface it as
-/// `total` so the Memory tab can stop telling a human "No memories stored yet"
-/// while tens of thousands of memories are actually held (#2358). The per-item
-/// list stays empty/unavailable on this backend.
+/// That stub was stale: the same shared reader (`open_reader_client`) that
+/// backs `/api/memory/graph` DOES enumerate per-item memory through
+/// `CognitiveMemoryOps::list_all_episodes` (newest-first by `temporal_index`).
+/// So the Memory tab's "Recent Memories" panel (frontend #1997) — which already
+/// ships a renderer expecting `items:[{category,summary,timestamp}]` — was
+/// permanently empty even while the daemon logged thousands of episodes. We now
+/// populate `items` from the most recent episodes so the panel answers "what
+/// has Simard been remembering/observing recently?".
+///
+/// The *aggregate* stored total is available via the same `get_statistics()`
+/// path that `/api/memory/history` uses. We surface it as `total` so the Memory
+/// tab can stop telling a human "No memories stored yet" while tens of
+/// thousands of memories are actually held (#2358).
 ///
 /// `last_hour_count` (#2679): this field previously returned a hardcoded literal
 /// `0` — a placeholder left by de-fork Phase 2b (#2307) — so the dashboard told
@@ -295,31 +361,58 @@ pub(crate) async fn memory_recent() -> Json<Value> {
 /// (see [`select_last_hour_baseline`]). The read fails closed: on a live-read
 /// error it returns an `error` payload with `last_hour_count: null` — never a
 /// misleading `0`.
+///
+/// `last_hour_window_secs` (#4318): the ACTUAL span the count covers,
+/// `now − baseline.epoch_secs`. It is ~3600 in steady state but can be larger
+/// when `memory_history.json` has a gap wider than an hour straddling the 1 h
+/// mark (the baseline is then older than 1 h, so the count is net growth over
+/// that longer span). The frontend labels the true window instead of hardcoding
+/// "in the last hour". `null` when there is no baseline snapshot at all.
 pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value> {
-    // Preserved back-compat note describing the per-item listing limitation.
-    let note = "Per-item recent-memory listing is unavailable on the library \
-                backend (de-fork Phase 2b, #2307); `total` is the live aggregate \
-                stored count. See /api/memory/history for the per-type breakdown.";
+    let note = "Recent items are the newest episodic memories (events Simard \
+                recorded), newest-first; `total` is the live aggregate stored \
+                count across all six memory types. See /api/memory/graph for the \
+                full per-type graph and /api/memory/history for the per-type \
+                growth breakdown.";
 
-    // Live read via the SAME shared reader path `/api/memory/history` uses so
-    // the count reflects real writes, not a divergent store.
-    let stats =
-        match open_reader_client(state_root).and_then(|reader| reader.ops().get_statistics()) {
-            Ok(s) => s,
-            Err(e) => {
-                // Fail closed (#2561 prior art): surface the error and emit a null
-                // count so the frontend renders "—", never a misleading 0.
-                return Json(json!({
-                    "items": [],
-                    "total": Value::Null,
-                    "last_hour_count": Value::Null,
-                    "available": false,
-                    "note": note,
-                    "error": format!("Cannot read cognitive memory: {e}"),
-                    "server_time": chrono::Utc::now().to_rfc3339(),
-                }));
-            }
-        };
+    // Open the shared reader ONCE and reuse it for both the aggregate statistics
+    // (drives `last_hour_count`/`total`) and the per-item episode enumeration
+    // (drives `items`) — the same reader path `/api/memory/graph` uses, so the
+    // listing reflects real writes, not a divergent store.
+    let reader = match open_reader_client(state_root) {
+        Ok(r) => r,
+        Err(e) => {
+            // Fail closed (#2561 prior art): surface the error and emit a null
+            // count so the frontend renders "—", never a misleading 0.
+            return Json(json!({
+                "items": [],
+                "total": Value::Null,
+                "last_hour_count": Value::Null,
+                "last_hour_window_secs": Value::Null,
+                "available": false,
+                "note": note,
+                "error": format!("Cannot read cognitive memory: {e}"),
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+    };
+    let ops = reader.ops();
+
+    let stats = match ops.get_statistics() {
+        Ok(s) => s,
+        Err(e) => {
+            return Json(json!({
+                "items": [],
+                "total": Value::Null,
+                "last_hour_count": Value::Null,
+                "last_hour_window_secs": Value::Null,
+                "available": false,
+                "note": note,
+                "error": format!("Cannot read cognitive memory: {e}"),
+                "server_time": chrono::Utc::now().to_rfc3339(),
+            }));
+        }
+    };
 
     let total = stats.total();
     // "Remembered" ⇒ consolidated long-term memory (facts + procedures +
@@ -339,17 +432,74 @@ pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value
     // Absent a one-hour-ago baseline (empty history), diff the live total
     // against itself → honest 0. `saturating_sub` clamps a pruning-dominated
     // (net-negative) interval to 0 without underflowing.
+    let baseline_snapshot = select_last_hour_baseline_snapshot(&history, now_secs);
     let baseline = select_last_hour_baseline(&history, now_secs).unwrap_or(live_long_term);
     let last_hour_count = live_long_term.saturating_sub(baseline);
+    // The ACTUAL window the count covers (#4318): `now − baseline.epoch`. When
+    // history has a gap wider than an hour, the chosen baseline is older than
+    // 1 h and this exceeds 3600 s — the count is net growth over that longer
+    // span, NOT one hour. Surfacing it lets the caption tell the truth instead
+    // of hardcoding "in the last hour". `null` when there is no baseline
+    // snapshot at all (empty history → count is an honest 0 over no window).
+    let last_hour_window_secs = baseline_snapshot.map(|s| (now_secs - s.epoch_secs).max(0.0));
+
+    // Per-item recent feed: the newest episodes (newest-first by temporal_index),
+    // capped. Episodes are the only memory type carrying a wall-clock timestamp,
+    // so they form the natural time-ordered "recent activity" stream. A read
+    // failure here is best-effort (the aggregate above is still valid): report an
+    // empty list with `available:false` rather than failing the whole endpoint.
+    let (items, items_available) = match ops.list_all_episodes(RECENT_ITEMS_MAX as u32) {
+        Ok(episodes) => (build_recent_episode_items(&episodes), true),
+        Err(_) => (Vec::new(), false),
+    };
 
     Json(json!({
-        "items": [],
+        "items": items,
         "total": total,
         "last_hour_count": last_hour_count,
-        "available": false,
+        "last_hour_window_secs": last_hour_window_secs,
+        "available": items_available,
         "note": note,
         "server_time": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Maximum number of recent per-item episodes returned by `/api/memory/recent`.
+/// Bounds the payload; the panel is a "recent glance", not a full dump (the
+/// graph tab covers exhaustive enumeration).
+const RECENT_ITEMS_MAX: usize = 25;
+
+/// Map recent episodes to the frontend "Recent Memories" item shape
+/// (`{category, summary, timestamp, ...}`, part_03.rs `fetchRecentMemories`).
+/// Episodes render under the "Past event" category. `summary`/content is bounded
+/// by [`GRAPH_NODE_CONTENT_MAX`] so a single large episode cannot bloat the
+/// payload.
+///
+/// `timestamp` carries the episode's real `created_at` as an RFC3339 instant
+/// (issue #4383) so the frontend's `timeAgo()` can render a "time ago" label.
+/// It falls back to `null` — never a fabricated epoch — for episodes that
+/// genuinely lack a timestamp (e.g. mock backends or records serialized before
+/// the field existed), so the panel degrades honestly to a blank label rather
+/// than a nonsensical 1970s date. Newest-first ordering still derives from the
+/// `temporal_index` sort, not this field.
+fn build_recent_episode_items(
+    episodes: &[crate::memory_cognitive::CognitiveEpisode],
+) -> Vec<Value> {
+    episodes
+        .iter()
+        .map(|e| {
+            json!({
+                "category": "Past event",
+                "summary": truncate_graph_content(&e.content),
+                "timestamp": e
+                    .created_at
+                    .map(|t| json!(t.to_rfc3339()))
+                    .unwrap_or(Value::Null),
+                "source": e.source_label,
+                "node_id": e.node_id,
+            })
+        })
+        .collect()
 }
 
 pub(crate) async fn memory_search(Json(body): Json<Value>) -> Json<Value> {
@@ -990,6 +1140,94 @@ mod tests_memory_history {
         }];
         let r = rate_per_hour(&single);
         assert_eq!(r["total"], 0.0);
+    }
+
+    /// Build a snapshot at `epoch_secs` with every long-term rail equal to
+    /// `long_term` (split across episodic) so the rate math is easy to assert.
+    fn snap_at(epoch_secs: f64, long_term: u64) -> MemorySnapshot {
+        MemorySnapshot {
+            timestamp: "".into(),
+            epoch_secs,
+            sensory: 0,
+            working: 0,
+            episodic: long_term,
+            semantic: 0,
+            procedural: 0,
+            prospective: 0,
+            total: long_term,
+            long_term_total: long_term,
+        }
+    }
+
+    /// #4107: an ancient baseline outside the trailing 24 h window must NOT be
+    /// used. The rate is anchored at the newest sample and diffs against the
+    /// oldest sample *inside* the window, so a multi-week-old first snapshot
+    /// cannot dilute the denominator to a meaningless near-zero figure.
+    #[test]
+    fn rate_per_hour_ignores_ancient_baseline_outside_window() {
+        let day = 86_400.0;
+        // Newest at t=40 days. An ancient sample 39 days ago (outside the 24 h
+        // window) plus a fresh one 1 h before newest (inside the window).
+        let newest_t = 40.0 * day;
+        let snaps = vec![
+            snap_at(newest_t - 39.0 * day, 100), // ancient, out of window
+            snap_at(newest_t - 3600.0, 200),     // 1 h ago, in window
+            snap_at(newest_t, 260),              // newest
+        ];
+        let r = rate_per_hour(&snaps);
+        // Windowed: (260 - 200) / 1 h = 60/hr — NOT the whole-history
+        // (260 - 100) / (~40 days) ≈ 0.17/hr the naive calc would report.
+        assert_eq!(r["long_term_total"], 60.0);
+        assert_eq!(r["episodic"], 60.0);
+    }
+
+    /// #4107: when only the newest sample lies inside the trailing window
+    /// (a fresh daemon after a long down-gap), report 0.0 — an honest
+    /// "insufficient recent data" rather than a distorted whole-span figure.
+    #[test]
+    fn rate_per_hour_no_recent_sample_reports_zero() {
+        let day = 86_400.0;
+        let newest_t = 10.0 * day;
+        let snaps = vec![
+            snap_at(newest_t - 8.0 * day, 100), // way outside the 24 h window
+            snap_at(newest_t, 500),             // newest — the only in-window sample
+        ];
+        let r = rate_per_hour(&snaps);
+        assert_eq!(r["long_term_total"], 0.0, "no in-window baseline → 0.0");
+        assert_eq!(r["total"], 0.0);
+    }
+
+    /// #4107: the trailing-window edge is inclusive. A baseline exactly at
+    /// `newest - GROWTH_RATE_WINDOW_SECS` is used (not dropped by an off-by-one).
+    #[test]
+    fn rate_per_hour_window_edge_is_inclusive() {
+        let newest_t = 1_000_000.0;
+        let snaps = vec![
+            // Exactly 24 h before newest — must be included.
+            snap_at(newest_t - GROWTH_RATE_WINDOW_SECS, 100),
+            snap_at(newest_t, 124),
+        ];
+        let r = rate_per_hour(&snaps);
+        // (124 - 100) / 24 h = 1.0/hr.
+        assert_eq!(r["long_term_total"], 1.0);
+    }
+
+    /// #4107: a sample just *outside* the window edge is excluded, and the
+    /// oldest sample still *inside* the window becomes the baseline.
+    #[test]
+    fn rate_per_hour_selects_oldest_in_window_baseline() {
+        let newest_t = 1_000_000.0;
+        let snaps = vec![
+            // 1 second past the 24 h edge — excluded.
+            snap_at(newest_t - GROWTH_RATE_WINDOW_SECS - 1.0, 0),
+            // Oldest inside the window (12 h ago) — the chosen baseline.
+            snap_at(newest_t - 12.0 * 3600.0, 100),
+            snap_at(newest_t - 3600.0, 130),
+            snap_at(newest_t, 160),
+        ];
+        let r = rate_per_hour(&snaps);
+        // (160 - 100) / 12 h = 5.0/hr, using the oldest in-window sample.
+        assert_eq!(r["long_term_total"], 5.0);
     }
 
     #[test]
@@ -1847,5 +2085,77 @@ mod tests_memory_graph {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_recent_episode_timestamp {
+    //! Issue #4383: `/api/memory/recent` must surface the episode's real
+    //! `created_at` so the "Recent Memories" panel can render a "time ago"
+    //! label, and degrade to JSON `null` (never a fabricated epoch) when the
+    //! episode genuinely lacks a timestamp.
+    use super::build_recent_episode_items;
+    use crate::memory_cognitive::CognitiveEpisode;
+
+    fn episode(
+        node_id: &str,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> CognitiveEpisode {
+        CognitiveEpisode {
+            node_id: node_id.to_string(),
+            content: format!("content for {node_id}"),
+            source_label: "unit".to_string(),
+            temporal_index: 0,
+            compressed: false,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn surfaces_created_at_as_rfc3339() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-07-21T08:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let items = build_recent_episode_items(&[episode("epi-1", Some(ts))]);
+        assert_eq!(items.len(), 1);
+        let got = items[0]["timestamp"]
+            .as_str()
+            .expect("a supplied created_at must render as a JSON string, not null");
+        let parsed = chrono::DateTime::parse_from_rfc3339(got)
+            .expect("timestamp must be valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            parsed, ts,
+            "the exact instant must round-trip: {}",
+            items[0]
+        );
+    }
+
+    #[test]
+    fn degrades_missing_created_at_to_null() {
+        let items = build_recent_episode_items(&[episode("epi-2", None)]);
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0]["timestamp"].is_null(),
+            "an absent created_at must degrade to JSON null, never a fabricated \
+             epoch: {}",
+            items[0],
+        );
+        // The key must still be present so the frontend shape is stable.
+        assert!(
+            items[0].get("timestamp").is_some(),
+            "the `timestamp` key must always be present: {}",
+            items[0],
+        );
+    }
+
+    #[test]
+    fn preserves_frontend_item_shape() {
+        let items = build_recent_episode_items(&[episode("epi-3", None)]);
+        let item = &items[0];
+        assert_eq!(item["category"].as_str(), Some("Past event"));
+        assert_eq!(item["source"].as_str(), Some("unit"));
+        assert_eq!(item["node_id"].as_str(), Some("epi-3"));
+        assert!(item["summary"].is_string());
     }
 }

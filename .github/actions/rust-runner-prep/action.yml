@@ -49,6 +49,15 @@ runs:
         sudo swapon /swapfile
         echo "Swap enabled: $(swapon --show)"
 
+    - name: Harden apt sources (drop flaky packages.microsoft.com repo, #2975)
+      shell: bash
+      # GitHub runners ship packages.microsoft.com apt sources that periodically
+      # serve an invalid InRelease ("NOSPLIT" / "no longer signed"), which makes
+      # the `apt-get update` below exit 100 and fails the job with a spurious red
+      # on the default branch. This job only needs Ubuntu-archive packages
+      # (mold), so strip the Microsoft sources first. Idempotent and non-fatal.
+      run: bash "$GITHUB_WORKSPACE/scripts/ci-harden-apt.sh"
+
     - name: Install mold linker
       shell: bash
       # mold is a drop-in replacement for ld/lld with 3-5x faster cold-link of
@@ -70,10 +79,13 @@ runs:
         echo 'RUSTFLAGS=-C link-arg=-fuse-ld=mold' >> "$GITHUB_ENV"
 
     - name: Set up Rust
-      # SHA-pinned for supply-chain safety. This is the HEAD of dtolnay's
-      # `stable` branch, whose action.yml hard-defaults `toolchain: stable`,
-      # so pinning preserves the stable channel exactly (same pin as
-      # release.yml). The `# stable` comment documents the tracked branch.
-      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # SHA-pins the reachable `v1` release of dtolnay/rust-toolchain (an
+      # ancestor of the action's default branch) and selects the channel via
+      # the `toolchain:` input. The previous `# stable` pin was the HEAD of
+      # dtolnay's per-channel `stable` branch, whose commit is *diverged* from
+      # the default branch, so Dependabot's github_actions updater could not
+      # resolve it ("no such commit") and failed the dependabot-updates run.
+      uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
       with:
+        toolchain: stable
         components: ${{ inputs.rust-components }}

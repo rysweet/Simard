@@ -1,7 +1,7 @@
 ---
 title: Recipe-brain verdict/decision parsing
-description: How recipe-backed brain phases turn a recipe-runner-rs subprocess run into a typed decision/verdict. All four phases — engineer-lifecycle, decide, orient, and merge-judge — share one JSON-envelope transport, one confidence-gated escalation ladder, and loud/fail-closed defaults, plus the class-level brain_verdict_parsed_total metric.
-last_updated: 2026-06-29
+description: Current recipe-backed brain parsing contract; OODA use becomes legacy only after verified typed-route cutover.
+last_updated: 2026-07-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -18,6 +18,30 @@ related:
 ---
 
 # Recipe-brain verdict/decision parsing
+
+!!! note "Migration condition"
+    Current releases use these parsers. OODA consumers become legacy only after
+    a release implements and selects the typed route and route verification
+    proves them unreachable. They remain authoritative while the route is
+    `legacy` or `shadow`; non-OODA consumers are unaffected by that cutover.
+    See the planned
+    [typed OODA architecture](../architecture/typed-ooda-loop.md).
+
+!!! warning "OODA decide/orient converted off this parser ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A)"
+    The **decide** and **orient** phases no longer read the JSON envelope or run
+    the escalation ladder. They call the gated `simard ooda record-decide` /
+    `record-orient` tools, which write typed records
+    (`simard.ooda.decide.v1` / `simard.ooda.orient.v1`) that `RecipeBrain` reads
+    **fail-CLOSED** via `read_verified_decide` / `read_verified_orient` — an
+    absent/malformed/mismatched record is a safe no-op, never a default. The
+    orient/decide-exclusive ladder plumbing (`extract_orient_envelope`,
+    `parse_orient_outcome`, `decide_judgment_from_variant`, etc.) is removed.
+    The **engineer-lifecycle** and **merge-judge** rows below still use the shared
+    ladder machinery (`run_brain_ladder`, `extract_decision_envelope`,
+    `DecisionEnvelope`, `LifecycleParseOutcome`, `finalize_ladder_result`,
+    `record_verdict_parse_metric`, `brain_verdict_parsed_total`) and are
+    **retained** unchanged. See
+    [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
 
 > **Status — all four phases shipped.**
 > Every recipe-backed brain phase reads the `recipe-runner-rs --output-format
@@ -42,6 +66,12 @@ related:
 > | merge-judge JSON transport + ladder + fail-closed `Unclear` | **shipped** ([#2428](https://github.com/rysweet/Simard/issues/2428) / [#2430](https://github.com/rysweet/Simard/issues/2430) / [#2435](https://github.com/rysweet/Simard/issues/2435) / [#2462](https://github.com/rysweet/Simard/issues/2462) / [#2463](https://github.com/rysweet/Simard/issues/2463)) | `src/stewardship/recipe_merge_judge.rs` |
 > | class-level `brain_verdict_parsed_total` metric | **shipped** ([#2429](https://github.com/rysweet/Simard/issues/2429)) | `src/ooda_brain/recipe_brain.rs` |
 > | Copilot launch-log preamble stripped at the shared chokepoint + decide/orient termination-cause wiring | **shipped** ([#2496](https://github.com/rysweet/Simard/issues/2496), generalising the distill regression PR [#2500](https://github.com/rysweet/Simard/pull/2500)) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Trailing-comma recovery wired into every reasoner parse site via the shared `extract_and_parse_json` chokepoint | **shipped** ([#2658](https://github.com/rysweet/Simard/issues/2658) lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Unescaped-control-character recovery (raw newline/tab/CR inside a string value) composed with trailing-comma recovery in `recover_json_view`, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Invalid-backslash-escape recovery (a lone `\` inside a string value — a Windows path / regex / LaTeX fragment) composed into `recover_json_view` ahead of the control-char view, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | JavaScript-comment recovery (`// …` line / `/* … */` block comment outside a string value — the "JSONC" annotation shape) composed into `recover_json_view` **ahead of** the string-aware views, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Python/JS bare-literal recovery (`True`/`False`/`None` outside a string value — the Python-`repr`/`dict` shape) composed into `recover_json_view` **after** the existing views, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
+> | Non-finite-number recovery (`NaN`/`Infinity`/`-Infinity` outside a string value — the Python `json.dumps` `allow_nan` shape) normalised to the canonical JSON `null`, composed into `recover_json_view` as the **last** structural view, wired into the same chokepoint | **shipped** (#2658 lineage) | `src/recipe_output/extract.rs`, `src/ooda_brain/recipe_brain.rs` |
 >
 > Everything on this page describes code that exists today. A reader six months
 > from now should treat this as the current design, not a migration note.
@@ -502,17 +532,175 @@ For the design rationale, see
 
 ---
 
+## Reasoner JSON recovery at the parse chokepoint (#2658 lineage)
+
+> **Retired in #4991.** The two named wrapper functions in this section —
+> `recipe_output::extract_json_payload` and `extract_and_parse_json` — were
+> removed as dead code (they had **zero production callers** after the typed
+> record-contract cutover). The composed JSON-hardening they wrapped is
+> **retained** and still public: `recover_json_view` (which composes
+> `strip_json_comments`, `strip_json_trailing_commas`,
+> `escape_json_string_control_chars`, `escape_json_string_invalid_escapes`,
+> `normalize_python_json_literals`, and `normalize_json_number_specials`),
+> together with `strip_recipe_noise` and `last_balanced_object`. The prose and
+> code below are kept as the historical design rationale for that recovery
+> layer; where it references the two retired wrappers, read it as "the retained
+> primitives, composed directly."
+
+The shared extractor `recipe_output::extract_json_payload` strips banner / ANSI /
+log noise but returns the balanced `{…}` object body **verbatim**. Six common
+real-world LLM JSON defects therefore survive into the extracted payload and fail
+a strict `serde_json::from_str`:
+
+1. a **trailing comma** before a closing `}`/`]` (issue #2658),
+2. an **unescaped ASCII control character** (a raw newline/tab/CR) inside a
+   string value — the shape a model emits for a multi-line `content`/`rationale`
+   field; `serde_json` is spec-strict and rejects it with
+   `control character (\u0000-\u001F) found while parsing a string`,
+3. an **invalid backslash escape** inside a string value — a lone `\` not
+   followed by a JSON escape initiator (`" \ / b f n r t u`), the shape a model
+   emits for a Windows path (`C:\Users`), a regular expression (`\d+`), or a
+   LaTeX/Markdown fragment (`\alpha`); `serde_json` rejects it with `invalid
+   escape` while parsing a string,
+4. a **JavaScript-style comment** outside a string value — a `// …` line comment
+   or a `/* … */` block comment, the "JSONC" shape a model emits to annotate a
+   field (`"confidence": 0.8 // high`); the JSON grammar has no comment
+   production, so `serde_json` rejects the stray `/`, and
+5. a **Python/JS bare literal** (`True`, `False`, `None`) outside a string value —
+   the shape a model that reasons in Python emits for a boolean/null field
+   (`"ready": True`, `"error": None`); the JSON grammar's only bare-word literals
+   are the lowercase `true`/`false`/`null`, so `serde_json` rejects the
+   capitalised token, and
+6. a **non-finite number** (`NaN`, `Infinity`, `-Infinity`) outside a string
+   value — the shape Python's `json.dumps` emits **by default** (`allow_nan=True`)
+   for an IEEE float special (`"score": NaN`, `"bound": -Infinity`); the JSON
+   grammar has no non-finite number production, so `serde_json` rejects the bare
+   token with `expected value`. It is normalised to the canonical JSON `null`
+   (exactly what ECMAScript `JSON.stringify` serialises these specials to, and the
+   only JSON a value `serde_json` itself refuses to serialise as a number can
+   become).
+
+Every reasoner parse site used to parse that payload strictly
+(`extract_json_payload(text)?` → `serde_json::from_str(&payload).ok()?`), so one
+stray comma, one literal newline, one lone backslash, one interleaved comment, one
+capitalised literal, OR one non-finite number
+silently dropped the model's whole structured decision and the phase fell back to
+its deterministic default (a parse-failure default, per the section above — *not*
+a real model decision).
+
+All six recovery views (`strip_json_comments`; `strip_json_trailing_commas`, the
+pre-existing #2658 view; `escape_json_string_control_chars`;
+`escape_json_string_invalid_escapes`; `normalize_python_json_literals`; and
+`normalize_json_number_specials`) are
+composed by `recover_json_view` and
+wired into these reasoner sites through one shared chokepoint:
+
+```rust
+pub fn extract_and_parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    let payload = extract_json_payload(raw)?;
+    match serde_json::from_str::<T>(&payload) {
+        Ok(value) => Some(value),
+        // Retry ONLY when a recovery view actually rewrote the payload (the Owned
+        // arm). recover_json_view composes strip_json_comments +
+        // escape_json_string_invalid_escapes + escape_json_string_control_chars +
+        // strip_json_trailing_commas + normalize_python_json_literals +
+        // normalize_json_number_specials; each is a
+        // provable no-op (Cow::Borrowed) on valid JSON, so any OTHER malformed
+        // shape returns None unchanged.
+        Err(_) => match recover_json_view(&payload) {
+            Cow::Owned(recovered) => serde_json::from_str::<T>(&recovered).ok(),
+            Cow::Borrowed(_) => None,
+        },
+    }
+}
+```
+
+`recover_json_view` first strips any `// …` / `/* … */` comment sitting **outside**
+a string literal, then doubles any invalid backslash escape sitting **inside** a
+string literal (`\d` → `\\d`), then escapes any literal control character inside a
+string literal (`\b \t \n \f \r`, else `\u00XX`), then strips trailing commas, then
+normalises any bare `True`/`False`/`None` sitting **outside** a string literal to
+`true`/`false`/`null`, then normalises any non-finite number
+(`NaN`/`Infinity`/`-Infinity`) sitting **outside** a string literal to `null`. The
+six views cannot interfere: the two string views only touch bytes inside string
+literals, comment-stripping, comma-stripping, literal-normalisation, and
+number-normalisation only touch bytes outside them (and `True`/`False`/`None` and
+`NaN`/`Infinity`/`-Infinity` are disjoint token sets).
+Comment-stripping runs **first**, ahead of the two string-aware views, on purpose
+— a `"` byte inside a comment (`// see "foo"`, `/* "x */`) is comment text, not a
+string delimiter, so removing whole comment spans before any `in_string` scan runs
+keeps every downstream string-tracking view aligned with the real string
+boundaries. On a comment-free payload `strip_json_comments` borrows unchanged, so
+the pre-existing recovery and its ordering are preserved exactly. The
+two string views are then ordered invalid-escape **before** control-char on
+purpose — a lone backslash immediately followed by a raw newline (`\` + the
+newline byte) is a backslash-then-control-char pair, and doubling the backslash
+first lets the control-char view then escape the newline; running control-char
+first would treat the raw newline as the backslash's (invalid) escape target and
+leave it a raw control byte. Literal-normalisation and number-normalisation run
+**last** (in that order), after comments are already stripped, so their own
+`in_string` scans are aligned with the real string boundaries and each rewrites
+only its exact tokens — a longer identifier run (`Truthy`, `Nonexistent`,
+`NaNValue`, `Infinityx`) is left verbatim, and a `-` that begins an ordinary
+negative number is left as a sign. All six are
+string-literal aware, so a comma,
+control byte, backslash, `//`/`/*` sequence, a `True`/`False`/`None` word, or a
+`NaN`/`Infinity` word that
+is legitimate string content
+(a URL, a glob, a quoted sentence) is preserved, and a raw newline/tab used as JSON
+whitespace *between* tokens is left untouched.
+
+Sites routed through it in `src/ooda_brain/recipe_brain.rs`: the engineer
+**lifecycle** `DecisionEnvelope` path (`extract_decision_envelope`, ~L2187) — the
+last remaining stdout-scraping seam, out of scope for Group D.
+
+!!! note "Converted seams no longer route through the scraper"
+    The decide/orient path ([#4719](https://github.com/rysweet/Simard/issues/4719)
+    Group A), the engineer/resource admission path (Group B), and the
+    creative-ideas semantic-dedup + consolidation path (Group C) have been
+    converted to the typed-record pattern: the recipe **acts via a gated `simard
+    ooda record-*` tool** and RecipeBrain reads a typed, `0o600`,
+    freshness-checked record fail-closed — it no longer scrapes their stdout. The
+    former Group C scrapers `parse_idea_dedup_decision`, `parse_idea_consolidation`,
+    `IdeaDedupEnvelope`, and `IdeaConsolidationEnvelope` are **deleted**; the two
+    seams now read
+    [`IdeaDedupDecisionRecord` / `IdeaConsolidationRecord`](./ooda-record-idea-dedup-consolidation-cli.md)
+    via `read_verified_idea_dedup` / `read_verified_idea_consolidation`. Group D
+    (#4967) converted the **outcome-verify** and **RustyClawd** seams the same way
+    (the former `parse_outcome_decision`, `outcome_decision_from_variant`,
+    `OutcomeEnvelope`, `PerGoalAction::from_recipe_envelope`, and `PerGoalEnvelope`
+    are **deleted**; the seams now read `OutcomeDecisionRecord` /
+    `PerGoalDecisionRecord` via `read_verified_outcome` / `read_verified`). The
+    shared `extract_and_parse_json` family is **retained** only for the engineer
+    **lifecycle** `DecisionEnvelope` path, which remains stdout-scraped and is not
+    part of Group D — so epic #4719 is **not** yet complete.
+
+Leniency never widens beyond these six named defects: an unquoted key, an
+elided array element, a missing value, a lone `/` that is not a comment, a
+capitalised word that is not exactly `True`/`False`/`None`, or a bareword that is
+not exactly `NaN`/`Infinity`/`-Infinity` still
+yields `None` (a loud parse miss + ladder escalation), exactly as before. A
+non-finite value landing in a *required, non-optional* numeric field likewise
+still yields `None` (its token becomes `null`, which the strict re-parse then
+rejects for that field). This
+improves reasoner reliability — a genuine decision that is well-formed except for
+one comma, one literal newline, one lone backslash, one annotation comment, one
+bare literal, or one non-finite number is
+now honored instead of discarded — without accepting any broken JSON.
+
+---
+
 ## Test inventory (shipped)
 
 | Module | Coverage |
 |--------|----------|
-| `src/recipe_output/extract.rs` | **`issue_2496_launcher_tests`**: each Copilot launcher shape dropped by `is_copilot_launcher_line` / `is_noise_line` (the `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`, `launching copilot binary=… version="GitHub Copilot CLI 1.0.66-2."`, leading `INFO`/`WARN` launcher lines); payload-recovery cases (a launcher+ANSI preamble wrapped around a valid action keyword, a bare urgency decimal, and a `{…}` JSON body, each surviving the clean); negative/safety cases (a `{`-leading line, an action keyword, a bare decimal, and a verdict keyword are **never** dropped); and the `Cow::Borrowed` zero-copy clean-path assertion on noise-free input. |
-| `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2421_tests`** + **`issue_2419_family_phase_tests`**: `parse_action_outcome` / `parse_orient_outcome` classification (parsed vs `DefaultEmpty`/`DefaultMalformed`), `build_decide_escalation_note` / `build_orient_escalation_note` / `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. **`issue_2496_decide_orient_launcher_tests`**: `parse_action_outcome` and `parse_orient_outcome` fed a real Copilot 1.0.66-2 banner + ANSI-coloured `INFO`/`WARN` launcher lines wrapped around a valid decision / urgency decimal, asserting the decision parses (`Parsed`, not `DefaultMalformed`) and the version string `1.0.66-2` is not mined as the urgency; the **all-goals-`DefaultMalformed` stall regression** asserting that the same noisy capture across a batch of active goals now yields parsed decisions (the deadlock no longer reproduces); and the decide/orient `cause` wiring (a parse-failure default carries `ladder_exhausted` / `ladder_invoke_error`, distinct from a genuine decision). |
+| `src/recipe_output/extract.rs` | **`issue_2496_launcher_tests`**: each Copilot launcher shape dropped by `is_copilot_launcher_line` / `is_noise_line` (the `ℹ NODE_OPTIONS=… (saved preference)` info marker, `Run 'copilot update'…`, `launching copilot binary=… version="GitHub Copilot CLI 1.0.66-2."`, leading `INFO`/`WARN` launcher lines); payload-recovery cases (a launcher+ANSI preamble wrapped around a valid action keyword, a bare urgency decimal, and a `{…}` JSON body, each surviving the clean); negative/safety cases (a `{`-leading line, an action keyword, a bare decimal, and a verdict keyword are **never** dropped); and the `Cow::Borrowed` zero-copy clean-path assertion on noise-free input. **JSON recovery views**: `strip_json_trailing_commas` (borrow on valid JSON; strip before `}`/`]`; comma-in-string and escaped-quote preserved; multibyte-safe; other-malformed unchanged), `escape_json_string_control_chars` (borrow on valid/already-escaped JSON; escape raw newline/tab/CR and generic `\u00XX` inside a string; control bytes OUTSIDE strings left as whitespace; escaped-quote and multibyte preserved), and `recover_json_view` composing both (borrow on valid JSON; owned on either defect; other-malformed stays borrowed). **`escape_json_string_invalid_escapes`** (borrow on valid JSON incl. `\\`/`\"`/`\n`/`\uXXXX`/`\/`; double a lone backslash from a regex `\d+` or a Windows path `C:\Users\model`; leave a valid escape untouched when adjacent to an invalid one; respect an escaped quote inside the string; leave a backslash OUTSIDE a string untouched; multibyte-safe), and the extended **`recover_json_view`** (recovers an invalid escape alone; composes all three defects; **orders invalid-escape before control-char** so a `\`+raw-newline pair recovers correctly). **`strip_json_comments`** (borrow on valid JSON incl. a `/`, `//`, `/*`, `*/` INSIDE a string; strip a `// …` line comment (incl. at end of input) and a `/* … */` block comment (incl. multi-line); leave a `//` inside a URL string untouched; respect an escaped quote before a `//`; a lone `/` outside a string is NOT a comment; multibyte-safe; unterminated block dropped without panic; other-malformed stays borrowed), and the further-extended **`recover_json_view`** (recovers a comment alone; strips a comment BEFORE the string-aware views so a `"` inside a comment cannot desync their string tracking; composes all four defects). **`normalize_python_json_literals`** (borrow on valid JSON incl. lowercase `true`/`false`/`null` and a `True`/`False`/`None` word INSIDE a string; rewrite bare `True`/`False`/`None` to `true`/`false`/`null`; leave a longer identifier run `Truthy`/`Nonexistent`/`xNone` untouched; tight array/object delimiters `[True,False,None]` / `{"k":None}`; respect an escaped quote before the literal; multibyte-safe), and the further-extended **`recover_json_view`** (recovers a bare literal alone; composes it with the trailing comma; composes all five defects). **`normalize_json_number_specials`** (borrow on valid JSON incl. finite negatives/exponents and a `NaN`/`Infinity` word INSIDE a string; rewrite bare `NaN`/`Infinity`/`-Infinity` to `null`; leave a longer run `NaNValue`/`Infinityx`/`xNaN`/`-Infinityx` untouched; preserve a `-` that begins an ordinary negative number/exponent; tight array/object delimiters `[NaN,Infinity,-Infinity]` / `{"k":-Infinity}`; respect an escaped quote before the token; multibyte-safe), and the fully-extended **`recover_json_view`** (recovers a non-finite number alone; the word inside a string stays a borrow; composes it with the trailing comma and with the Python literal; composes all six defects). **`extract_and_parse_json`** end-to-end recovery of a trailing comma and of an unescaped control character (each alone, both together, and through banner+ANSI+log noise), plus of an invalid backslash escape (alone, through banner+ANSI+log noise, and with all three defects together), plus of a line comment (alone) and a block comment (through banner+ANSI+log noise) and all four defects together, plus of a bare `True`/`False`/`None` literal (alone, through banner+ANSI+log noise, and all five defects together), plus of a `NaN`/`Infinity`/`-Infinity` non-finite number (in an optional field, through banner+ANSI+log noise, and all six defects together), with a `//` inside a URL string, a `True`/`None` inside a string, and a `NaN`/`Infinity` inside a string preserved, and a non-target-malformed body (incl. a non-finite number alongside an unquoted key) / no-object still returning `None`. |
+| `src/ooda_brain/recipe_brain.rs` | `extract_recipe_decision_output` success + decode/`success=false`/empty-`step_results` error cases; `parse_lifecycle_outcome` matrix; `run_escalation_ladder` recovery / exhaustion / invoke-error / disabled paths; `LadderTermination::cause_label` distinctness; `build_escalation_note` content pins; `build_lifecycle_metric_context` shape. **`issue_2419_family_phase_tests`** (decide/orient-parser tests removed in [#4719](https://github.com/rysweet/Simard/issues/4719) Group A): the retained shared coverage — `build_phase_escalation_note` content (empty on `Base`), `brain_verdict_parsed_total` context shape, and the generic `run_brain_ladder` driving an arbitrary decision type. The former decide/orient stdout-parser + escalation-note tests (`parse_action_outcome` / `parse_orient_outcome`, `build_decide_escalation_note` / `build_orient_escalation_note`, the `issue_2421_tests` banner pins, and `issue_2496_decide_orient_launcher_tests`) are **removed** and replaced by the typed-record seam tests: **`ooda_brain::tests_record_orient_decide`** (10-variant decide round-trip + orient field round-trip + R1–R8 fail-CLOSED reader) and **`ooda_brain::tests_rework_contract`** (source/recipe contract asserting the old scrape machinery is deleted and the typed-record seam present). |
 | `src/memory_consolidation/distillation.rs` | **`issue_2496_distill_launcher_tests`** (built on the merged PR [#2500](https://github.com/rysweet/Simard/pull/2500) regression): the distill fact parser still recovers `{ "facts": […] }` from a launcher-preamble-wrapped capture, now via the shared `is_noise_line` chokepoint rather than a private cleaner. |
 | `src/stewardship/recipe_merge_judge.rs` | `parse_merge_verdict_from_text` keyword matrix (ready / not_ready / unclear / empty / no-keyword `Err`). **`issue_2428_tests`** + **`issue_2428_production_tests`**: JSON-envelope extraction, `parse_merge_outcome` (structured `parse_judge_response` first, then keyword prose fallback), prose keyword fallback, and fail-closed `Verdict::Unclear` on an unparseable verdict. |
 | `src/stewardship/merge_judge.rs` | `parse_judge_response` JSON extraction (fenced / brace-balanced / outermost), `LlmMergeJudge`, `RefusingMergeJudge`. |
 | `tests/recipe_brain_verdict_assets.rs` | Asset/integration coverage of the recipe-brain verdict path. |
-| `tests/gadugi/decide-orient-brain-parse.sh`, `tests/gadugi/merge-judge-verdict.sh` | Outside-in gadugi scenarios exercising the decide/orient parse path and the merge-judge verdict path end-to-end. |
+| `tests/gadugi/decide-orient-brain-parse.sh`, `tests/gadugi/merge-judge-verdict.sh` | Outside-in gadugi scenarios: the decide/orient scenario now exercises the typed-record seam (recipes call `simard ooda record-decide` / `record-orient`; no stdout scraping) via the `tests_record_orient_decide` + `tests_rework_contract` proofs, and the merge-judge scenario exercises the verdict path end-to-end. |
 
 ---
 

@@ -1,0 +1,8 @@
+flowchart LR
+  Action["PlannedAction spawn_engineer"] --> Rails["identity/read-only rails"] --> Live["assigned/live engineer checks"]
+  Live --> Repo["resolve target repo"] --> Admission["overlap/resource admission"] --> Worktree["EngineerWorktree::allocate"]
+  Worktree --> Fresh["ensure_amplihack_fresh"] --> Subordinate["spawn_subordinate"]
+  Subordinate --> Tmux["tmux or direct child"] --> Single["simard engineer run single-process"]
+  Single --> Prompt["build_agent_prompt + standards"] --> Agent["amplihack copilot/RustyClawd"] --> PR["git/gh PR creation by agent"]
+  PR --> Merge["merge authority/operator"] --> Deploy["self-deploy candidate"]
+  Subordinate --> Registry["subagent_sessions registry"]

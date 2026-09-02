@@ -10,7 +10,9 @@ related:
   - ./steerable-ooda-daemon.md
   - ./ooda-loop-self-detection.md
   - ./overseer-goal-board-health.md
+  - ./research-goal-never-idle.md
   - ../reference/no-progress-breaker-api.md
+  - ../reference/research-goal-never-idle-rail-api.md
   - ../reference/completion-evidence-gate-api.md
   - ../howto/unblock-stuck-ooda-goals.md
 ---
@@ -25,6 +27,18 @@ related:
 > [`src/goal_board_store/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/goal_board_store/mod.rs).
 > See the [no-progress breaker API reference](../reference/no-progress-breaker-api.md)
 > for the exact types and functions.
+
+> **Superseded for the research goal (#4399).** This page describes the benign
+> exemption that treats an idle cycle as *normal* for a bursty standing goal. That
+> is still correct for **non-research** standing goals (e.g. a CI-stewardship
+> perpetual goal). It is **no longer** correct for the standing *research* goal:
+> under [#4399](./research-goal-never-idle.md) an idle cycle for that goal is a
+> **fault** — the breaker records it in `research_idle_faults` and **re-orients**
+> the goal (still fail-closed: never blocked), rather than granting the benign
+> `perpetual_idled` exemption. The split is made by the shared
+> `classify_standing_idle` classifier keyed on `is_standing_research_goal()`. See
+> [The standing research goal never idles](./research-goal-never-idle.md) and the
+> [never-idle rail API](../reference/research-goal-never-idle-rail-api.md).
 
 ## The defect this fixes (#2589)
 
@@ -156,6 +170,9 @@ for the (now rare) cases that still need a human.
 
 ## Related
 
+- [The standing research goal never idles — an idle cycle is a fault](./research-goal-never-idle.md)
+  — #4399 supersedes this benign exemption for the standing *research* goal (idle →
+  fault → re-orient) while preserving it for non-research standing goals.
 - [No-progress breaker API reference](../reference/no-progress-breaker-api.md)
 - [Overseer goal-board health](./overseer-goal-board-health.md) — the steward-side
   defense-in-depth complement (#2616): if a standing goal is parked anyway, the
