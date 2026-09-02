@@ -542,6 +542,7 @@ Run the relevant suites with:
 cargo test cognitive_memory
 cargo test memory_consolidation
 cargo test graph_memory_metric_sweep_uses_goal_board_graph_stats_fields
+cargo test --test bin_simard_memory_cli stats_shows_edges_and_dedup_section_via_direct_open
 ```
 
 ---

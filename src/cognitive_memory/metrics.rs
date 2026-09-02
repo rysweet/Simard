@@ -300,7 +300,8 @@ pub const GOAL_BOARD_SNAPSHOT_DEDUP_RATIO_METRIC: &str = "goal_board_snapshot_de
 /// (`distinct_snapshot_caller_keys / snapshot_facts_total`), in `[0.0, 1.0]`.
 /// Higher is healthier: `1.0` means every goal-board stream holds a single live
 /// revision; a value approaching `0` means superseded revisions have piled up
-/// (the inverse — total / distinct — is the mean revisions retained per stream).
+/// When every snapshot fact has a valid caller key, the inverse — total /
+/// distinct — is the mean revisions retained per stream.
 ///
 /// Returns `None` (undefined, **not** `0.0`) when the store holds no goal-board
 /// snapshot facts, so an empty goal-board snapshot layer contributes no
