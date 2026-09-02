@@ -45,7 +45,7 @@ This layer maps Simard's direct Cargo dependencies and a one-hop view of the lar
 | `tokio` | `=1.52.1`, features `rt`, `rt-multi-thread`, `process`, `io-util`, `time`, `net`, `macros`, `sync` | Async runtime, subprocess, networking, and synchronization foundation. |
 | `axum` | `=0.8.9`, feature `ws` | HTTP and websocket dashboard or operator services. |
 | `tower-http` | `=0.6.8`, features `cors`, `auth` | HTTP middleware for CORS and auth layers. |
-| `uuid` | `=1.23.1`, features `v4`, `v7` | Stable identifiers for sessions, facts, and domain records. |
+| `uuid` | `=1.23.4`, features `v4`, `v7` | Stable identifiers for sessions, facts, and domain records. |
 | `chrono` | `=0.4.45` | Date and time handling in runtime code. |
 | `chrono-tz` | `=0.10.4` | Time-zone aware dashboard timestamp formatting. |
 | `dirs` | `=6.0.0` | User directory discovery for state and configuration paths. |
