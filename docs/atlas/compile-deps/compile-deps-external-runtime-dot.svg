@@ -211,7 +211,7 @@
 <g id="node17" class="node">
 <title>chrono</title>
 <path fill="#fffaf0" stroke="#b36b00" d="M235,-1296C235,-1296 152,-1296 152,-1296 146,-1296 140,-1290 140,-1284 140,-1284 140,-1272 140,-1272 140,-1266 146,-1260 152,-1260 152,-1260 235,-1260 235,-1260 241,-1260 247,-1266 247,-1272 247,-1272 247,-1284 247,-1284 247,-1290 241,-1296 235,-1296"/>
-<text text-anchor="middle" x="193.5" y="-1274.3" font-family="Arial" font-size="14.00">chrono =0.4.44</text>
+<text text-anchor="middle" x="193.5" y="-1274.3" font-family="Arial" font-size="14.00">chrono =0.4.45</text>
 </g>
 <!-- simard&#45;&gt;chrono -->
 <g id="edge16" class="edge">

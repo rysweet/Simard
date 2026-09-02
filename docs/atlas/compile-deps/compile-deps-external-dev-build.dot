@@ -7,7 +7,7 @@ digraph compile_deps_external_dev_build {
     build_deps [label="build-dependencies"];
     dev_deps [label="dev-dependencies"];
     features [label="features"];
-    chrono_build [label="chrono =0.4.44\nbuild timestamp"];
+    chrono_build [label="chrono =0.4.45\nbuild timestamp"];
     assert_cmd [label="assert_cmd =2.2.1"];
     proptest [label="proptest =1.11.0"];
     serial_test [label="serial_test =3.4.0"];

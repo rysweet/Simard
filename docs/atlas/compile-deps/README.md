@@ -67,7 +67,7 @@ This layer maps Simard's direct Cargo dependencies and a one-hop view of the lar
 | `url` | `=2.5.8`, optional | URL parsing behind `dashboard-audit`. |
 | `base64` | `=0.22.1` | SMTP AUTH LOGIN payload encoding. |
 | `rustls` | `=0.23.38`, feature `ring` | TLS for authenticated SMTP relay and network clients. |
-| `rustls-native-certs` | `=0.8.3` | Native trust roots for TLS. |
+| `rustls-native-certs` | `=0.8.4` | Native trust roots for TLS. |
 | `webpki-roots` | `=1.0.7` | WebPKI trust roots for TLS fallback. |
 | `libc` | `=0.2.185`, Unix target dependency | Unix FFI bindings. |
 | `chrono` build dependency | `=0.4.45` | Build-time timestamp formatting in `build.rs`. |
