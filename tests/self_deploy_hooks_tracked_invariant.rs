@@ -25,6 +25,7 @@
 //!
 //! See `docs/reference/self-deploy-drift-resilient-checkout.md`.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -88,20 +89,47 @@ fn hooks_manifest_and_scripts_are_git_tracked() {
          the manifest stays tracked for review and supply-chain integrity (SR-P1-2)"
     );
 
-    // Every hook script the manifest authorises must be tracked too: at least
-    // the manifest plus one hook script under .github/hooks/ must be listed by
-    // `git ls-files`, so the directory can never silently become untracked.
-    let hooks_dir = ".github/hooks";
-    let (ok, listed) =
-        git(&root, &["ls-files", "--", hooks_dir]).expect("git ls-files must run in a work tree");
-    assert!(ok, "git ls-files {hooks_dir} must succeed");
-    let tracked_files: Vec<&str> = listed.lines().filter(|l| !l.is_empty()).collect();
+    // Every command script authorised by the manifest must exist in the
+    // repository hooks directory and remain tracked.
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(MANIFEST_REL)).expect("hooks manifest must be readable"),
+    )
+    .expect("hooks manifest must be valid JSON");
+    let hooks = manifest
+        .get("hooks")
+        .and_then(serde_json::Value::as_object)
+        .expect("hooks manifest must contain a hooks object");
+    let mut authorised_scripts = Vec::new();
+    for entries in hooks.values() {
+        for entry in entries
+            .as_array()
+            .expect("each hooks event must contain an array")
+        {
+            if let Some(command) = entry.get("bash").and_then(serde_json::Value::as_str) {
+                let file_name = Path::new(command)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("hook command must end in a UTF-8 script name");
+                authorised_scripts.push(format!(".github/hooks/{file_name}"));
+            }
+        }
+    }
+    authorised_scripts.sort();
+    authorised_scripts.dedup();
     assert!(
-        tracked_files.contains(&MANIFEST_REL),
-        "the manifest must appear in `git ls-files {hooks_dir}`"
+        !authorised_scripts.is_empty(),
+        "hooks manifest must authorise at least one command script"
     );
-    assert!(
-        tracked_files.len() >= 2,
-        "{hooks_dir} must track the manifest AND its hook scripts (found only {tracked_files:?})"
-    );
+    for script in authorised_scripts {
+        assert!(
+            root.join(&script).is_file(),
+            "manifest-authorised hook script must exist: {script}"
+        );
+        let (tracked, _) = git(&root, &["ls-files", "--error-unmatch", "--", &script])
+            .expect("git must be runnable in a work tree");
+        assert!(
+            tracked,
+            "manifest-authorised hook script must be git-tracked: {script}"
+        );
+    }
 }
