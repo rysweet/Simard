@@ -1920,12 +1920,19 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn checkpoint(&self) -> SimardResult<()> {
-        // The library exposes durability via `close`, which issues a LadybugDB
-        // CHECKPOINT (collapsing the WAL into the main file) while keeping the
-        // store usable. Flushing here mirrors the native backend's CHECKPOINT so
-        // a subsequent reopen of the same path observes all committed writes.
-        self.lock()?.close();
-        Ok(())
+        // Delegate to the library's purpose-built `CognitiveMemory::checkpoint`,
+        // which issues a LadybugDB CHECKPOINT (collapsing the WAL into the main
+        // file) and — crucially — leaves the store's warm schema/id caches
+        // intact. `close` would also work the CHECKPOINT, but it is a pre-drop
+        // teardown that clears those caches (forcing a schema reload on the next
+        // op) AND logs-and-swallows a failed CHECKPOINT, so routing through it
+        // would make this method return `Ok(())` even when the flush failed.
+        // `checkpoint` PROPAGATES the failure instead, so the daemon's bounded
+        // WAL-retention cadence (issue #4929) surfaces checkpoint errors rather
+        // than silently swallowing them.
+        self.lock()?
+            .checkpoint()
+            .map_err(|e| map_op_err("checkpoint", e))
     }
 }
 

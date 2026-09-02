@@ -10,6 +10,7 @@ mod disk_reclaim;
 mod engineer;
 mod goal;
 mod gym;
+mod liaison;
 mod meeting;
 mod memory;
 mod merge;
@@ -22,11 +23,21 @@ mod self_health;
 mod signal;
 mod status;
 #[cfg(test)]
+mod tests_liaison_and_rework_cli;
+#[cfg(test)]
 mod tests_record_admission;
 #[cfg(test)]
 mod tests_record_decision;
 #[cfg(test)]
+mod tests_record_idea_dedup_consolidation;
+#[cfg(test)]
+mod tests_record_lifecycle_decision;
+#[cfg(test)]
 mod tests_record_orient_decide;
+#[cfg(test)]
+mod tests_record_outcome;
+#[cfg(test)]
+mod tests_record_thread_reasoning;
 mod worktree_gc;
 
 use std::path::PathBuf;
@@ -121,6 +132,7 @@ Product modes:
   gym compare <scenario-id>
   gym run-suite <suite-id>
   gym recall-precision
+  gym reliability-gate
   gym enrichment-ablation
   ooda run [--cycles=N] [--no-auto-reload] [state-root]
   dashboard serve [--port=8080]
@@ -277,6 +289,7 @@ where
         "status" => status::dispatch_status_command(args),
         "spawn" => dispatch_spawn_command(args),
         "merge" => merge::dispatch_merge_command(args),
+        "liaison" => liaison::dispatch_liaison_command(args),
         "merge-pr" => merge::dispatch_merge_pr_command(args),
         "worktree-gc" => worktree_gc::dispatch_worktree_gc_command(args),
         "disk-reclaim" => disk_reclaim::dispatch_disk_reclaim_command(args),

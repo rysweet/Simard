@@ -77,6 +77,8 @@ nav:
     - Episode Distillation: architecture/episode-distillation.md
     - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
     - Reflective Cognitive Threads Act via Tools: architecture/reflective-cognitive-threads.md
+    - The Metacognitive Model (OODA + overseer + threads): architecture/metacognitive-model.md
+    - The Metacognitive Atlas (code-derived diagrams): architecture/metacognitive-atlas.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -98,6 +100,7 @@ nav:
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
     - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
+    - Durable Issue-Cooldown Ledger (stops the auto-issue storm): concepts/durable-issue-cooldown-ledger.md
     - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
     - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
     - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
@@ -147,6 +150,8 @@ nav:
     - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
     - Terminal No-Progress Stall Never Parks Empty Evidence: concepts/no-progress-terminal-investigation.md
     - No-Progress Breaker Suppresses Its Own Issue Storm: concepts/no-progress-breaker-storm-suppression.md
+    - OODA Breaker Quarantines Terminal Unclear Goals: concepts/ooda-breaker-churn-suppression.md
+    - Overseer Reconciles Auto-Doc PRs to One Open: concepts/auto-doc-pr-reconciliation.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
     - Stable Goal-Session Identity: concepts/stable-goal-session-identity.md
     - Blocked-Goal Escalation Backoff: concepts/blocked-goal-escalation-backoff.md
@@ -202,6 +207,8 @@ nav:
     - Declare a Standing (Perpetual) Seed Goal: howto/declare-a-standing-seed-goal.md
     - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
     - Diagnose a No-Progress Breaker Issue Storm: howto/diagnose-a-no-progress-breaker-issue-storm.md
+    - Quarantine and Recover an Unclear OODA Goal: howto/quarantine-and-recover-an-unclear-ooda-goal.md
+    - Reconcile Stale Auto-Doc PRs: howto/reconcile-stale-auto-doc-prs.md
     - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
     - Triage a Blocked-Goal Escalation (Before It Reaches You): howto/triage-a-blocked-goal-escalation.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
@@ -291,11 +298,13 @@ nav:
     - Configure Overseer Gap-Scan Backoff: howto/configure-overseer-gap-scan-backoff.md
     - Configure Overseer Gap-Scan Durable Dedup: howto/configure-overseer-gap-scan-durable-dedup.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
+    - Configure Overseer Signal Liaison &amp; PR Rework Loop: howto/configure-overseer-signal-liaison-and-rework.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
     - Configure the Cognitive-Thread Batch: howto/configure-cognitive-thread-batch.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
     - Configure the Reflective Cognitive Threads: howto/configure-reflective-cognitive-threads.md
+    - Read a Cognitive Thread's Reasoning Summary: howto/read-cognitive-thread-reasoning.md
     - Record an Investigation Finding (issue/memory, not a repo doc): howto/record-an-investigation-finding.md
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
@@ -318,9 +327,11 @@ nav:
     - Coverage Comment Resilience: reference/coverage-comment-resilience.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
+    - Reliability-Gate Benchmark: reference/reliability-gate-benchmark.md
     - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
     - Enrichment Observability API: reference/enrichment-observability-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
+    - OODA Daemon Bounded Steady-State Memory: reference/ooda-daemon-bounded-memory.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - Overseer Tick Details: reference/overseer-tick-details.md
@@ -331,9 +342,12 @@ nav:
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
     - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
     - Overseer Gap-Scan Durable Open-Issue Dedup: reference/overseer-gap-scan-durable-dedup.md
+    - Issue-Cooldown Ledger API: reference/issue-cooldown-ledger-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
     - Escalation-Triage API &amp; Output Contract: reference/escalation-triage-api.md
     - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
+    - Overseer Signal Operator-Liaison: reference/overseer-signal-liaison.md
+    - Overseer Autonomous PR Rework Loop: reference/overseer-rework-loop.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
     - Dashboard Memory Tab: reference/dashboard-memory-tab.md
@@ -383,10 +397,12 @@ nav:
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
     - OODA Record-Orient/Decide Tools: reference/ooda-record-orient-decide-cli.md
+    - Cognition Record-Thread-Reasoning Tool: reference/simard-cognition-record-thread-reasoning-cli.md
     - OODA Record-Admission Tools: reference/ooda-record-admission-cli.md
+    - OODA Record-Idea-Dedup/Consolidation Tools: reference/ooda-record-idea-dedup-consolidation-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
-    - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
+    - Historical Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Memory Write CLI (remember): reference/simard-memory-remember-cli.md
@@ -454,6 +470,8 @@ nav:
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
     - No-Progress Re-Investigation API: reference/no-progress-reinvestigation-api.md
     - No-Progress Breaker Issue-Storm Suppression API: reference/no-progress-breaker-storm-suppression-api.md
+    - OODA Breaker Churn-Suppression API: reference/ooda-breaker-churn-suppression-api.md
+    - Auto-Doc PR Reconciliation API: reference/auto-doc-pr-reconciliation-api.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
@@ -476,6 +494,7 @@ nav:
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Cognition Record-Brain-Introspection/Self-Quality-Audit Tools: reference/record-brain-introspection-self-audit-cli.md
     - Disk-Health API: reference/disk-health-api.md
     - Disk Reclaim API: reference/disk-reclaim-api.md
     - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md

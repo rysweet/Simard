@@ -7,17 +7,19 @@ description: >
   two-stage plan_candidate seam (coarse Jaccard shortlist → agentic judge) with
   its fail-closed rails, the PlannedAction outcome and apply_enhance append-only
   merge, the SIMARD_CREATIVE_IDEAS_SEMANTIC_DEDUP kill-switch and
-  SIMARD_CREATIVE_IDEAS_DEDUP_SHORTLIST_K knob, the parse_idea_dedup_decision
-  shim, the consolidation entrypoint, observability (metric + judgment record +
-  tracing counts), module layout, and the hermetic test matrix.
-last_updated: 2026-07-07
+  SIMARD_CREATIVE_IDEAS_DEDUP_SHORTLIST_K knob, the typed-record fail-closed
+  reader (read_verified_idea_dedup, #4719 Group C), the consolidation entrypoint,
+  observability (metric + judgment record + tracing counts), module layout, and
+  the hermetic test matrix.
+last_updated: 2026-07-28
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: draft
+status: implemented
 related:
   - ../concepts/semantic-creative-ideas-dedup.md
   - ./creative-idea-dedup-recipe.md
+  - ./ooda-record-idea-dedup-consolidation-cli.md
   - ./creative-ideas-api.md
   - ./resource-admission-api.md
   - ./recipe-brain-api.md
@@ -80,7 +82,7 @@ Modules:
 - [The fail-closed rails](#the-fail-closed-rails)
 - [`apply_enhance` (append-only merge)](#apply_enhance-append-only-merge)
 - [Tick wiring (`run_tick`)](#tick-wiring-run_tick)
-- [`RecipeBrain::decide_idea_dedup` and the parser](#recipebraindecide_idea_dedup-and-the-parser)
+- [`RecipeBrain::decide_idea_dedup` and the fail-closed reader](#recipebraindecide_idea_dedup-and-the-fail-closed-reader)
 - [Consolidation entrypoint](#consolidation-entrypoint)
 - [Configuration](#configuration)
 - [Observability](#observability)
@@ -166,7 +168,7 @@ fail-closed rail — it never blindly creates and never mutates an unrelated ide
 A **defaulted** trait method, so every existing brain and test-double compiles
 unchanged and an un-migrated brain preserves today's behaviour (the deterministic
 Jaccard rail remains the actual dedup). The production `RecipeBrain`
-[overrides it](#recipebraindecide_idea_dedup-and-the-parser).
+[overrides it](#recipebraindecide_idea_dedup-and-the-fail-closed-reader).
 
 ```rust
 // src/ooda_brain/mod.rs, in `trait OodaBrain`
@@ -346,30 +348,42 @@ when recipe-runner-rs is unavailable), and a stub in tests. The legacy
 `with_pipeline` constructor keeps today's deterministic behaviour (semantic
 layer off) so existing tests are unchanged.
 
-## `RecipeBrain::decide_idea_dedup` and the parser
+## `RecipeBrain::decide_idea_dedup` and the fail-closed reader
 
 The production override mirrors
-[`RecipeBrain::decide_resource_admission`](resource-admission-api.md#oodabraindecide_resource_admission):
+[`RecipeBrain::decide_engineer_admission` / `decide_resource_admission`](ooda-record-admission-cli.md)
+after the [#4719](https://github.com/rysweet/Simard/issues/4719) Group C
+typed-record rework — the recipe **acts via a tool**, and the shim **reads a
+typed record fail-closed** instead of scraping stdout:
 
-- Consts: `IDEA_DEDUP_ADAPTER_TAG = "recipe-idea-dedup-brain"`,
-  `IDEA_DEDUP_RECIPE_FILENAME = "creative-idea-dedup.yaml"`, and a prompt-store
+- Consts: `IDEA_DEDUP_RECIPE_FILENAME = "creative-idea-dedup.yaml"`, the prompt-store
   name `IDEA_DEDUP_PROMPT_NAME = "creative_idea_dedup.md"` for versioned judgment
-  stamping.
-- `decide_idea_dedup` resolves the recipe path (hot-reload order: `~/.simard/...`
-  then the repo asset), renders each `IdeaDedupCtx` field through
-  `sanitize_context_var`, spawns `recipe-runner-rs` with `-c` variables (the
-  shortlist is rendered as a single sanitized block), reads the clean result via
-  `extract_recipe_decision_output`, and calls `parse_idea_dedup_decision`.
-- `parse_idea_dedup_decision(text) -> Option<IdeaDedupDecision>` strips any
-  banner/prose with `recipe_output::extract_json_payload`, then
-  `serde_json::from_str` into a local envelope
-  `{ choice, rationale, target_node_id }`. An empty/unknown `choice`, or a
-  missing `target_node_id` on `enhance_existing`, yields `None` → the shim
-  returns `Err(AdapterInvocationFailed)` → the seam fails closed. **No stdout
-  scraping** — the decision comes from the recipe's structured result channel.
+  stamping, the schema pin `IDEA_DEDUP_SCHEMA = "simard.creative.idea_dedup.v1"`,
+  and the fixed synthetic seam id `"creative-idea-dedup"` (with
+  `REASONER_RECORD_CYCLE = 0`).
+- `decide_idea_dedup` allocates a fresh per-call temp dir, resolves the recipe
+  path (hot-reload order: `~/.simard/...` then the repo asset), renders each
+  `IdeaDedupCtx` field through `sanitize_context_var`, and spawns
+  `recipe-runner-rs` with `-c` variables — the untrusted DATA (`candidate_idea`,
+  `candidate_rationale`, the sanitized `existing_shortlist` block) **plus** the
+  tool-wiring vars `record_path`, `simard_bin` (`current_exe()`), `goal_id`, and
+  `cycle_number`. The agent **records** its verdict by calling the
+  [`simard ooda record-idea-dedup`](ooda-record-idea-dedup-consolidation-cli.md)
+  tool; the agent's stdout is ignored.
+- The shim reads the result with `read_verified_idea_dedup(record_path,
+  "creative-idea-dedup", REASONER_RECORD_CYCLE)`, which returns
+  `Ok(IdeaDedupDecision)` only when the typed record exists, pins the schema,
+  matches goal/cycle, and re-validates through the shared
+  `IdeaDedupDecision::from_choice_fields` chokepoint (non-empty rationale;
+  `target_node_id` required on `enhance_existing`, rejected otherwise). Any other
+  outcome (absent/malformed/wrong-schema/unknown-choice/missing-target/mismatch)
+  is an `Err` → the shim returns `Err(AdapterInvocationFailed)` → the seam **fails
+  closed** (the candidate is dropped this cycle). **No stdout scraping.**
 
-See the [recipe & prompt schema](creative-idea-dedup-recipe.md) for the exact
-envelope and prompt.
+See the [record tool reference](ooda-record-idea-dedup-consolidation-cli.md) for
+the on-disk record shape and the R1–R7 read matrix, and the
+[recipe & prompt schema](creative-idea-dedup-recipe.md) for the tool-call the
+agent makes.
 
 ## Consolidation entrypoint
 
@@ -398,9 +412,17 @@ pub fn consolidate_existing(
 ```
 
 Mechanics: load the pool via `store.list(u32::MAX)`; the
-[consolidation recipe](creative-idea-dedup-recipe.md#consolidation-recipe)
-returns clusters `{ canonical_id, redundant_ids, merged_rationale, evidence }`;
-the applier `apply_enhance`s the canonical and, for each redundant id,
+[consolidation recipe](creative-idea-dedup-recipe.md#consolidation-recipe)'s
+agent writes its cluster list to a `clusters_path` file and **records** it by
+calling the
+[`simard ooda record-idea-consolidation`](ooda-record-idea-dedup-consolidation-cli.md#simard-ooda-record-idea-consolidation)
+tool; `decide_idea_consolidation` reads the typed `IdeaConsolidationRecord`
+fail-closed via `read_verified_idea_consolidation`, returning
+`Ok(Vec<IdeaCluster>)` — each `{ canonical_id, redundant_ids, merged_rationale,
+evidence }` re-validated through the shared `IdeaCluster::sanitized` chokepoint. A
+present-but-empty list is a valid `Ok(vec![])` ("nothing to consolidate");
+absent/malformed/mismatched is an `Err` (the applier writes nothing). The applier
+`apply_enhance`s the canonical and, for each redundant id,
 `try_transition(New → Rejected)` with rationale `"merged into <canonical>"`.
 `New → Rejected` is a valid edge; ideas that cannot transition (already terminal)
 are skipped. **No hard deletes.** Re-running after apply is idempotent
@@ -456,7 +478,7 @@ See the [operations runbook](../operations/creative-ideas-semantic-dedup-kill-sw
 | `src/creative_ideas/dedup.rs` | **Reused.** Its `jaccard` scorer (exposed `pub(crate)` as `similarity`) becomes the Stage-1 ranker + the backstop; `is_near_duplicate` / `reject_duplicates` retained. |
 | `src/creative_ideas/mod.rs` | `pub mod dedup_gate;` |
 | `src/ooda_brain/mod.rs` | `+ IdeaDedupCtx`, `ExistingIdeaView`, `IdeaDedupDecision`, `IdeaConsolidationCtx`, `IdeaCluster`, `OodaBrain::decide_idea_dedup` + `decide_idea_consolidation` (defaulted). |
-| `src/ooda_brain/recipe_brain.rs` | `+ RecipeBrain::decide_idea_dedup` / `decide_idea_consolidation`, `parse_idea_dedup_decision`, `parse_idea_consolidation`, consts. |
+| `src/ooda_brain/recipe_brain.rs` | `+ RecipeBrain::decide_idea_dedup` / `decide_idea_consolidation` (temp-dir → run-recipe → `read_verified_*`), consts. The former `parse_idea_dedup_decision` / `parse_idea_consolidation` scrapers are **deleted** (#4719 Group C). |
 | `src/cognitive_threads/threads/creative_ideas.rs` | Thread gains the brain seam (`with_pipeline_and_brain`); `run_tick` rewired; `GenerationReport` counters. |
 | `src/operator_cli/creative_ideas.rs` | `simard creative-ideas consolidate [--apply]` trigger. |
 | `prompt_assets/simard/creative_idea_dedup.md` | The reasoning prompt (prompt-store registered). |
@@ -478,8 +500,8 @@ fake; no network, no recipe runner in the seam tests.
 | `plan_candidate` — empty pool | `Create` without consulting the brain. |
 | `plan_candidate` — bad ENHANCE target | Fail-closed **drop** (`FailClosed`); no wrong-node write. |
 | `apply_enhance` | `update` appended a revision at the **same** `idea_id`, status preserved, rationale + links merged, **pool count unchanged (0 new nodes)**; `dry_run` writes nothing; missing target ⇒ `Ok(false)`. |
-| `parse_idea_dedup_decision` (table) | Valid variants parse; banner-polluted JSON parses; unknown `choice` → `None`; missing `target_node_id` on enhance → `None`. |
-| `parse_idea_consolidation` (table) | Reads the `clusters` array; drops headless clusters; empty is `Some([])`; bad JSON → `None`. |
+| `read_verified_idea_dedup` (table) | Valid variants read back; unknown `choice` → `Err`; missing/rejected `target_node_id` on enhance → `Err`; wrong schema / goal / cycle → `Err`; empty rationale → `Err`. (See the [record tool reference](ooda-record-idea-dedup-consolidation-cli.md#regression-tests).) |
+| `read_verified_idea_consolidation` (table) | Reads the `clusters` array re-sanitized via `IdeaCluster::sanitized`; drops headless clusters; present-empty is `Ok(vec![])`; absent/malformed/mismatched → `Err`. |
 | `run_tick` integration | Report `persisted` / `skipped` / `enhanced` / `dedup_errors` counts; a stubbed SKIP drops (0 nodes); a stubbed ENHANCE updates the matched idea and creates **0** nodes; a stubbed CREATE persists; a brain error is fail-closed (candidate not persisted, no duplicate). |
 | `consolidate_existing` | Dry-run produces a plan and writes nothing; `apply` strengthens canonicals and transitions redundant ideas `New → Rejected`; second run is idempotent. |
-| Recipe/prompt content-pin | The recipe + prompt assets expose the documented `-c` vars, terminal `output`, and decision tokens (`tests/creative_ideas_dedup_assets.rs`, mirrors `tests/recipe_brain_verdict_assets.rs`); full validation by the recipe runner in CI. |
+| Recipe/prompt content-pin | The recipe + prompt assets expose the documented `-c` vars, **call the `simard ooda record-idea-*` tool** with `--record-path {{record_path}} --goal-id {{goal_id}} --cycle-number {{cycle_number}}` (consolidation also `--clusters-path {{clusters_path}}`), and document `Output: NONE scraped from stdout` (`tests/creative_ideas_dedup_assets.rs`); full validation by the recipe runner in CI. |

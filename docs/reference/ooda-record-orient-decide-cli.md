@@ -682,10 +682,11 @@ reader must ship together.
 
 This change removes the orient/decide callers of `extract_and_parse_json` /
 `extract_json_payload`. The shared scraper family in
-`src/recipe_output/extract.rs` is **retained** because other, not-yet-converted
-seams still call it (Groups B/C/D: admission + resource-admission; idea-dedup +
-idea-consolidation; outcome-verify + RustyClawd `from_recipe_envelope`, plus the
-engineer-lifecycle envelope). `extract.rs` is deleted only once
+`src/recipe_output/extract.rs` is **retained** because one not-yet-converted
+seam still calls it: the engineer-**lifecycle** `DecisionEnvelope` path. (Groups
+B/C are converted — admission + resource-admission and idea-dedup +
+idea-consolidation; Group D (#4967) converted outcome-verify + RustyClawd.)
+`extract.rs` is deleted only once
 `grep -rn extract_json_payload src/` returns no remaining callers.
 
 Likewise, the shared engineer-lifecycle machinery — `run_brain_ladder`,

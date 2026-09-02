@@ -197,6 +197,8 @@ threshold is a judgment, and judgment belongs in an agentic recipe step.
 - [Agentic observe/orient merge-queue reasoning](./agentic-merge-queue-reasoning.md)
 - [Overseer root-cause "why"](./overseer-root-cause-why.md)
 - [No-progress root-cause resolution](./no-progress-root-cause-resolution.md)
+- [Overseer Signal operator-liaison](../reference/overseer-signal-liaison.md) — an agentic-first application: operator-message interpretation lives in the `operator-liaison` recipe; Rust is a thin receive/authorize/dedup/dispatch rail.
+- [Overseer autonomous PR rework loop](../reference/overseer-rework-loop.md) — an agentic-first application: the fixable-vs-escalate judgment lives in the merge-judge prompt; Rust is a thin cap/dedup/dispatch rail.
 - [Durable documentation policy](./durable-documentation-policy.md)
 - Engineering Guidelines G1–G4 — `CONTRIBUTING.md`, and `engineer_system.md`
   "Engineering Guidelines" section (canonical G3).

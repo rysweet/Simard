@@ -78,6 +78,37 @@ fn promote_to_active_not_found() {
 }
 
 #[test]
+fn promote_to_active_is_fail_closed_and_leaves_backlog_untouched() {
+    // Issue #4930 (B2): `promote_to_active` must run the SAME admission gate as
+    // the direct-add path, not just `validate_priority`. A backlog item whose
+    // record would produce an invalid active goal (here: an empty description,
+    // as a corrupt persisted board could carry) must be rejected — and because
+    // validation runs BEFORE the board is mutated, the item stays in the backlog
+    // rather than being silently dropped.
+    let mut board = GoalBoard::new();
+    board.backlog.push(BacklogItem {
+        id: "b-invalid".to_string(),
+        description: String::new(),
+        source: "test".to_string(),
+        score: 0.0,
+    });
+    let err = promote_to_active(&mut board, "b-invalid", 1, None);
+    assert!(
+        err.is_err(),
+        "an item that would yield an invalid active goal must be rejected on promotion"
+    );
+    assert_eq!(
+        board.backlog.len(),
+        1,
+        "a rejected promotion must leave the backlog item in place (no silent loss)"
+    );
+    assert!(
+        board.active.is_empty(),
+        "a rejected promotion must not insert into the active board"
+    );
+}
+
+#[test]
 fn update_goal_progress_and_archive_completed() {
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, make_goal("g1", 1)).unwrap();

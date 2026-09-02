@@ -21,6 +21,7 @@ use super::super::thread::{
     CognitiveThread, Priority, SchedulePolicy, ThreadContext, ThreadHealth, ThreadKind,
     ThreadOutcome,
 };
+use crate::ooda_brain::ThreadName;
 
 /// Stable telemetry id.
 pub const ID: &str = "values_deliberation";
@@ -183,9 +184,16 @@ impl CognitiveThread for ValuesDeliberationThread {
         // TRIGGER — record ran/health from the recipe's EXIT STATUS only. The
         // recipe writes each advisory `values:` fact via `simard memory remember`
         // and proposes any follow-up heuristic goal via `simard goal add`.
-        let result = self.invoker.invoke(RECIPE, &ctx_vars);
-        self.note_run(ctx.now_epoch, result.is_success());
-        result.into_outcome(RECIPE, start.elapsed())
+        let outcome = recipe_rail::run_reflective_thread(
+            self.invoker.as_ref(),
+            RECIPE,
+            ThreadName::ValuesDeliberation,
+            ctx.state_root,
+            ctx_vars,
+            start,
+        );
+        self.note_run(ctx.now_epoch, outcome.success);
+        outcome
     }
 
     fn health(&self) -> ThreadHealth {

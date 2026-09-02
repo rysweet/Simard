@@ -357,6 +357,19 @@ impl WhisperGate {
     /// overflowing for very large strike counts.
     fn window_for(&self, signature: &str) -> i64 {
         let strikes = self.strikes.get(signature).copied().unwrap_or(0);
+        self.window_for_strikes(strikes)
+    }
+
+    /// The suppression window for a signature that has been delivered `strikes`
+    /// times: `min(base * 2^(strikes - 1), cap)`; `strikes <= 1` uses the base
+    /// window. Saturates instead of overflowing for very large strike counts.
+    ///
+    /// Exposed (issue #4930) so a DURABLE cooldown backing — the
+    /// [`crate::overseer::issue_cooldown::IssueCooldownLedger`], which persists
+    /// `(last_emit, strikes)` in cognitive memory rather than in this gate's
+    /// in-memory maps — can reuse the exact same window math without duplicating
+    /// the formula.
+    pub fn window_for_strikes(&self, strikes: u32) -> i64 {
         if strikes <= 1 {
             return self.base_secs;
         }
@@ -369,6 +382,13 @@ impl WhisperGate {
                 .unwrap_or(self.cap_secs)
         };
         grown.min(self.cap_secs)
+    }
+
+    /// The hard cap (seconds) this gate's window can grow to. Exposed (issue
+    /// #4930) so the durable [`IssueCooldownLedger`](crate::overseer::issue_cooldown::IssueCooldownLedger)
+    /// can size its stale-entry pruning consistently with the window bound.
+    pub fn cap_secs(&self) -> i64 {
+        self.cap_secs
     }
 
     /// Decide WITHOUT recording — the act path uses this so it can commit only

@@ -33,6 +33,11 @@ mod tests_catalog;
 #[cfg(test)]
 mod tests_rework_contract;
 
+// Issue #4970: TDD contract for the ThreadReasoningRecord typed handoff, its
+// fail-closed reader, and the `run_reflective_thread` rail helper.
+#[cfg(test)]
+mod tests_thread_reasoning_record;
+
 // Issue #4786: TDD contract for cognitive-thread observability instrumentation
 // (per-thread OTel series + durable error propagation).
 #[cfg(test)]

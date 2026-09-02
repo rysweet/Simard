@@ -25,6 +25,15 @@ Commands:
                   [--task-hint <TEXT> | --task-hint-path <FILE>]
                               Record exactly one typed, validated per-goal-cycle
                               decision (the reasoner's tool; zero privilege).
+  record-outcome  --choice <mark_achieved|reopen|replan|keep_open_and_report>
+                  (--reason <TEXT> | --reason-path <FILE>)
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                  [--replan-hint <TEXT> | --replan-hint-path <FILE>]
+                              Record exactly one typed, validated goal-outcome-
+                              verification decision (the reasoner's tool; zero
+                              privilege). --replan-hint is OWNED by replan
+                              (optional even there), REJECTED on every other
+                              choice.
   record-orient   --adjusted-urgency <F> --confidence <F> --demotion-applied <F>
                   --base-urgency <F> (--reason <TEXT> | --reason-path <FILE>)
                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
@@ -37,6 +46,15 @@ Commands:
                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
                               Record exactly one typed, validated OODA Decide
                               action-routing (the reasoner's tool; zero privilege).
+  record-lifecycle-decision --decision <continue_skipping|reclaim_and_redispatch|
+                            deprioritize|open_tracking_issue|mark_goal_blocked|
+                            consider_self_update>
+                  [--rationale <TEXT> | --rationale-path <FILE>]
+                  --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated engineer-
+                              lifecycle Act decision (the reasoner's tool; zero
+                              privilege). The extra-field variants derive their
+                              body/reason/redispatch text from --rationale.
   record-admission --choice <admit|defer|serialize_after>
                    (--rationale <TEXT> | --rationale-path <FILE>)
                    --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
@@ -52,6 +70,20 @@ Commands:
                    --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
                               Record exactly one typed, validated resource-
                               admission verdict (the reasoner's tool; zero privilege).
+  record-idea-dedup --choice <create_new|skip|enhance_existing>
+                   (--reason <TEXT> | --reason-path <FILE>) [--target-node-id <ID>]
+                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated creative-idea
+                              semantic-dedup verdict (the reasoner's tool; zero
+                              privilege). --target-node-id is REQUIRED on
+                              enhance_existing, REJECTED on create_new/skip.
+  record-idea-consolidation --clusters-path <ABSOLUTE_PATH>
+                   --record-path <ABSOLUTE_PATH> --goal-id <ID> --cycle-number <N>
+                              Record exactly one typed, validated creative-ideas
+                              consolidation cluster list read from the JSON-array
+                              file at --clusters-path (the reasoner's tool; zero
+                              privilege). An empty array is a valid \"nothing to
+                              consolidate\" record.
   approvals issue --state-root <PATH> --effect-id <ID> --request-id <ID>
                               Issue a privileged merge/deploy approval from
                               the configured server principal and signing key.
@@ -102,10 +134,14 @@ pub(super) fn dispatch_ooda_command(
         "fixture" => dispatch_fixture(args),
         "terminal" => dispatch_terminal(args),
         "record-decision" => dispatch_record_decision(args),
+        "record-outcome" => dispatch_record_outcome(args),
         "record-orient" => dispatch_record_orient(args),
         "record-decide" => dispatch_record_decide(args),
+        "record-lifecycle-decision" => dispatch_record_lifecycle_decision(args),
         "record-admission" => dispatch_record_admission(args),
         "record-resource-admission" => dispatch_record_resource_admission(args),
+        "record-idea-dedup" => dispatch_record_idea_dedup(args),
+        "record-idea-consolidation" => dispatch_record_idea_consolidation(args),
         "approvals" => dispatch_approvals(args),
         other => Err(format!("unsupported command 'ooda {other}'").into()),
     }
@@ -185,6 +221,80 @@ fn dispatch_record_decision(
     // Validate-all-then-write-once: this atomic, owner-only (0o600) write is the
     // tool's ONLY side effect. It runs only after EVERY check above passed.
     crate::persistence::persist_json("ooda-per-goal-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-outcome` — the zero-privilege tool the OODA closed-loop
+/// OUTCOME-VERIFICATION reasoner calls to record EXACTLY ONE typed, validated
+/// decision (Group D of epic #4719).
+///
+/// It validates the closed 4-variant `--choice` enum + non-empty `--reason`
+/// through the SINGLE shared
+/// [`GoalOutcomeDecision::from_choice_fields`](crate::ooda_brain::GoalOutcomeDecision::from_choice_fields)
+/// chokepoint, hardens `--record-path` (absolute, no `..`), then writes exactly
+/// one atomic `0o600`
+/// [`OutcomeDecisionRecord`](crate::ooda_brain::OutcomeDecisionRecord). Any
+/// validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). `--replan-hint` is OWNED by `replan`
+/// (optional even there) and REJECTED on every other choice by the chokepoint.
+/// `RecipeBrain` reads the record back with `read_verified_outcome` — it never
+/// scrapes the agent's stdout.
+fn dispatch_record_outcome(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "reason",
+        "reason-path",
+        "replan-hint",
+        "replan-hint-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let reason = resolve_field(&parsed, "reason", "reason-path")?
+        .ok_or("an outcome decision requires --reason or --reason-path")?;
+    // Optional variant-owned free text (single field). The chokepoint enforces
+    // that only `replan` may carry a non-empty hint — a hint supplied on any
+    // other choice is rejected there, before any write.
+    let replan_hint =
+        resolve_field(&parsed, "replan-hint", "replan-hint-path")?.unwrap_or_default();
+
+    let decision =
+        crate::ooda_brain::GoalOutcomeDecision::from_choice_fields(choice, &reason, &replan_hint)
+            .ok_or_else(|| {
+            format!(
+                "invalid outcome decision: unknown --choice {choice:?}, empty --reason, or a \
+                     --replan-hint on a non-replan choice (choice must be one of \
+                     mark_achieved|reopen|replan|keep_open_and_report; --replan-hint is owned by \
+                     replan)"
+            )
+        })?;
+
+    let record = crate::ooda_brain::OutcomeDecisionRecord {
+        schema: crate::ooda_brain::OUTCOME_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision,
+    };
+
+    crate::persistence::persist_json("ooda-goal-outcome-decision", record_path, &record)?;
     Ok(())
 }
 
@@ -331,6 +441,91 @@ fn dispatch_record_decide(
     };
 
     crate::persistence::persist_json("ooda-decide-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-lifecycle-decision` — the zero-privilege tool the OODA
+/// engineer-lifecycle reasoner calls to record EXACTLY ONE typed, validated Act
+/// decision (Group E, #4967; retires the last reasoner-decision stdout scrape).
+///
+/// It validates the closed `--decision` variant + bounds/sanitizes the optional
+/// `--rationale` through the SINGLE shared
+/// [`sanitize_lifecycle_fields`](crate::ooda_brain::sanitize_lifecycle_fields)
+/// chokepoint (the same one the reader applies, so writer and reader can never
+/// drift), hardens `--record-path` (absolute, no `..`), stamps `written_at_epoch`
+/// = now, then writes exactly one atomic `0o600`
+/// [`EngineerLifecycleRecord`](crate::ooda_brain::EngineerLifecycleRecord). Any
+/// validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once). The tool holds no privilege: its only side
+/// effect is that one write. `RecipeBrain` reads the record back with
+/// [`read_verified_engineer_lifecycle_decision`](crate::ooda_brain::read_verified_engineer_lifecycle_decision)
+/// — it never scrapes the agent's stdout.
+///
+/// Unlike the sibling record verbs, `--rationale` is OPTIONAL (an empty
+/// rationale is a valid record); the extra-field variants
+/// (`reclaim_and_redispatch` / `open_tracking_issue` / `mark_goal_blocked`)
+/// derive their body/reason/redispatch text from it, exactly as the retired
+/// scrape path did.
+fn dispatch_record_lifecycle_decision(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "decision",
+        "rationale",
+        "rationale-path",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let decision = required_named(&parsed, "decision")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    // --rationale is OPTIONAL (empty is valid); the extra-field variants reuse it.
+    let rationale = resolve_field(&parsed, "rationale", "rationale-path")?.unwrap_or_default();
+
+    // Validate the closed variant + bound/sanitize the rationale through the
+    // SINGLE shared chokepoint. An out-of-set decision or an oversize rationale
+    // ⇒ None ⇒ rejected here, before any write. Returns the decoded decision +
+    // sanitized rationale; the canonical token is projected from the decision so
+    // the persisted record is already normalized.
+    let (mapped, clean_rationale) =
+        crate::ooda_brain::sanitize_lifecycle_fields(decision, &rationale).ok_or_else(|| {
+            format!(
+                "invalid lifecycle decision: unknown --decision {decision:?} or a rationale that \
+                 is too long after sanitize (decision must be one of {})",
+                crate::ooda_brain::LIFECYCLE_VARIANT_LIST
+            )
+        })?;
+    let canonical = crate::ooda_brain::lifecycle_decision_choice(&mapped);
+
+    let written_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let record = crate::ooda_brain::EngineerLifecycleRecord {
+        schema: crate::ooda_brain::ENGINEER_LIFECYCLE_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision: canonical.to_string(),
+        rationale: clean_rationale,
+        written_at_epoch,
+    };
+
+    crate::persistence::persist_json("ooda-engineer-lifecycle-decision", record_path, &record)?;
     Ok(())
 }
 
@@ -498,6 +693,145 @@ fn dispatch_record_resource_admission(
     Ok(())
 }
 
+/// `simard ooda record-idea-dedup` — the zero-privilege tool the Creative Ideas
+/// SEMANTIC-dedup reasoner calls to record EXACTLY ONE typed, validated verdict
+/// (issue #2925; Group C of epic #4719).
+///
+/// It validates the closed 3-variant `--choice` enum (`create_new|skip|
+/// enhance_existing`, case-insensitive) + a non-empty `--reason` AND the
+/// per-variant field ownership (`--target-node-id` REQUIRED on `enhance_existing`,
+/// REJECTED on `create_new`/`skip`) through the SINGLE shared
+/// [`IdeaDedupDecision::from_choice_fields`](crate::ooda_brain::IdeaDedupDecision::from_choice_fields)
+/// chokepoint, hardens `--record-path` (absolute, no `..`), then writes exactly
+/// one atomic `0o600`
+/// [`IdeaDedupDecisionRecord`](crate::ooda_brain::IdeaDedupDecisionRecord). Any
+/// validation failure ⇒ a non-zero exit AND **no file on disk**
+/// (validate-all-then-write-once).
+///
+/// See `docs/reference/ooda-record-idea-dedup-consolidation-cli.md`.
+fn dispatch_record_idea_dedup(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &[
+        "choice",
+        "reason",
+        "reason-path",
+        "target-node-id",
+        "record-path",
+        "goal-id",
+        "cycle-number",
+    ];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let choice = required_named(&parsed, "choice")?;
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let reason = resolve_field(&parsed, "reason", "reason-path")?
+        .ok_or("a dedup verdict requires --reason or --reason-path")?;
+
+    // Optional variant-owned field. The chokepoint enforces which variant may
+    // carry it — a target on create_new/skip, or a missing target on
+    // enhance_existing, is rejected there, before any write.
+    let target_node_id = parsed
+        .get("target-node-id")
+        .map(String::as_str)
+        .unwrap_or("");
+
+    let decision =
+        crate::ooda_brain::IdeaDedupDecision::from_choice_fields(choice, &reason, target_node_id)
+            .ok_or_else(|| {
+            format!(
+                "invalid dedup verdict: unknown --choice {choice:?}, empty --reason, or a \
+                     misplaced --target-node-id (choice must be one of \
+                     create_new|skip|enhance_existing; --target-node-id is required on \
+                     enhance_existing and rejected on create_new/skip)"
+            )
+        })?;
+
+    let record = crate::ooda_brain::IdeaDedupDecisionRecord {
+        schema: crate::ooda_brain::IDEA_DEDUP_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        decision,
+    };
+
+    crate::persistence::persist_json("ooda-idea-dedup-decision", record_path, &record)?;
+    Ok(())
+}
+
+/// `simard ooda record-idea-consolidation` — the zero-privilege tool the
+/// Creative Ideas CONSOLIDATION reasoner calls to record EXACTLY ONE typed,
+/// validated cluster list (issue #2925; Group C of epic #4719).
+///
+/// The clusters are a LIST, not an enum, so they are read from the JSON-array
+/// FILE at `--clusters-path` (inline argv would hit E2BIG for large lists). Each
+/// cluster passes the shared
+/// [`IdeaCluster::sanitized`](crate::ooda_brain::IdeaCluster::sanitized)
+/// chokepoint (headless clusters dropped, fields sanitized + bounded); the list
+/// is capped at 64. An empty array `[]` is a VALID "nothing to consolidate"
+/// record. Both paths are hardened (absolute, no `..`); the tool writes exactly
+/// one atomic `0o600`
+/// [`IdeaConsolidationRecord`](crate::ooda_brain::IdeaConsolidationRecord). Any
+/// validation failure ⇒ a non-zero exit AND **no file on disk**.
+///
+/// See `docs/reference/ooda-record-idea-dedup-consolidation-cli.md`.
+fn dispatch_record_idea_consolidation(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const KNOWN_FLAGS: &[&str] = &["clusters-path", "record-path", "goal-id", "cycle-number"];
+
+    let parsed = parse_named_args(args)?;
+    for flag in parsed.keys() {
+        if !KNOWN_FLAGS.contains(&flag.as_str()) {
+            return Err(format!("unknown option --{flag}").into());
+        }
+    }
+
+    let goal_id = required_named(&parsed, "goal-id")?;
+    let cycle_number: u32 = required_named(&parsed, "cycle-number")?
+        .parse()
+        .map_err(|_| "invalid --cycle-number (expected a u32)")?;
+    let record_path = Path::new(required_named(&parsed, "record-path")?);
+    harden_path(record_path, "record-path")?;
+
+    let clusters_path = Path::new(required_named(&parsed, "clusters-path")?);
+    harden_path(clusters_path, "clusters-path")?;
+    let raw = read_bounded_clusters_file(clusters_path)?;
+
+    // Validate-all-then-write-once: the whole array must parse before any write.
+    let parsed_clusters: Vec<crate::ooda_brain::IdeaCluster> = serde_json::from_str(&raw)
+        .map_err(|e| format!("--clusters-path must be a JSON array of clusters: {e}"))?;
+
+    // Sanitize each cluster through the SAME chokepoint the reader re-runs;
+    // headless clusters are dropped, and the list is capped at 64.
+    let clusters: Vec<crate::ooda_brain::IdeaCluster> = parsed_clusters
+        .iter()
+        .filter_map(crate::ooda_brain::IdeaCluster::sanitized)
+        .take(64)
+        .collect();
+
+    let record = crate::ooda_brain::IdeaConsolidationRecord {
+        schema: crate::ooda_brain::IDEA_CONSOLIDATION_SCHEMA.to_string(),
+        goal_id: goal_id.to_string(),
+        cycle_number,
+        clusters,
+    };
+
+    crate::persistence::persist_json("ooda-idea-consolidation-decision", record_path, &record)?;
+    Ok(())
+}
+
 /// Split a single comma-separated list-flag value into its trimmed, non-empty
 /// elements. The admission list flags (`--blocked-by`, `--overlap-files`) accept
 /// ONE comma-separated value because `parse_named_args` rejects a repeated flag;
@@ -545,6 +879,30 @@ fn read_bounded_field_file(path: &Path, flag: &str) -> Result<String, Box<dyn st
     if buf.len() as u64 > MAX_FIELD_FILE_BYTES {
         return Err(format!(
             "--{flag} file {} exceeds the {MAX_FIELD_FILE_BYTES}-byte cap",
+            path.display()
+        )
+        .into());
+    }
+    Ok(buf)
+}
+
+/// Maximum bytes read from a `--clusters-path` JSON-array file before failing
+/// closed. Larger than [`MAX_FIELD_FILE_BYTES`] because a consolidation list can
+/// carry up to 64 clusters each with several bounded free-text fields — 1 MiB is
+/// ample headroom while still bounding a hostile/accidental huge file.
+const MAX_CLUSTERS_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Read at most [`MAX_CLUSTERS_FILE_BYTES`] from the `--clusters-path` file,
+/// failing closed if the file is larger. The list is re-capped + re-sanitized
+/// after parsing; this only bounds the raw read to prevent a transient OOM.
+fn read_bounded_clusters_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let mut reader = std::fs::File::open(path)?.take(MAX_CLUSTERS_FILE_BYTES + 1);
+    let mut buf = String::new();
+    reader.read_to_string(&mut buf)?;
+    if buf.len() as u64 > MAX_CLUSTERS_FILE_BYTES {
+        return Err(format!(
+            "--clusters-path file {} exceeds the {MAX_CLUSTERS_FILE_BYTES}-byte cap",
             path.display()
         )
         .into());

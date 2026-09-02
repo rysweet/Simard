@@ -26,6 +26,7 @@ use crate::error::SimardResult;
 use crate::journal::jargon::scrub_jargon;
 use crate::journal::providers::PrListSource;
 use crate::journal::types::PrSummary;
+use crate::recipe_output::strip_recipe_noise;
 use crate::stewardship::merge_authority::{
     MergedPrSummary, OpenPrSummary, PrGhClient, evaluate_objective_gates,
 };
@@ -77,12 +78,25 @@ fn strip_conventional_prefix(title: &str) -> &str {
 
 /// Rewrite a raw PR title into a layperson-readable "what changed & why it
 /// matters" phrase: drop a Conventional-Commits prefix that means nothing to a
-/// non-engineer, then scrub engineering jargon. Falls back to a neutral phrase
+/// non-engineer, drop any Copilot CLI launch-log banner the orchestrator lifted
+/// into the title, then scrub engineering jargon. Falls back to a neutral phrase
 /// when nothing readable remains.
+///
+/// Issue #1093: the orchestrator's fallback commit-message generator can lift
+/// the agent's first stdout line verbatim, so a PR title occasionally *is* the
+/// `ℹ NODE_OPTIONS=… (saved preference)` launch banner (observed on leaked
+/// commits, e.g. `9a7e88ec8 fix: ℹ NODE_OPTIONS=…`). Routing the
+/// (prefix-stripped) title through the shared [`strip_recipe_noise`] filter —
+/// the same predicate that suppresses this banner on every other channel —
+/// collapses such a title to the neutral fallback instead of surfacing launcher
+/// noise to a layperson. The predicate anchors on the full banner shape
+/// (`ℹ` + `NODE_OPTIONS=` + `(saved preference)`), so a real title that merely
+/// *mentions* `NODE_OPTIONS` in prose is preserved unchanged (anti-weakening).
 #[must_use]
 pub fn plainify_pr_title(title: &str) -> String {
     let without_prefix = strip_conventional_prefix(title.trim());
-    let scrubbed = scrub_jargon(without_prefix).trim().to_string();
+    let denoised = strip_recipe_noise(without_prefix);
+    let scrubbed = scrub_jargon(denoised.trim()).trim().to_string();
     if scrubbed.is_empty() {
         "A code change.".to_string()
     } else {
