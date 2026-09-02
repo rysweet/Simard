@@ -146,8 +146,11 @@ failed: … agent step failed: amplihack copilot failed (exit 1)
   `recipe-runner-rs` reported the step as failed and the recipe exited
   non-zero.
 - **Impact:** **minimal and self-limiting.** The disk-health check is
-  best-effort and runs every cycle; a single failed run skips one cleanup
-  opportunity and never aborts the OODA cycle. The very next cycle re-runs it.
+  best-effort and runs on its own interval
+  (`SIMARD_DISK_HEALTH_INTERVAL_SECS`, default 900 seconds), independent of the
+  OODA cycle; a single failed run skips one cleanup opportunity and never
+  aborts the OODA cycle. The next scheduled disk-health run retries it. Confirm
+  the active cadence from the `disk health interval = ...s` startup line.
   Disk reclaim also runs independently.
 - **Current status:** the reworked trigger (issue #4722) records the recipe by
   **exit status alone** without scraping or embedding child stdout. Current
