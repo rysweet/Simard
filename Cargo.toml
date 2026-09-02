@@ -188,7 +188,7 @@ chrono = "=0.4.45"
 # US Pacific time with the date-correct PST/PDT abbreviation. chrono-tz is the
 # idiomatic tz-database crate for the runtime UTC->America/Los_Angeles
 # conversion (chrono alone has no DST-aware named zones). `=`-pinned to match
-# the repo convention (e.g. `chrono = "=0.4.44"`); the pin is what makes the
+# the repo convention (e.g. `chrono = "=0.4.45"`); the pin is what makes the
 # %Z abbreviation reproducible and lets the PST/PDT unit tests act as a guard.
 chrono-tz = "=0.10.4"
 dirs = "=6.0.0"

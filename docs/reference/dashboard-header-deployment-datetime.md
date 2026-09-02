@@ -166,7 +166,7 @@ proves which path is in effect for the pinned version.
 
 `chrono-tz` is the idiomatic crate for the runtime conversion and is added as a
 **new `=`-pinned dependency** under `[dependencies]`, matching the repo
-convention (e.g. `chrono = "=0.4.44"`). The exact pinned version is fixed at
+convention (e.g. `chrono = "=0.4.45"`). The exact pinned version is fixed at
 implementation time and recorded in the pull request — the pin is what makes the
 `%Z` abbreviation reproducible and lets the unit tests act as a regression guard.
 Separately, `build.rs` gains a `=`-pinned `[build-dependencies]` `chrono` entry
