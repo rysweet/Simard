@@ -13,8 +13,11 @@ use std::path::{Component, Path, PathBuf};
 use tracing::warn;
 
 use super::loader::BuiltinIdentityLoader;
-use super::toml_types::{TomlIdentity, TomlIdentityFile};
-use super::{IdentityLoadRequest, IdentityLoader, IdentityManifest, MemoryPolicy, OperatingMode};
+use super::toml_types::{TomlAuthority, TomlIdentity, TomlIdentityFile};
+use super::{
+    IdentityAuthority, IdentityLoadRequest, IdentityLoader, IdentityManifest, MemoryPolicy,
+    OperatingMode, SeedGoal, WritePosture,
+};
 use crate::base_types::{BaseTypeCapability, BaseTypeId};
 use crate::error::{SimardError, SimardResult};
 use crate::memory::MemoryScope;
@@ -65,6 +68,37 @@ impl FileIdentityLoader {
             }
         })?;
 
+        // #3125: identity-scoped cognition fields (seed goals, target scope,
+        // write-authority posture). Computed once and applied to whichever
+        // manifest is built (leaf or composite).
+        let seed_goals: Vec<SeedGoal> = identity
+            .seed_goals
+            .iter()
+            .map(|g| {
+                let seed = SeedGoal::new(
+                    g.priority,
+                    g.title.clone(),
+                    g.description.clone(),
+                    g.repo.clone(),
+                );
+                // #4927 three-state mapping: preserve the omitted/explicit
+                // distinction the `Option<bool>` carries. Omitted (`None`) is an
+                // inert non-standing seed; explicit `false` maps to
+                // `.non_standing()` (authorizes conservative reversal); `true`
+                // maps to `.standing()`.
+                match g.standing {
+                    Some(true) => seed.standing(),
+                    Some(false) => seed.non_standing(),
+                    None => seed,
+                }
+            })
+            .collect();
+        let target_repos = identity.target_repos.clone();
+        let declared_authority: Option<IdentityAuthority> = match &identity.authority {
+            Some(a) => Some(toml_authority_to_domain(a, &identity.name, toml_path)?),
+            None => None,
+        };
+
         if !identity.components.is_empty() {
             if depth >= MAX_COMPOSITION_DEPTH {
                 return Err(SimardError::IdentityTomlParseError {
@@ -110,13 +144,32 @@ impl FileIdentityLoader {
             // the same node (diamond pattern).
             visited.remove(&identity.name);
 
-            return IdentityManifest::compose(
+            let composed = IdentityManifest::compose(
                 &identity.name,
                 &request.package_version,
                 components,
                 default_mode,
                 request.contract.clone(),
-            );
+            )?;
+            // A composite may not DILUTE its components' posture: if it declares
+            // its own `[identities.authority]`, it must agree with the posture
+            // `compose` derived from the components (defense in depth, #3125).
+            if let Some(declared) = &declared_authority
+                && declared.posture != composed.authority.posture
+            {
+                return Err(SimardError::IdentityTomlParseError {
+                    path: toml_path.to_path_buf(),
+                    reason: format!(
+                        "composite identity '{}' declares authority.posture = \"{}\" but its \
+                         components resolve to \"{}\"; a composite cannot dilute its components' \
+                         write-authority posture",
+                        identity.name, declared.posture, composed.authority.posture
+                    ),
+                });
+            }
+            return Ok(composed
+                .with_seed_goals(seed_goals)
+                .with_target_repos(target_repos));
         }
 
         let supported_base_types = identity
@@ -237,7 +290,75 @@ impl FileIdentityLoader {
             memory_policy,
             request.contract.clone(),
         )
+        .map(|m| {
+            m.with_seed_goals(seed_goals)
+                .with_target_repos(target_repos)
+                .with_authority(declared_authority.unwrap_or_default())
+        })
     }
+}
+
+/// Convert a `[identities.authority]` TOML block into a validated
+/// [`IdentityAuthority`] (#3125 / #3067), failing closed on contradictions.
+///
+/// Rules (see docs/reference/write-authority-posture-api.md):
+/// - `posture` must be one of `read-only | scoped-write | full`.
+/// - Under `read-only`, any `allow_*_writes = true` is a hard contradiction.
+/// - `allowed_write_repos` must be empty unless `posture = "scoped-write"`.
+/// - `allow_*` default is posture-dependent: `false` under `read-only`,
+///   `true` otherwise.
+fn toml_authority_to_domain(
+    authority: &TomlAuthority,
+    identity_name: &str,
+    toml_path: &Path,
+) -> SimardResult<IdentityAuthority> {
+    let posture: WritePosture =
+        authority
+            .posture
+            .parse()
+            .map_err(|e: String| SimardError::IdentityTomlParseError {
+                path: toml_path.to_path_buf(),
+                reason: format!(
+                    "invalid authority.posture '{}' for identity '{identity_name}': {e}",
+                    authority.posture
+                ),
+            })?;
+    let read_only = posture == WritePosture::ReadOnly;
+
+    for (field, value) in [
+        ("allow_git_push", authority.allow_git_push),
+        ("allow_ado_writes", authority.allow_ado_writes),
+        ("allow_github_writes", authority.allow_github_writes),
+    ] {
+        if read_only && value == Some(true) {
+            return Err(SimardError::IdentityTomlParseError {
+                path: toml_path.to_path_buf(),
+                reason: format!(
+                    "authority.{field} = true contradicts posture = \"read-only\" for identity \
+                     '{identity_name}' (a read-only identity may not enable any write path)"
+                ),
+            });
+        }
+    }
+
+    if !authority.allowed_write_repos.is_empty() && posture != WritePosture::ScopedWrite {
+        return Err(SimardError::IdentityTomlParseError {
+            path: toml_path.to_path_buf(),
+            reason: format!(
+                "authority.allowed_write_repos is non-empty but posture is \"{posture}\" for \
+                 identity '{identity_name}' (only scoped-write may list writable repos)"
+            ),
+        });
+    }
+
+    let default_allow = !read_only;
+    Ok(IdentityAuthority {
+        posture,
+        allowed_write_repos: authority.allowed_write_repos.clone(),
+        allow_git_push: authority.allow_git_push.unwrap_or(default_allow),
+        allow_ado_writes: authority.allow_ado_writes.unwrap_or(default_allow),
+        allow_github_writes: authority.allow_github_writes.unwrap_or(default_allow),
+    })
 }
 
 fn validate_identity_name(name: &str, toml_path: &Path) -> SimardResult<()> {
@@ -1000,5 +1121,264 @@ path = "prompts/evil.md"
             msg.contains("escapes identity directory"),
             "error should mention directory escape, got: {msg}"
         );
+    }
+
+    // ── #3125: identity-scoped cognition (seed goals, target scope, posture) ──
+
+    const CROCUTUS_TOML: &str = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+target_repos = ["hyenas"]
+
+[[identities.seed_goals]]
+priority = 1
+title = "Observe hyenas repo health"
+description = "Read the hyenas repos and assess branch hygiene, CODEOWNERS, LICENSE, dependabot, large blobs. OBSERVE ONLY."
+repo = "hyenas"
+
+[[identities.seed_goals]]
+priority = 2
+title = "Articulate repo-hygiene backlog"
+description = "Turn observations into prioritized, target-scoped repo-hygiene goals on this identity's own board."
+repo = "hyenas"
+
+[identities.authority]
+posture = "read-only"
+"#;
+
+    fn load_crocutus(toml: &str) -> SimardResult<IdentityManifest> {
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("crocutus");
+        fs::create_dir_all(&identity_dir).unwrap();
+        write_identity_toml(&identity_dir, toml);
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        loader.load(&test_request("crocutus"))
+    }
+
+    #[test]
+    fn file_loader_reads_read_only_identity_seed_goals_and_target_scope() {
+        let manifest = load_crocutus(CROCUTUS_TOML).expect("crocutus identity must load");
+        // (b) A read-only identity seeds its OWN goals, scoped to its target.
+        assert_eq!(manifest.seed_goals.len(), 2);
+        assert_eq!(manifest.seed_goals[0].priority, 1);
+        assert_eq!(manifest.seed_goals[0].title, "Observe hyenas repo health");
+        assert_eq!(manifest.seed_goals[0].repo.as_deref(), Some("hyenas"));
+        assert_eq!(manifest.target_repos, vec!["hyenas".to_string()]);
+        assert_eq!(manifest.resolved_target_repos(), vec!["hyenas".to_string()]);
+        // Read-only posture with every write path denied (defaults under read-only).
+        assert_eq!(manifest.authority.posture, WritePosture::ReadOnly);
+        assert!(!manifest.authority.allow_git_push);
+        assert!(!manifest.authority.allow_ado_writes);
+        assert!(!manifest.authority.allow_github_writes);
+        assert!(!manifest.authority.permits_spawn());
+    }
+
+    #[test]
+    fn file_loader_preserves_standing_declaration_three_state() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[[identities.seed_goals]]
+priority = 1
+title = "Explicit standing"
+description = "d"
+standing = true
+
+[[identities.seed_goals]]
+priority = 2
+title = "Explicit non-standing"
+description = "d"
+standing = false
+
+[[identities.seed_goals]]
+priority = 3
+title = "Omitted standing"
+description = "d"
+"#;
+        let manifest = load_crocutus(toml).expect("three-state identity must load");
+        assert_eq!(manifest.seed_goals.len(), 3);
+
+        let explicit_standing = &manifest.seed_goals[0];
+        assert!(explicit_standing.standing);
+        assert!(!explicit_standing.authorizes_standing_reversal());
+
+        let explicit_non_standing = &manifest.seed_goals[1];
+        assert!(!explicit_non_standing.standing);
+        assert!(explicit_non_standing.authorizes_standing_reversal());
+
+        let omitted = &manifest.seed_goals[2];
+        assert!(!omitted.standing);
+        assert!(!omitted.authorizes_standing_reversal());
+    }
+
+    #[test]
+    fn file_loader_target_repos_defaults_to_union_of_seed_goal_repos() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[[identities.seed_goals]]
+priority = 1
+title = "Observe hyenas repo health"
+description = "OBSERVE ONLY"
+repo = "hyenas"
+
+[identities.authority]
+posture = "read-only"
+"#;
+        let manifest = load_crocutus(toml).expect("identity must load");
+        // target_repos omitted => union of seed-goal repos.
+        assert!(manifest.target_repos.is_empty());
+        assert_eq!(manifest.resolved_target_repos(), vec!["hyenas".to_string()]);
+    }
+
+    #[test]
+    fn file_loader_identity_without_authority_is_full_and_unchanged() {
+        // (a) An identity that omits [identities.authority] and declares no seed
+        // goals resolves to `full` with no override — Simard-equivalent.
+        let toml = r#"
+[package]
+name = "plain"
+version = "0.1.0"
+
+[[identities]]
+name = "plain"
+default_mode = "engineer"
+supported_base_types = ["local-harness"]
+"#;
+        let prompt_root = TempDir::new().unwrap();
+        let identity_dir = prompt_root.path().join("plain");
+        fs::create_dir_all(&identity_dir).unwrap();
+        write_identity_toml(&identity_dir, toml);
+        let loader = FileIdentityLoader::new(&identity_dir, prompt_root.path());
+        let manifest = loader.load(&test_request("plain")).unwrap();
+        assert!(manifest.seed_goals.is_empty());
+        assert!(manifest.target_repos.is_empty());
+        assert_eq!(manifest.authority, IdentityAuthority::default());
+        assert!(manifest.authority.permits_spawn());
+    }
+
+    #[test]
+    fn file_loader_rejects_read_only_write_contradiction() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[identities.authority]
+posture = "read-only"
+allow_git_push = true
+"#;
+        let err =
+            load_crocutus(toml).expect_err("read-only + allow_git_push=true must be rejected");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, SimardError::IdentityTomlParseError { .. }),
+            "contradiction must be an IdentityTomlParseError, got: {err:?}"
+        );
+        assert!(
+            msg.contains("contradicts posture") && msg.contains("read-only"),
+            "error should explain the contradiction, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn file_loader_rejects_allowlist_without_scoped_write() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[identities.authority]
+posture = "full"
+allowed_write_repos = ["some-repo"]
+"#;
+        let err = load_crocutus(toml).expect_err("allowed_write_repos under full must be rejected");
+        assert!(
+            matches!(err, SimardError::IdentityTomlParseError { .. }),
+            "must be an IdentityTomlParseError, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn file_loader_rejects_invalid_posture_value() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[identities.authority]
+posture = "read-write"
+"#;
+        let err = load_crocutus(toml).expect_err("unknown posture must be rejected");
+        assert!(matches!(err, SimardError::IdentityTomlParseError { .. }));
+    }
+
+    #[test]
+    fn file_loader_rejects_unknown_seed_goal_field() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[[identities.seed_goals]]
+priority = 1
+title = "g"
+description = "d"
+bogus = "x"
+"#;
+        let err = load_crocutus(toml).expect_err("unknown seed_goal field must be rejected");
+        assert!(matches!(err, SimardError::IdentityTomlParseError { .. }));
+    }
+
+    #[test]
+    fn file_loader_rejects_unknown_authority_field() {
+        let toml = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+
+[identities.authority]
+posture = "read-only"
+encryption = "aes"
+"#;
+        let err = load_crocutus(toml).expect_err("unknown authority field must be rejected");
+        assert!(matches!(err, SimardError::IdentityTomlParseError { .. }));
     }
 }

@@ -1,0 +1,9 @@
+flowchart LR
+  Mutation["operator/meeting/OODA mutation"] --> Load["goal_board_store::load"] --> Json["goal_board.json authoritative"]
+  Json --> Filter["filter tombstones"] --> Heal["heal stale no-progress blocks"] --> Board["OodaState.active_goals"]
+  Board --> Cache["overwrite_memory_cache"] --> Snapshot["goal-board:snapshot derived cache"] --> Readers["legacy/dashboard/prepare readers"]
+  Board --> Done["sweep_done_goals / archive/drop"] --> Tombstones["tombstone ids"]
+  Board --> Commit["commit_cycle"]
+  Tombstones --> Commit
+  Commit --> Reconcile["reconcile persisted + in-flight"] --> Json
+  Commit --> Tracker["persist no-progress tracker + cycle_count"] --> Json

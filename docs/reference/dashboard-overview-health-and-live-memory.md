@@ -8,6 +8,7 @@ related:
   - ../dashboard.md
   - ./dashboard-activity-cycle-reports.md
   - ./dashboard-goal-lifecycle-status.md
+  - ./dashboard-memory-recent-last-hour-count.md
   - ./cognitive-memory-client-helpers.md
   - ../memory.md
 ---
@@ -312,3 +313,6 @@ cognitive-memory resource where the cognitive store is exercised
   counts.
 - [Memory architecture](../memory.md) — where consolidation fits in the memory
   model.
+- [Honest "items remembered in the last hour" count](./dashboard-memory-recent-last-hour-count.md) —
+  the sibling `GET /api/memory/recent` `last_hour_count` fix that shares this
+  live-read path.

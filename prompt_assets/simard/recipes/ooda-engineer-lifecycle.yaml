@@ -4,21 +4,25 @@
 # Replaces the direct LLM call + DECISION: marker parsing in RustyClawdBrain
 # (issue #2115). Parsers eliminated in issue #2144.
 #
-# The agent outputs the variant name as the FIRST WORD of its response.
-# The Rust shim (recipe_brain.rs) extracts the first whitespace-delimited
-# token and matches it case-insensitively to the 6 known lifecycle variants.
+# Group E (#4967, epic #4719): the agent RECORDS its decision by calling the
+# `simard ooda record-lifecycle-decision` tool exactly once. The tool validates
+# the closed 6-variant set + bounds/sanitizes the rationale and writes a typed
+# EngineerLifecycleRecord to {{record_path}}. RecipeBrain::decide_engineer_lifecycle
+# reads that typed record fail-CLOSED; it does NOT scrape stdout.
 #
 # Context vars (passed via -c):
-#   goal_id, goal_description, cycle_number, consecutive_skip_count,
-#   failure_count, worktree_path, worktree_mtime_secs_ago, sentinel_pid,
-#   last_engineer_log_tail, commits_behind, in_flight_engineer_count,
-#   minutes_since_last_update_attempt, escalation_note
+#   record_path, simard_bin, record_cycle_number, goal_id, goal_description,
+#   cycle_number, consecutive_skip_count, failure_count, worktree_path,
+#   worktree_mtime_secs_ago, sentinel_pid, last_engineer_log_tail,
+#   commits_behind, in_flight_engineer_count, minutes_since_last_update_attempt,
+#   escalation_note
 #
 # `escalation_note` (issue #2432) is empty on the base attempt and carries a
 # schema-repair / higher-effort instruction on escalation-ladder retries. When
 # empty it renders to nothing, so base behaviour is unchanged.
 #
-# Output: agent stdout — variant name as first word, followed by rationale
+# Output: NONE scraped from stdout. The agent RECORDS its decision by calling the
+# `simard ooda record-lifecycle-decision` tool exactly once.
 
 name: "ooda-engineer-lifecycle"
 description: "OODA Act brain — engineer lifecycle decision"
@@ -39,14 +43,16 @@ steps:
 
       ## ROLE
 
-      You are the brain of Simard's OODA daemon. The Act phase is about to skip a goal because a live engineer worktree already exists for it. Before that skip happens, decide whether the engineer is genuinely making progress, is wedged, or warrants escalation. Output the variant name as the very first word of your response, followed by your rationale. Be conservative: prefer `continue_skipping` unless evidence clearly points elsewhere.
+      You are the brain of Simard's OODA daemon. The Act phase is about to skip a goal because a live engineer worktree already exists for it. Before that skip happens, decide whether the engineer is genuinely making progress, is wedged, or warrants escalation. You RECORD your decision by calling the `simard ooda record-lifecycle-decision` tool (see "HOW TO RECORD YOUR DECISION" below) — do NOT print your answer as prose. Be conservative: prefer `continue_skipping` unless evidence clearly points elsewhere.
 
       **Engineering guidelines (G1/G2/G3).** When the engineer's work touches
       cognition, memory-architecture, or output-parsing, apply Simard's three
       durable engineering guidelines (canonical in `CONTRIBUTING.md`): prove
       cognition gains on a benchmark AND a live, trended self-metric (G1); route
       memory-architecture work upstream to `amplihack-memory-lib` (G2); and prefer
-      agentic extraction over brittle parsing, and recipes/prompts over code (G3).
+      agentic extraction over brittle parsing, and recipes/prompts over code (G3); and
+      record investigation/testing findings as a GitHub issue and/or memory, never a
+      committed point-in-time report doc (G4, `no-point-in-time-docs`).
       This does not change your output contract below.
 
       ## CONTEXT
@@ -70,7 +76,7 @@ steps:
 
       ## OPTIONS
 
-      Pick exactly one of these `choice` tags. The daemon maps each choice to a concrete side effect:
+      Pick exactly one of these `decision` variants. The daemon maps each choice to a concrete side effect:
 
       - `continue_skipping` — Engineer is healthy / recently active / making visible progress. Do nothing this cycle. Default when in doubt.
       - `reclaim_and_redispatch` — Worktree is stale, wedged, or the log tail shows the engineer is stuck. Tear down the worktree, kill the sentinel pid, clear `assigned_to`, and re-dispatch. Use sparingly.
@@ -98,59 +104,86 @@ steps:
       to re-scope an **open-ended goal** (no reachable 100%, parked at a high
       completion-% for many cycles) into concrete, completable work.
 
-      ## OUTPUT FORMAT
+      ## HOW TO RECORD YOUR DECISION (call the tool — do NOT print JSON)
 
-      **Preferred — emit a structured JSON decision envelope.** Respond with a
-      single JSON object of this exact shape (a fenced ```json block is fine; the
-      daemon strips any surrounding banner/prose before parsing):
+      Record your decision by calling the `simard ooda record-lifecycle-decision`
+      tool EXACTLY ONCE, using your shell/bash tool. The daemon reads the typed
+      record the tool writes; it does NOT read your prose. Anything you print to
+      stdout is ignored.
 
-      ```json
-      {"decision": "<variant>", "rationale": "<short reason>"}
+      Run (substitute your chosen `<variant>` and a concrete `<rationale>`):
+
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision \
+        --decision <variant> \
+        --rationale "<short concrete reason citing goal_id or the log tail>" \
+        --record-path "{{record_path}}" \
+        --goal-id "{{goal_id}}" \
+        --cycle-number {{record_cycle_number}}
       ```
 
-      where `<variant>` is exactly one of: `continue_skipping`,
+      `<variant>` is exactly one of: `continue_skipping`,
       `reclaim_and_redispatch`, `deprioritize`, `open_tracking_issue`,
-      `mark_goal_blocked`, `consider_self_update`.
+      `mark_goal_blocked`, `consider_self_update`. An unknown `--decision` is
+      rejected by the tool. `--rationale` is optional but strongly recommended;
+      for a LARGE rationale, write it to a file first and pass
+      `--rationale-path <FILE>` instead of the inline flag (never put large text
+      on the command line).
 
-      **Accepted fallback** — if you cannot emit JSON, output the variant name as
-      the very first word of your response, followed by your rationale (the
-      daemon's fallback scanner reads the first whitespace-delimited token,
-      case-insensitive).
+      Call the tool EXACTLY ONCE. If you do not record a valid decision, the
+      daemon takes NO action on your behalf: it records a `brain_parse_error`,
+      retries you with a schema-repair prompt, and surfaces an explicit error only
+      if the bounded retry still fails — it does NOT guess a default
+      `continue_skipping` (#1711, #2580). A genuine "the engineer is healthy, do
+      nothing" answer is a REAL decision: record `continue_skipping` explicitly.
 
-      A genuine "the engineer is healthy, do nothing" answer is a REAL decision:
-      emit `continue_skipping` explicitly. If your output is unparseable the
-      daemon does NOT default to `continue_skipping` on your behalf — it records
-      a `brain_parse_error`, retries you with a schema-repair prompt, and
-      surfaces an explicit error only if the bounded retry still fails (never a
-      parse-failure masquerading as a no-action decision).
+      ## EXAMPLES (the command to run, one per situation)
 
-      ## EXAMPLES
+      Engineer healthy — an explicit no-action decision:
 
-      Preferred (JSON envelope):
-
-      ```json
-      {"decision": "continue_skipping", "rationale": "engineer committed 2 minutes ago, healthy progress"}
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision --decision continue_skipping \
+        --rationale "engineer committed 2 minutes ago, healthy progress" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{record_cycle_number}}
       ```
 
-      Accepted fallback (bare first word):
+      Worktree wedged — reclaim and re-dispatch:
 
-      ```
-      reclaim_and_redispatch worktree idle 7h, log truncated mid-tool-call
-      ```
-
-      ```
-      deprioritize 20 cycles of no-op skips while engineer churns on same file
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision --decision reclaim_and_redispatch \
+        --rationale "worktree idle 7h, log truncated mid-tool-call" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{record_cycle_number}}
       ```
 
-      ```
-      open_tracking_issue Engineer OOM on cycle 12 at 03:14 UTC, recurring — needs investigation
+      Churn without progress — deprioritize:
+
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision --decision deprioritize \
+        --rationale "20 cycles of no-op skips while engineer churns on same file" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{record_cycle_number}}
       ```
 
-      ```
-      mark_goal_blocked ANTHROPIC_API_KEY not set in daemon environment, engineer cannot make API calls
+      Needs a human — open a tracking issue:
+
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision --decision open_tracking_issue \
+        --rationale "engineer OOM on cycle 12 at 03:14 UTC, recurring — needs investigation" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{record_cycle_number}}
       ```
 
+      Externally blocked — mark blocked:
+
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision --decision mark_goal_blocked \
+        --rationale "ANTHROPIC_API_KEY not set in daemon environment, engineer cannot make API calls" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{record_cycle_number}}
       ```
-      consider_self_update binary is 12 commits behind, last update 4h ago, no other engineers in flight
+
+      Daemon behind origin — consider self-update:
+
+      ```bash
+      "{{simard_bin}}" ooda record-lifecycle-decision --decision consider_self_update \
+        --rationale "binary is 12 commits behind, last update 4h ago, no other engineers in flight" \
+        --record-path "{{record_path}}" --goal-id "{{goal_id}}" --cycle-number {{record_cycle_number}}
       ```
     output: "lifecycle_result"

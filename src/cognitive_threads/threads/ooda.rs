@@ -5,7 +5,7 @@
 //! Its `tick()` performs the exact current per-cycle work in the same order
 //! (heartbeat → `run_ooda_cycle` → persist report/episode/health/metrics), so
 //! the daemon's external cadence and side-effects are byte-for-byte preserved.
-//! The `tick()` body is a `todo!()` stub during TDD; the OODA state/bridges/
+//! The `tick()` body is implemented; the OODA state/memories/
 //! config it owns are moved in at construction, matching Appendix A.7/A.9.
 
 use std::time::Instant;
@@ -25,7 +25,7 @@ const OODA_ID: &str = "ooda";
 /// `run_ooda_cycle` per tick.
 pub struct OodaThread {
     state: OodaState,
-    bridges: OodaClients,
+    memories: OodaClients,
     config: OodaConfig,
     interval_secs: u64,
     cycles: u64,
@@ -39,13 +39,13 @@ impl OodaThread {
     /// and the configured cadence (`SIMARD_OODA_INTERVAL_SECS`).
     pub fn new(
         state: OodaState,
-        bridges: OodaClients,
+        memories: OodaClients,
         config: OodaConfig,
         interval_secs: u64,
     ) -> Self {
         Self {
             state,
-            bridges,
+            memories,
             config,
             interval_secs,
             cycles: 0,
@@ -59,7 +59,7 @@ impl OodaThread {
     /// shutdown, which flushes the board and closes the session). Supports the
     /// full cutover where the daemon drives OODA solely through this thread.
     pub fn into_parts(self) -> (OodaState, OodaClients) {
-        (self.state, self.bridges)
+        (self.state, self.memories)
     }
 }
 
@@ -70,6 +70,10 @@ impl CognitiveThread for OodaThread {
 
     fn kind(&self) -> ThreadKind {
         ThreadKind::Ooda
+    }
+
+    fn purpose(&self) -> &'static str {
+        "Run the primary Observe-Orient-Decide-Act reasoning cycle"
     }
 
     fn policy(&self) -> SchedulePolicy {
@@ -91,7 +95,7 @@ impl CognitiveThread for OodaThread {
         // truth for the cycle's durable output.
         let outcome = match crate::ooda_loop::run_ooda_cycle(
             &mut self.state,
-            &mut self.bridges,
+            &mut self.memories,
             &self.config,
         ) {
             Ok(report) => {
@@ -102,7 +106,7 @@ impl CognitiveThread for OodaThread {
                 self.state.current_phase = OodaPhase::Sleep;
 
                 persist_cycle_report(ctx.state_root, &report);
-                persist_cycle_to_memory(&self.bridges, &report);
+                persist_cycle_to_memory(&self.memories, &report);
                 let _ = crate::self_metrics::collect_and_record_all(elapsed);
 
                 self.last_success = Some(true);
@@ -138,6 +142,8 @@ impl CognitiveThread for OodaThread {
             // enforces this and never accrues errors against it.
             consecutive_errors: 0,
             backoff_until_epoch: None,
+            purpose: self.purpose().to_string(),
+            cadence_secs: self.policy().cadence_secs(),
         }
     }
 }

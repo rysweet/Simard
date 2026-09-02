@@ -310,6 +310,7 @@ mod wire_in_tests {
 
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -381,6 +382,7 @@ mod wire_in_tests {
 
         let mut board = GoalBoard::default();
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -457,6 +459,7 @@ mod hallucination_filter_tests {
 
     fn active(id: &str) -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

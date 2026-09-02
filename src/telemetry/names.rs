@@ -86,6 +86,82 @@ pub const GOAL_COMPLETED: &str = "simard.goal.completed";
 /// Aggregate progress signal 0–100 (gauge).
 pub const GOAL_PROGRESS: &str = "simard.goal.progress";
 
+// ── Enrichment observability — simard.enrichment.* (#2942) ──────────────────
+
+/// One instrumented enrichment decision. Attribute `attached` = `true` | `false`
+/// (the memory reader resolved to `Some` vs degraded to `None`). The
+/// `attached` split is the attach-rate numerator/denominator
+/// (`attach_rate = decisions{attached=true} / decisions{*}`), recorded only for
+/// the *expected* population (turns where enrichment was configured).
+pub const ENRICHMENT_DECISIONS: &str = "simard.enrichment.decisions";
+/// One reader-launch degrade. Attribute `reason` = `memory_ipc` |
+/// `knowledge_launch` — the concrete cause so an operator sees which reader is
+/// down.
+pub const ENRICHMENT_DEGRADED: &str = "simard.enrichment.degraded";
+/// Rendered enrichment-block size injected per decision (histogram: count+sum →
+/// average bytes/decision at zero attribute cardinality).
+pub const ENRICHMENT_PREAMBLE_BYTES: &str = "simard.enrichment.preamble_bytes";
+/// Facts rendered into the preamble per decision (histogram: count+sum → avg
+/// facts/decision).
+pub const ENRICHMENT_FACTS_INJECTED: &str = "simard.enrichment.facts_injected";
+/// Procedures rendered into the preamble per decision (histogram: count+sum →
+/// avg procedures/decision).
+pub const ENRICHMENT_PROCEDURES_INJECTED: &str = "simard.enrichment.procedures_injected";
+
+// ── Disk reclaim — simard.disk.reclaim.* ────────────────────────────────────
+
+/// Bytes actually reclaimed this run (counter). `0` on a dry-run / no-op.
+pub const DISK_RECLAIM_BYTES_FREED: &str = "simard.disk.reclaim.bytes_freed";
+/// Paths actually removed this run (counter), tagged by [`ATTR_KIND`].
+pub const DISK_RECLAIM_PATHS_REMOVED: &str = "simard.disk.reclaim.paths_removed";
+/// Candidates a hard rail refused (counter), tagged by [`ATTR_REASON`]. Every
+/// increment is a path that was **not** deleted (the human-review list).
+pub const DISK_RECLAIM_CANDIDATES_SKIPPED: &str = "simard.disk.reclaim.candidates_skipped";
+/// Home-partition `%-used` measured at the start of the run (gauge, 0–100).
+pub const DISK_RECLAIM_USED_PCT_BEFORE: &str = "simard.disk.reclaim.used_pct_before";
+/// Home-partition `%-used` after the run (gauge, 0–100).
+pub const DISK_RECLAIM_USED_PCT_AFTER: &str = "simard.disk.reclaim.used_pct_after";
+
+// ── Cognitive threads — simard.thread.<id>.* (#4786) ────────────────────────
+//
+// Per-thread observability. Thread identity is embedded in the metric NAME
+// (`simard.thread.<id>.<suffix>`) rather than an attribute value: the scheduler
+// hosts ~15 threads, which on a single attribute key would breach the registry's
+// `MAX_VALUES_PER_KEY` (16) cardinality cliff and fold into `other`; embedding in
+// the name yields one clean series per (thread, suffix). Every series is emitted
+// with an EMPTY attribute set. Build a full name with [`thread_metric_name`].
+
+/// Metric-name prefix for every per-thread series (`simard.thread.`).
+pub const THREAD_METRIC_PREFIX: &str = "simard.thread.";
+
+/// Build a per-thread metric/span name: `simard.thread.<id>.<suffix>`.
+///
+/// The single source of truth for the per-thread naming scheme, shared by the
+/// emitting telemetry seam (`cognitive_threads::telemetry`) and the reading
+/// oversight rail (`overseer::thread_oversight`) so the two can never drift.
+/// `id` and `suffix` are compile-time constants at every call site (SR-11).
+pub fn thread_metric_name(id: &str, suffix: &str) -> String {
+    format!("{THREAD_METRIC_PREFIX}{id}.{suffix}")
+}
+/// Suffix: every scheduler attempt to run the thread (counter).
+pub const THREAD_SUFFIX_RUNS: &str = "runs";
+/// Suffix: successful runs (counter). Every scheduled run terminates as either
+/// a success or a failure, so `successes + failures == runs`; the success rate
+/// is `successes / runs`.
+pub const THREAD_SUFFIX_SUCCESSES: &str = "successes";
+/// Suffix: failed/errored runs (counter). Success rate is derivable.
+pub const THREAD_SUFFIX_FAILURES: &str = "failures";
+/// Suffix: per-run wall-clock duration in seconds (histogram).
+pub const THREAD_SUFFIX_DURATION_SECONDS: &str = "duration_seconds";
+/// Suffix: Unix epoch (seconds) of the last completed run (gauge). Liveness:
+/// `now - last_run_epoch` is the last-run age the Overseer derives.
+pub const THREAD_SUFFIX_LAST_RUN_EPOCH: &str = "last_run_epoch";
+/// Suffix: Unix epoch (seconds) of the next scheduled run (gauge). The cadence /
+/// staleness seam the Overseer reads to detect a stalled thread.
+pub const THREAD_SUFFIX_NEXT_RUN_EPOCH: &str = "next_run_epoch";
+/// Suffix: `1` while a tick is in flight, `0` otherwise (gauge).
+pub const THREAD_SUFFIX_ACTIVE: &str = "active";
+
 // ── Attribute keys ──────────────────────────────────────────────────────────
 
 /// Attribute key: outcome/result discriminator (`ok`/`parse_fail`, parse
@@ -101,6 +177,17 @@ pub const ATTR_TYPE: &str = "type";
 pub const ATTR_DIR: &str = "dir";
 /// Attribute key: token cache status.
 pub const ATTR_CACHED: &str = "cached";
+/// Attribute key: enrichment memory-reader attach state (`true` | `false`).
+pub const ATTR_ATTACHED: &str = "attached";
+/// Attribute key: disk-reclaim run source (`daemon` \| `cli`).
+pub const ATTR_SOURCE: &str = "source";
+/// Attribute key: reclamation candidate kind (`tracked_worktree` \|
+/// `orphan_dir` \| `stale_build_cache`).
+pub const ATTR_KIND: &str = "kind";
+/// Attribute key: shared reason discriminator — enrichment degrade reason
+/// (`memory_ipc` | `knowledge_launch`) or reclamation reject reason
+/// (mirrors `RejectReason`).
+pub const ATTR_REASON: &str = "reason";
 
 /// Sentinel bucket an out-of-catalog attribute value is folded into.
 pub const OTHER_BUCKET: &str = "other";

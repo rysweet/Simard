@@ -1,12 +1,19 @@
 ---
 title: Diagnose OODA decide/orient brain parse failures
-description: Operator runbook for text-based OODA brain parse failures. Find, classify, and remediate parse failures from the decide and orient phases.
-last_updated: 2026-06-29
+description: Current operator runbook for text-based decide and orient failures until typed-route cutover.
+last_updated: 2026-07-13
 review_schedule: as-needed
 owner: simard
+doc_type: howto
+status: implemented
 ---
 
 # How-to: Diagnose OODA decide/orient brain parse failures
+
+!!! note "Migration condition"
+    Use this runbook for current releases and whenever the selected route is
+    `legacy` or `shadow`. It becomes rollback-only after a release implements
+    and selects the typed route and verifies these parsers are unreachable.
 
 > **Audience:** operators on call when an OODA goal is making no progress
 > across many cycles despite the dashboard reporting `success: true`

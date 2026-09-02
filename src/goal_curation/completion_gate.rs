@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::SimardResult;
 
-use super::types::{ActiveGoal, GoalBoard, GoalProgress};
+use super::types::{ActiveGoal, GoalBoard};
 
 /// The verified facts the gate gathered for one goal.
 #[derive(Clone, Debug, PartialEq)]
@@ -197,7 +197,7 @@ pub fn classify_from_missing(
 /// same refutation always yields the same class. [`MissingEvidence::CouldNotVerify`]
 /// is excluded — it routes to [`VerificationOutcome::Error`], never `Refuted`.
 ///
-/// This is the bridge from FU1's external failure signal to #2458's failure→
+/// This is the memory from FU1's external failure signal to #2458's failure→
 /// lesson loop: the returned class is the `error_class` half of the
 /// `(goal_type, error_class)` recurrence key
 /// ([`crate::memory_consolidation::reflection_lessons`]).
@@ -301,9 +301,33 @@ pub fn false_completion_rate(outcomes: &[VerificationOutcome]) -> Option<f64> {
     Some(refuted as f64 / checkable as f64)
 }
 
+/// The resolution state of a goal's declared upstream dependency, as observed by
+/// [`EvidenceSource::dependency_goal_state`]. Backs the `UPSTREAM-DEPENDENCY`
+/// rung of the no-progress root-cause ladder (issue #16): a goal gated on a
+/// still-open upstream is *deferred* (Paused with the blocking ref recorded)
+/// rather than blocked, and *auto-clears* once the upstream resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencyState {
+    /// No declared/known upstream dependency for this goal.
+    None,
+    /// A specific upstream (goal id / PR / issue) is still open — the goal is
+    /// waiting on it. `blocking_ref` identifies the blocker for the WHY.
+    Pending { blocking_ref: String },
+    /// The previously-blocking upstream has landed (PR merged / issue closed /
+    /// dependency goal completed) — a deferred goal may resume.
+    Resolved { blocking_ref: String },
+}
+
 /// Injected evidence lookups. The production impl resolves PR/issue state via
 /// `gh` and `is_deployed` via the reconciliation detector; tests inject a
 /// canned source.
+///
+/// The two root-cause methods ([`repo_present`](Self::repo_present) and
+/// [`dependency_goal_state`](Self::dependency_goal_state), issue #16) carry
+/// **default bodies** so every existing implementation and test double keeps
+/// compiling unchanged. Both default *conservatively* — a source that cannot
+/// tell must never fabricate a missing precondition or an upstream dependency,
+/// so the breaker never self-heals or self-defers on an unknown state.
 pub trait EvidenceSource: Send + Sync {
     /// Is any PR for this goal merged? (`wip_refs` of kind "pr", or a merged PR
     /// referencing the goal's issue.)
@@ -313,6 +337,23 @@ pub trait EvidenceSource: Send + Sync {
     /// Is the merged self-change running? Backed by the Workstream A
     /// `ReconcileDetector` (`!DeployDrift::needs_deploy`).
     fn is_deployed(&self, goal: &ActiveGoal) -> SimardResult<bool>;
+
+    /// Is the goal's governed target repository present in the workspace? Backs
+    /// the `MISSING-PRECONDITION` classification (issue #16). Default `Ok(true)`:
+    /// a source that cannot tell must not invent a missing precondition.
+    fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        let _ = goal;
+        Ok(true)
+    }
+
+    /// State of the goal's declared upstream dependency, if any. Backs the
+    /// `UPSTREAM-DEPENDENCY` classification (issue #16). Default
+    /// `Ok(DependencyState::None)`: a source that cannot tell reports no known
+    /// dependency, so the breaker never defers on an unknown state.
+    fn dependency_goal_state(&self, goal: &ActiveGoal) -> SimardResult<DependencyState> {
+        let _ = goal;
+        Ok(DependencyState::None)
+    }
 }
 
 /// Blanket impl so an `&dyn EvidenceSource` (e.g. `Arc::as_ref()`) satisfies the
@@ -328,6 +369,12 @@ impl<T: EvidenceSource + ?Sized> EvidenceSource for &T {
     }
     fn is_deployed(&self, goal: &ActiveGoal) -> SimardResult<bool> {
         (**self).is_deployed(goal)
+    }
+    fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        (**self).repo_present(goal)
+    }
+    fn dependency_goal_state(&self, goal: &ActiveGoal) -> SimardResult<DependencyState> {
+        (**self).dependency_goal_state(goal)
     }
 }
 
@@ -473,11 +520,7 @@ pub fn completion_evidence_enabled() -> bool {
 /// Standing/perpetual goals (issue #2580) are never candidates: they have no
 /// terminal done-state, so the gate must not archive them regardless of status.
 fn is_complete_candidate(goal: &ActiveGoal) -> bool {
-    if goal.is_perpetual() {
-        return false;
-    }
-    matches!(goal.status, GoalProgress::Completed)
-        || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
+    !goal.is_perpetual() && goal.status.is_terminal()
 }
 
 /// True when a goal's status *looks* terminal (`Completed`, or `InProgress` at
@@ -485,8 +528,7 @@ fn is_complete_candidate(goal: &ActiveGoal) -> bool {
 /// standing goal whose unit of work finished so it can be rolled to a fresh
 /// cycle instead of stalling in a done-looking state.
 fn has_dominant_progress(goal: &ActiveGoal) -> bool {
-    matches!(goal.status, GoalProgress::Completed)
-        || matches!(goal.status, GoalProgress::InProgress { percent } if percent >= 100)
+    goal.status.is_terminal()
 }
 
 /// Archive only goals the gate certifies `Complete`. Goals that fail the gate
@@ -591,9 +633,106 @@ impl GhCliEvidenceSource {
         }
     }
 
+    /// Issue-based merged-PR fallback (issue #12).
+    ///
+    /// When `reconcile_merged_prs` prunes a merged PR's `pr` wip_ref (a not-open
+    /// PR ref is deleted) *before* the completion gate reads it, the goal's only
+    /// remaining signal is its linked `issue` ref. Without this fallback the gate
+    /// perpetually reports [`MissingEvidence::PrNotMerged`] for a genuinely-merged
+    /// goal, re-blocking it every OODA cycle (the 153-emission churn).
+    ///
+    /// Resolve whether a **merged** PR closes the issue `issue_num` in `repo_slug`
+    /// via a read-only `gh api graphql` query over
+    /// `issue.closedByPullRequestsReferences{ merged }`. Cross-repo aware: the
+    /// query is scoped to the goal's own `repo_slug`, not Simard's default owner.
+    ///
+    /// Fail-closed: any spawn/exit/parse ambiguity surfaces as `Err`
+    /// (→ [`MissingEvidence::CouldNotVerify`]); only an authoritative merged PR
+    /// yields `Ok(true)`. `owner`/`name`/`number` are passed as parameterized
+    /// `gh api` variables (never interpolated into the query body), and are
+    /// validated by the caller before we reach this point.
+    fn merged_pr_closes_issue(&self, repo_slug: &str, issue_num: u64) -> SimardResult<bool> {
+        let (owner, name) = repo_slug.split_once('/').ok_or_else(|| {
+            crate::error::SimardError::VerificationFailed {
+                reason: format!("repo slug `{repo_slug}` is not `owner/repo`"),
+            }
+        })?;
+        const QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){\
+repository(owner:$owner,name:$name){\
+issue(number:$number){\
+closedByPullRequestsReferences(first:50,includeClosedPrs:true){nodes{merged}}}}}";
+        let number_arg = format!("number={issue_num}");
+        let owner_arg = format!("owner={owner}");
+        let name_arg = format!("name={name}");
+        let query_arg = format!("query={QUERY}");
+        // `-f` = raw string variable (owner/name); `-F` = typed variable (number
+        // parsed as an Int). `--jq` reduces the node set to a single `true`/`false`.
+        let out = std::process::Command::new("gh")
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &owner_arg,
+                "-f",
+                &name_arg,
+                "-F",
+                &number_arg,
+                "-f",
+                &query_arg,
+                "--jq",
+                "[.data.repository.issue.closedByPullRequestsReferences.nodes[].merged] | any",
+            ])
+            .output()
+            .map_err(|e| crate::error::SimardError::VerificationFailed {
+                reason: format!(
+                    "failed to spawn `gh api graphql` (issue #{issue_num} in {repo_slug}): {e}"
+                ),
+            })?;
+        if !out.status.success() {
+            return Err(crate::error::SimardError::VerificationFailed {
+                reason: format!(
+                    "`gh api graphql` for issue #{issue_num} in {repo_slug} exited {}: {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let merged = match stdout.trim() {
+            "true" => true,
+            "false" => false,
+            other => {
+                // Fail-closed on any ambiguous/unexpected payload rather than
+                // guessing — never silently `false`, never speculatively `true`.
+                return Err(crate::error::SimardError::VerificationFailed {
+                    reason: format!(
+                        "unexpected `gh api graphql` result for issue #{issue_num} in {repo_slug}: {other:?}"
+                    ),
+                });
+            }
+        };
+        tracing::debug!(
+            target: "simard::completion_gate",
+            repo_slug,
+            issue_num,
+            merged,
+            "issue-based merged-PR fallback resolved"
+        );
+        Ok(merged)
+    }
+
     /// Run `gh <kind> view <num> --repo <repo> --json state --jq .state` and
     /// return the trimmed state string (e.g. `MERGED`, `CLOSED`, `OPEN`).
     fn gh_state(&self, kind: &str, repo: &str, num: &str) -> SimardResult<String> {
+        // Uniform injection guard: every `gh <kind> view` call — the `pr`
+        // fast-path, `issue_closed`, and any future caller — validates its
+        // `repo` slug and parses `num` into a positive integer *before* spawn,
+        // matching the merged-PR issue fallback. A flag-like `num` (leading
+        // `-`) or an unsafe slug fails **closed** (`CouldNotVerify`) instead of
+        // reaching `gh` as an argument.
+        validate_repo_slug(repo)?;
+        let num = parse_ref_number(kind, num)?.to_string();
+        let num = num.as_str();
         let out = std::process::Command::new("gh")
             .args([
                 kind, "view", num, "--repo", repo, "--json", "state", "--jq", ".state",
@@ -624,17 +763,70 @@ fn first_ref_of_kind<'a>(goal: &'a ActiveGoal, want: &str) -> Option<&'a str> {
         .map(|r| r.ref_id.as_str())
 }
 
+/// Argument-injection guard: parse an issue/PR `ref_id` into a positive `u64`.
+///
+/// A malformed `ref_id` (empty, non-numeric, a leading `-`, embedded spaces or
+/// flag-like text such as `-12 --json state`) is rejected to `Err` — so it can
+/// never be forwarded to `gh` where it might be interpreted as a flag, and the
+/// gate fails **closed** ([`MissingEvidence::CouldNotVerify`]) rather than
+/// silently treating the goal as unmerged.
+fn parse_ref_number(kind: &str, ref_id: &str) -> SimardResult<u64> {
+    match ref_id.trim().parse::<u64>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(crate::error::SimardError::VerificationFailed {
+            reason: format!("{kind} ref_id {ref_id:?} is not a positive integer"),
+        }),
+    }
+}
+
+/// Argument/GraphQL-injection guard on a `owner/repo` slug.
+///
+/// Requires exactly two non-empty segments separated by a single `/`, each
+/// drawn from `[A-Za-z0-9._-]` and neither equal to `.`/`..` nor containing a
+/// `..` path-traversal. Anything else (extra slashes, metacharacters, traversal)
+/// is rejected to `Err` (fail-closed) before any subprocess is spawned.
+fn validate_repo_slug(slug: &str) -> SimardResult<()> {
+    fn is_segment(s: &str) -> bool {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && !s.contains("..")
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    }
+    let mut parts = slug.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(owner), Some(name), None) if is_segment(owner) && is_segment(name) => Ok(()),
+        _ => Err(crate::error::SimardError::VerificationFailed {
+            reason: format!("repo slug {slug:?} is not a safe `owner/repo`"),
+        }),
+    }
+}
+
 impl EvidenceSource for GhCliEvidenceSource {
     fn any_pr_merged(&self, goal: &ActiveGoal) -> SimardResult<bool> {
         match first_ref_of_kind(goal, "pr") {
-            // No tracked PR ⇒ no merge evidence (block, cheaply, no network).
-            None => Ok(false),
+            // A tracked `pr` ref is the fast path: read its state directly.
             Some(num) => {
                 let repo = self.repo_slug(goal);
                 Ok(self
                     .gh_state("pr", &repo, num)?
                     .eq_ignore_ascii_case("MERGED"))
             }
+            // No tracked `pr` ref: it may have been pruned by
+            // `reconcile_merged_prs` after the PR merged (issue #12). Recover the
+            // merged-PR evidence from the linked `issue` ref, if any. The network
+            // call fires ONLY when an `issue` ref is present (over-fetch guard).
+            None => match first_ref_of_kind(goal, "issue") {
+                // No `pr` and no `issue` ⇒ no merge evidence (block, cheaply).
+                None => Ok(false),
+                Some(issue_ref) => {
+                    let issue_num = parse_ref_number("issue", issue_ref)?;
+                    let repo = self.repo_slug(goal);
+                    validate_repo_slug(&repo)?;
+                    self.merged_pr_closes_issue(&repo, issue_num)
+                }
+            },
         }
     }
 
@@ -659,6 +851,28 @@ impl EvidenceSource for GhCliEvidenceSource {
             crate::self_deploy::GitDeploySource::at(&self.repo_dir),
         );
         Ok(!detector.detect().needs_deploy)
+    }
+
+    fn repo_present(&self, goal: &ActiveGoal) -> SimardResult<bool> {
+        // A goal that routes to the daemon's own repo is always present (this is
+        // the checkout the daemon is running from). A repo-scoped goal is
+        // present iff its governed clone exists under `$HOME/src/<repo>` — the
+        // same workspace convention `ooda_actions::advance_goal`'s repo_resolver
+        // uses. Absence is the MISSING-PRECONDITION signal (issue #16). When the
+        // home dir cannot be resolved we report `true` (conservative: never
+        // invent a missing precondition on an undeterminable path).
+        let repo = match &goal.repo {
+            None => return Ok(true),
+            Some(r) if r.eq_ignore_ascii_case("Simard") => return Ok(true),
+            Some(r) => r,
+        };
+        // Use only the bare repo name for the local clone path (an `owner/repo`
+        // slug clones to `$HOME/src/<repo>`).
+        let name = repo.rsplit('/').next().unwrap_or(repo);
+        match dirs::home_dir() {
+            Some(home) => Ok(home.join("src").join(name).is_dir()),
+            None => Ok(true),
+        }
     }
 }
 

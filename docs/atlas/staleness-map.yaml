@@ -1,0 +1,83 @@
+# Simard Code Atlas — staleness map
+#
+# When `git diff` touches a path matching a layer's triggers, that layer is stale
+# and should be rebuilt from code truth. Triggers are heuristic (path globs), not
+# semantic. graph_backend is recorded explicitly (never silently defaulted).
+
+graph_backend: portable-cypher-only   # NO kuzu, NO python (Simard policy); loads into lbug/neo4j/memgraph
+analyzer: rust-native                  # cargo metadata + ripgrep/rust-analyzer (NOT Python code-visualizer)
+ast_lsp_mode: static-approximation     # LSP server not attached during this build
+
+layers:
+  repo-surface:
+    triggers:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/bin/**"
+      - "bins/**"
+      - "build.rs"
+  ast-lsp-bindings:
+    triggers:
+      - "src/**/*.rs"        # exported symbol surface; rebuild on broad API change
+      - "src/lib.rs"
+      - "src/main.rs"
+  compile-deps:
+    triggers:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**/mod.rs"      # internal module graph edges
+  runtime-topology:
+    triggers:
+      - "src/install/systemd.rs"
+      - "src/operator_commands_ooda/daemon/**"
+      - "src/operator_commands_dashboard/**"
+      - "src/signal_conversation/**"
+      - "src/memory_ipc/**"
+      - "src/self_deploy/**"
+      - "src/self_relaunch/**"
+  api-contracts:
+    triggers:
+      - "src/operator_commands_dashboard/routes.rs"
+      - "src/operator_commands_dashboard/auth.rs"
+      - "src/signal_conversation/gating.rs"
+  data-flow:
+    triggers:
+      - "src/cognitive_memory/**"
+      - "src/memory_ipc/**"
+      - "src/ooda_actions/**"
+      - "src/overseer/**"
+      - "src/self_deploy/**"
+  service-components:
+    triggers:
+      - "src/**/mod.rs"
+      - "src/operator_commands_ooda/**"
+      - "src/cognitive_threads/**"
+  user-journeys:
+    triggers:
+      - "src/ooda_loop/**"
+      - "src/ooda_brain/**"
+      - "src/typed_ooda/**"
+      - "src/overseer/**"
+      - "src/self_deploy/**"
+  agentic-flows:
+    triggers:
+      - "src/ooda_loop/**"
+      - "src/ooda_brain/**"
+      - "src/ooda_actions/**"
+      - "src/typed_ooda/**"
+      - "src/overseer/**"
+      - "src/cognitive_memory/**"
+      - "src/memory_ipc/**"
+      - "src/recipe_context_file.rs"
+      - "src/recipe_output/**"
+      - "src/prompt_assets.rs"
+      - "src/prompt_delivery/**"
+      - "src/operator_commands_ooda/daemon/**"
+      - "src/memory_consolidation/**"
+      - "src/goal_board_store/**"
+      - "src/goal_curation/**"
+      - "src/amplihack_freshness_gate/**"
+      - "prompt_assets/simard/**"
+
+# Cypher artifacts are regenerated whenever ANY layer above is rebuilt.
+cypher_regen_on_any_layer: true

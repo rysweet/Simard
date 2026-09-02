@@ -44,14 +44,14 @@ fn run_release_build(
     }
 
     let output = cmd.output().map_err(|e| SimardError::RpcSpawnFailed {
-        bridge: label.to_string(),
+        endpoint: label.to_string(),
         reason: format!("cargo build failed to start: {e}"),
     })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(SimardError::RpcCallFailed {
-            bridge: label.to_string(),
+            endpoint: label.to_string(),
             method: "cargo build --release".to_string(),
             reason: format!("build failed (exit {}): {}", output.status, stderr),
         });
@@ -124,7 +124,7 @@ pub fn build_self_deploy_candidate(repo: &Path, target_dir: &Path) -> SimardResu
 pub fn handover(current_pid: u32, canary_binary: &Path) -> SimardResult<()> {
     if current_pid == 0 {
         return Err(SimardError::RpcCallFailed {
-            bridge: "self-relaunch".to_string(),
+            endpoint: "self-relaunch".to_string(),
             method: "handover".to_string(),
             reason: "current_pid cannot be 0".to_string(),
         });
@@ -157,7 +157,7 @@ pub fn handover(current_pid: u32, canary_binary: &Path) -> SimardResult<()> {
         let err = Command::new(canary_binary).exec();
         // exec() only returns on error.
         Err(SimardError::RpcCallFailed {
-            bridge: "self-relaunch".to_string(),
+            endpoint: "self-relaunch".to_string(),
             method: "handover".to_string(),
             reason: format!("exec failed for '{}': {err}", canary_binary.display()),
         })
@@ -169,7 +169,7 @@ pub fn handover(current_pid: u32, canary_binary: &Path) -> SimardResult<()> {
         Command::new(canary_binary)
             .spawn()
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: "self-relaunch".to_string(),
+                rpc: "self-relaunch".to_string(),
                 method: "handover".to_string(),
                 reason: format!("failed to spawn canary '{}': {e}", canary_binary.display()),
             })?;

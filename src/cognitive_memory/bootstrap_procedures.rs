@@ -137,11 +137,11 @@ pub const BOOTSTRAP_PROCEDURES: &[BootstrapProcedure] = &[
 ///
 /// Issue #2281, PR-C, problem 3.
 #[tracing::instrument(skip_all)]
-pub fn seed_bootstrap_procedures(bridge: &dyn CognitiveMemoryOps) -> SimardResult<usize> {
+pub fn seed_bootstrap_procedures(memory: &dyn CognitiveMemoryOps) -> SimardResult<usize> {
     let mut seeded = 0usize;
     for proc in BOOTSTRAP_PROCEDURES {
-        if !bridge.procedure_exists(proc.name())? {
-            bridge.store_procedure(proc.name(), &proc.steps(), &proc.prerequisites())?;
+        if !memory.procedure_exists(proc.name())? {
+            memory.store_procedure(proc.name(), &proc.steps(), &proc.prerequisites())?;
             seeded += 1;
         }
     }

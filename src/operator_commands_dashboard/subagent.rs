@@ -15,13 +15,29 @@ pub(crate) fn file_metrics(path: &std::path::Path) -> (u64, Option<String>) {
     }
 }
 
+/// Count the number of records persisted in a memory/evidence JSON snapshot.
+///
+/// Understands three on-disk shapes:
+/// 1. The canonical checksummed envelope written by
+///    `FileBackedMemoryStore::persist_checksummed` —
+///    `{"crc32": <u32>, "records": [ ... ]}` — whose record count is the
+///    length of the `records` array, NOT the number of top-level keys.
+/// 2. The legacy plain array — `[ {...}, {...} ]` — counted directly.
+/// 3. Any other object — counted by top-level key count (legacy fallback).
+///
+/// Before the envelope was recognized (issue #4075) a `{crc32, records}` file
+/// misreported `2` (its two keys) regardless of how many records it held, so
+/// the Memory tab showed "2 records" for a store with over a thousand entries.
 pub(crate) fn count_json_records(path: &std::path::Path) -> u64 {
     let Ok(content) = std::fs::read_to_string(path) else {
         return 0;
     };
     match serde_json::from_str::<Value>(&content) {
         Ok(Value::Array(arr)) => arr.len() as u64,
-        Ok(Value::Object(map)) => map.len() as u64,
+        Ok(Value::Object(map)) => match map.get("records") {
+            Some(Value::Array(records)) => records.len() as u64,
+            _ => map.len() as u64,
+        },
         _ => 0,
     }
 }
@@ -158,5 +174,52 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
 
         assert_eq!(count_json_records(&path), 0);
+    }
+
+    // Issue #4075: the canonical checksummed envelope
+    // `{"crc32": <u32>, "records": [...]}` must count the `records` array,
+    // not its two top-level keys.
+    #[test]
+    fn count_checksummed_envelope_uses_records_array_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory_records.json");
+        std::fs::write(
+            &path,
+            r#"{"crc32":3861665043,"records":[{"a":1},{"b":2},{"c":3},{"d":4}]}"#,
+        )
+        .unwrap();
+
+        // Two top-level keys but four records — must report 4, never 2.
+        assert_eq!(count_json_records(&path), 4);
+    }
+
+    #[test]
+    fn count_checksummed_envelope_with_empty_records_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory_records.json");
+        std::fs::write(&path, r#"{"crc32":0,"records":[]}"#).unwrap();
+
+        assert_eq!(count_json_records(&path), 0);
+    }
+
+    #[test]
+    fn count_object_without_records_key_falls_back_to_key_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"{"key1":"v","key2":"v","key3":"v"}"#).unwrap();
+
+        // No `records` array present — legacy generic-object behavior.
+        assert_eq!(count_json_records(&path), 3);
+    }
+
+    #[test]
+    fn count_object_with_non_array_records_falls_back_to_key_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        // `records` present but not an array — must not panic; fall back to
+        // the object key count rather than misreport.
+        std::fs::write(&path, r#"{"crc32":1,"records":"oops"}"#).unwrap();
+
+        assert_eq!(count_json_records(&path), 2);
     }
 }

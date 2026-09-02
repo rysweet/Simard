@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# check-rust-only-gate.sh — Enforce the Rust-only policy (issue #2155).
+# check-rust-only-gate.sh — Enforce the Rust-only policy (issues #2155, #3181).
 #
-# Fails if any .py file under src/ or python/, or any .js/.ts file outside
-# exempted directories, is found that is NOT in the allow-list of pre-existing
-# files. This prevents new non-Rust source files from being added while the
-# migration proceeds.
+# Fails if ANY .py file is found anywhere in the tree, or any .js/.ts file
+# outside exempted directories, that is NOT in the allow-list of pre-existing
+# files. Simard is a pure-Rust daemon (#3181): no Python source may live in the
+# repo, no matter which directory it sits in. This prevents new non-Rust source
+# files from being (re)introduced.
 #
 # Usage:
 #   scripts/check-rust-only-gate.sh          # check working tree
@@ -13,11 +14,11 @@
 set -euo pipefail
 
 # ── Allow-list: pre-existing files that are permitted until migrated ──────────
-# Each entry is tracked by the Rust-only epic (#2155). Remove entries as the
-# corresponding rewrite issues (#2156, #2157) are completed.
-#
-# Python bridge files (bridge_server.py, simard_gym_bridge.py,
-# simard_knowledge_bridge.py) removed in #2181 — native Rust transport complete.
+# Each entry was tracked by the Rust-only epic (#2155). This list is now EMPTY:
+# the last grandfathered Python was removed in #3181 (pure-Rust daemon), so no
+# `.py` file is permitted anywhere in the repo. Keep it empty — a new entry
+# would reopen the door the #3181 acceptance guard (tests/no_python_dependency.rs)
+# exists to keep shut.
 ALLOWED_PY_FILES=(
 )
 
@@ -68,9 +69,8 @@ violations=()
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
 
-  # Python files under src/ or python/
-  if [[ "$file" == src/*.py || "$file" == python/*.py ]] || \
-     [[ "$file" == src/**/*.py || "$file" == python/**/*.py ]]; then
+  # Python files anywhere in the tree (Simard is a pure-Rust daemon, #3181).
+  if [[ "$file" == *.py ]]; then
     if ! in_array "$file" "${ALLOWED_PY_FILES[@]}"; then
       violations+=("PYTHON  $file")
     fi
@@ -96,8 +96,9 @@ if [[ ${#violations[@]} -gt 0 ]]; then
     echo "  • $v"
   done
   echo ""
-  echo "This project is migrating to Rust-only. New .py files under src/ or python/"
-  echo "and new .js/.ts files outside npm/ and tests/e2e-dashboard/ are not permitted."
+  echo "This project is a pure-Rust daemon (#3181). New .py files are not permitted"
+  echo "anywhere in the repo, and new .js/.ts files outside npm/ and"
+  echo "tests/e2e-dashboard/ are not permitted."
   echo ""
   echo "If this file is intentionally needed, add it to the allow-list in"
   echo "scripts/check-rust-only-gate.sh and document the reason."

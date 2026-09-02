@@ -118,7 +118,7 @@ impl LeaderSemaphore {
             }
             if is_pid_alive(existing.pid) && !self.is_stale(&existing) {
                 return Err(SimardError::RpcCallFailed {
-                    bridge: "leader-semaphore".to_string(),
+                    endpoint: "leader-semaphore".to_string(),
                     method: "try_acquire".to_string(),
                     reason: format!(
                         "leadership held by pid {} (gen {})",
@@ -172,14 +172,14 @@ impl LeaderSemaphore {
         let current = self
             .read_state()?
             .ok_or_else(|| SimardError::RpcCallFailed {
-                bridge: "leader-semaphore".to_string(),
+                endpoint: "leader-semaphore".to_string(),
                 method: "transfer".to_string(),
                 reason: "no leader state to transfer from".to_string(),
             })?;
 
         if current.pid != from_pid {
             return Err(SimardError::RpcCallFailed {
-                bridge: "leader-semaphore".to_string(),
+                endpoint: "leader-semaphore".to_string(),
                 method: "transfer".to_string(),
                 reason: format!(
                     "caller pid {} does not own semaphore (owner: {})",

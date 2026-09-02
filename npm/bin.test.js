@@ -134,6 +134,14 @@ test("bin.js passes through process.argv", () => {
   );
 });
 
+test("bin.js passes packaged prompt assets to native installer", () => {
+  assert.ok(
+    binSource.includes("SIMARD_INSTALL_PROMPT_ASSETS_ROOT") &&
+      binSource.includes('join(installDir(), "prompt_assets")'),
+    "bin.js should expose downloaded prompt_assets to simard install"
+  );
+});
+
 test("bin.js downloads on first run when binary missing", () => {
   // Verify the download-on-miss logic exists
   assert.ok(

@@ -111,7 +111,7 @@ fn failures_then_success_clears_marker_and_counter() {
 
     let marker = format!("{BRAIN_FAILURE_BLOCKED_PREFIX}3{BRAIN_FAILURE_BLOCKED_SUFFIX}");
     let board = board_with_goal("g-locked", GoalProgress::Blocked(marker.clone()), None);
-    let mut bridges = test_bridges(); // session: None — auto-recovery happens before session check
+    let mut memories = test_memories(); // session: None — auto-recovery happens before session check
     let mut state = OodaState::new(board);
 
     // Seed the counter to simulate the 3-failure history that produced
@@ -123,7 +123,7 @@ fn failures_then_success_clears_marker_and_counter() {
         goal_id: Some("g-locked".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
 
     // The outcome itself is still success=false (no session in this test
     // setup), BUT the failure must NOT be the "blocked" short-circuit:
@@ -185,7 +185,7 @@ fn auto_recovery_skipped_when_blocked_reason_is_not_marker() {
         GoalProgress::Blocked("waiting for human review".into()),
         None,
     );
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let mut state = OodaState::new(board);
     state
         .goal_failure_counts
@@ -196,7 +196,7 @@ fn auto_recovery_skipped_when_blocked_reason_is_not_marker() {
         goal_id: Some("g-operator-blocked".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
 
     // Operator-set Blocked must still surface the existing "blocked"
     // short-circuit — auto-recovery did NOT fire.
@@ -279,7 +279,7 @@ fn cycle_rs_257_reset_preserved() {
 
 #[test]
 fn dispatch_advance_goal_without_session_fails() {
-    let mut bridges = test_bridges(); // session: None
+    let mut memories = test_memories(); // session: None
     let board = board_with_goal("g1", GoalProgress::NotStarted, None);
     let mut state = OodaState::new(board);
     let action = PlannedAction {
@@ -287,7 +287,7 @@ fn dispatch_advance_goal_without_session_fails() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     assert!(
         !outcomes[0].success,
         "advance without LLM session must fail"
@@ -303,7 +303,7 @@ fn dispatch_advance_goal_blocked_fails() {
     // operator-set, scope-blocked, dependency-blocked, or
     // subordinate-blocked reason continues to short-circuit dispatch
     // with the existing "blocked" failure detail.
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let board = board_with_goal("g1", GoalProgress::Blocked("waiting".into()), None);
     let mut state = OodaState::new(board);
     let action = PlannedAction {
@@ -311,21 +311,21 @@ fn dispatch_advance_goal_blocked_fails() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     assert!(!outcomes[0].success);
     assert!(outcomes[0].detail.contains("blocked"));
 }
 
 #[test]
 fn dispatch_advance_goal_missing_id_fails() {
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let mut state = OodaState::new(crate::goal_curation::GoalBoard::new());
     let action = PlannedAction {
         kind: ActionKind::AdvanceGoal,
         goal_id: None,
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     assert!(!outcomes[0].success);
     assert!(outcomes[0].detail.contains("requires a goal_id"));
 }
@@ -337,7 +337,7 @@ fn dispatch_advance_goal_with_dead_subordinate_blocks() {
     // guard in save_goal_board does not trip when dispatch_actions
     // persists a blocked-status update.
     let _hermetic = crate::test_support::HermeticState::new();
-    let mut bridges = test_bridges();
+    let mut memories = test_memories();
     let board = board_with_goal("g1", GoalProgress::NotStarted, Some("sub-1"));
     let mut state = OodaState::new(board);
     let action = PlannedAction {
@@ -345,7 +345,7 @@ fn dispatch_advance_goal_with_dead_subordinate_blocks() {
         goal_id: Some("g1".into()),
         description: "advance".into(),
     };
-    let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+    let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
     // No progress facts in memory means Dead heartbeat — should report no artifacts.
     assert!(!outcomes[0].success);
     assert!(
@@ -591,6 +591,93 @@ mod inflight_tests {
         assert_eq!(
             find_live_engineer_for_goal(tmp.path(), "verified-goal"),
             Some(wt)
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDD (issue #4197): STABLE per-goal-session identity.
+//
+// Root cause: in `typed_goal_session::run` the session id is minted as
+// `format!("ooda-{}", Uuid::now_v7())`, so every tick of the same goal gets a
+// FRESH session id. Terminal outcomes are keyed by `(session_id, cycle_id)`, so
+// a terminal written on one tick can never be read back on the next — the goal
+// is perpetually re-surfaced as blocked and re-escalated.
+//
+// Fix contract: derive the session id DETERMINISTICALLY from the goal identity
+// via a shared `derive_session_id(goal_id) -> String` helper, so the same goal
+// always maps to the same session id across ticks / process restarts. The helper
+// lives in the test-compiled `advance_goal::spawn` module (alongside the other
+// shared, unit-testable goal-session helpers such as `is_brain_failure_marker`
+// and `find_live_engineer_for_goal`); `typed_goal_session::run` calls it in place
+// of the `Uuid::now_v7()` mint. `cycle_id` stays per-cycle — it must remain
+// unique per tick to preserve the append-only `UNIQUE(session_id, cycle_id)`
+// cycle guard.
+//
+// These tests are committed FIRST (TDD red phase) and MUST FAIL until
+// `derive_session_id` exists.
+#[cfg(test)]
+mod session_identity_tests {
+    use crate::ooda_actions::advance_goal::spawn::derive_session_id;
+
+    fn is_safe_identifier(id: &str) -> bool {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b':'))
+    }
+
+    /// The whole point of the fix: the SAME goal id maps to the SAME session id
+    /// on every call. Today's `Uuid::now_v7()` mint fails this.
+    #[test]
+    fn derive_session_id_is_deterministic() {
+        let a = derive_session_id("goal-alpha");
+        let b = derive_session_id("goal-alpha");
+        assert_eq!(
+            a, b,
+            "same goal must yield a stable session id across ticks"
+        );
+    }
+
+    /// Distinct goals must not collide onto the same session id.
+    #[test]
+    fn derive_session_id_is_distinct_per_goal() {
+        assert_ne!(
+            derive_session_id("goal-alpha"),
+            derive_session_id("goal-beta"),
+            "different goals must map to different session ids"
+        );
+    }
+
+    /// The derived id must satisfy the ledger's `validate_identifier` charset
+    /// (1..=128 bytes of `[A-Za-z0-9-_./:]`) so it can key terminal outcomes —
+    /// even when the goal id itself contains characters that need sanitising.
+    #[test]
+    fn derive_session_id_is_always_a_valid_identifier() {
+        for goal in [
+            "goal-alpha",
+            "g",
+            "goal with spaces",
+            "weird*chars#and?punct!",
+            "unicode-☃-snowman",
+            &"x".repeat(4096),
+        ] {
+            let id = derive_session_id(goal);
+            assert!(
+                is_safe_identifier(&id),
+                "derived session id {id:?} for goal {goal:?} must be a safe 1..=128 char identifier"
+            );
+        }
+    }
+
+    /// Sanitisation must not erase goal distinctness: two goals that differ only
+    /// after sanitising unsafe characters must still produce different ids.
+    #[test]
+    fn derive_session_id_distinct_even_after_sanitising() {
+        assert_ne!(
+            derive_session_id("goal one!"),
+            derive_session_id("goal two!"),
         );
     }
 }

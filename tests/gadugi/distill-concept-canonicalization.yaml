@@ -1,0 +1,98 @@
+name: distill-concept-canonicalization
+app_type: cli
+description: |
+  qa-team outside-in gate for the perpetual-cognition sub-goals "graph memory",
+  "recall quality", and "distillation fact-yield". The shared write-boundary gate
+  `src/fact_reliability.rs::commit_gated_fact` — the single seam both the IPC
+  `StoreFactGated` server path and the in-process distiller sink call — now folds
+  a distilled fact's concept through `canonical_concept` ONCE before it dedups and
+  stores. A concept that maps into the closed `KNOWN_CONCEPTS` set is deduped AND
+  stored under its canonical label; a genuinely off-spec concept is kept verbatim.
+
+  Before this fix the gate SCORED with a canonicalized concept (the concept-
+  validity nudge) but DEDUPED and STORED under the raw surface concept, so the
+  surface variants an LLM routinely emits for one label — "PR-Pattern",
+  "pr_pattern", "pr-pattern." — fragmented the same concept across spellings.
+  Fragmentation split the graph's concept vocabulary (graph memory), let a
+  variant-labeled restatement slip past the identity-dedup so a duplicate fact was
+  promoted (dragging recall precision down and inflating semantic memory), and hid
+  a fact from a recall that queried the canonical label.
+
+  Three properties are now pinned end-to-end over the real gate and a real
+  in-memory cognitive store:
+
+    * A fact committed under a variant label ("PR_Pattern") is STORED under the
+      canonical "pr-pattern" and is recallable by the canonical concept.
+    * A restatement under a DIFFERENT variant of the same canonical concept
+      ("Bug-Pattern" after "bug-pattern") is deduped, leaving a single canonical
+      fact — the concept-label-only variant can no longer escape the gate.
+    * An off-spec concept ("infra-note", which does not canonicalize) is stored
+      verbatim — canonicalization folds recognized labels, never coerces a
+      different concept into the closed set.
+
+  Hermetic: no network, no live host mutation; the CLI runner rejects any non-zero
+  exit.
+agents:
+  - name: simard-cli
+    type: cli
+    command: cargo
+
+steps:
+  # Headline: the shared write-boundary gate canonicalizes the concept for both
+  # storage and dedup — canonical-label storage, cross-variant dedup, and
+  # verbatim off-spec preservation.
+  - action: run
+    params:
+      command: "cargo test --locked --lib fact_reliability_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "commit_gated_fact_stores_under_canonical_concept_label ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "commit_gated_fact_dedups_across_concept_label_variants ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "commit_gated_fact_preserves_off_spec_concept_verbatim ... ok"
+    timeout: 8000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+  # Regression guard: the full distillation semantic-handoff contract (the
+  # write-boundary gate that now canonicalizes) stays green — no honest fact
+  # changes disposition.
+  - action: run
+    params:
+      command: "cargo test --locked --lib memory_consolidation::distillation_semantic_handoff_tests"
+    timeout: 600000
+  - action: wait_for_output
+    params:
+      value: "test result: ok"
+    timeout: 8000
+  - action: validate_exit_code
+    params:
+      value: "0"
+    timeout: 5000
+
+metadata:
+  tags:
+    - cli
+    - memory
+    - cognitive-memory
+    - distillation
+    - fact-yield
+    - recall-quality
+    - graph-memory
+    - reliability
+    - regression
+  priority: high
+  author: copilot
+  test_type: outside-in

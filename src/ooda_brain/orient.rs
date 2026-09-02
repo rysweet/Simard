@@ -113,7 +113,7 @@ impl OrientJudgment {
 
 /// Single-decision-site trait for the Orient phase. Sync on purpose to match
 /// [`super::OodaBrain`] and [`super::OodaDecideBrain`] — the LLM-backed impl
-/// bridges to async internally so callers do not need a runtime.
+/// adapts to async internally so callers do not need a runtime.
 pub trait OodaOrientBrain: Send + Sync {
     /// Judge the demotion for one goal with at least one consecutive failure.
     /// Implementations must guarantee the returned judgment passes

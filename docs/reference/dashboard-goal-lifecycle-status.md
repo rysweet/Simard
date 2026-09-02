@@ -1,7 +1,7 @@
 ---
 title: Goals tab lifecycle-status badges
 description: Reference for the Goals tab Status column — the per-goal lifecycle badge that renders each active goal's real, live status (Not started, In progress, Blocked + reason, Completed, Proposed, Paused) distinctly, driven by the additive status_progress field on /api/goals.
-last_updated: 2026-07-06
+last_updated: 2026-07-16
 owner: simard
 doc_type: reference
 related:
@@ -249,6 +249,65 @@ Hermetic tests pin the behaviour end to end:
 - **Reconciliation** — a test asserts the rendered lifecycle statuses match the
   underlying `GoalProgress` values, i.e. the dashboard view and the goal store
   agree.
+
+## Work Board sub-section (kanban) — blocked ≠ failed
+
+The retired standalone *Work Board* view now renders as a **Work Board**
+sub-section inside the Goals tab, showing a small kanban (`Queued`,
+`In progress`, `Blocked`, `Done`) fed by `GET /api/workboard`. Its cards had
+the *same* blocked-vs-failed confusion the Status column fixed, in a different
+place ([#4178](https://github.com/rysweet/Simard/issues/4178)):
+
+- The **Blocked** column card coloured a blocked goal's progress bar with the
+  activity-failure red `var(--red)` (`#f85149`) — so a blocked goal on the
+  kanban read as *failed*, contradicting the amber decision above.
+- The card never surfaced **why** the goal was blocked; the reason was only
+  reachable by opening the Status column.
+
+The fix brings the Work Board into line with the Status column:
+
+- The blocked card's progress bar now uses amber `var(--yellow)` (`#d29922`),
+  the same colour as the **Blocked** lifecycle badge and deliberately distinct
+  from the activity-`Failed` red.
+- The card renders an inline **`Blocked — <reason>`** row (escape-last:
+  `esc(reason)`), so the operator sees the block reason without leaving the
+  kanban.
+
+### API: the `block_reason` field on `/api/workboard`
+
+The fix is **additive**. Each blocked goal object returned by `/api/workboard`
+now carries a clean, prefix-free `block_reason` string alongside the existing
+fields. The legacy `status` field is **unchanged** — it keeps its
+`"blocked: <reason>"` shape, which the client-side kanban classifier
+(`g.status.startsWith('blocked')`) still keys off — so existing consumers are
+unaffected.
+
+```jsonc
+{
+  "goals": [
+    {
+      "name": "agent-kgpacks-rs-ws24",
+      "description": "…",
+      "status": "blocked: 🔒 [OODA-SAFEGUARD] … needs human review", // existing, unchanged
+      "block_reason": "🔒 [OODA-SAFEGUARD] … needs human review",     // NEW: clean reason
+      "progress_pct": 0,
+      "priority": 1,
+      "assigned_to": null
+    },
+    {
+      "name": "audit-test-coverage",
+      "status": "in_progress",
+      "progress_pct": 42
+      // no block_reason — the field is OMITTED for every non-blocked goal
+    }
+  ]
+}
+```
+
+`block_reason` is a **response-only projection** of the in-memory
+`GoalProgress::Blocked(reason)`; it is omitted for every other lifecycle state.
+The Work Board card prefers it and falls back to stripping the legacy
+`blocked: ` prefix from `status` so older payloads still render a reason.
 
 ## Related
 

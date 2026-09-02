@@ -4,7 +4,7 @@ use crate::memory_client::CognitiveMemoryClient;
 use crate::rpc_transport::InMemoryRpcTransport;
 use serde_json::json;
 
-fn mock_bridge() -> CognitiveMemoryClient {
+fn mock_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-meeting", |method, _params| match method {
         "memory.record_sensory" => Ok(json!({"id": "sen_m1"})),
         "memory.store_episode" => Ok(json!({"id": "epi_m1"})),
@@ -20,8 +20,8 @@ fn mock_bridge() -> CognitiveMemoryClient {
 
 #[test]
 fn start_and_close_meeting_round_trip() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Sprint planning", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Sprint planning", &memory).unwrap();
     assert_eq!(session.status, MeetingSessionStatus::Open);
 
     record_decision(
@@ -46,7 +46,7 @@ fn start_and_close_meeting_round_trip() {
     )
     .unwrap();
 
-    let closed = close_meeting(session, &bridge).unwrap();
+    let closed = close_meeting(session, &memory).unwrap();
     assert_eq!(closed.status, MeetingSessionStatus::Closed);
     assert_eq!(closed.decisions.len(), 1);
     assert_eq!(closed.action_items.len(), 1);
@@ -54,9 +54,9 @@ fn start_and_close_meeting_round_trip() {
 
 #[test]
 fn cannot_add_to_closed_meeting() {
-    let bridge = mock_bridge();
-    let session = start_meeting("Retro", &bridge).unwrap();
-    let mut closed = close_meeting(session, &bridge).unwrap();
+    let memory = mock_memory();
+    let session = start_meeting("Retro", &memory).unwrap();
+    let mut closed = close_meeting(session, &memory).unwrap();
 
     let err = record_decision(
         &mut closed,
@@ -73,15 +73,15 @@ fn cannot_add_to_closed_meeting() {
 
 #[test]
 fn rejects_empty_topic() {
-    let bridge = mock_bridge();
-    let err = start_meeting("", &bridge).unwrap_err();
+    let memory = mock_memory();
+    let err = start_meeting("", &memory).unwrap_err();
     assert!(err.to_string().contains("empty"));
 }
 
 #[test]
 fn rejects_zero_priority_action_item() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Check", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Check", &memory).unwrap();
     let err = record_action_item(
         &mut session,
         ActionItem {
@@ -98,8 +98,8 @@ fn rejects_zero_priority_action_item() {
 
 #[test]
 fn edit_decision_description() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Edit test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Edit test", &memory).unwrap();
     record_decision(
         &mut session,
         MeetingDecision {
@@ -115,8 +115,8 @@ fn edit_decision_description() {
 
 #[test]
 fn edit_action_item_description() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Edit test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Edit test", &memory).unwrap();
     record_action_item(
         &mut session,
         ActionItem {
@@ -135,8 +135,8 @@ fn edit_action_item_description() {
 
 #[test]
 fn edit_note() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Edit test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Edit test", &memory).unwrap();
     add_note(&mut session, "old note").unwrap();
     edit_item(&mut session, "note", 0, "new note").unwrap();
     assert_eq!(session.notes[0], "new note");
@@ -144,24 +144,24 @@ fn edit_note() {
 
 #[test]
 fn edit_out_of_bounds_returns_error() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Edit test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Edit test", &memory).unwrap();
     let err = edit_item(&mut session, "decision", 0, "text").unwrap_err();
     assert!(err.to_string().contains("out of range"));
 }
 
 #[test]
 fn edit_unknown_type_returns_error() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Edit test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Edit test", &memory).unwrap();
     let err = edit_item(&mut session, "bogus", 0, "text").unwrap_err();
     assert!(err.to_string().contains("unknown item type"));
 }
 
 #[test]
 fn remove_decision() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Delete test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Delete test", &memory).unwrap();
     record_decision(
         &mut session,
         MeetingDecision {
@@ -187,8 +187,8 @@ fn remove_decision() {
 
 #[test]
 fn remove_action_item() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Delete test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Delete test", &memory).unwrap();
     record_action_item(
         &mut session,
         ActionItem {
@@ -206,8 +206,8 @@ fn remove_action_item() {
 
 #[test]
 fn remove_note() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Delete test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Delete test", &memory).unwrap();
     add_note(&mut session, "keep").unwrap();
     add_note(&mut session, "remove").unwrap();
     remove_item(&mut session, "note", 1).unwrap();
@@ -216,24 +216,24 @@ fn remove_note() {
 
 #[test]
 fn remove_out_of_bounds_returns_error() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Delete test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Delete test", &memory).unwrap();
     let err = remove_item(&mut session, "action", 0).unwrap_err();
     assert!(err.to_string().contains("out of range"));
 }
 
 #[test]
 fn remove_unknown_type_returns_error() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Delete test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Delete test", &memory).unwrap();
     let err = remove_item(&mut session, "bogus", 0).unwrap_err();
     assert!(err.to_string().contains("unknown item type"));
 }
 
 #[test]
 fn add_question_to_session() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Question test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Question test", &memory).unwrap();
     add_question(&mut session, "What is the release timeline?").unwrap();
     assert_eq!(session.explicit_questions.len(), 1);
     assert_eq!(
@@ -244,25 +244,25 @@ fn add_question_to_session() {
 
 #[test]
 fn add_question_rejects_empty() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Question test", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Question test", &memory).unwrap();
     let err = add_question(&mut session, "").unwrap_err();
     assert!(err.to_string().contains("empty"));
 }
 
 #[test]
 fn add_question_rejects_closed_meeting() {
-    let bridge = mock_bridge();
-    let session = start_meeting("Q", &bridge).unwrap();
-    let mut closed = close_meeting(session, &bridge).unwrap();
+    let memory = mock_memory();
+    let session = start_meeting("Q", &memory).unwrap();
+    let mut closed = close_meeting(session, &memory).unwrap();
     let err = add_question(&mut closed, "Late question").unwrap_err();
     assert!(err.to_string().contains("closed meeting"));
 }
 
 #[test]
 fn edit_question() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Edit Q", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Edit Q", &memory).unwrap();
     add_question(&mut session, "Original question").unwrap();
     edit_item(&mut session, "question", 0, "Updated question").unwrap();
     assert_eq!(session.explicit_questions[0], "Updated question");
@@ -270,8 +270,8 @@ fn edit_question() {
 
 #[test]
 fn remove_question() {
-    let bridge = mock_bridge();
-    let mut session = start_meeting("Delete Q", &bridge).unwrap();
+    let memory = mock_memory();
+    let mut session = start_meeting("Delete Q", &memory).unwrap();
     add_question(&mut session, "Q1").unwrap();
     add_question(&mut session, "Q2").unwrap();
     remove_item(&mut session, "question", 0).unwrap();

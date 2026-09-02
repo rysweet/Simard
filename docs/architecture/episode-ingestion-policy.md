@@ -89,20 +89,31 @@ for why behaviour is asserted there rather than by reading episodes back).
 The classifier evaluates four rules top-to-bottom and returns on the
 first match:
 
-1. **Failure override (highest priority).** If the content contains any
-   of `error`, `failed`, `failure`, `panic`, `exception` (case-insensitive),
-   the episode is **stored** at `importance = 0.9` — even if it also looks
-   like noise. A failed "session complete" is still a failure worth
-   keeping. The kind is `RecipeFailure` when the content/source mentions a
-   recipe, `ActionFailure` otherwise.
-2. **Known-noise markers → Drop.** A small allowlist of substrings —
-   `started with objective`, `completed and persisted`, `flushing working
-   memory`, `continue_skipping`, `no decision keyword` — is dropped.
-3. **Meaningful content → Store.** Content/source matching a durable
+1. **Failure override (highest priority).** If the content carries a
+   **whole-word** failure signal — a word from the `error` / `fail` /
+   `failure` / `panic` / `exception` family, matched at word boundaries and
+   including inflections (`errors`, `failed`, `panicked`, `exceptions`, …) and
+   compound PascalCase type names (`ParseError`, `NullPointerException`), but
+   **not** coincidental look-alikes that merely embed a stem (`exceptional`,
+   `hispanic`, `terror`, `mirror`) — the episode is **stored** at
+   `importance = 0.9` — even if it also looks like noise. A failed "session
+   complete" is still a failure worth keeping. The kind is `RecipeFailure`
+   when the content/source mentions a recipe, `ActionFailure` otherwise.
+2. **Meaningful content → Store.** Content/source matching a durable
    episodic event — user decisions, goal-board promotions/archival,
    handoffs, durable completions (opened/merged PR), or any
    `goal-curator` board summary — stores the episode with the importance
-   from the table below.
+   from the table below. Evaluated **before** the known-noise drop rule so a
+   durable signal is retained even when the same episode also mentions a
+   bookkeeping noise phrase (a handoff log that ends `… flushing working
+   memory`) — the same precedence the failure override applies. Checking
+   noise first discarded these dual-signal episodes, losing the durable
+   signal to distillation (a fact-yield loss).
+3. **Known-noise markers → Drop.** A small allowlist of substrings —
+   `started with objective`, `completed and persisted`, `flushing working
+   memory`, `continue_skipping`, `no decision keyword` — is dropped. Only
+   reached once rules 1–2 find no higher-value signal, so a **pure-noise**
+   episode still drops.
 4. **Default → DownScope.** Anything unrecognised — including the
    cross-session hydration bookkeeping (`Hydrated N prior-session facts …`)
    — is **stored down-scoped**, never dropped. We never silently lose a

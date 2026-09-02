@@ -1,0 +1,56 @@
+# Bursar — EXAMPLE investment-portfolio research & advisory identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`. Its real
+# behavior is delivered by the agentic recipe in
+# `recipes/bursar-portfolio-review.yaml`, which may drive any external domain
+# tooling (pandas, backtrader, QuantLib, …). None of that tooling lives in
+# Simard's daemon.
+#
+# The bursar turns a portfolio + a mandate into an evidence-backed allocation,
+# backtest, risk analysis, rebalancing PLAN, and written report. It is
+# **research/advisory ONLY** — it NEVER executes trades, places orders, or moves
+# money. It produces recommendations a human can review and act on.
+
+[package]
+name = "bursar"
+version = "0.1.0"
+description = "Reference example identity: portfolio + mandate -> allocation, backtest, risk, rebalancing plan + report (advisory only, never order execution)"
+
+[[identities]]
+name = "bursar"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "bursar-system"
+path = "prompts/bursar_system.md"
+
+[[identities.prompt_assets]]
+id = "bursar-allocate"
+path = "prompts/bursar_allocate.md"
+
+[[identities.prompt_assets]]
+id = "bursar-backtest"
+path = "prompts/bursar_backtest.md"
+
+[[identities.prompt_assets]]
+id = "bursar-risk"
+path = "prompts/bursar_risk.md"
+
+[[identities.prompt_assets]]
+id = "bursar-rebalance"
+path = "prompts/bursar_rebalance.md"
+
+[[identities.prompt_assets]]
+id = "bursar-report"
+path = "prompts/bursar_report.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"

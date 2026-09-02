@@ -1,7 +1,7 @@
 ---
 title: Architecture Overview
-description: How Simard's components fit together — from the runtime kernel to the Python ecosystem clients, cognitive memory, agent composition, OODA loop, and self-improvement.
-last_updated: 2026-03-31
+description: How Simard's components fit together — from the Rust runtime kernel to cognitive memory, agent composition, OODA loop, gym evaluation, and self-improvement.
+last_updated: 2026-07-09
 owner: simard
 doc_type: concept
 ---
@@ -54,10 +54,10 @@ graph TB
         CB --> GB
     end
 
-    subgraph "Python Ecosystem"
-        CMA[CognitiveAdapter + Hive Mind]
-        KGA[KnowledgeGraphAgent]
-        EVA[Progressive Test Suite]
+    subgraph "Rust Runtime Libraries"
+        CMA[Cognitive Memory Adapter + Hive Mind]
+        KGA[Knowledge Graph Runtime]
+        EVA[Gym Evaluation Runtime]
         LBUG[(LadybugDB)]
 
         MB --> CMA
@@ -234,7 +234,7 @@ The `ooda_scheduler` manages action slots with status tracking (scheduled, runni
 ### Gym and Benchmarks
 
 - **Gym** (`gym`) — benchmark scenario loading, execution, suite reports, and cross-run comparison
-- **Gym Client** (`gym_client`) — client for Python evaluation infrastructure
+- **Gym Client** (`gym_client`) — client for the Rust evaluation infrastructure
 - **Gym Scoring** (`gym_scoring`) — dimension trends, regression detection, and improvement tracking
 
 ### Remote Orchestration

@@ -1,5 +1,5 @@
-//! Durable contract for the THREE engineering guidelines (G1/G2/G3) that
-//! Simard's OODA reasoners, engineers, and reviewers — and human
+//! Durable contract for the engineering guidelines (G1/G2/G3 and now **G4**)
+//! that Simard's OODA reasoners, engineers, and reviewers — and human
 //! contributors — must follow.
 //!
 //! G1 — HYBRID BENCHMARK + LIVE SELF-MEASUREMENT: cognition / self-improvement
@@ -13,13 +13,21 @@
 //!      CODE: treat line/substring parsing of model/tool output as a brittle
 //!      antipattern; prefer a structured-output contract + agentic extraction,
 //!      and prefer recipes/prompts over new code.
+//! G4 — DURABLE DOCS ONLY; NEVER COMMIT POINT-IN-TIME REPORT DOCS
+//!      (`no-point-in-time-docs`): an investigation / testing / diagnosis /
+//!      recurrence / benchmark-snapshot FINDING is recorded as a GitHub issue
+//!      and/or memory — NOT as a committed repo doc. Durable feature/architecture
+//!      docs remain encouraged (the distinction is doc TYPE, not topic). G4 also
+//!      has a hard deterministic backstop — the Overseer pr-verify scan
+//!      `scan_no_point_in_time_report_docs` (see `src/overseer/pr_verify.rs`).
 //!
-//! TDD (Step 7 — write tests first): these are RED until the implementation
-//! step threads G1/G2/G3 into the engineer / OODA reasoner prompts, the review
-//! gates, and the goal-framing prompts (and their recipe `.yaml` mirrors). The
-//! `CONTRIBUTING.md` durable-doc assertions are the GREEN anchor — the human
-//! source of truth is already in place, so a regression that deletes it is
-//! also caught.
+//! TDD (Step 7 — write tests first): the G1/G2/G3 assertions landed with #2614
+//! and are GREEN; the **G4** assertions at the end of this file are the new RED
+//! set — they stay RED until the implementation step threads G4 into the
+//! engineer / OODA reasoner prompts, the review gates, and the recipe mirrors.
+//! The `CONTRIBUTING.md` assertions (G1–G4) are the GREEN anchor — the human
+//! source of truth is already in place, so a regression that deletes it is also
+//! caught.
 //!
 //! The assertions pin STABLE keyword invariants (lowercased), not full-sentence
 //! snapshots, so ordinary rewording does not break them — deleting a guideline
@@ -428,5 +436,172 @@ fn contributing_documents_all_three_guidelines() {
         "#engineering-guidelines-g1g2g3",
         "CONTRIBUTING.md",
         "a table-of-contents anchor linking to the guidelines section",
+    );
+}
+
+// =========================================================================
+// G4 — DURABLE-DOCUMENTATION POLICY (no-point-in-time-docs)
+// =========================================================================
+//
+// TDD (Step 7 — write tests first). Everything below is RED until Step 8:
+//   * the prompt/gate assertions fail because the G4 marker is absent from the
+//     reasoner / gate prompts and their recipe mirrors today;
+//   * `contributing_documents_g4_durable_docs_policy` is the GREEN anchor (the
+//     CONTRIBUTING.md G4 section already landed in the documentation step).
+//
+// The vocabulary mirrors the CONTRIBUTING.md G4 language so Step 8 satisfies the
+// contract by threading the SAME wording into the prompts — keyword invariants,
+// not sentence snapshots.
+
+/// G4 guideline NAME — the stable, universal marker. Present in `CONTRIBUTING.md`
+/// today; ABSENT from the reasoner/gate prompts until Step 8 threads it, so it is
+/// the RED discriminator for every G4 prompt assertion.
+const G4_MARKER: &str = "no-point-in-time-docs";
+
+/// G4 — the banned artifact: a point-in-time investigation/testing/diagnosis
+/// REPORT doc committed to the repo.
+const G4_REPORT: &[&str] = &["point-in-time report", "point-in-time doc", "report doc"];
+
+/// G4 — where a finding goes INSTEAD: a GitHub issue and/or memory, not a repo doc.
+const G4_SINK: &[&str] = &[
+    "issue and/or memory",
+    "github issue",
+    "issue or memory",
+    "not a repo doc",
+];
+
+/// G4 — durable feature/architecture docs remain encouraged (doc TYPE, not topic).
+const G4_DURABLE: &[&str] = &["durable doc", "durable documentation"];
+
+fn assert_g4_marker(lc: &str, file: &str) {
+    assert_contains(
+        lc,
+        G4_MARKER,
+        file,
+        "a reference to the durable-documentation guideline (G4 / no-point-in-time-docs)",
+    );
+}
+
+/// Full G4 flag criteria: name the guideline, name the banned artifact, name the
+/// correct sink, and preserve the "durable docs are encouraged" half.
+fn assert_g4(lc: &str, file: &str) {
+    assert_g4_marker(lc, file);
+    assert_contains_any(
+        lc,
+        G4_REPORT,
+        file,
+        "G4: name the banned artifact — a point-in-time investigation/testing/diagnosis report doc",
+    );
+    assert_contains_any(
+        lc,
+        G4_SINK,
+        file,
+        "G4: findings go to a GitHub issue and/or memory, not a committed repo doc",
+    );
+    assert_contains_any(
+        lc,
+        G4_DURABLE,
+        file,
+        "G4: durable feature/architecture docs remain encouraged (doc type, not topic)",
+    );
+}
+
+// --- Layer A: engineer + planning reasoner prompts (full G4) --------------
+
+#[test]
+fn engineer_prompts_thread_g4_durable_docs_policy() {
+    for f in ["engineer_system.md", "engineer_planning.md"] {
+        let lc = prompt_lc(f);
+        assert_g4(&lc, f);
+    }
+}
+
+// --- Layer A: OODA reasoner prompts (lightweight G4 marker) ----------------
+//
+// The compact OODA reasoners carry the G4 NAME so their planning/authoring
+// judgment inherits the durable-docs policy, without over-pinning their narrow
+// output contracts (same treatment they give the G1/G2/G3 marker).
+
+#[test]
+fn ooda_reasoners_reference_g4() {
+    for f in OODA_REASONERS {
+        let lc = prompt_lc(f);
+        assert_g4_marker(&lc, f);
+    }
+}
+
+// --- Layer B: review gates (full G4 flag criteria) ------------------------
+
+#[test]
+fn review_gates_flag_g4_report_docs() {
+    for f in ["merge_readiness_judge.md", "review_pipeline.md"] {
+        let lc = prompt_lc(f);
+        assert_g4(&lc, f);
+    }
+}
+
+// --- Mirror parity: G4-bearing prompts stay in sync with their recipe .yaml -
+//
+// The G4-bearing subset of MIRROR_PAIRS (the OODA reasoners + the merge-readiness
+// judge) must carry the G4 marker in BOTH the `.md` and its recipe mirror, so a
+// `.md` edit can't silently leave the live recipe path un-guided by G4.
+
+const G4_MIRROR_PAIRS: &[(&str, &str)] = &[
+    ("ooda_orient.md", "ooda-orient.yaml"),
+    ("ooda_decide.md", "ooda-decide.yaml"),
+    ("ooda_brain.md", "ooda-engineer-lifecycle.yaml"),
+    ("merge_readiness_judge.md", "merge-readiness-judge.yaml"),
+];
+
+#[test]
+fn recipe_mirrors_carry_the_g4_marker() {
+    let mut drifted = Vec::new();
+    for (md, yaml) in G4_MIRROR_PAIRS {
+        let md_has = prompt_lc(md).contains(G4_MARKER);
+        let yaml_has = recipe(yaml).to_lowercase().contains(G4_MARKER);
+        if md_has != yaml_has {
+            drifted.push(format!("{md} (g4={md_has}) vs {yaml} (g4={yaml_has})"));
+        }
+        assert!(
+            yaml_has,
+            "recipe mirror {yaml} must carry the G4 marker {G4_MARKER:?} (parity with {md})"
+        );
+    }
+    assert!(
+        drifted.is_empty(),
+        "prompt/recipe G4 marker drift — G4 must be present in BOTH the .md and \
+         its .yaml mirror: {drifted:?}"
+    );
+}
+
+// --- Layer D: durable doc (GREEN anchor) ----------------------------------
+//
+// CONTRIBUTING.md already documents G4 (the documentation step). These
+// assertions are GREEN and guard against a future edit deleting the durable
+// G4 section, its hard-rail scan reference, or the updated TOC anchor.
+
+#[test]
+fn contributing_documents_g4_durable_docs_policy() {
+    let lc = repo_file("CONTRIBUTING.md").to_lowercase();
+    assert_g4(&lc, "CONTRIBUTING.md");
+    // The deterministic backstop scan is named, tying the soft rail to the hard.
+    assert_contains(
+        &lc,
+        "scan_no_point_in_time_report_docs",
+        "CONTRIBUTING.md",
+        "G4: name the deterministic pr-verify backstop scan (the hard rail)",
+    );
+    // The guidelines header and its TOC anchor are updated to include G4.
+    assert_contains(
+        &lc,
+        "g1/g2/g3/g4",
+        "CONTRIBUTING.md",
+        "the guidelines header names all four guidelines",
+    );
+    assert_contains(
+        &lc,
+        "#engineering-guidelines-g1g2g3g4",
+        "CONTRIBUTING.md",
+        "the table-of-contents anchor is updated to include G4",
     );
 }

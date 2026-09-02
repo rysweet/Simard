@@ -46,7 +46,7 @@ fn failing_executor(fail_on: &'static str) -> MockAzlinExecutor {
     MockAzlinExecutor::new(move |args| {
         if args.first().copied() == Some(fail_on) {
             Err(SimardError::RpcTransportError {
-                bridge: "azlin".to_string(),
+                endpoint: "azlin".to_string(),
                 reason: format!("simulated failure on {fail_on}"),
             })
         } else {

@@ -23,12 +23,12 @@ use super::{SKILL_MIN_USAGE, make_outcome};
 /// attribute work to the correct pass.
 pub(super) fn dispatch_consolidate_memory(
     action: &PlannedAction,
-    bridges: &OodaClients,
+    memories: &OodaClients,
 ) -> ActionOutcome {
     // Pass 1: textual dedup. Errors here are fatal for the outcome
     // because they signal a backend problem that would also affect
     // pass 2.
-    let consolidate_msg = match bridges.memory.consolidate_episodes(20) {
+    let consolidate_msg = match memories.memory.consolidate_episodes(20) {
         Ok(_) => "consolidated up to 20 episodes".to_string(),
         Err(e) => {
             return make_outcome(action, false, format!("consolidation failed: {e}"));
@@ -42,7 +42,7 @@ pub(super) fn dispatch_consolidate_memory(
     // `Ok(skipped)` shape is the graceful no-op path.
     let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let distill_msg = match crate::memory_consolidation::distillation::distill_recent_episodes(
-        &*bridges.memory,
+        &*memories.memory,
         &repo_root,
     ) {
         Ok(report) if report.was_skipped() => "distill skipped (below min threshold)".to_string(),
@@ -59,9 +59,9 @@ pub(super) fn dispatch_consolidate_memory(
 /// ResearchQuery: list available knowledge packs.
 pub(super) fn dispatch_research_query(
     action: &PlannedAction,
-    bridges: &OodaClients,
+    memories: &OodaClients,
 ) -> ActionOutcome {
-    match bridges.knowledge.list_packs() {
+    match memories.knowledge.list_packs() {
         Ok(packs) => make_outcome(
             action,
             true,
@@ -71,7 +71,7 @@ pub(super) fn dispatch_research_query(
     }
 }
 
-/// RunImprovement: execute a full improvement cycle via the gym bridge.
+/// RunImprovement: execute a full improvement cycle via the gym memory.
 ///
 /// Uses default improvement config (progressive suite, 2% threshold).
 /// The cycle evaluates baseline, applies no changes (empty proposals),
@@ -79,10 +79,10 @@ pub(super) fn dispatch_research_query(
 /// from the orient/decide phases.
 pub(super) fn dispatch_run_improvement(
     action: &PlannedAction,
-    bridges: &OodaClients,
+    memories: &OodaClients,
 ) -> ActionOutcome {
     let config = ImprovementConfig::default();
-    match run_improvement_cycle(&bridges.gym, &config) {
+    match run_improvement_cycle(&memories.gym, &config) {
         Ok(cycle) => {
             let summary = summarize_cycle(&cycle);
             let committed = matches!(
@@ -102,9 +102,9 @@ pub(super) fn dispatch_run_improvement(
 /// RunGymEval: run the progressive gym suite and return the score.
 pub(super) fn dispatch_run_gym_eval(
     action: &PlannedAction,
-    bridges: &OodaClients,
+    memories: &OodaClients,
 ) -> ActionOutcome {
-    match bridges.gym.run_suite("progressive") {
+    match memories.gym.run_suite("progressive") {
         Ok(result) => {
             use crate::gym_scoring::suite_score_from_result;
             let score = suite_score_from_result(&result);
@@ -124,8 +124,11 @@ pub(super) fn dispatch_run_gym_eval(
 }
 
 /// BuildSkill: extract skill candidates from procedural memory.
-pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaClients) -> ActionOutcome {
-    match extract_skill_candidates(&*bridges.memory, SKILL_MIN_USAGE) {
+pub(super) fn dispatch_build_skill(
+    action: &PlannedAction,
+    memories: &OodaClients,
+) -> ActionOutcome {
+    match extract_skill_candidates(&*memories.memory, SKILL_MIN_USAGE) {
         Ok(candidates) => {
             let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
             make_outcome(
@@ -146,14 +149,14 @@ pub(super) fn dispatch_build_skill(action: &PlannedAction, bridges: &OodaClients
 /// and store noteworthy events as semantic facts in cognitive memory.
 pub(super) fn dispatch_poll_developer_activity(
     action: &PlannedAction,
-    bridges: &OodaClients,
+    memories: &OodaClients,
 ) -> ActionOutcome {
     use crate::research_tracker::{
         default_developer_watches, poll_all_developer_activity, summarize_poll_results,
     };
 
     let watches = default_developer_watches();
-    let results = poll_all_developer_activity(&watches, &*bridges.memory, 5);
+    let results = poll_all_developer_activity(&watches, &*memories.memory, 5);
     let summary = summarize_poll_results(&results);
     let total_events: usize = results.iter().map(|r| r.events.len()).sum();
 
@@ -168,11 +171,11 @@ pub(super) fn dispatch_poll_developer_activity(
 /// and surface promising research ideas as `research:` issue proposals.
 pub(super) fn dispatch_extract_ideas(
     action: &PlannedAction,
-    bridges: &OodaClients,
+    memories: &OodaClients,
 ) -> ActionOutcome {
     use crate::research_tracker::{extract_ideas, summarize_extraction};
 
-    match extract_ideas(&*bridges.memory) {
+    match extract_ideas(&*memories.memory) {
         Ok(result) => {
             let summary = summarize_extraction(&result);
             make_outcome(action, true, format!("idea extraction complete: {summary}"))
@@ -229,14 +232,14 @@ mod tests {
 
     #[test]
     fn dispatch_run_improvement_calls_gym() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let action = PlannedAction {
             kind: ActionKind::RunImprovement,
             goal_id: None,
             description: "test".into(),
         };
         let mut state = OodaState::new(GoalBoard::new());
-        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("improvement cycle completed"));
@@ -244,14 +247,14 @@ mod tests {
 
     #[test]
     fn dispatch_run_gym_eval_returns_score() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::RunGymEval,
             goal_id: None,
             description: "eval".into(),
         };
-        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("gym eval"));
         assert!(outcomes[0].detail.contains("75.0%"));
@@ -259,28 +262,28 @@ mod tests {
 
     #[test]
     fn dispatch_build_skill_extracts_candidates() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::BuildSkill,
             goal_id: None,
             description: "build".into(),
         };
-        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("cargo-build"));
     }
 
     #[test]
     fn dispatch_consolidate_memory_succeeds() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::ConsolidateMemory,
             goal_id: None,
             description: "consolidate".into(),
         };
-        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("consolidated"));
@@ -288,14 +291,14 @@ mod tests {
 
     #[test]
     fn dispatch_research_query_lists_packs() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let mut state = OodaState::new(GoalBoard::new());
         let action = PlannedAction {
             kind: ActionKind::ResearchQuery,
             goal_id: None,
             description: "research".into(),
         };
-        let outcomes = dispatch_actions(&[action], &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[action], &mut memories, &mut state).unwrap();
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].success);
         assert!(outcomes[0].detail.contains("knowledge packs"));
@@ -303,7 +306,7 @@ mod tests {
 
     #[test]
     fn dispatch_multiple_actions_concurrently() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let mut state = OodaState::new(GoalBoard::new());
         let actions = vec![
             PlannedAction {
@@ -322,16 +325,16 @@ mod tests {
                 description: "build".into(),
             },
         ];
-        let outcomes = dispatch_actions(&actions, &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&actions, &mut memories, &mut state).unwrap();
         assert_eq!(outcomes.len(), 3);
         assert!(outcomes.iter().all(|o| o.success));
     }
 
     #[test]
     fn dispatch_empty_actions_returns_empty() {
-        let mut bridges = test_bridges();
+        let mut memories = test_memories();
         let mut state = OodaState::new(GoalBoard::new());
-        let outcomes = dispatch_actions(&[], &mut bridges, &mut state).unwrap();
+        let outcomes = dispatch_actions(&[], &mut memories, &mut state).unwrap();
         assert!(outcomes.is_empty());
     }
 

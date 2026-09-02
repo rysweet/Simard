@@ -31,7 +31,7 @@ mod tests {
     use crate::rpc_transport::InMemoryRpcTransport;
     use serde_json::json;
 
-    fn mock_bridge() -> CognitiveMemoryClient {
+    fn mock_memory() -> CognitiveMemoryClient {
         let transport =
             InMemoryRpcTransport::new("test-research", |method, _params| match method {
                 "memory.store_fact" => Ok(json!({"id": "sem_r1"})),
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn add_and_track_research_topic() {
-        let bridge = mock_bridge();
+        let memory = mock_memory();
         add_research_topic(
             ResearchTopic {
                 id: "rt-1".to_string(),
@@ -56,28 +56,28 @@ mod tests {
                 priority: 2,
                 status: ResearchStatus::Proposed,
             },
-            &bridge,
+            &memory,
         )
         .unwrap();
     }
 
     #[test]
     fn track_developer_watch() {
-        let bridge = mock_bridge();
+        let memory = mock_memory();
         track_developer(
             DeveloperWatch {
                 github_id: "octocat".to_string(),
                 focus_areas: vec!["agent-frameworks".to_string()],
                 last_checked: None,
             },
-            &bridge,
+            &memory,
         )
         .unwrap();
     }
 
     #[test]
     fn rejects_empty_topic_id() {
-        let bridge = mock_bridge();
+        let memory = mock_memory();
         let err = add_research_topic(
             ResearchTopic {
                 id: "".to_string(),
@@ -86,7 +86,7 @@ mod tests {
                 priority: 1,
                 status: ResearchStatus::Proposed,
             },
-            &bridge,
+            &memory,
         )
         .unwrap_err();
         assert!(err.to_string().contains("empty"));
@@ -94,14 +94,14 @@ mod tests {
 
     #[test]
     fn rejects_watch_without_focus_areas() {
-        let bridge = mock_bridge();
+        let memory = mock_memory();
         let err = track_developer(
             DeveloperWatch {
                 github_id: "someone".to_string(),
                 focus_areas: vec![],
                 last_checked: None,
             },
-            &bridge,
+            &memory,
         )
         .unwrap_err();
         assert!(err.to_string().contains("focus area"));
@@ -153,8 +153,8 @@ mod tests {
 
     #[test]
     fn seed_developer_watches_stores_all_five() {
-        let bridge = mock_bridge();
-        let seeded = seed_developer_watches(&bridge);
+        let memory = mock_memory();
+        let seeded = seed_developer_watches(&memory);
         assert_eq!(seeded, 5);
     }
 

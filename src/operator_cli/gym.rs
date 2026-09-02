@@ -1,5 +1,6 @@
 use crate::operator_commands::{
-    run_gym_compare, run_gym_list, run_gym_recall_precision, run_gym_scenario, run_gym_suite,
+    run_gym_compare, run_gym_enrichment_ablation, run_gym_list, run_gym_recall_precision,
+    run_gym_reliability_gate, run_gym_scenario, run_gym_suite,
 };
 
 use super::args::{next_required, reject_extra_args};
@@ -17,6 +18,16 @@ Commands:
   recall-precision            Run the fixed recall-precision benchmark, append
                               one score to gym history, and print the score and
                               gym signal (issue #2491 / #2494 hybrid measurement).
+  reliability-gate            Run the fixed reliability-gate benchmark, append
+                              one score to gym history, and print the score and
+                              gym signal. Scores a frozen, rubric-labeled fact
+                              corpus through the same fact-reliability gate the
+                              live write boundaries use (perpetual-cognition goal:
+                              reasoner reliability).
+  enrichment-ablation         Prove recalled memory influences decisions: render
+                              one decision with recall vs recall-suppressed, print
+                              the delta + verdict, and feed enrichment_ablation_delta
+                              into the hybrid self-measurement (issue #2942).
   help, -h, --help            Show this help message and exit.
 ";
 
@@ -51,6 +62,14 @@ pub(super) fn dispatch_gym_command(
         "recall-precision" => {
             reject_extra_args(args)?;
             run_gym_recall_precision()
+        }
+        "reliability-gate" => {
+            reject_extra_args(args)?;
+            run_gym_reliability_gate()
+        }
+        "enrichment-ablation" => {
+            reject_extra_args(args)?;
+            run_gym_enrichment_ablation()
         }
         other => Err(format!("unsupported command 'gym {other}'").into()),
     }
@@ -188,6 +207,25 @@ mod tests {
         let result = dispatch_operator_cli(vec![
             "gym".to_string(),
             "list".to_string(),
+            "extra".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected trailing")
+        );
+    }
+
+    #[test]
+    fn test_gym_reliability_gate_rejects_extra_args() {
+        // `reject_extra_args` runs before the command body, so this errors
+        // without opening the real gym-history DB — a hermetic wiring check that
+        // the `reliability-gate` subcommand is dispatched.
+        let result = dispatch_operator_cli(vec![
+            "gym".to_string(),
+            "reliability-gate".to_string(),
             "extra".to_string(),
         ]);
         assert!(result.is_err());

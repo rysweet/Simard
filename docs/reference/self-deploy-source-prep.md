@@ -1,7 +1,7 @@
 ---
 title: Self-deploy source preparation & warm target dir reference
-description: Reference for the cwd-independent self-deploy source preparer (SelfDeploySourcePreparer / GitSourcePreparer), the persistent warm build directories under the state root, the build_self_deploy_candidate builder, the SelfDeployOrchestrator::with_source constructor, the source-preparation UpdateConfig/env surface, the new SafeUpdateError variants, and the security model that fetches and checks out the merged head before building.
-last_updated: 2026-06-28
+description: Reference for the cwd-independent self-deploy source preparer (SelfDeploySourcePreparer / GitSourcePreparer), the persistent warm build directories under the state root, the build_self_deploy_candidate builder, the SelfDeployOrchestrator::with_source constructor, the managed-clone reset+clean hygiene that keeps redeploys unblockable, the source-preparation UpdateConfig/env surface, the new SafeUpdateError variants, and the security model that fetches and checks out the merged head before building.
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -69,6 +69,7 @@ This reference closes both. The single guiding rule:
 - [`SelfDeploySourcePreparer`](#selfdeploysourcepreparer)
 - [`GitSourcePreparer`](#gitsourcepreparer)
 - [Repo resolution precedence](#repo-resolution-precedence)
+- [Managed-clone hygiene (reset + clean before checkout)](#managed-clone-hygiene-reset--clean-before-checkout)
 - [`build_self_deploy_candidate`](#build_self_deploy_candidate)
 - [`SelfDeployOrchestrator::with_source`](#selfdeployorchestratorwith_source)
 - [Configuration & environment](#configuration-environment)
@@ -132,12 +133,21 @@ pub trait SelfDeploySourcePreparer: Send + Sync {
   daemon mutation. There is no cwd-`HEAD` fallback.
 - `prepare` leaves the work-tree on a **detached** checkout of `target_commit`
   (no per-run branch accumulation), so `build.rs` embeds exactly that SHA.
+- When the resolved repo is the **managed disposable clone**
+  (`self_deploy_src_dir()`), `prepare` first scrubs it with `git reset --hard`
+  + `git clean -fd` (see
+  [Managed-clone hygiene](#managed-clone-hygiene-reset--clean-before-checkout)),
+  so a prior run's aborted or dirty checkout can never block a redeploy. A
+  caller-provided `SIMARD_SELF_DEPLOY_REPO` is **never** scrubbed.
 
 ## `GitSourcePreparer`
 
 The production implementation. It runs `git` via the repo's hardened
-`env_clear()` + `PATH`/`HOME`-only pattern (mirroring `engineer_worktree`'s git
-helper), so a hostile ambient environment cannot hijack the build source.
+`env_clear()` + `PATH`/`HOME`/`SSH_AUTH_SOCK`-only pattern (mirroring
+`engineer_worktree`'s git helper), so a hostile ambient environment cannot
+hijack the build source. `SSH_AUTH_SOCK` is forwarded so `ssh://`/scp-like
+origins can authenticate via a running ssh-agent; `GIT_SSH_COMMAND` is
+deliberately **not** forwarded.
 
 ```rust
 pub struct GitSourcePreparer { /* optional explicit repo override … */ }
@@ -219,6 +229,82 @@ one.
 > (keeping stdout/`--json` clean) and then degrades to the cwd report, so an
 > operator who only ever runs `--check` still sees the misconfiguration the
 > effectful `resolve_repo` would have aborted on.
+
+## Managed-clone hygiene (reset + clean before checkout)
+
+The persistent source checkout at `self_deploy_src_dir()`
+(`~/.simard/self-deploy-src/`) is a **disposable, self-deploy-owned** work-tree —
+it is only ever written by the preparer, never by an operator. Even so, a
+self-deploy that is interrupted mid-checkout, or a merged commit that modifies a
+tracked file the previous deploy left dirty (observed in production with
+`.github/hooks/amplihack-hooks.json`), can leave the clone in a state where the
+next `git checkout --detach <sha>` aborts:
+
+```text
+error: Your local changes to '.github/hooks/amplihack-hooks.json' would be
+overwritten by checkout: Aborting
+```
+
+Before this, a single such abort stranded the running binary one commit behind
+merged `main` on **every** subsequent cycle (a self-perpetuating DeployDrift)
+because the checkout never succeeded. To make redeploys unconditionally
+unblockable, `prepare` (and `prepare_existing_repo`) scrub the managed clone
+immediately before the detached checkout:
+
+```rust
+/// Discard any local modifications and untracked files in the managed
+/// disposable self-deploy clone so the subsequent `checkout --detach` can
+/// never abort on a dirty tree.
+///
+/// Runs `git reset --hard` then `git clean -fd` via the hardened,
+/// env-scrubbed git helper (same `env_clear()` + `PATH`/`HOME`/`SSH_AUTH_SOCK`
+/// path as every other preparer git call). Maps any non-zero/exec failure to
+/// `SafeUpdateError::CheckoutFailed`.
+///
+/// DEFENSE-IN-DEPTH: canonicalizes `repo` and asserts it is **exactly**
+/// `self_deploy_src_dir()`. An empty, relative, root, or mismatched path
+/// fails closed to `CheckoutFailed` *before* any destructive command runs, so
+/// this can never scrub a caller's tree, the operator cwd, or an
+/// `SIMARD_SELF_DEPLOY_REPO` override.
+fn reset_source_tree(repo: &Path) -> Result<(), SafeUpdateError>;
+```
+
+Call ordering inside `prepare` becomes:
+
+```text
+1. validate_full_sha(target_commit)           // option-injection guard
+2. repo = resolve_repo()                       // env override → checkout → clone
+3. if !commit_present(repo, target_commit): fetch_origin(repo)
+4. if repo == self_deploy_src_dir():
+       reset_source_tree(repo)                 // git reset --hard + git clean -fd
+5. git checkout --detach <target_commit>       // now never aborts on a dirty tree
+```
+
+> **Implementation mandate — the `repo == self_deploy_src_dir()` gate is
+> required, not optional.** `reset_source_tree` must be called *only* under this
+> outer equality gate; it must **not** be wired unconditionally after `fetch`.
+> `resolve_repo()` / `resolve_existing_repo()` can legitimately return a repo
+> that is **not** `self_deploy_src_dir()` — a test `at()`/`repo_override` or a
+> `SIMARD_SELF_DEPLOY_REPO` override. Because `reset_source_tree` re-asserts
+> canonical equality with `self_deploy_src_dir()` and **fails closed to
+> `CheckoutFailed`**, calling it unconditionally on such a repo would abort
+> every override/test deploy with `CheckoutFailed`. The gate keeps the scrub
+> scoped to the disposable managed clone; a *dirty* override still fails loud at
+> the checkout step (as documented below), never via a forced wipe.
+
+**Scope guarantees:**
+
+| Guarantee | How |
+| --- | --- |
+| Only the managed clone is scrubbed | The call is gated on `repo == self_deploy_src_dir()`, and `reset_source_tree` re-asserts the same canonical equality internally (fail-closed). |
+| A user-provided `SIMARD_SELF_DEPLOY_REPO` is never mutated | It resolves to a different canonical path, so the gate is skipped; a *dirty* override still fails loud on checkout (`CheckoutFailed`) exactly as before — the preparer never `reset --hard`/`clean`s a caller's tree. |
+| Ignored files (secrets, caches) survive | `git clean -fd` is used, **never** `-x`/`-fdx`, so `.env`, credential caches, and ignored build artifacts under the clone are preserved. |
+| The warm target dir survives | The reset/clean is scoped to `self_deploy_src_dir()`; the incremental Cargo cache in the **separate** `self_deploy_target_dir()` is untouched, so builds stay warm. |
+| No new failure mode on the happy path | On a clean clone, `reset --hard`/`clean -fd` are no-ops; the checkout proceeds exactly as before. |
+
+Reset/clean failures reuse the existing `CheckoutFailed` variant — no new error
+type is introduced, and the scrub runs during **step 1** (source preparation),
+so a failure aborts *before* any daemon mutation and never triggers rollback.
 
 ## `build_self_deploy_candidate`
 
@@ -331,7 +417,7 @@ any backup, drain, swap, or restart. When `build_source` is `Some`, step 1
 becomes:
 
 ```text
-1a. source.prepare(target_commit)   // resolve repo + git fetch origin + checkout --detach
+1a. source.prepare(target_commit)   // resolve repo + git fetch origin + (managed-clone reset --hard/clean -fd) + checkout --detach
 1b. build_self_deploy_candidate(prepared_repo, self_deploy_target_dir())
 ```
 
@@ -377,7 +463,7 @@ path untouched.
 | --- | --- |
 | `SourceResolveFailed { detail }` | The canonical repo could not be resolved: invalid `SIMARD_SELF_DEPLOY_REPO` (`..`, symlink, or not a work-tree), an undiscoverable origin URL, or a failed first-time clone. |
 | `FetchFailed { detail }` | `git fetch origin` failed and the target object is not already cached locally — the merged head cannot be made available. |
-| `CheckoutFailed { detail }` | SHA validation failed (`^[0-9a-f]{40}$`) or `git checkout --detach <sha>` failed (e.g. the merged object is not present after fetch). |
+| `CheckoutFailed { detail }` | SHA validation failed (`^[0-9a-f]{40}$`), the managed-clone `git reset --hard`/`git clean -fd` hygiene step failed (including a path-validation mismatch caught by the fail-closed guard), or `git checkout --detach <sha>` failed (e.g. the merged object is not present after fetch, or a dirty `SIMARD_SELF_DEPLOY_REPO` override that is deliberately never scrubbed). |
 
 Every variant carries a `detail` string and is surfaced loudly in logs and the
 cycle report; none is swallowed and none falls back to a cwd build.
@@ -392,9 +478,9 @@ writes to disk, so it applies defence-in-depth controls:
 | **SHA validation** | The target SHA is validated against `^[0-9a-f]{40}$` before any git interpolation, blocking leading-`-` option injection into `checkout`/`fetch`. |
 | **Repo-path validation** | `SIMARD_SELF_DEPLOY_REPO` (and any explicit `at()` override) must be absolute, contain no `..`, not be a symlink, and resolve to a real git work-tree. Invalid → `SourceResolveFailed`, never a cwd fallback. |
 | **Transport allow-list** | Only `https://`, `ssh://`, and the scp-like `git@host:path` origins are accepted. Arbitrary-command / remote-helper transports (`ext::`, `fd::`, and any `scheme::address`) are rejected before `git clone` ever runs. |
-| **Hardened git execution** | Every preparer git call uses `env_clear()` and re-injects only `PATH` and `HOME`, blocking `GIT_DIR` / `GIT_WORK_TREE` / `LD_PRELOAD` hijack. Arguments are passed as an argv array — never via `sh -c`. |
+| **Hardened git execution** | Every preparer git call uses `env_clear()` and re-injects only `PATH`, `HOME`, and `SSH_AUTH_SOCK`, blocking `GIT_DIR` / `GIT_WORK_TREE` / `LD_PRELOAD` hijack. `SSH_AUTH_SOCK` is forwarded so ssh-agent can authenticate `ssh://`/scp-like origins; `GIT_SSH_COMMAND` (arbitrary-command execution) is **not** forwarded. Arguments are passed as an argv array — never via `sh -c`. |
 | **Build-environment sanitization** | `build_self_deploy_candidate` invokes `cargo build` with `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` / `GIT_OBJECT_DIRECTORY` removed, so `build.rs`'s `git rev-parse HEAD` resolves the **prepared** repo's `HEAD` (`== target_commit`) and the post-build `SIMARD_GIT_HASH` integrity gate stays self-consistent. (The rest of the env — `PATH`/`HOME`/`CARGO_*`/`RUSTUP_*` — is preserved so the build runs.) |
-| **Non-destructive checkout** | `prepare` leaves the work-tree on a plain `git checkout --detach <sha>` of the exact merged commit. The managed clone is only ever written by self-deploy, so it stays clean; a *dirty* user-provided `SIMARD_SELF_DEPLOY_REPO` fails loud (`CheckoutFailed`) rather than being force-wiped — the preparer never `reset --hard`/`clean`s a caller's tree. |
+| **Managed-clone reset + clean** | Before the detached checkout, the **managed disposable clone** (`self_deploy_src_dir()`) is scrubbed with `git reset --hard` + `git clean -fd` so a prior aborted/dirty checkout can never block a redeploy. `reset_source_tree` canonicalizes the path and **fails closed to `CheckoutFailed`** unless it is exactly `self_deploy_src_dir()`, so it can never touch the operator cwd or a caller's tree. `git clean` is `-fd` only — **never** `-x`/`-fdx` — so ignored secrets/caches are preserved. A *dirty* user-provided `SIMARD_SELF_DEPLOY_REPO` is **not** scrubbed: it fails loud (`CheckoutFailed`) rather than being force-wiped — the preparer never `reset --hard`/`clean`s a caller's tree. |
 | **Trust boundary** | The built SHA always originates from the trusted origin default branch (`merged_head` against the resolved canonical repo), never a cwd-controlled ref. `cargo build` still runs `build.rs`/proc-macros from source; that supply-chain surface is bounded by this SHA-trust + the post-build `SIMARD_GIT_HASH` integrity gate. |
 
 ## Cleanup-reaper non-overlap
@@ -437,6 +523,9 @@ and the fake-effects ordering) rather than replacing it.
 | `--check` invalid-override degradation | A present-but-invalid override resolves to `None` (cwd fallback) **without cloning or erroring**, and warns loudly on stderr — never silently swallowed. |
 | warm target dir | The build targets the persistent `self_deploy_target_dir()`, reused across runs — not a per-PID `temp_dir()`. |
 | loud failure | A failed fetch/clone/checkout aborts with the specific variant and never builds cwd `HEAD`. |
+| managed-clone dirty-tree redeploy | A managed clone left with a modified tracked file (e.g. `.github/hooks/amplihack-hooks.json`) **and** an untracked file still checks out the merged SHA cleanly — `reset --hard` + `clean -fd` run first, so the checkout never aborts. |
+| warm target dir survives reset | `self_deploy_target_dir()` (the incremental Cargo cache) is untouched by the managed-clone reset/clean, so redeploys stay warm. |
+| override is never scrubbed | A dirty `SIMARD_SELF_DEPLOY_REPO` override still fails loud (`CheckoutFailed`); `reset_source_tree` is skipped for any path that is not exactly `self_deploy_src_dir()`. |
 | SHA validation | A non-40-hex or leading-`-` SHA is rejected before any git call. |
 | reaper non-overlap | `self_deploy_src_dir()` / `self_deploy_target_dir()` fall under no cleanup scan base. |
 | backward compatibility | `RelaunchConfig::Default`, `build_canary`, and `SelfDeployOrchestrator::new` default tests still pass. |
@@ -451,6 +540,7 @@ CI.
 src/self_deploy/
     source_prep.rs            # NEW: SelfDeploySourcePreparer trait + GitSourcePreparer
                               #      + self_deploy_src_dir()/self_deploy_target_dir()
+                              #      + reset_source_tree() managed-clone hygiene
     orchestrator.rs           # EXISTING: adds SelfDeployOrchestrator::with_source +
                               #   build_source field; DeploySourceKind unchanged
     tests_source_prep.rs      # NEW: local-fixture-repo + fake-preparer tests

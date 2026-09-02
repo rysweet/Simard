@@ -8,10 +8,14 @@ doc_type: reference
 status: implemented
 related:
   - ../concepts/perpetual-goal-no-progress-exemption.md
+  - ../concepts/no-progress-root-cause-resolution.md
   - ../concepts/steerable-ooda-daemon.md
+  - ../reference/no-progress-root-cause-resolution-api.md
+  - ../reference/ooda-no-progress-why-recipe.md
   - ../reference/completion-evidence-gate-api.md
   - ../reference/goal-board-api.md
   - ../howto/unblock-stuck-ooda-goals.md
+  - ../howto/diagnose-a-no-progress-block.md
   - ../../src/goal_curation/no_progress_breaker.rs
   - ../../src/ooda_loop/no_progress.rs
   - ../../src/goal_board_store/mod.rs
@@ -29,6 +33,15 @@ related:
 > [`src/goal_board_store/mod.rs`](https://github.com/rysweet/Simard/blob/main/src/goal_board_store/mod.rs).
 > The standing/perpetual flag it reuses is
 > [`ActiveGoal::is_perpetual()`](https://github.com/rysweet/Simard/blob/main/src/goal_curation/types.rs).
+
+> **`perpetual_idled` is now scoped to NON-research standing goals (#4399).** The
+> `perpetual_idled` exemption below is unchanged for standing goals whose charter
+> genuinely permits bursty idling. For the standing **research** goal, an idle is a
+> **fault**: the shared `classify_standing_idle` classifier routes it to the new
+> `research_idle_faults` report field and re-orients the goal instead of exempting
+> it. See the
+> [never-idle rail API reference](./research-goal-never-idle-rail-api.md) and
+> [concept](../concepts/research-goal-never-idle.md).
 
 This reference specifies the API of the no-progress breaker and the
 standing/perpetual-goal exemption added in issue #2589. For the rationale, see
@@ -67,13 +80,17 @@ pub const NO_PROGRESS_BLOCKED_SUFFIX: &str =
 ## Marker helpers
 
 ```rust
-/// True when `reason` was authored by the no-progress breaker (both sentinel
-/// halves present). Distinct from the brain-failure marker and from
-/// operator/scope/dependency block reasons.
+/// True when `reason` was authored by the no-progress breaker. Keys on the
+/// `NO_PROGRESS_BLOCKED_PREFIX` sentinel ALONE (issue #16), so it recognises both
+/// the legacy `{PREFIX}{count}{SUFFIX}` reason and the WHY-bearing
+/// `{PREFIX}{count} … why=<TOKEN> evidence=[…]` reason. Distinct from the
+/// brain-failure marker and from operator/scope/dependency block reasons.
 pub fn is_no_progress_marker(reason: &str) -> bool;
 
-/// Render the sentinel Blocked reason for a goal escalated after
-/// `consecutive` no-action cycles.
+/// Render the legacy sentinel Blocked reason for a goal escalated after
+/// `consecutive` no-action cycles. The root-cause upgrade (issue #16) authors the
+/// richer `no_progress_blocked_reason_with_why` instead; see the
+/// [root-cause resolution API](./no-progress-root-cause-resolution-api.md).
 pub fn no_progress_blocked_reason(consecutive: u32) -> String;
 ```
 
@@ -122,7 +139,15 @@ impl NoProgressTracker {
 
 The disposition the breaker computes for a stuck goal at the threshold (via the
 done-gate). Each terminal variant carries the payload its side effect needs.
-Unchanged by #2589.
+
+> **Extended by the root-cause-resolution upgrade (issue #16, implemented).**
+> The four variants below are the *base* ladder. The upgrade first classifies
+> **why** a goal stalled and adds self-resolving rungs — `Heal { why }`,
+> `Defer { blocking_ref, evidence }`, `SpawnEngineer { task, why }` — reaching
+> `Escalate` (WHY-bearing) only as a last resort. See the
+> [root-cause resolution API reference](./no-progress-root-cause-resolution-api.md#extended-noprogressresolution)
+> for the extended enum and the
+> [concept](../concepts/no-progress-root-cause-resolution.md) for the ladder.
 
 ```rust
 pub enum NoProgressResolution {
@@ -195,6 +220,11 @@ pub(crate) struct NoProgressBreakerReport {
     /// NEW (#2589): standing/perpetual goals that idled this cycle. Their
     /// counters were reset and they were kept active — an idle is NORMAL for a
     /// bursty goal, not a fault, so this list is informational only.
+    ///
+    /// SCOPED by #4399: this now holds only NON-research standing goals. A
+    /// standing RESEARCH goal that idles is routed instead to
+    /// `research_idle_faults` (a fault → re-orient); see the
+    /// [never-idle rail API](./research-goal-never-idle-rail-api.md).
     pub perpetual_idled: Vec<String>,
 }
 
@@ -358,10 +388,22 @@ status is persisted by the next `commit_cycle`.
 - `simard goal unblock` / `simard goal unblock-all` — still available for the
   (now rare) manual cases; see the
   [runbook](../howto/unblock-stuck-ooda-goals.md).
+- Re-investigation of **already-blocked** bare goals (#17) — the safeguard now
+  re-runs the WHY reasoner over goals already parked with a bare
+  `[OODA-SAFEGUARD] … needs human review` marker, not just goals crossing the
+  threshold. See the
+  [no-progress re-investigation API](../reference/no-progress-reinvestigation-api.md).
 
 ## See also
 
+- [Issue-storm suppression API reference](../reference/no-progress-breaker-storm-suppression-api.md) — the durable suppression marker and storm-safe escalation that cap breaker-authored `ooda-stuck` filings at one per goal, plus the `derive_criteria` terminal-rung helper.
+- [Concept: the breaker explains WHY and self-resolves before escalating](../concepts/no-progress-root-cause-resolution.md) — the root-cause classification and resolution ladder layered on this base breaker.
+- [Root-cause resolution API reference](../reference/no-progress-root-cause-resolution-api.md) — `NoProgressClass`, the WHY types, the reasoner, and the extended resolution ladder.
+- [The `ooda-no-progress-why` recipe reference](../reference/ooda-no-progress-why-recipe.md) — the optional agentic WHY narrator.
+- [Concept: re-investigating already-blocked OODA goals](../concepts/ooda-reinvestigate-blocked-goals.md) — the #17 pass that upgrades bare blocks to a concrete WHY.
+- [No-progress re-investigation API reference](../reference/no-progress-reinvestigation-api.md) — the rail, dedupe set, and re-investigation pass.
 - [Concept: standing/perpetual goals are exempt from the no-progress hard-block](../concepts/perpetual-goal-no-progress-exemption.md)
 - [Completion-evidence gate API](../reference/completion-evidence-gate-api.md) — the sibling gate that makes standing goals non-completable.
 - [Goal board API reference](../reference/goal-board-api.md) — `filter_tombstoned` and load/save semantics.
+- [Diagnose a no-progress block and read its WHY](../howto/diagnose-a-no-progress-block.md)
 - [Unblock OODA goals stuck after a safeguard lockout](../howto/unblock-stuck-ooda-goals.md)

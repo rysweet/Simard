@@ -443,7 +443,10 @@ fn needs_review_goal_escalates_to_operator_on_both_channels() {
         .with_operator_notifier(Box::new(notifier));
 
     let report = overseer_tick(&mut ov);
-    assert_eq!(report.goals_escalated, 1, "the genuine block is escalated");
+    assert_eq!(
+        report.recipes_launched, 1,
+        "the genuine block hands off to the agentic triage recipe"
+    );
     assert_eq!(
         report.goals_unblocked, 0,
         "a normal goal is not self-healed"
@@ -461,9 +464,24 @@ fn needs_review_goal_escalates_to_operator_on_both_channels() {
             n.headline.contains("feature-x"),
             "the {chan} notification names the goal id: {n:?}"
         );
+        // Plain-English body (issue #4276): the raw marker / diagnostic tokens
+        // NEVER reach the operator — only a human-readable problem + next step.
+        let body = n.plain_text();
         assert!(
-            n.problem.contains(&reason) || n.problem.contains("needs human review"),
-            "the {chan} notification carries the block reason: {n:?}"
+            !body.contains(&reason),
+            "the {chan} notification never surfaces the raw block marker: {n:?}"
+        );
+        assert!(
+            !body.contains("Problem solved:"),
+            "an unresolved escalation must not claim the problem is solved: {body:?}"
+        );
+        assert!(
+            n.problem.contains("blocked") || n.problem.contains("stuck"),
+            "the {chan} notification restates the problem in plain English: {n:?}"
+        );
+        assert!(
+            !n.next_step.is_empty(),
+            "the {chan} notification carries a recommended next step: {n:?}"
         );
     }
 }
@@ -494,6 +512,11 @@ fn self_heal_and_escalate_fail_closed_without_a_distinct_identity() {
         goal_id: "feature-x".to_string(),
         reason: brain_failure_reason(3),
         why: "brain-failure safeguard tripped 3×".to_string(),
+        problem: "Goal \"feature-x\" is blocked and Simard can't move it forward on its own."
+            .to_string(),
+        next_step: "Give the goal a checkable finish line or close it if already delivered."
+            .to_string(),
+        link: None,
     });
     assert!(
         matches!(escalate, Err(OverseerError::Recursion { .. })),
@@ -674,6 +697,9 @@ fn goal_health_interventions_are_routine_and_admitted_by_default_gate() {
             goal_id: "g".to_string(),
             reason: "r".to_string(),
             why: "w".to_string(),
+            problem: "p".to_string(),
+            next_step: "n".to_string(),
+            link: None,
         },
     ] {
         assert_eq!(classify(&iv), RiskClass::Routine);
@@ -694,7 +720,10 @@ fn goal_health_interventions_are_routine_and_admitted_by_default_gate() {
         Intervention::EscalateBlockedGoal {
             goal_id: "g".to_string(),
             reason: "r".to_string(),
-            why: "w".to_string()
+            why: "w".to_string(),
+            problem: "p".to_string(),
+            next_step: "n".to_string(),
+            link: None,
         }
         .label(),
         "escalate_blocked_goal"

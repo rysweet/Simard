@@ -7,6 +7,7 @@ doc_type: howto
 related:
   - ../concepts/adaptive-scaling.md
   - ../reference/adaptive-scaling-api.md
+  - ../reference/ooda-coverage-parallelism-ceiling.md
   - ../daemon-mode.md
   - ./run-ooda-daemon.md
 ---
@@ -43,7 +44,7 @@ ExecStart=/usr/local/bin/simard ooda run
 ```
 
 When `SIMARD_SCALING` is unset or set to `fixed`, the daemon uses the
-static `max_concurrent_actions` value from `OodaConfig` (default: `3`).
+static `max_concurrent_actions` value from `OodaConfig` (default: `24`).
 
 ---
 
@@ -84,17 +85,46 @@ The scaler uses AIMD (Additive Increase / Multiplicative Decrease):
 - **Medium pressure** (0.3–0.8, no 429s): hold steady.
 
 The concurrency is bounded by a floor (default: 1) and ceiling
-(default: `max_concurrent_actions × 4`, e.g. 20 when the base is 5).
-The floor guarantees at least one engineer dispatch per cycle even
-under maximum pressure.
+(default: the configured `max_concurrent_actions`, i.e. **24**). The floor
+guarantees at least one engineer dispatch per cycle even under maximum
+pressure; the ceiling caps how many independent goals a single cycle can
+cover.
 
 ---
 
-## 4. Override the static fallback
+## 4. Set the concurrency ceiling
 
-When scaling is disabled (`SIMARD_SCALING=fixed` or unset), the daemon
-uses the static `max_concurrent_actions` from `OodaConfig`. This value
-defaults to `3` and can be adjusted in the config if needed.
+Both the scaler's starting value **and** its ceiling come from
+`OodaConfig.max_concurrent_actions`. Set it with `SIMARD_OODA_MAX_CONCURRENT`:
+
+```bash
+# Cover up to 40 independent goals per cycle (when resources allow).
+SIMARD_OODA_MAX_CONCURRENT=40 SIMARD_SCALING=auto simard ooda run
+```
+
+| Variable | Default | Range | Notes |
+|----------|---------|-------|-------|
+| `SIMARD_OODA_MAX_CONCURRENT` | `24` | `1..=64` | Preferred. Seeds base **and** ceiling. |
+| `SIMARD_MAX_CONCURRENT_ACTIONS` | `24` | `1..=64` | Legacy fallback, used only when the preferred variable is unset. |
+
+Both variables are **fail-closed**: a non-numeric, zero, or out-of-range value
+is rejected with a `tracing::warn!` on the `simard::ooda_loop::types` target
+(the module defining the parser, so no custom `target:` override is needed) and
+the default `24` is used instead — the daemon never applies the bad value and
+never crashes.
+
+```
+WARN simard::ooda_loop::types: invalid value for SIMARD_OODA_MAX_CONCURRENT; using default 24 key="SIMARD_OODA_MAX_CONCURRENT" value="0" min=1 max=64 default=24
+```
+
+> **24 is a ceiling, not a guarantee.** Raising this value only *allows* more
+> goals to be covered per cycle. The resource-admission gate (disk / memory /
+> load) and the overlap/dependency gate still bound how many engineers actually
+> spawn, and the AIMD scaler still backs off under pressure. See
+> [OODA coverage parallelism ceiling](../reference/ooda-coverage-parallelism-ceiling.md).
+
+When scaling is disabled (`SIMARD_SCALING=fixed` or unset), the same
+`max_concurrent_actions` value (default `24`) is used as a static cap.
 
 ---
 
@@ -156,22 +186,31 @@ set a static value.
 
 ### Want to change the floor or ceiling
 
-The floor is always 1. The ceiling defaults to `max_concurrent_actions × 4`
-(computed from `OodaConfig`). To change the effective ceiling, adjust
-`SIMARD_MAX_CONCURRENT_ACTIONS`:
+The floor is always 1. The ceiling equals the configured
+`max_concurrent_actions` (default `24`). To change the effective ceiling, set
+`SIMARD_OODA_MAX_CONCURRENT` (preferred) or the legacy
+`SIMARD_MAX_CONCURRENT_ACTIONS`, within the valid range `1..=64`:
 
 ```bash
-# Base=3 → ceiling=12, base=10 → ceiling=40
-SIMARD_MAX_CONCURRENT_ACTIONS=10 SIMARD_SCALING=auto simard ooda run
+# base = ceiling = 12
+SIMARD_OODA_MAX_CONCURRENT=12 SIMARD_SCALING=auto simard ooda run
+
+# base = ceiling = 40
+SIMARD_OODA_MAX_CONCURRENT=40 SIMARD_SCALING=auto simard ooda run
 ```
 
-Environment-variable overrides for independent floor and ceiling values
-are a candidate for a follow-up issue.
+Values outside `1..=64` (or non-numeric) are rejected and the default `24` is
+used, with a `tracing::warn!` recording the ignored value. Environment-variable
+overrides for an *independent* floor and ceiling remain a candidate for a
+follow-up issue.
 
 ---
 
 ## See also
 
+- [OODA coverage parallelism ceiling](../reference/ooda-coverage-parallelism-ceiling.md)
+  — the 24 default, `SIMARD_OODA_MAX_CONCURRENT`, and the ceiling-vs-guarantee
+  distinction.
 - [Adaptive scaling concept](../concepts/adaptive-scaling.md) — design
   rationale.
 - [Adaptive scaling API reference](../reference/adaptive-scaling-api.md)

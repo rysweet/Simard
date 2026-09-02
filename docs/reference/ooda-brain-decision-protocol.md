@@ -1,10 +1,28 @@
-# Reference: OODA Brain Decision Protocol (first-word match)
+---
+title: OODA brain decision protocol
+description: Current first-word OODA parser contract; becomes legacy only after verified typed-route cutover.
+last_updated: 2026-07-13
+review_schedule: as-needed
+owner: simard
+doc_type: reference
+status: implemented
+---
+
+# Reference: OODA brain decision protocol
+
+!!! note "Migration condition"
+    Current releases use this parser contract. It becomes legacy only for a
+    deployment after a release implements the typed-capability route, selects
+    that route, and verifies this parser is unreachable. It remains
+    authoritative while the route is `legacy` or `shadow`. See the planned
+    [OODA capability API](./ooda-capability-api.md).
 
 Crate: `simard` · Module: `simard::ooda_brain::rustyclawd`
 Closes the design gap that Issue [#1711](https://github.com/rysweet/Simard/issues/1711) opened.
 
-This page is the normative definition of the **wire format** the OODA brain
-accepts from an LLM when emitting an `EngineerLifecycleDecision`.
+This page is the normative definition of the current wire format accepted when
+emitting an `EngineerLifecycleDecision`. New typed-route code must not depend on
+it.
 
 > **Changed in #2144:** The lifecycle brain no longer parses a `DECISION:`
 > marker, labeled lines, or JSON-shaped fallback bodies. It now lowercases the

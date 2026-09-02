@@ -1,11 +1,11 @@
-//! Gym evaluation bridge connecting Simard to the amplihack-agent-eval suite.
+//! Gym evaluation client connecting Simard to the amplihack-agent-eval suite.
 //!
 //! [`GymClient`] wraps a [`RpcTransport`] to communicate with the native
 //! Rust transport that runs progressive test levels (L1-L12) and long-horizon
 //! memory evaluations. All results are typed and serializable so they can
 //! feed the scoring pipeline in [`crate::gym_scoring`].
 //!
-//! If the bridge is unavailable or a call fails, errors are surfaced with
+//! If the client is unavailable or a call fails, errors are surfaced with
 //! full context (Pillar 11: honest degradation). Callers can inspect the
 //! error to decide whether to continue with degraded results or abort.
 
@@ -86,7 +86,7 @@ pub struct GymSuiteResult {
 /// RPC client for gym evaluations.
 ///
 /// Wraps a [`RpcTransport`] to call the native gym evaluation transport.
-/// Each method maps to a single bridge RPC call.
+/// Each method maps to a single client RPC call.
 pub struct GymClient {
     transport: Box<dyn RpcTransport>,
 }
@@ -107,7 +107,7 @@ impl GymClient {
             .transport
             .call(request)
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: CLIENT_NAME.to_string(),
+                endpoint: CLIENT_NAME.to_string(),
                 method: "gym.list_scenarios".to_string(),
                 reason: format!("transport error: {e}"),
             })?;
@@ -125,7 +125,7 @@ impl GymClient {
             .transport
             .call(request)
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: CLIENT_NAME.to_string(),
+                endpoint: CLIENT_NAME.to_string(),
                 method: "gym.run_scenario".to_string(),
                 reason: format!("transport error: {e}"),
             })?;
@@ -143,7 +143,7 @@ impl GymClient {
             .transport
             .call(request)
             .map_err(|e| SimardError::RpcCallFailed {
-                bridge: CLIENT_NAME.to_string(),
+                endpoint: CLIENT_NAME.to_string(),
                 method: "gym.run_suite".to_string(),
                 reason: format!("transport error: {e}"),
             })?;
@@ -197,8 +197,8 @@ mod tests {
             }
         ]);
         let transport = fixed_result_transport(scenarios);
-        let bridge = GymClient::new(Box::new(transport));
-        let result = bridge.list_scenarios().unwrap();
+        let client = GymClient::new(Box::new(transport));
+        let result = client.list_scenarios().unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "L1");
     }
@@ -221,8 +221,8 @@ mod tests {
             "degraded_sources": []
         });
         let transport = fixed_result_transport(result_json);
-        let bridge = GymClient::new(Box::new(transport));
-        let result = bridge.run_scenario("L1").unwrap();
+        let client = GymClient::new(Box::new(transport));
+        let result = client.run_scenario("L1").unwrap();
         assert!(result.success);
         assert_eq!(result.scenario_id, "L1");
         assert!((result.score - 0.85).abs() < 1e-9);
@@ -247,8 +247,8 @@ mod tests {
             "degraded_sources": ["progressive_test_suite"]
         });
         let transport = fixed_result_transport(result_json);
-        let bridge = GymClient::new(Box::new(transport));
-        let result = bridge.run_scenario("L12").unwrap();
+        let client = GymClient::new(Box::new(transport));
+        let result = client.run_scenario("L12").unwrap();
         assert!(!result.success);
         assert_eq!(
             result.error_message.as_deref(),
@@ -276,21 +276,21 @@ mod tests {
             "degraded_sources": []
         });
         let transport = fixed_result_transport(suite_json);
-        let bridge = GymClient::new(Box::new(transport));
-        let result = bridge.run_suite("progressive").unwrap();
+        let client = GymClient::new(Box::new(transport));
+        let result = client.run_suite("progressive").unwrap();
         assert!(result.success);
         assert_eq!(result.scenarios_passed, 6);
     }
 
     #[test]
-    fn bridge_error_surfaces_with_context() {
+    fn client_error_surfaces_with_context() {
         let transport = fixed_error_transport(-32603, "eval server crashed");
-        let bridge = GymClient::new(Box::new(transport));
-        let err = bridge.list_scenarios().unwrap_err();
+        let client = GymClient::new(Box::new(transport));
+        let err = client.list_scenarios().unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("simard-gym-eval"),
-            "error should name the bridge: {msg}"
+            "error should name the client: {msg}"
         );
         assert!(
             msg.contains("eval server crashed"),

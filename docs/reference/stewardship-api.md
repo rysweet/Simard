@@ -13,25 +13,38 @@ For the broader Goal Stewardship Mode, see `Specs/ProductArchitecture.md`
 
 ```
 src/stewardship/
-├── mod.rs           public entrypoint and re-exports (the only public surface)
-├── types.rs         OrchestratorRunSummary, StewardshipOutcome, TargetRepo
-├── routing.rs       route_failure
-├── dedup.rs         normalize, failure_signature, find_existing
-├── gh_client.rs     trait GhClient, GhIssue, RealGhClient, FakeGhClient (cfg(test))
-└── tests.rs         unit and end-to-end tests
+├── mod.rs                 public entrypoint (process_orchestrator_run) and re-exports
+├── types.rs               OrchestratorRunSummary, StewardshipOutcome, TargetRepo
+├── routing.rs             route_failure (total; DEFAULT_TARGET_REPO fallback)
+├── dedup.rs               normalize, failure_signature, find_existing
+├── gh_client.rs           trait GhClient, GhIssue, RealGhClient, FakeGhClient (test-utils)
+├── merge_authority.rs     gated squash-merge authority (merge-readiness path)
+├── merge_judge.rs         MergeJudge trait, LLM judge, objective-gate verdicts
+├── recipe_merge_judge.rs  recipe-runner-backed MergeJudge implementation
+├── tests.rs               unit and end-to-end tests (cfg(test))
+└── tests_extra.rs         TDD contract tests incl. routing-fallback coverage (cfg(test))
 ```
 
-`mod.rs` re-exports the public API:
+The routing-fallback behaviour documented on this page is exercised by
+`tests_extra.rs`. The `merge_authority` / `merge_judge` / `recipe_merge_judge`
+modules are a separate merge-readiness path unrelated to the orchestrator-failure
+loop described here.
+
+`mod.rs` re-exports the failure-filing API — the focus of this page:
 
 ```rust
+pub use dedup::{failure_signature, find_existing, normalize};
 pub use gh_client::{GhClient, GhIssue, RealGhClient};
 pub use routing::route_failure;
 pub use types::{OrchestratorRunSummary, StewardshipOutcome, TargetRepo};
 
-// Test-only helpers re-exported for downstream test consumers.
+// Test-only helper re-exported for downstream test consumers.
 #[cfg(any(test, feature = "test-utils"))]
 pub use gh_client::FakeGhClient;
 ```
+
+It additionally re-exports the merge-readiness surface (`merge_authority::*`,
+`merge_judge::*`, `recipe_merge_judge::RecipeMergeJudge`).
 
 `stewardship` depends on `goal_curation` (one direction only). It does **not**
 depend on `engineer_loop`, `base_type_*`, or `self_improve`.
@@ -55,10 +68,13 @@ resulting issue handle into the curation `board`.
 | Variant                          | When                                                       |
 |----------------------------------|------------------------------------------------------------|
 | `StewardshipInvalidRunSummary`   | A required field on `OrchestratorRunSummary` is empty.     |
-| `StewardshipRoutingAmbiguous`    | `source_module` matches no routing keyword set.            |
 | `StewardshipGhCommandFailed`     | `gh` is missing, exited non-zero, or returned malformed JSON. |
 
 No success branch is taken on any of these errors; `board` is left untouched.
+
+Routing no longer contributes an error variant: `route_failure` is total (see
+[Routing](#routing)). An unmatched `source_module` falls back to the default
+repo rather than aborting `process_orchestrator_run`.
 
 ## Types
 
@@ -101,19 +117,35 @@ pub enum StewardshipOutcome {
 
 `FiledNew` is returned when no existing open issue carried the signature;
 exactly one `gh issue create` was performed. `MatchedExisting` is returned
-when an open issue with the signature was found; no creation occurred.
-
-In both cases, `enqueue_stewardship_issue` was called with the issue handle.
+when an open issue with the signature was found; no creation occurred. Neither
+outcome mutates the goal board.
 
 ## Routing
 
 ```rust
 pub fn route_failure(source_module: &str) -> SimardResult<TargetRepo>;
+
+// The one named source of truth for the default target repo.
+const DEFAULT_TARGET_REPO: TargetRepo = TargetRepo::Simard; // rysweet/Simard
 ```
 
-Pure, total over the routing matrix; performs zero I/O. See the
+Pure, **total**, and performs zero I/O. See the
 [routing matrix](../concepts/stewardship-mode.md#routing-matrix) for the
-keyword sets.
+keyword sets. Keyword checks run first (amplihack before Simard); if **no**
+keyword matches, `route_failure` returns `Ok(DEFAULT_TARGET_REPO)` and emits a
+single `tracing::warn!` carrying the unmatched `source_module` and the default
+slug:
+
+```text
+WARN stewardship routing: no keyword match, routing to default repo
+     source_module="overseer" default="rysweet/Simard"
+```
+
+The signature returns `SimardResult<TargetRepo>` for API stability, but the
+`Err` arm is now unreachable — every input resolves to a `TargetRepo`. This is
+what unblocks the Overseer's workstream-gap-scan, whose briefs carry
+`source_module = "overseer"` (no keyword match): they now route to
+`rysweet/Simard` and file/upsert a deduped tracking issue instead of failing.
 
 ## Deduplication
 
@@ -151,11 +183,29 @@ pub trait GhClient {
 The only subprocess surface in the stewardship module. Two implementations
 are shipped:
 
+> **Reused by the Overseer gap-scan (#4717).** The same `GhClient` trait,
+> `RealGhClient`, and eventually-consistent-search-resilient dedup logic back
+> the Overseer's durable workstream-gap open-issue check. It injects a
+> `GhClient` via `Overseer::with_gap_issue_client(..)` and keys the search on
+> `GapItem::dedup_key()` = `workstream-gap:<signature>`, matching the same
+> `stewardship-signature:<key> in:body` body marker documented here. See the
+> [gap-scan durable dedup reference](./overseer-gap-scan-durable-dedup.md).
+
 ### `RealGhClient`
 
 `std::process::Command`-based.
 
-  - **search**: `gh issue list -R <repo> --state open --search "stewardship-signature:<hex> in:body" --json number,url,title,body`
+  - **search**: dedup is resilient to GitHub's **eventually-consistent** issue
+    search index. It first runs the fast full-text search
+    `gh issue list -R <repo> --state open --search "stewardship-signature:<hex> in:body" --json number,url,title,body`;
+    if that already surfaces the signed issue it is used as-is (one `gh` call).
+    Otherwise a just-filed tracking issue may exist but not be indexed yet, so
+    the (possibly empty) search hits are unioned with a **strongly-consistent**
+    scan of the newest open issues
+    (`gh issue list -R <repo> --state open --limit <N> --json …`, no `--search`).
+    Without this fallback, two sweeps inside the multi-minute indexing window
+    each see an empty search and file a duplicate, breaking the "one issue per
+    distinct failure" guarantee.
   - **create**: `gh issue create -R <repo> --title <…> --body-file -`, with the
     body piped on stdin so argv-length and shell-quoting are not concerns.
 
@@ -189,32 +239,11 @@ Test consumers import it from the public surface:
 use simard::stewardship::FakeGhClient;
 ```
 
-## `goal_curation` Helper
+## Goal-board isolation
 
-```rust
-// src/goal_curation/operations.rs
-pub const DEFAULT_STEWARD_SCORE: f64 = 0.6;
-
-pub fn enqueue_stewardship_issue(
-    board: &mut GoalBoard,
-    repo: &str,
-    issue_number: u64,
-    url: &str,
-    signature: &str,
-) -> SimardResult<()>;
-```
-
-Constructs a `BacklogItem`:
-
-| Field         | Value                                                                  |
-|---------------|------------------------------------------------------------------------|
-| `id`          | `stewardship-<repo_with_/_replaced_by_underscore>-<issue_number>`      |
-| `description` | `"Investigate stewardship-filed failure <url> (sig <signature>)"`      |
-| `source`      | `"stewardship:<repo>#<issue_number>"`                                  |
-| `score`       | `DEFAULT_STEWARD_SCORE` (`0.6`)                                        |
-| `url`         | `Some(url.into())`                                                     |
-
-…and calls the existing `add_backlog_item`, which deduplicates by `id`.
+`process_orchestrator_run` has no `GoalBoard` argument. This boundary prevents
+an issue created by stewardship from becoming a new backlog item and triggering
+the same issue pipeline recursively.
 Repeated `MatchedExisting` outcomes therefore do not grow the backlog.
 
 ## Error Variants
@@ -223,11 +252,14 @@ Repeated `MatchedExisting` outcomes therefore do not grow the backlog.
 // src/error/mod.rs
 pub enum SimardError {
     // ...existing variants...
-    StewardshipRoutingAmbiguous { source: String },
+    StewardshipRoutingAmbiguous { source: String }, // retained for API stability; no longer produced by route_failure
     StewardshipGhCommandFailed  { reason: String },
     StewardshipInvalidRunSummary{ field: &'static str },
 }
 ```
 
 Each variant has a `Display` arm and an associated unit test alongside
-existing error-variant tests.
+existing error-variant tests. `StewardshipRoutingAmbiguous` is **retained** so
+its `Display` contract stays stable and downstream matches keep compiling, but
+`route_failure` no longer emits it — an unmatched source now falls back to
+`DEFAULT_TARGET_REPO` (see [Routing](#routing)).

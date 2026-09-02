@@ -1,11 +1,14 @@
-//! Integration tests for `advance_goal_with_session` covering the prose
-//! dispatch contract: NO ACTION marker, SpawnEngineer prose, PROGRESS
-//! marker, and empty-response failure.
+//! Integration tests for `advance_goal_with_session` covering the strict
+//! goal-session response contract: explicit spawn markers, NO ACTION with
+//! REASON, bounded PROGRESS markers, and loud invalid-response failures.
 
+use crate::goal_curation::progress_evidence::{EvidenceDecision, ProgressEvidenceChecker};
 use crate::goal_curation::{GoalBoard, GoalProgress};
-use crate::ooda_actions::goal_session::{GoalAction, advance_goal_with_session};
+use crate::ooda_actions::goal_session::{GoalAction, GoalSessionResult, advance_goal_with_session};
 use crate::ooda_actions::test_helpers::*;
 use crate::ooda_loop::{ActionKind, OodaState, PlannedAction};
+use chrono::{DateTime, Utc};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn planned_action(goal_id: &str) -> PlannedAction {
     PlannedAction {
@@ -30,6 +33,64 @@ fn live_goal(state: &OodaState, goal_id: &str) -> crate::goal_curation::ActiveGo
         .expect("seeded goal must exist")
 }
 
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_env_for_test() -> MutexGuard<'static, ()> {
+    env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct ObserveOnlyEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl Drop for ObserveOnlyEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+                None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+            }
+        }
+    }
+}
+
+fn set_observe_only_for_test(value: Option<&str>) -> ObserveOnlyEnvGuard {
+    let previous = std::env::var_os("SIMARD_OBSERVE_ONLY");
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var("SIMARD_OBSERVE_ONLY", value),
+            None => std::env::remove_var("SIMARD_OBSERVE_ONLY"),
+        }
+    }
+    ObserveOnlyEnvGuard { previous }
+}
+
+fn run_goal_session_response(response: &str) -> (GoalSessionResult, OodaState) {
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+    let (mut session, _captured) = MockSession::new_ok(response, vec![]);
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    (result, state)
+}
+
 #[test]
 fn no_action_response_records_no_action_outcome_without_spawning() {
     let goal_id = "test-goal";
@@ -38,7 +99,7 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
     let action = planned_action(goal_id);
 
     let (mut session, _captured) = MockSession::new_ok(
-        "NO ACTION\nAnother subordinate (engineer-foo-1234) is already in flight.",
+        "NO ACTION\nREASON: another subordinate (engineer-foo-1234) is already in flight.",
         vec![],
     );
 
@@ -67,14 +128,19 @@ fn no_action_response_records_no_action_outcome_without_spawning() {
 }
 
 #[test]
-fn prose_response_routes_to_spawn_engineer() {
+#[serial_test::serial(cognitive_memory)]
+fn explicit_spawn_response_routes_to_spawn_engineer_and_extracts_task_body() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
     let task_text = "Run cargo test --lib goal_session and report failing tests.";
-    let (mut session, _captured) = MockSession::new_ok(task_text, vec![]);
+    let response = format!("ACTION: SPAWN_ENGINEER\nTASK:\n{task_text}\nPROGRESS: 20");
+    let (mut session, _captured) = MockSession::new_ok(&response, vec![]);
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -98,14 +164,100 @@ fn prose_response_routes_to_spawn_engineer() {
 }
 
 #[test]
-fn progress_marker_in_prose_updates_goal_progress_before_spawn() {
+#[serial_test::serial(cognitive_memory)]
+fn observe_only_explicit_spawn_response_records_no_action_without_spawn() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(Some("1"));
+
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let task_text = "Inspect the repository read-only and report concrete evidence.";
+    let response = format!("ACTION: SPAWN_ENGINEER\nTASK:\n{task_text}\nPROGRESS: 10");
+    let (mut session, _captured) = MockSession::new_ok(&response, vec![]);
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    assert!(result.outcome.success);
+    assert!(result.outcome.detail.contains("no-action"));
+    assert!(
+        !result.outcome.detail.contains("spawn_engineer"),
+        "observe-only prose must not surface as a spawn outcome"
+    );
+    match result.action {
+        Some(GoalAction::NoAction { reason }) => {
+            assert!(reason.contains("converted spawn request"));
+            assert!(reason.contains(task_text));
+        }
+        other => panic!("expected NoAction, got {other:?}"),
+    }
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn read_only_identity_explicit_spawn_response_records_no_action_without_env_floor() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    state.identity_cognition.authority = Some(crate::identity::IdentityAuthority::read_only());
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let task_text = "Inspect the repository read-only and report concrete evidence.";
+    let response = format!("ACTION: SPAWN_ENGINEER\nTASK:\n{task_text}\nPROGRESS: 10");
+    let (mut session, captured) = MockSession::new_ok(&response, vec![]);
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    assert!(result.outcome.success);
+    assert!(result.outcome.detail.contains("no-action"));
+    match result.action {
+        Some(GoalAction::NoAction { reason }) => {
+            assert!(reason.contains("converted spawn request"));
+            assert!(reason.contains(task_text));
+        }
+        other => panic!("expected NoAction, got {other:?}"),
+    }
+    let captured = captured.borrow();
+    let input = captured.as_ref().expect("session must be invoked once");
+    assert!(input.objective.contains("Read-only observer contract"));
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn progress_marker_in_explicit_spawn_updates_goal_progress_before_spawn() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
     let goal_id = "test-goal";
     let mut state = state_with_goal(goal_id);
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
     let (mut session, _captured) = MockSession::new_ok(
-        "Spawn engineer to finish the dashboard. PROGRESS: 70",
+        "ACTION: SPAWN_ENGINEER\nTASK:\nFinish the dashboard.\nPROGRESS: 70",
         vec![],
     );
 
@@ -134,8 +286,10 @@ fn progress_marker_in_no_action_updates_goal_progress() {
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let (mut session, _captured) =
-        MockSession::new_ok("NO ACTION\nWaiting on PR review. PROGRESS: 95", vec![]);
+    let (mut session, _captured) = MockSession::new_ok(
+        "NO ACTION\nREASON: waiting on PR review.\nPROGRESS: 95",
+        vec![],
+    );
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -152,6 +306,64 @@ fn progress_marker_in_no_action_updates_goal_progress() {
     match updated.status {
         GoalProgress::InProgress { percent } => assert_eq!(percent, 95),
         other => panic!("expected InProgress(95), got {other:?}"),
+    }
+}
+
+struct RequiresCurrentEvidence;
+
+impl ProgressEvidenceChecker for RequiresCurrentEvidence {
+    fn check(
+        &self,
+        goal: &crate::goal_curation::ActiveGoal,
+        _old_percent: u32,
+        _new_percent: u32,
+        _since: DateTime<Utc>,
+    ) -> EvidenceDecision {
+        let activity = goal.current_activity.as_deref().unwrap_or("");
+        if activity.contains("EVIDENCE:") {
+            EvidenceDecision::Accept {
+                reason: "current no-action evidence was visible".to_string(),
+            }
+        } else {
+            EvidenceDecision::Reject {
+                reason: format!("missing current no-action evidence; activity={activity:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn no_action_progress_review_sees_current_cycle_evidence() {
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let (mut session, _captured) = MockSession::new_ok(
+        "NO ACTION\nREASON: observed CODEOWNERS is missing.\nPROGRESS: 5\nEVIDENCE:\n- observed CODEOWNERS is missing",
+        vec![],
+    );
+
+    let mem_box = mock_memory();
+    let result = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &RequiresCurrentEvidence,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    assert!(result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("progress=5%"),
+        "expected accepted progress detail, got: {}",
+        result.outcome.detail
+    );
+    let updated = live_goal(&state, goal_id);
+    match updated.status {
+        GoalProgress::InProgress { percent } => assert_eq!(percent, 5),
+        other => panic!("expected InProgress(5), got {other:?}"),
     }
 }
 
@@ -177,6 +389,108 @@ fn empty_response_is_a_visible_failure() {
 
     assert!(!result.outcome.success);
     assert!(result.outcome.detail.contains("empty response"));
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn free_form_prose_response_is_a_visible_invalid_contract_failure() {
+    let (result, _state) =
+        run_goal_session_response("Run cargo test --lib goal_session and fix any failures.");
+
+    assert!(!result.outcome.success);
+    assert!(
+        result
+            .outcome
+            .detail
+            .contains("invalid goal-session response")
+            || result.outcome.detail.contains("invalid response contract"),
+        "expected visible invalid-contract failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn no_action_without_reason_is_a_visible_invalid_contract_failure() {
+    let (result, _state) = run_goal_session_response("NO ACTION\nPROGRESS: 0");
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("REASON"),
+        "expected missing-REASON failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn conflicting_spawn_and_no_action_markers_are_rejected() {
+    let (result, _state) = run_goal_session_response(
+        "NO ACTION\nREASON: already in flight.\nACTION: SPAWN_ENGINEER\nTASK:\nStart a second engineer.",
+    );
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("conflicting")
+            || result.outcome.detail.contains("multiple action"),
+        "expected conflicting-marker failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn unknown_action_marker_is_rejected() {
+    let (result, _state) = run_goal_session_response(
+        "ACTION: MERGE_PR\nTASK:\nMerge PR #4042 directly.\nPROGRESS: 80",
+    );
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("unknown action")
+            || result.outcome.detail.contains("ACTION"),
+        "expected unknown-action failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+}
+
+#[test]
+fn progress_above_100_is_rejected_without_mutating_goal() {
+    let (result, state) =
+        run_goal_session_response("NO ACTION\nREASON: PR is almost landed.\nPROGRESS: 125");
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("PROGRESS")
+            && (result.outcome.detail.contains("0..=100")
+                || result.outcome.detail.contains("out of range")),
+        "expected out-of-range PROGRESS failure, got: {}",
+        result.outcome.detail
+    );
+    assert!(result.action.is_none());
+
+    let updated = live_goal(&state, "test-goal");
+    assert_eq!(
+        updated.status,
+        GoalProgress::NotStarted,
+        "invalid progress must not be clamped or applied"
+    );
+}
+
+#[test]
+fn duplicate_progress_markers_are_rejected_without_guessing() {
+    let (result, _state) = run_goal_session_response(
+        "NO ACTION\nREASON: evidence is mixed.\nPROGRESS: 40\nPROGRESS: 80",
+    );
+
+    assert!(!result.outcome.success);
+    assert!(
+        result.outcome.detail.contains("duplicate")
+            || result.outcome.detail.contains("multiple PROGRESS"),
+        "expected duplicate-progress failure, got: {}",
+        result.outcome.detail
+    );
     assert!(result.action.is_none());
 }
 
@@ -214,7 +528,7 @@ fn objective_includes_goal_metadata_and_environment() {
     let goal = live_goal(&state, goal_id);
     let action = planned_action(goal_id);
 
-    let (mut session, captured) = MockSession::new_ok("NO ACTION\n", vec![]);
+    let (mut session, captured) = MockSession::new_ok("NO ACTION\nREASON: smoke test.\n", vec![]);
 
     let mem_box = mock_memory();
     let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
@@ -232,4 +546,202 @@ fn objective_includes_goal_metadata_and_environment() {
     assert!(input.objective.contains(goal_id));
     assert!(input.objective.contains(&format!("Goal {goal_id}")));
     assert!(input.objective.contains("Environment context"));
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn observe_only_objective_forbids_engineer_dispatch_and_requires_evidence_protocol() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(Some("1"));
+
+    let goal_id = "test-goal";
+    let mut state = state_with_goal(goal_id);
+    let goal = live_goal(&state, goal_id);
+    let action = planned_action(goal_id);
+
+    let (mut session, captured) = MockSession::new_ok(
+        "NO ACTION\nREASON: read-only smoke test.\nPROGRESS: 0",
+        vec![],
+    );
+
+    let mem_box = mock_memory();
+    let checker = crate::goal_curation::progress_evidence::NoopProgressEvidenceChecker;
+    let _ = advance_goal_with_session(
+        &action,
+        &*mem_box,
+        &checker,
+        &mut session,
+        &mut state,
+        &goal,
+    );
+
+    let captured = captured.borrow();
+    let input = captured.as_ref().expect("session must be invoked once");
+    assert!(input.objective.contains("Read-only observer contract"));
+    assert!(input.objective.contains("Do not ask for"));
+    assert!(input.objective.contains("dispatch an engineer"));
+    assert!(input.objective.contains("NO ACTION"));
+    assert!(input.objective.contains("EVIDENCE/PROPOSALS"));
+    assert!(
+        input
+            .objective
+            .contains("Read-only means no writes, not no progress")
+    );
+    assert!(input.objective.contains("modest positive progress"));
+}
+
+// ── Never-idle steering for standing research/cognition goals (#4347, #4399) ──
+//
+// TDD: `build_goal_advance_input` must durably inject a never-idle directive
+// into the goal-session objective ONLY when the goal is a standing
+// research/cognition goal (`ActiveGoal::is_standing_research_goal`), so the
+// standing cognition-research goal NEVER idles — each cycle it must seek a NEW
+// source or design a NEW experiment (deduped against recent directions) instead
+// of idling or repeating an incremental parse-site / dedup fix. This lives in the
+// daemon (code hook + prompt asset), so it survives goal-board re-persist — it is
+// NOT a runtime CLI priority tweak.
+//
+// The code-owned hook emits this exact sentinel; the always-embedded prompt
+// asset must NOT contain it, so the positive/negative split is meaningful.
+const NEVER_IDLE_SENTINEL: &str = "[never-idle: standing research goal]";
+
+fn research_goal() -> crate::goal_curation::ActiveGoal {
+    crate::goal_curation::ActiveGoal::new(
+        "continuously-research-and-improve-your-own-cogn-70ab8541",
+        "Continuously research and improve your own cognition: graph memory, \
+         recall quality, distillation fact-yield, and reasoner reliability. \
+         STANDING PERPETUAL goal — durable improvements only",
+        1,
+    )
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_injects_never_idle_directive_for_standing_research_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    let goal = research_goal();
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    let obj = &input.objective;
+    assert!(
+        obj.contains(NEVER_IDLE_SENTINEL),
+        "standing research goal must get the code-owned never-idle directive sentinel"
+    );
+    // Assert on the code-owned directive itself (deterministic regardless of the
+    // installed `goal_session_objective.md` asset the prompt store also loads).
+    let directive_lc = obj
+        .split("## Never-idle directive")
+        .nth(1)
+        .expect("objective must contain the injected never-idle directive")
+        .to_lowercase();
+    // The directive must mandate never idling and producing a NOVEL action.
+    assert!(
+        directive_lc.contains("never idle"),
+        "directive must mandate that the goal never idles"
+    );
+    assert!(
+        directive_lc.contains("novel"),
+        "directive must require a novel action each cycle"
+    );
+    // Each cycle must yield a NEW external SOURCE or a NEW EXPERIMENT.
+    assert!(
+        directive_lc.contains("source"),
+        "directive must offer discovering + ingesting a new external source"
+    );
+    assert!(
+        directive_lc.contains("experiment"),
+        "directive must offer designing + running a new experiment"
+    );
+    // Dedup against recent directions so the action is a genuinely new direction.
+    assert!(
+        directive_lc.contains("dedup") || directive_lc.contains("recent direction"),
+        "directive must dedup the chosen action against recent directions"
+    );
+    // An idle/repeat cycle is a FAULT — not a tolerated fall-back to incremental work.
+    assert!(
+        directive_lc.contains("fault"),
+        "directive must frame an idle/repeat cycle as a fault"
+    );
+    // Degrade to a NEW LOCAL experiment when no external source is reachable —
+    // there is NO idle fallback and NO incremental-maintenance fallback.
+    assert!(
+        directive_lc.contains("local"),
+        "directive must degrade to a new local experiment, not idle, when no \
+         external source is reachable"
+    );
+    assert!(
+        directive_lc.contains("never fall back to idling"),
+        "the directive must explicitly forbid the idle / incremental-maintenance loophole"
+    );
+    assert!(
+        !directive_lc.contains("only fall back to incremental maintenance"),
+        "the old incremental-maintenance idle loophole must be gone from the directive"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_omits_never_idle_directive_for_ordinary_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    let goal = crate::goal_curation::ActiveGoal::new("g-mvp", "Ship the MVP release.", 1);
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    assert!(
+        !input.objective.contains(NEVER_IDLE_SENTINEL),
+        "an ordinary (non-standing, non-research) goal must NOT get the never-idle sentinel"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_omits_never_idle_directive_for_standing_non_research_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    // Standing/perpetual, but NOT a research/cognition goal.
+    let goal = crate::goal_curation::ActiveGoal::new(
+        "g-ci",
+        "Steward CI health and keep the pipeline green. STANDING PERPETUAL goal.",
+        1,
+    );
+    assert!(goal.is_perpetual());
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    assert!(
+        !input.objective.contains(NEVER_IDLE_SENTINEL),
+        "a standing NON-research goal must NOT get the never-idle sentinel"
+    );
+}
+
+#[test]
+#[serial_test::serial(cognitive_memory)]
+fn advance_input_omits_never_idle_directive_for_research_non_standing_goal() {
+    let _guard = lock_env_for_test();
+    let _env = set_observe_only_for_test(None);
+
+    let mem = crate::ooda_actions::test_helpers::mock_memory();
+    // Research/cognition wording, but a one-off (non-standing) goal.
+    let goal = crate::goal_curation::ActiveGoal::new(
+        "g-recall",
+        "Improve recall precision at parse sites",
+        1,
+    );
+    assert!(!goal.is_perpetual());
+    let input =
+        crate::ooda_actions::goal_session::build_goal_advance_input(&*mem, None, &goal, false);
+
+    assert!(
+        !input.objective.contains(NEVER_IDLE_SENTINEL),
+        "a non-standing research goal must NOT get the never-idle sentinel"
+    );
 }

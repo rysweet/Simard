@@ -30,7 +30,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
     let now = super::current_epoch_seconds()?;
 
     let exe = std::env::current_exe().map_err(|e| SimardError::RpcSpawnFailed {
-        bridge: "subordinate".to_string(),
+        endpoint: "subordinate".to_string(),
         reason: format!("cannot resolve current executable: {e}"),
     })?;
 
@@ -47,6 +47,17 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
         )
         // Limit concurrent cargo parallelism per agent to prevent OOM (issues #373, #2199).
         .env("CARGO_BUILD_JOBS", crate::cargo_jobs::cargo_jobs())
+        // Best-effort engineer-PR label for the amplihack publish step
+        // (workflow_publish_pr.sh, amplihack-rs #979). Stamps this engineer's
+        // PRs with the durable `simard-autonomous` marker so the self-merge
+        // queue can tell them apart from the operator's own review PRs (#4097).
+        // Inert until the consumer lands. The production tmux path seeds this
+        // separately in `compute_tmux_env` (it is not a SIMARD_* var and so is
+        // not auto-forwarded across the tmux boundary).
+        .env(
+            crate::overseer::config::WORKFLOW_PR_LABELS_ENV,
+            crate::overseer::config::SIMARD_ENGINEER_PR_LABEL,
+        )
         .current_dir(&config.worktree_path);
     // Issue #1197: per-engineer git worktrees would otherwise force a
     // cold cargo rebuild (incl. lbug, ~40min) every spawn. Share one
@@ -106,7 +117,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let status = tmux_cmd.status().map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "subordinate".to_string(),
+            endpoint: "subordinate".to_string(),
             reason: format!(
                 "failed to spawn tmux-wrapped subordinate '{}': {e}",
                 config.agent_name
@@ -115,7 +126,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
 
         if !status.success() {
             return Err(SimardError::RpcSpawnFailed {
-                bridge: "subordinate".to_string(),
+                endpoint: "subordinate".to_string(),
                 reason: format!(
                     "tmux new-session for subordinate '{}' exited with {status}",
                     config.agent_name
@@ -134,7 +145,7 @@ pub fn spawn_subordinate(config: &SubordinateConfig) -> SimardResult<Subordinate
             "tmux not available; spawning subordinate directly (no attach support)",
         );
         let child = cmd.spawn().map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "subordinate".to_string(),
+            endpoint: "subordinate".to_string(),
             reason: format!(
                 "failed to spawn subordinate '{}' at '{}': {e}",
                 config.agent_name,

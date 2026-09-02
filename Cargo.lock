@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "amplihack-memory"
 version = "0.4.0"
-source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=e005a5963b38bc02610fa5b0bef7e52625dcd092#e005a5963b38bc02610fa5b0bef7e52625dcd092"
+source = "git+https://github.com/rysweet/amplihack-memory-lib.git?rev=0031505b911151bf47409694a6c45f8b778d91b9#0031505b911151bf47409694a6c45f8b778d91b9"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -1084,7 +1084,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1218,7 +1218,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1490,8 +1490,6 @@ dependencies = [
  "libc",
  "libgit2-sys",
  "log",
- "openssl-probe 0.1.6",
- "openssl-sys",
  "url",
 ]
 
@@ -2117,8 +2115,7 @@ dependencies = [
 [[package]]
 name = "lbug"
 version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d38365ef5ebc0a55e342db7296a6ca9a2ee64916dbdbe4f87f1496b4fc68d0da"
+source = "git+https://github.com/rysweet/ladybug-rust?rev=5a2c107881879f4d1bb594b14967948870e65cdc#5a2c107881879f4d1bb594b14967948870e65cdc"
 dependencies = [
  "cmake",
  "cxx",
@@ -2150,9 +2147,7 @@ checksum = "c9b3acc4b91781bb0b3386669d325163746af5f6e4f73e6d2d630e09a35f3487"
 dependencies = [
  "cc",
  "libc",
- "libssh2-sys",
  "libz-sys",
- "openssl-sys",
  "pkg-config",
 ]
 
@@ -2178,20 +2173,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
 dependencies = [
  "cc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "libssh2-sys"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "220e4f05ad4a218192533b300327f5150e809b54c4ec83b5a1d91833601811b9"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "openssl-sys",
  "pkg-config",
  "vcpkg",
 ]
@@ -2454,7 +2435,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2584,27 +2565,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openssl-probe"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
-
-[[package]]
-name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.113"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad2f2c0eba47118757e4c6d2bff2838f3e0523380021356e7875e858372ce644"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "opentelemetry"
@@ -3459,7 +3422,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3484,7 +3447,7 @@ version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "612460d5f7bea540c490b2b6395d8e34a953e52b491accd6c86c8164c5932a63"
 dependencies = [
- "openssl-probe 0.2.1",
+ "openssl-probe",
  "rustls-pki-types",
  "schannel",
  "security-framework",
@@ -3518,7 +3481,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3560,7 +3523,7 @@ dependencies = [
 [[package]]
 name = "rustyclawd-core"
 version = "0.1.1"
-source = "git+https://github.com/rysweet/RustyClawd.git?rev=ddae0fdf1b922ae8604b0a4e178a3634ada7e350#ddae0fdf1b922ae8604b0a4e178a3634ada7e350"
+source = "git+https://github.com/rysweet/RustyClawd.git?rev=dcccad80ed381c66a7728565be5cb84120aacbed#dcccad80ed381c66a7728565be5cb84120aacbed"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3582,7 +3545,7 @@ dependencies = [
 [[package]]
 name = "rustyclawd-tools"
 version = "0.1.1"
-source = "git+https://github.com/rysweet/RustyClawd.git?rev=ddae0fdf1b922ae8604b0a4e178a3634ada7e350#ddae0fdf1b922ae8604b0a4e178a3634ada7e350"
+source = "git+https://github.com/rysweet/RustyClawd.git?rev=dcccad80ed381c66a7728565be5cb84120aacbed#dcccad80ed381c66a7728565be5cb84120aacbed"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3920,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "simard"
-version = "0.28.0"
+version = "0.42.0"
 dependencies = [
  "amplihack-agent-eval",
  "amplihack-memory",
@@ -4222,7 +4185,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5153,7 +5116,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

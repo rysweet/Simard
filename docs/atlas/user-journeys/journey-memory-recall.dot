@@ -1,0 +1,18 @@
+digraph JourneyMemoryRecall {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+  probe [label="build objective probe from active goals"];
+  prep [label="preparation_memory_operations_with_active_slugs_phased"];
+  ranked [label="recall_facts_ranked"];
+  ipc [label="RemoteCognitiveMemory -> MemoryRequest -> server dispatch"];
+  store [label="LibraryCognitiveMemory lbug store", fillcolor="#fff6df"];
+  filter [label="filter snapshots + round-robin fragments"];
+  goals [label="search goal-store records, latest by slug"];
+  triggers [label="check prospective triggers"];
+  procedures [label="tokenize + recall procedures"];
+  episodes [label="ranked episodic recall"];
+  working [label="push working context summary"];
+  context [label="PreparedContext for OODA prompt"];
+  probe -> prep -> ranked -> ipc -> store -> filter -> goals -> triggers -> procedures -> episodes -> working -> context;
+}

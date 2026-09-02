@@ -17,6 +17,10 @@ pub enum SafeUpdateError {
         path: PathBuf,
         reason: String,
     },
+    /// Retained for backward compatibility and operator-facing messages only.
+    /// The redesigned drain (issue: self-deploy while busy) never produces this
+    /// — it checkpoints and requeues in-flight engineers instead of failing on
+    /// a wall-clock timeout. See `src/safe_update/drain.rs`.
     DrainTimeout {
         seconds: u64,
         in_flight: usize,

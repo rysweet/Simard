@@ -20,49 +20,115 @@
 //!
 //! See `docs/reference/ci-health-sweep.md`.
 
+pub mod cache;
 pub mod classify;
+pub mod diagnose;
 pub mod gh;
 pub mod report;
+pub mod steward;
 pub mod types;
 
 #[cfg(test)]
 mod tests;
 
+pub use cache::GreenShaCache;
 pub use classify::{
     ActionableFailure, FleetReport, WorkflowVerdict, build_report, classify_workflow,
+    repo_cacheable, update_cache_from_report,
+};
+pub use diagnose::{
+    FailedJob, RealGhRunDiagnostics, RunDiagnosis, RunDiagnostics, parse_failure_annotations,
+    parse_run_diagnosis,
 };
 pub use gh::{
     GhWorkflowClient, RealGhWorkflowClient, build_repo_snapshot, collect_fleet,
     snapshot_from_fixture,
 };
 pub use report::render_human;
+pub use steward::{
+    CiIssueResolver, IssueFilingReport, IssueResolutionReport, RealCiIssueResolver,
+    ResolutionOutcome, UnauthorizedSkip, ci_failure_signature, ci_signature_for,
+    file_issues_for_report, resolve_issues_for_report,
+};
 pub use types::{
     FleetSnapshot, RepoSnapshot, RunConclusion, WorkflowRun, WorkflowSnapshot, WorkflowState,
 };
 
 use crate::error::{SimardError, SimardResult};
+use tracing::warn;
 
-/// The amplihack ecosystem fleet: Simard plus its governed sibling repos, by
-/// GitHub `owner/repo` slug. Source of truth: the ecosystem table in
-/// `prompt_assets/simard/engineer_system.md` (note `amplihack` → `amplihack-rs`
-/// on GitHub).
-pub const GOVERNED_REPOS: &[&str] = &[
-    "rysweet/Simard",
-    "rysweet/RustyClawd",
-    "rysweet/amplihack-rs",
-    "rysweet/azlin",
-    "rysweet/amplihack-memory-lib",
-    "rysweet/amplihack-agent-eval",
-    "rysweet/agent-kgpacks",
-    "rysweet/amplihack-recipe-runner",
-    "rysweet/amplihack-xpia-defender",
-    "rysweet/gadugi-agentic-test",
-];
+/// The amplihack ecosystem fleet — Simard plus her governed sibling repos, by
+/// GitHub `owner/repo` slug — read from the **identity-curated stewarded roster**
+/// (`identity-state/<identity>/stewarded_repos.toml` under the state root, seeded
+/// on first use from `prompt_assets/simard/identity/stewarded_repos.seed.toml`).
+/// This is the SAME single source of truth the Overseer's `ecosystem-observe`
+/// sweep reads, so a repo Simard adds/removes agentically is swept on the next
+/// run — no second hardcoded list to silently drift out of sync (a drift that
+/// would let a newly-governed repo's red CI go unswept and the fleet be reported
+/// green). Note `amplihack` → `amplihack-rs` on GitHub.
+///
+/// Fail-loud: a corrupt or empty roster is an `Err`, never a silently empty
+/// sweep — an empty repo list would classify as zero actionable failures and
+/// report the fleet **green**, the exact false-green this module exists to
+/// prevent.
+pub fn governed_repos() -> SimardResult<Vec<String>> {
+    crate::overseer::ecosystem_observe::load_stewarded_roster_from_env().map_err(|error| {
+        SimardError::CiHealthGhCommandFailed {
+            reason: format!("failed to load identity-curated stewarded roster: {error}"),
+        }
+    })
+}
 
-/// Run a live sweep of [`GOVERNED_REPOS`] and classify it into a report.
+/// Run a live sweep of the governed fleet ([`governed_repos`]), using and
+/// updating the persistent last-known-green head-SHA cache so an unchanged-green
+/// fleet is a cheap no-op.
+///
+/// The cache is loaded from [`GreenShaCache::default_path`], consulted by
+/// [`collect_fleet`] to skip unchanged-green repos, reconciled against the fresh
+/// report by [`update_cache_from_report`], and saved back. A save failure is
+/// non-fatal (the verdict is already computed) and only warns.
 pub fn sweep_live(gh: &dyn GhWorkflowClient) -> SimardResult<FleetReport> {
-    let snapshot = collect_fleet(gh, GOVERNED_REPOS)?;
-    Ok(build_report(&snapshot))
+    sweep_live_with_options(gh, true)
+}
+
+/// Like [`sweep_live`] but `use_cache = false` forces a full re-collection of
+/// every repo (no skips) while still refreshing the persisted cache from the
+/// fresh report — the `--no-cache` / `--refresh` path.
+pub fn sweep_live_with_options(
+    gh: &dyn GhWorkflowClient,
+    use_cache: bool,
+) -> SimardResult<FleetReport> {
+    let roster = governed_repos()?;
+    let repos: Vec<&str> = roster.iter().map(String::as_str).collect();
+    let path = GreenShaCache::default_path();
+    let mut cache = if use_cache {
+        GreenShaCache::load(&path)
+    } else {
+        GreenShaCache::empty()
+    };
+    let report = run_sweep(gh, &repos, &mut cache)?;
+    if let Err(e) = cache.save(&path) {
+        warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to persist ci-health green-SHA cache; next sweep will re-audit"
+        );
+    }
+    Ok(report)
+}
+
+/// Collect → classify → reconcile-cache, without any disk I/O. This is the
+/// testable core shared by the live paths: it skips cached-green repos, builds
+/// the report, and updates `cache` in place.
+pub fn run_sweep(
+    gh: &dyn GhWorkflowClient,
+    repos: &[&str],
+    cache: &mut GreenShaCache,
+) -> SimardResult<FleetReport> {
+    let snapshot = collect_fleet(gh, repos, cache)?;
+    let report = build_report(&snapshot);
+    update_cache_from_report(cache, &snapshot, &report);
+    Ok(report)
 }
 
 /// Classify an offline fixture snapshot into a report (`--from-json`).

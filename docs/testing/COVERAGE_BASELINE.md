@@ -1,9 +1,24 @@
 # Test-coverage baseline
 
+> **Scope:** this ledger covers the **`rysweet/Simard`** repository only (the
+> single `simard` crate plus its `simard-*` binary crates). It is the
+> companion ledger to the canonical
+> [Coverage-Audit Charter](https://github.com/rysweet/Simard/blob/main/Specs/COVERAGE_AUDIT.md), which defines the
+> measurable done-criteria and the deterministic next-target procedure for the
+> recurring "audit Simard's coverage and raise it to 70%" goal. The parent
+> epics linked below (#1735 / #1937) describe the separate
+> **`rysweet/amplihack-rs`** workspace and are co-located in Simard for
+> coordination only — see the charter's §1 disambiguation before treating
+> their per-crate targets as Simard work.
+
 This document records the most recent line-coverage baseline for each Cargo
-target group and links each group to the issue that drives it toward the
-project-wide ≥ 70% target. Update this file whenever a coverage-targeted PR
-lands.
+target group. Since 2026-07-26 the recurring goal's **done-gate is the
+whole-repo aggregate line coverage ≥ 70%** (measured by
+`scripts/coverage-gate.sh`; see the charter's §2). This per-group ledger is
+retained as the **map for choosing what to test next** when that total is
+short — it is no longer itself the done-gate. Each group links to the issue
+that drove it toward the ≥ 70% aggregate. Update this file whenever a
+coverage-targeted PR lands.
 
 The numbers below come from:
 
@@ -150,13 +165,25 @@ The deterministic CLI-surface integration test lives at
 `simard::run_gym_compare` and `simard::dispatch_legacy_gym_cli` (no network,
 no external services).
 
-## Other groups
+## Other groups — status
 
-Tracked, but not yet attacked by a landed PR:
+All five originally-tracked per-group issues have **landed** and clear the
+≥ 70% aggregate target; there is no open per-group backlog remaining:
 
-| Group        | Tracking issue                                                  |
-| ------------ | --------------------------------------------------------------- |
-| `engineer`   | [#1750](https://github.com/rysweet/Simard/issues/1750)          |
-| `meeting`    | [#1753](https://github.com/rysweet/Simard/issues/1753)          |
+| Group                          | Tracking issue                                          | State  | Landing PR |
+| ------------------------------ | ------------------------------------------------------- | ------ | ---------- |
+| `bin`                          | [#1749](https://github.com/rysweet/Simard/issues/1749)  | CLOSED | #1772      |
+| `operator_commands_dashboard`  | [#1750](https://github.com/rysweet/Simard/issues/1750)  | CLOSED | #2257      |
+| `trace_collector`              | [#1751](https://github.com/rysweet/Simard/issues/1751)  | CLOSED | #2338      |
+| `operator_commands_gym`        | [#1752](https://github.com/rysweet/Simard/issues/1752)  | CLOSED | #2346      |
+| `cmd_cleanup`                  | [#1753](https://github.com/rysweet/Simard/issues/1753)  | CLOSED | #2353      |
 
-Update this table as those PRs land.
+> The two rows previously labelled `engineer` (#1750) and `meeting` (#1753)
+> were mislabeled: those issues are `operator_commands_dashboard` and
+> `cmd_cleanup` respectively, and both have landed.
+
+Because the per-group backlog is empty, further coverage work is selected
+**ad hoc** using the deterministic next-target procedure in
+[`Specs/COVERAGE_AUDIT.md`](https://github.com/rysweet/Simard/blob/main/Specs/COVERAGE_AUDIT.md) §3 (measure → filter
+files < 70% with > 50 executable lines → rank by risk → attack one group per
+PR). Record each new landed group here with its before/after aggregate.

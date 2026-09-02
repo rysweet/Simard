@@ -1,0 +1,45 @@
+# Pinned SHA-256 checksums for the prebuilt `liblbug` static release assets
+# consumed by scripts/provision-lbug-prebuilt.sh (issue #2471).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# provision-lbug-prebuilt.sh downloads a version-pinned `liblbug-static-*.tar.gz`
+# from the LadybugDB/ladybug GitHub release and statically links it into every
+# CI build. TLS + version/repo pinning authenticate the transport and the URL,
+# but nothing verified the *content* — if the published asset were tampered with
+# at rest, the poisoned archive would be linked unnoticed. These pinned digests
+# are the trusted, code-reviewed content-integrity anchor: the provisioner
+# refuses to extract any tarball whose SHA-256 does not match the entry here
+# (fail-closed — an unknown version/asset is rejected, never trusted).
+#
+# The checksum MUST be pinned in-repo (not fetched live from the same release),
+# so that a substitution of the asset at its source is caught by comparison
+# against this reviewed value.
+#
+# FORMAT
+# ------
+#   <sha256-hex>  <lbug-version>  <asset-file-name>
+# Blank lines and lines starting with `#` are ignored. The version column is the
+# `lbug` version resolved from Cargo.lock (see `lbug_version` in the script).
+#
+# REGENERATING ON A VERSION BUMP
+# ------------------------------
+# When Cargo.lock's resolved `lbug` version changes, add the new version's
+# digests (keep old rows for reproducibility of older checkouts). GitHub records
+# an authoritative per-asset SHA-256 digest; regenerate with:
+#
+#   V=<new-version>
+#   gh api repos/LadybugDB/ladybug/releases/tags/v$V \
+#     --jq '.assets[]
+#       | select(.name|test("liblbug-static-(linux|osx)"))
+#       | [ (.digest|sub("sha256:";"")), "'"$V"'", .name ] | @tsv'
+#
+# Review the diff as a supply-chain change before merging.
+
+# lbug 0.17.1  (LadybugDB/ladybug release v0.17.1)
+2b0fb205f21e32de448356f4879e68b8729e659e1faaa40edb4f892ee28ddeac  0.17.1  liblbug-static-linux-x86_64-compat.tar.gz
+dfe5354f3e5ceb02db3139ef8266b3b1cc6d19cc5de7aab537f7d56f2dc55c09  0.17.1  liblbug-static-linux-x86_64-perf.tar.gz
+4d59cdc910357bc57158ffda79f53246662e6af2178dc6ae27c3f0c5196073c7  0.17.1  liblbug-static-linux-aarch64-compat.tar.gz
+86cede659317fbc831a45a37cec1da71be65a3918b5eaec99afc355bb826ff23  0.17.1  liblbug-static-linux-aarch64-perf.tar.gz
+d627b29b13aabc040001332c7e877a7e5c6c824b4f408294710370e3fb7db3e9  0.17.1  liblbug-static-osx-x86_64.tar.gz
+62481355eedf67c6d4767b9d27f5fb150812343c6eef90c9ab6cdc6de473decf  0.17.1  liblbug-static-osx-arm64.tar.gz

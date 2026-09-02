@@ -5,10 +5,9 @@
 //!
 //! Before: the distiller agent printed a `{ "facts": [...] }` envelope; Simard
 //! scraped it back out of noisy recipe stdout (launcher banner + ANSI + tracing
-//! lines) via `extract_json_payload` → `balanced_objects` →
-//! `serde_json::from_str`, and a single malformed token (a trailing comma)
-//! failed the strict parse and discarded the ENTIRE batch — the
-//! `parse_fail` / 91%→100% failure mode.
+//! lines) via a bespoke JSON-recovery/`serde_json::from_str` pass, and a single
+//! malformed token (a trailing comma) failed the strict parse and discarded the
+//! ENTIRE batch — the `parse_fail` / 91%→100% failure mode.
 //!
 //! After: the distiller agentic step writes each fact DIRECTLY through the
 //! gated cognitive-memory write boundary during its run. There is **no return
@@ -155,7 +154,7 @@ fn nonzero_exit_is_a_surfaced_terminal_failure() {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// A deterministic stub that implements ONLY the legacy `run` (returning facts).
-/// It must keep working unchanged: the new default `run_agentic` bridges its
+/// It must keep working unchanged: the new default `run_agentic` memories its
 /// returned facts to the in-process gated `DistillFactSink`. Each fact cites a
 /// real batch episode id so it is grounded.
 struct GroundedFactsRunner {
@@ -345,5 +344,72 @@ fn erroring_agentic_step_leaves_batch_unmarked_and_stores_nothing() {
             .expect("search")
             .is_empty(),
         "no facts may be stored when the agentic step fails"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Grounding seam parity: a whitespace-padded `source_episode_id` grounds the
+// same in-process as it does on the production store-existence seam.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// A stub whose fact cites a real batch episode id but with surrounding
+/// whitespace (a routine LLM surface variation). The production seam grounds
+/// this — `any_episode_exists` / `episode_exists` both `.trim()` the cited id
+/// before matching — so the in-process `DistillFactSink` must ground it too, or
+/// the two write boundaries would reach opposite dispositions for the same fact
+/// (violating the shared-gate parity invariant and silently losing fact-yield
+/// on the stub / run-only path).
+struct PaddedProvenanceRunner;
+
+impl DistillRecipeRunner for PaddedProvenanceRunner {
+    fn run(&self, episodes: &[CognitiveEpisode]) -> SimardResult<Vec<DistilledFact>> {
+        Ok(vec![DistilledFact {
+            concept: "pr-pattern".into(),
+            content: "warm cache before pin bumps".into(),
+            // Real batch id wrapped in leading/trailing whitespace.
+            source_episode_id: format!("  {}\n", episodes[0].node_id),
+        }])
+    }
+}
+
+#[test]
+fn padded_source_episode_id_grounds_in_process_matching_production_seam() {
+    let n = DISTILL_MIN_EPISODES as usize + 2;
+    let mem = store_with_episodes(n);
+
+    // Precondition: the padded id is NOT byte-equal to the stored node id, so a
+    // raw (un-trimmed) membership test would treat this grounded fact as
+    // ungrounded and quarantine it.
+    let real_id = mem
+        .list_undistilled_episodes(1)
+        .expect("list undistilled")
+        .first()
+        .expect("at least one episode")
+        .node_id
+        .clone();
+    let padded = format!("  {real_id}\n");
+    assert_ne!(padded, real_id, "precondition: the cited id is padded");
+
+    let report = distill_recent_episodes_with_runner(
+        &mem as &dyn CognitiveMemoryOps,
+        &PaddedProvenanceRunner,
+    )
+    .expect("pass must succeed");
+
+    assert_eq!(
+        report.fact_count, 1,
+        "a fact citing a padded-but-real episode id must ground and store, matching the \
+         store-existence seam which trims the cited id"
+    );
+    assert_eq!(
+        report.quarantined_count, 0,
+        "the padded-provenance fact must NOT be quarantined as ungrounded"
+    );
+    assert!(
+        mem.search_facts("pr-pattern", 10, 0.0)
+            .expect("search")
+            .iter()
+            .any(|f| f.content == "warm cache before pin bumps"),
+        "the grounded fact must reach semantic memory"
     );
 }

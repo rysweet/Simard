@@ -1,11 +1,11 @@
 //! Adapter that implements [`MemoryStore`] by delegating to [`CognitiveMemoryClient`].
 //!
-//! This bridges the gap between the simple key-value `MemoryStore` trait (used
+//! This clients the gap between the simple key-value `MemoryStore` trait (used
 //! by `RuntimePorts`) and the six-type cognitive memory system backed by LadybugDB.
 //! Each `MemoryRecord` is stored as a semantic fact in the cognitive graph, with
 //! the record key as concept and scope+session encoded in tags.
 //!
-//! When the cognitive bridge is unavailable (honest degradation), the adapter
+//! When the cognitive client is unavailable (honest degradation), the adapter
 //! falls back to a `FileBackedMemoryStore` so the runtime always functions.
 
 mod convert;
@@ -20,12 +20,12 @@ mod tests;
 #[cfg(test)]
 mod tests_store;
 
-const STORE_NAME: &str = "cognitive-bridge-memory";
+const STORE_NAME: &str = "cognitive-memory-store";
 
-/// Maximum retries for bridge read operations.
+/// Maximum retries for client read operations.
 const READ_MAX_RETRIES: usize = 1;
 
-/// Backoff between bridge retries in milliseconds.
+/// Backoff between client retries in milliseconds.
 const RETRY_BACKOFF_MS: u64 = 200;
 
 // Re-export all public items so `crate::memory_store_adapter::X` still works.

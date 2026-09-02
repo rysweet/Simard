@@ -29,6 +29,7 @@ fn seeded_board() -> GoalBoard {
     let mut board = GoalBoard::new();
     for i in 0..5 {
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -96,6 +97,7 @@ fn writer_persists_through_cognitive_memory_without_legacy_file() {
 
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

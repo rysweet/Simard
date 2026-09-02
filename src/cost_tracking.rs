@@ -8,7 +8,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// A single cost entry written to the ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,7 +96,7 @@ pub fn record_cost(
 
     write_entry(&entry)?;
 
-    // Issue #2528: bridge token throughput into the unified telemetry facade
+    // Issue #2528: memory token throughput into the unified telemetry facade
     // alongside the authoritative JSONL ledger (which `simard status` reads for
     // the honest $/token/credit reconciliation). Tokens are naturally integral;
     // dollar cost stays ledger-sourced to avoid a lossy integer counter.
@@ -120,13 +121,46 @@ pub fn record_cost(
 }
 
 fn write_entry(entry: &CostEntry) -> std::io::Result<()> {
-    let path = ledger_path();
+    let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
+    append_line(&ledger_path(), &line)
+}
+
+/// Serializes concurrent in-process appends to a cost ledger.
+///
+/// The lib test binary runs every test in a single process with many threads,
+/// and `record_cost` resolves the ledger from the process-global `HOME` /
+/// `SIMARD_COST_LEDGER_PATH`. When one test redirects that env (e.g. the
+/// meeting-cost regression pins the ledger under a temp `$HOME`), a parallel,
+/// non-serialized test that also calls `record_cost` (e.g. the lightweight-chat
+/// adapter turn) resolves the *same* path and appends to it concurrently.
+static LEDGER_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Append one JSONL record to `path` without ever interleaving with a
+/// concurrent append.
+///
+/// `writeln!` emits the payload and the trailing newline as two separate
+/// `write()` syscalls, so two threads appending to the same ledger can splice
+/// their bytes into one line (`{a}{b}\n\n`). A spliced line fails JSON parse
+/// and the entry is silently dropped on read — the intermittent
+/// "a copilot-meeting cost entry ... must be recorded" CI flake. Two guards
+/// close that window: a process-wide lock serializes in-process writers, and
+/// the whole record is written in a single buffered `write_all` so that even a
+/// cross-process appender (`O_APPEND` makes a lone `write()` atomic at EOF)
+/// cannot tear the line.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e.to_string()))?;
-    writeln!(file, "{}", line)?;
+    let mut record = String::with_capacity(line.len() + 1);
+    record.push_str(line);
+    record.push('\n');
+
+    let _guard = LEDGER_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(record.as_bytes())?;
+    file.flush()?;
     Ok(())
 }
 
@@ -299,6 +333,86 @@ mod tests {
             }
         }
         assert_eq!(entries.len(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression for the intermittent `base_type_copilot::tests::
+    /// meeting_turn_records_full_enriched_prompt_tokens_not_bare_objective`
+    /// failure ("a copilot-meeting cost entry ... must be recorded").
+    ///
+    /// Root cause: the meeting-cost test redirects the process-global `HOME`, so
+    /// a parallel, non-serialized test that calls `record_cost` (e.g. the
+    /// lightweight-chat adapter turn) appended to the SAME ledger concurrently.
+    /// The old `writeln!`-based writer emitted the payload and newline as
+    /// separate syscalls, so concurrent appends spliced into one another; a
+    /// spliced line failed JSON parse and the entry was dropped on read.
+    ///
+    /// This test hammers the production `append_line` from many threads and
+    /// asserts every line round-trips and every entry survives. Reverting
+    /// `append_line` to the original lock-free `writeln!` append makes it fail
+    /// RED (verified: concurrent two-syscall appends splice into one
+    /// unparseable line); the lock plus single-buffer `write_all` makes it
+    /// GREEN. The in-process lock alone is sufficient to serialize these
+    /// threads, so the additional cross-process protection from the
+    /// single-buffer `write_all` is guarded structurally by
+    /// `scripts/qa-cost-ledger-concurrent-no-drop.sh`, not by this in-process
+    /// test. It uses an explicit path (no `HOME` / env dependency), so it needs
+    /// no serial key and is itself deterministic.
+    #[test]
+    fn concurrent_appends_never_interleave_or_drop_entries() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-cost-tracking-concurrent");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("ledger-{}.jsonl", std::process::id()));
+        let _ = fs::remove_file(&path);
+
+        const THREADS: usize = 16;
+        const PER_THREAD: usize = 64;
+
+        std::thread::scope(|scope| {
+            for t in 0..THREADS {
+                let path = path.clone();
+                scope.spawn(move || {
+                    for i in 0..PER_THREAD {
+                        let entry = CostEntry {
+                            timestamp: Utc::now(),
+                            session_id: format!("thread-{t}-entry-{i}"),
+                            model: "concurrent-writer".to_string(),
+                            prompt_tokens_est: i as u64,
+                            completion_tokens_est: t as u64,
+                            cost_usd_est: 0.0,
+                            context: "x".repeat(64),
+                        };
+                        let line = serde_json::to_string(&entry).unwrap();
+                        append_line(&path, &line).unwrap();
+                    }
+                });
+            }
+        });
+
+        let contents = fs::read_to_string(&path).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for raw in contents.lines() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry: CostEntry = serde_json::from_str(trimmed).unwrap_or_else(|e| {
+                panic!("interleaved/torn ledger line is not valid JSON ({e}): {trimmed:?}")
+            });
+            assert!(
+                seen.insert(entry.session_id.clone()),
+                "duplicate ledger entry {:?} — a concurrent append was corrupted",
+                entry.session_id
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            THREADS * PER_THREAD,
+            "every concurrently-appended entry must be present and intact"
+        );
+        let _ = fs::remove_file(&path);
         fs::remove_dir_all(&dir).ok();
     }
 }

@@ -103,7 +103,7 @@ impl DecideJudgment {
 // ---------------------------------------------------------------------------
 
 /// Single-decision-site trait for the Decide phase. Sync on purpose to match
-/// [`super::OodaBrain`] — the LLM-backed impl bridges to async internally so
+/// [`super::OodaBrain`] — the LLM-backed impl adapts to async internally so
 /// callers do not need a runtime.
 pub trait OodaDecideBrain: Send + Sync {
     fn judge_decision(&self, ctx: &DecideContext) -> SimardResult<DecideJudgment>;

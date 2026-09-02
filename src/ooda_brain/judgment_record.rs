@@ -20,7 +20,10 @@
 
 use std::cell::RefCell;
 
-use super::{DecideJudgment, EngineerLifecycleDecision, OrientJudgment, ParseFailureRecord};
+use super::{
+    DecideJudgment, EngineerAdmissionDecision, EngineerLifecycleDecision, GoalOutcomeDecision,
+    OrientJudgment, ParseFailureRecord, PerGoalAction, ResourceAdmissionDecision,
+};
 
 /// Which recipe-backed brain phase produced the judgment. Serialised as
 /// snake_case strings so the cycle-report JSON consumers (dashboard, ad-hoc
@@ -41,6 +44,19 @@ pub enum BrainPhase {
     /// Recipe-backed merge-readiness judge (`simard merge-pr`). Serialises as
     /// `"merge_judge"`.
     MergeJudge,
+    /// Closed-loop outcome verification of a completion-candidate goal (issue
+    /// #2751). Serialises as `"outcome_verify"`.
+    OutcomeVerify,
+    /// Dependency/overlap-aware engineer admission at the spawn decision point
+    /// (issue #2690). Serialises as `"engineer_admission"`.
+    EngineerAdmission,
+    /// Resource-aware engineer admission at the spawn decision point (issue
+    /// #2706): can the host afford another engineer (disk/build-cache/load)?
+    /// Serialises as `"resource_admission"`.
+    ResourceAdmission,
+    /// Per-goal, per-cycle agentic next-action decision (issue #4453). Recorded
+    /// once for EVERY active goal EVERY cycle. Serialises as `"per_goal_cycle"`.
+    PerGoalCycle,
 }
 
 impl BrainPhase {
@@ -54,6 +70,10 @@ impl BrainPhase {
             BrainPhase::Decide => "decide",
             BrainPhase::Orient => "orient",
             BrainPhase::MergeJudge => "merge_judge",
+            BrainPhase::OutcomeVerify => "outcome_verify",
+            BrainPhase::EngineerAdmission => "engineer_admission",
+            BrainPhase::ResourceAdmission => "resource_admission",
+            BrainPhase::PerGoalCycle => "per_goal_cycle",
         }
     }
 }
@@ -98,10 +118,17 @@ const CONTEXT_SUMMARY_MAX: usize = 200;
 fn truncate(s: &str) -> String {
     let trimmed = s.trim();
     if trimmed.len() <= CONTEXT_SUMMARY_MAX {
-        trimmed.to_string()
-    } else {
-        format!("{}…", &trimmed[..CONTEXT_SUMMARY_MAX])
+        return trimmed.to_string();
     }
+    // Byte-slicing at CONTEXT_SUMMARY_MAX can split a multi-byte UTF-8 char and
+    // panic (callers such as `from_goal_outcome` feed arbitrary `goal_id`).
+    // Back off to the nearest char boundary at or below the byte cap, matching
+    // the boundary-safe truncation in `sanitize::sanitize_context_var`.
+    let mut end = CONTEXT_SUMMARY_MAX;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &trimmed[..end])
 }
 
 impl BrainJudgmentRecord {
@@ -138,6 +165,28 @@ impl BrainJudgmentRecord {
             context_summary: truncate(&format!("engineer-lifecycle goal_id={goal_id}")),
             decision: label.to_string(),
             rationale: rationale.to_string(),
+            confidence: if fallback { 0.5 } else { 1.0 },
+            fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build a `PerGoalCycle`-phase record from a per-goal, per-cycle action
+    /// (issue #4453). Recorded once for EVERY active goal EVERY cycle so no goal
+    /// is ever left idle without both a chosen action and its reason. The
+    /// `PerGoalAction` carries the mandatory reason on each variant.
+    pub fn from_per_goal_cycle(
+        goal_id: &str,
+        action: &PerGoalAction,
+        fallback: bool,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase: BrainPhase::PerGoalCycle,
+            context_summary: truncate(&format!("per-goal-cycle goal_id={goal_id}")),
+            decision: action.variant_label().to_string(),
+            rationale: action.reason().to_string(),
             confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
             prompt_version: prompt_version.into(),
@@ -233,6 +282,90 @@ impl BrainJudgmentRecord {
             decision: label.to_string(),
             rationale: judgment.rationale.clone(),
             confidence: judgment.confidence as f32,
+            fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build an OutcomeVerify-phase record from an applied outcome-verification
+    /// decision (issue #2751). `verified_signal_count` is the number of
+    /// adapter-verified live signals that were present when the decision was
+    /// applied — the load-bearing input to Rail-3. Pure: no IO.
+    pub fn from_goal_outcome(
+        goal_id: &str,
+        decision: &GoalOutcomeDecision,
+        verified_signal_count: u32,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase: BrainPhase::OutcomeVerify,
+            context_summary: truncate(&format!(
+                "outcome-verify goal_id={goal_id} verified_signals={verified_signal_count}"
+            )),
+            decision: decision.variant_label().to_string(),
+            rationale: decision.rationale().to_string(),
+            confidence: 1.0,
+            fallback: false,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build an EngineerAdmission-phase record from an applied admission
+    /// decision (issue #2690). `fallback` is `true` for the deterministic
+    /// exact-path rail block and the fail-open brain-error path (both carry
+    /// lower confidence). The overlapping / serialized-after goal ids are folded
+    /// into the context summary so a cycle report shows *what* the candidate was
+    /// weighed against. Pure: no IO.
+    pub fn from_engineer_admission(
+        goal_id: &str,
+        decision: &EngineerAdmissionDecision,
+        fallback: bool,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        let blocking = decision.blocking_goals();
+        Self {
+            phase: BrainPhase::EngineerAdmission,
+            context_summary: truncate(&format!(
+                "engineer-admission goal_id={goal_id} vs=[{}]",
+                blocking.join(",")
+            )),
+            decision: decision.variant_label().to_string(),
+            rationale: decision.rationale().to_string(),
+            confidence: if fallback { 0.5 } else { 1.0 },
+            fallback,
+            prompt_version: prompt_version.into(),
+            parse_failure: None,
+        }
+    }
+
+    /// Build a ResourceAdmission-phase record (issue #2706). The
+    /// `context_summary` carries the resource picture the brain weighed (disk %
+    /// vs ceiling, in-flight engineers) so the cycle report explains *why* an
+    /// admission was deferred/reclaimed. `fallback` is `true` for the fail-closed
+    /// brain-error defer AND the deterministic disk-ceiling Rail override.
+    pub fn from_resource_admission(
+        goal_id: &str,
+        decision: &ResourceAdmissionDecision,
+        disk_used_pct: Option<f64>,
+        ceiling_pct: f64,
+        in_flight_engineers: u32,
+        fallback: bool,
+        prompt_version: impl Into<String>,
+    ) -> Self {
+        let disk = disk_used_pct
+            .map(|p| format!("{p:.0}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        Self {
+            phase: BrainPhase::ResourceAdmission,
+            context_summary: truncate(&format!(
+                "resource-admission goal_id={goal_id} disk={disk}%/ceiling={ceiling_pct:.0}% \
+                 in_flight={in_flight_engineers}"
+            )),
+            decision: decision.variant_label().to_string(),
+            rationale: decision.rationale().to_string(),
+            confidence: if fallback { 0.5 } else { 1.0 },
             fallback,
             prompt_version: prompt_version.into(),
             parse_failure: None,
@@ -458,6 +591,18 @@ mod tests {
         };
         let rec = BrainJudgmentRecord::from_engineer_lifecycle(&long, &dec, false, "");
         assert!(rec.context_summary.len() <= CONTEXT_SUMMARY_MAX + 4);
+    }
+
+    #[test]
+    fn truncate_multibyte_on_byte_cap_does_not_panic() {
+        // Regression (#2751): a multi-byte char straddling the CONTEXT_SUMMARY_MAX
+        // byte boundary must truncate on a char boundary rather than panic. The
+        // '€' at bytes 198..201 makes byte 200 an invalid slice index.
+        let s = format!("{}{}", "x".repeat(198), "€".repeat(10));
+        assert!(!s.is_char_boundary(CONTEXT_SUMMARY_MAX));
+        let out = truncate(&s);
+        assert!(out.len() <= CONTEXT_SUMMARY_MAX + 4);
+        assert!(out.ends_with('…'));
     }
 
     #[tokio::test]

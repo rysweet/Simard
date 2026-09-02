@@ -1,0 +1,38 @@
+digraph AgenticFlowsOverview {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  subgraph cluster_l4 {
+    label="Layer 4: Runtime Topology"; style="rounded,dashed"; color="#7a7a7a";
+    daemon [label="simard-daemon (single native Rust process)"];
+    lbug   [label="(:DataStore lbug-cognitive)", fillcolor="#eaf6ff"];
+    rr     [label="(:Process recipe-runner-rs / amplihack)", fillcolor="#fff6df"];
+  }
+  subgraph cluster_flows {
+    label="Layer 9: Agentic Flows"; style="rounded,dashed"; color="#d9a441";
+    ooda     [label="OODA loop\nobserve/orient/decide/act"];
+    overseer [label="Overseer meta-OODA tick\n(merge-queue + ecosystem reasoning)"];
+    typed    [label="typed-OODA\ncapability/effect model"];
+    recipes  [label="Recipes (recipe-runner invocation)", fillcolor="#fff6df"];
+    prompts  [label="Prompt assets prompt_assets/simard/*", fillcolor="#fff6df"];
+    memory   [label="Cognitive-memory recall (embedded lbug)", fillcolor="#eaf6ff"];
+  }
+  engineer[label="engineer worktree agent (Layer 8 journey)"];
+  ledger  [label="(:DataStore typed-ooda ledger SQLite)", fillcolor="#eaf6ff"];
+
+  daemon -> ooda;
+  daemon -> overseer;
+  ooda -> memory [label="prepare/consolidate"];
+  ooda -> recipes [label="orient/decide (RecipeBrain)"];
+  ooda -> typed [label="ACT AdvanceGoal"];
+  overseer -> recipes [label="merge-queue / ecosystem / smart-orchestrator"];
+  overseer -> memory [label="recall_pass / write-back"];
+  typed -> recipes [label="goal-session-actor.yaml"];
+  typed -> engineer [label="SpawnEngineer effect"];
+  typed -> ledger;
+  recipes -> prompts [label="resolve_recipe_path"];
+  typed -> prompts [label="load_policy"];
+  memory -> lbug;
+  recipes -> rr;
+}

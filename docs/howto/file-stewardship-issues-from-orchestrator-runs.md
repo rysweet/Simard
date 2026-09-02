@@ -42,7 +42,19 @@ let run = OrchestratorRunSummary {
 Pick `source_module` carefully — it is the routing key. The amplihack family
 includes `amplihack`, `recipe-runner`, `orchestrator`, and `recipe::`; the
 Simard family includes `engineer_loop`, `base_type`, `self_improve`,
-`goal_curation`, `agent_loop`, `session_builder`, and `simard::`.
+`goal_curation`, `agent_loop`, `session_builder`, and `simard::`. A source that
+matches **no** keyword (for example a bare `"overseer"`) is not rejected — it
+falls back to the **default repo** (`rysweet/Simard`) and the fallback is
+logged via `tracing::warn!`. Prefer an explicit `simard::` / `amplihack::`
+prefix when you know the right home; rely on the default only when you
+deliberately want unclassified work tracked in `rysweet/Simard`.
+
+> **Keep secrets out of the payload.** `error_text` is rendered **verbatim into
+> a public GitHub issue body**, and an unmatched `source_module` is echoed at
+> `WARN` log level by the routing fallback. Never place tokens, credentials, or
+> PII in either field — redact them in the producer before constructing the
+> `OrchestratorRunSummary`. The default-repo fallback broadens where issues can
+> be written, so this hygiene is what keeps that reach safe.
 
 ## 2. Choose a `GhClient` implementation
 
@@ -67,7 +79,7 @@ use simard::stewardship::FakeGhClient;
 ```rust
 use simard::stewardship::{process_orchestrator_run, StewardshipOutcome};
 
-match process_orchestrator_run(&run, &gh, &mut board)? {
+match process_orchestrator_run(&run, &gh)? {
     StewardshipOutcome::FiledNew { repo, issue_number, url, signature } => {
         tracing::info!(%repo, issue_number, %url, %signature,
             "stewardship filed new issue");
@@ -79,33 +91,29 @@ match process_orchestrator_run(&run, &gh, &mut board)? {
 }
 ```
 
-`board` is mutated in both cases — the issue handle is enqueued via
-`enqueue_stewardship_issue` with a deterministic id, so re-invoking the loop
-with the same `OrchestratorRunSummary` is idempotent.
+The API has no goal-board parameter. Re-invoking the loop with the same
+`OrchestratorRunSummary` remains idempotent through the open-issue signature
+search.
 
 ## 4. Handle errors loudly
 
-The loop has no fallbacks. Propagate every error up to your orchestrator's
-failure path; do not catch and swallow. The snippet below is shown inside a
-function returning `SimardResult<()>` so the `return Err(other)` arm
-type-checks:
+The loop surfaces `gh` and input failures as first-class errors — propagate
+every one up to your orchestrator's failure path; do not catch and swallow.
+Routing itself no longer errors: an unmatched `source_module` falls back to the
+default repo (`rysweet/Simard`) and is `tracing::warn!`-logged, so you never
+need to handle a routing error. The snippet below is shown inside a function
+returning `SimardResult<()>` so the `return Err(other)` arm type-checks:
 
 ```rust
 use simard::error::{SimardError, SimardResult};
 use simard::stewardship::process_orchestrator_run;
 
 fn handle_failed_run(
-    run:   &OrchestratorRunSummary,
-    gh:    &dyn GhClient,
-    board: &mut GoalBoard,
+    run: &OrchestratorRunSummary,
+    gh:  &dyn GhClient,
 ) -> SimardResult<()> {
-    if let Err(err) = process_orchestrator_run(run, gh, board) {
+    if let Err(err) = process_orchestrator_run(run, gh) {
         match err {
-            SimardError::StewardshipRoutingAmbiguous { source } => {
-                // Add the missing keyword to the routing matrix and re-run;
-                // do not pick a default repo.
-                tracing::error!(%source, "stewardship routing ambiguous");
-            }
             SimardError::StewardshipGhCommandFailed { reason } => {
                 // gh is broken / unauthenticated / rate-limited; surface as a
                 // first-class operational failure.
@@ -115,6 +123,9 @@ fn handle_failed_run(
                 // Bug in the caller — fix the producer of OrchestratorRunSummary.
                 tracing::error!(field, "stewardship invalid run summary");
             }
+            // Routing never returns StewardshipRoutingAmbiguous anymore — an
+            // unmatched source falls back to the default repo (see step 1). The
+            // variant is retained only for API stability.
             other => return Err(other),
         }
     }
@@ -142,10 +153,12 @@ score `0.6`.
 
 ## Common Pitfalls
 
-- **Routing ambiguous.** Means your `source_module` does not contain any
-  known keyword. Fix: change the producer to emit a routable string (e.g.
-  prefix it with `simard::` or `amplihack::`). Do not edit the routing
-  matrix without also adding a test.
+- **Unmatched `source_module`.** A source that contains no known keyword is
+  **not** an error — it routes to the default repo (`rysweet/Simard`) and emits
+  a `tracing::warn!` naming the source and the chosen default. If you meant it
+  to land elsewhere, change the producer to emit a routable string (e.g. prefix
+  it with `simard::` or `amplihack::`), or add the keyword to the routing matrix
+  (with a test). Watch for the warn line if issues show up in an unexpected repo.
 - **`gh` not authenticated.** `StewardshipGhCommandFailed` will carry the
   trimmed stderr — usually a hint to run `gh auth login`.
 - **Backlog appears unchanged after a match.** Expected: the deterministic

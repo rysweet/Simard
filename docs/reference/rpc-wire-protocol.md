@@ -328,13 +328,18 @@ List all available knowledge packs.
 
 ### `knowledge.pack_info`
 
-Get details about a specific pack.
+Get details about a specific pack. In addition to the manifest metadata, the
+response carries two computed booleans reflecting on-disk state (parity with the
+upstream agent-kgpacks `pack_info`): `db_exists` (the pack's `pack.db` database
+file is present) and `urls_file_exists` (the pack's `urls.json` provenance file
+is present; native packs keep citations in the database `url` column, so this is
+typically `false` for them).
 
 **Params**: `{"pack_name": "rust-expert"}`
 
 **Result**:
 ```json
-{"name": "rust-expert", "description": "...", "article_count": 150, "section_count": 890}
+{"name": "rust-expert", "description": "...", "article_count": 150, "section_count": 890, "db_exists": true, "urls_file_exists": false}
 ```
 
 ---

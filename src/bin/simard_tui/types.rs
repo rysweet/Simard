@@ -66,6 +66,11 @@ pub struct ActiveGoal {
     pub current_activity: Option<String>,
     #[serde(default)]
     pub wip_refs: Vec<WipRef>,
+    /// Free-form labels (tags) mirrored from the daemon's goal (issue #2743) so
+    /// the Goals tab can render label badges and filter by tag. `#[serde(default)]`
+    /// keeps unlabelled goals (no `labels` key) deserializing to an empty list.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// A backlog item scored for future promotion.
@@ -186,6 +191,7 @@ mod tests {
 
     fn sample_active_goal() -> ActiveGoal {
         ActiveGoal {
+            labels: Vec::new(),
             repo: None,
             id: "g-1".to_string(),
             description: "Ship MVP".to_string(),
@@ -365,8 +371,8 @@ mod tests {
                     "wip_refs": []
                 },
                 {
-                    "id": "goal-refactor-bridge",
-                    "description": "Refactor bridge layer",
+                    "id": "goal-refactor-memory",
+                    "description": "Refactor memory layer",
                     "priority": 2,
                     "status": {"Blocked": "Waiting on lbug 0.16 release"}
                 }

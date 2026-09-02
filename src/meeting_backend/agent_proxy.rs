@@ -1,12 +1,15 @@
 //! Direct-invoke agent proxy for meeting conversations.
 //!
-//! Spawns the coding agent per-turn via `copilot -p "MESSAGE"` with piped
-//! stdout — no PTY, no script(1), no bash wrapper. This is the "thin proxy"
-//! replacing the 30-90s PTY overhead (issue #2179).
+//! Spawns the coding agent per-turn with the prompt delivered on STDIN and
+//! piped stdout — no PTY, no script(1), no bash wrapper. This is the "thin
+//! proxy" replacing the 30-90s PTY overhead (issue #2179).
 //!
-//! Copilot CLI does not support persistent interactive stdin when piped, so
-//! each turn is a separate subprocess. The conversation context is maintained
-//! by the caller (MeetingBackend), not by the agent process.
+//! The prompt is streamed on stdin (never inlined as a `-p <MESSAGE>` argv
+//! token) so an arbitrarily large turn can never overflow `ARG_MAX` and make
+//! `exec` fail with E2BIG ("Argument list too long") — the live Signal defect
+//! fixed by issue #2640. Each turn is a separate subprocess; the conversation
+//! context is maintained by the caller (MeetingBackend), not by the agent
+//! process.
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
@@ -210,7 +213,12 @@ fn kill_process_group(leader_pid: u32) {
     }
 }
 
-/// Resolve the agent command and args for one-shot `-p` invocations.
+/// Resolve the agent command and its fixed-size base args. The prompt is
+/// delivered on STDIN (issue #2640), never inlined on `argv`, so no arm carries
+/// an inline prompt: `copilot` omits `-p` entirely (it reads its prompt from
+/// stdin when `-p` is absent), while `claude` carries a BARE `-p` (print mode)
+/// so it honours the piped-stdin prompt. Either way `argv` stays constant-size
+/// and can never overflow `ARG_MAX`.
 fn resolve_agent_command() -> SimardResult<(String, Vec<String>)> {
     let config = crate::runtime_config::RuntimeConfig::load()?;
     match config.llm_provider {
@@ -223,17 +231,23 @@ fn resolve_agent_command() -> SimardResult<(String, Vec<String>)> {
         )),
         crate::session_builder::LlmProvider::RustyClawd => Ok((
             "claude".to_string(),
-            vec!["--allowedTools".to_string(), "all".to_string()],
+            vec![
+                "-p".to_string(),
+                "--allowedTools".to_string(),
+                "all".to_string(),
+            ],
         )),
     }
 }
 
-/// A direct-invoke agent proxy that spawns the coding agent per-turn via
-/// `copilot -p "MESSAGE"` with piped stdout.
+/// A direct-invoke agent proxy that spawns the coding agent per-turn with the
+/// prompt streamed on STDIN and stdout captured over a pipe.
 ///
 /// Unlike `CopilotSdkAdapter` (which uses PTY/script per turn), this proxy
-/// invokes the agent directly with `-p` flag and captures stdout — no PTY
-/// allocation, no script(1) wrapper, no bash intermediary.
+/// invokes the agent directly and captures stdout — no PTY allocation, no
+/// script(1) wrapper, no bash intermediary. The prompt rides on stdin, never on
+/// `argv`, so a large turn cannot overflow `ARG_MAX` and E2BIG on `exec`
+/// (issue #2640).
 ///
 /// Response time: ~4-15s per turn vs 30-90s with the old PTY path.
 pub struct PersistentAgentProxy {
@@ -312,6 +326,44 @@ impl PersistentAgentProxy {
         Ok(())
     }
 
+    /// Build the per-turn agent command carrying ONLY the fixed-size base flags
+    /// on `argv` — the prompt is delivered out-of-band on **stdin** (issue
+    /// #2640), never as an argv token, so this `argv` is prompt-independent and
+    /// can never overflow `ARG_MAX`. Configures the piped stdio, process group,
+    /// and workdir shared by every invocation; the caller attaches the stdin
+    /// prompt via [`crate::spawn_payload::attach_prompt_std`] before spawning.
+    fn build_agent_command(&self) -> Command {
+        let mut cmd = Command::new(&self.agent_cmd);
+        cmd.args(&self.agent_base_args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        // Run the agent as the leader of its own process group so the liveness
+        // reaper can kill the WHOLE subtree, not just the direct child. The
+        // agent CLIs (`copilot`/`claude`) are Node processes that spawn
+        // descendants which inherit the stdout/stderr pipe write-ends; killing
+        // only the direct child would leave those descendants alive, holding
+        // the pipes open so the reader threads never see EOF (leaked threads +
+        // FDs + orphaned processes). `process_group(0)` makes the child's PGID
+        // equal its PID; the reaper then signals the negated PGID.
+        //
+        // Tradeoff: the child no longer shares Simard's foreground process
+        // group, so a terminal SIGINT (Ctrl-C) sent to Simard mid-turn no
+        // longer reaches the agent. That is acceptable here — the agent is a
+        // one-shot invocation that self-terminates, and the idle-liveness
+        // reaper still reaps a genuinely hung subtree.
+        cmd.process_group(0);
+
+        // Operate in the active repository so the agent can inspect code and
+        // run `simard` commands in the correct context. Resolved in `open()`
+        // from the active repo / explicit config — never a hardcoded operator
+        // path (issue #2549). When unresolved, inherit the process cwd.
+        if let Some(dir) = &self.workdir {
+            cmd.current_dir(dir);
+        }
+        cmd
+    }
+
     /// Invoke the agent with a prompt and return the full (noise-stripped)
     /// response. Thin wrapper over [`Self::invoke_agent_streaming`] with a
     /// no-op chunk sink, for callers that don't need incremental output.
@@ -341,45 +393,43 @@ impl PersistentAgentProxy {
             "Invoking agent (streaming)"
         );
 
-        let mut cmd = Command::new(&self.agent_cmd);
-        cmd.args(&self.agent_base_args)
-            .arg("-p")
-            .arg(prompt)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        let mut cmd = self.build_agent_command();
 
-        // Run the agent as the leader of its own process group so the liveness
-        // reaper can kill the WHOLE subtree, not just the direct child. The
-        // agent CLIs (`copilot`/`claude`) are Node processes that spawn
-        // descendants which inherit the stdout/stderr pipe write-ends; killing
-        // only the direct child would leave those descendants alive, holding
-        // the pipes open so the reader threads never see EOF (leaked threads +
-        // FDs + orphaned processes). `process_group(0)` makes the child's PGID
-        // equal its PID; the reaper then signals the negated PGID.
-        //
-        // Tradeoff: the child no longer shares Simard's foreground process
-        // group, so a terminal SIGINT (Ctrl-C) sent to Simard mid-turn no
-        // longer reaches the agent. That is acceptable here — the agent is a
-        // one-shot `-p` invocation that self-terminates, and the idle-liveness
-        // reaper still reaps a genuinely hung subtree.
-        cmd.process_group(0);
-
-        // Operate in the active repository so the agent can inspect code and
-        // run `simard` commands in the correct context. Resolved in `open()`
-        // from the active repo / explicit config — never a hardcoded operator
-        // path (issue #2549). When unresolved, inherit the process cwd.
-        if let Some(dir) = &self.workdir {
-            cmd.current_dir(dir);
-        }
-
-        let start = Instant::now();
-        let mut child = cmd
-            .spawn()
+        // Deliver the (possibly large) prompt on STDIN via the single spawn
+        // facade, never as an argv token: the agent reads its prompt from stdin
+        // (copilot when no `-p` is given; claude in `-p` print mode), so the
+        // prompt never contributes to `ARG_MAX` regardless of size. Inlining it
+        // as `-p <prompt>` made `exec` fail with E2BIG ("Argument list too
+        // long") the instant a large Signal turn was routed here (elapsed_ms=0)
+        // — the live defect fixed by issue #2640, mirroring the proven
+        // base_type_copilot stdin transport. Sets the child's stdin to a pipe;
+        // the bytes are written by the feeder thread below after spawn.
+        let applied = crate::spawn_payload::attach_prompt_std(&mut cmd, prompt.as_bytes())
             .map_err(|e| SimardError::AdapterInvocationFailed {
                 base_type: "persistent-agent-proxy".to_string(),
-                reason: format!("failed to spawn '{}': {e}", self.agent_cmd),
+                reason: format!("failed to prepare agent prompt delivery: {e}"),
             })?;
+
+        let start = Instant::now();
+        let mut child = cmd.spawn().map_err(|e| {
+            // A pre-exec spawn failure (E2BIG / ENOMEM / ENOENT / …) has no
+            // child and no `ExitStatus`, so the exit-code classifier never sees
+            // it. Classify and record it into the Overseer failure sink so the
+            // failure is diagnosed at its launch site, never silently swallowed
+            // (issue #2640).
+            crate::spawn_payload::record_spawn_failure(&e, "meeting-agent-proxy");
+            SimardError::AdapterInvocationFailed {
+                base_type: "persistent-agent-proxy".to_string(),
+                reason: format!("failed to spawn '{}': {e}", self.agent_cmd),
+            }
+        })?;
+
+        // Feed the prompt on a dedicated thread so a large prompt cannot
+        // deadlock against the child filling its stdout pipe while we are still
+        // writing stdin. The feeder closes stdin on completion so the agent
+        // reads EOF. Joined after the stdout loop below.
+        let stdin = child.stdin.take();
+        let feeder = std::thread::spawn(move || applied.feed(stdin));
 
         // Read stdout in a thread, forwarding each line over a channel.
         let stdout = child
@@ -479,6 +529,35 @@ impl PersistentAgentProxy {
                 // running (it closed stdout early), so switch to bounded
                 // exit/idle polling above.
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => stdout_eof = true,
+            }
+        }
+
+        // Join the stdin feeder now the child has exited / been reaped. A child
+        // that exits (or is reaped on idle) before consuming its stdin closes
+        // the read end, so the feeder's write gets `BrokenPipe` — expected here
+        // (an agent that answers from a short prefix of the prompt, or the idle
+        // reaper killing a hung child) and tolerated. Any OTHER feed error, or a
+        // panic, is a real transport fault and is surfaced loudly — no silent
+        // fallback (issue #2640).
+        match feeder.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                debug!(
+                    "agent stdin feeder: child closed stdin before consuming the \
+                     prompt (BrokenPipe) — tolerated"
+                );
+            }
+            Ok(Err(e)) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: "persistent-agent-proxy".to_string(),
+                    reason: format!("failed to stream agent prompt on stdin: {e}"),
+                });
+            }
+            Err(_) => {
+                return Err(SimardError::AdapterInvocationFailed {
+                    base_type: "persistent-agent-proxy".to_string(),
+                    reason: "agent prompt feeder thread panicked".to_string(),
+                });
             }
         }
 
@@ -669,8 +748,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_command_returns_valid_command() {
-        let _result = resolve_agent_command();
+    fn resolve_agent_command_maps_provider_to_a_known_agent() {
+        // Config may be unavailable in a headless test env; but whenever it
+        // resolves, the command must be one of the two supported agents with
+        // its canonical argv — never an empty or arbitrary program.
+        if let Ok((program, args)) = resolve_agent_command() {
+            match program.as_str() {
+                "copilot" => {
+                    assert_eq!(args, vec!["--allow-all-tools", "--allow-all-paths"]);
+                }
+                "claude" => assert_eq!(args, vec!["-p", "--allowedTools", "all"]),
+                other => panic!("unexpected agent program: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -755,11 +845,40 @@ mod tests {
     // ── issue #2549: repo-derived workdir (no hardcoded operator path) ──
 
     #[test]
+    #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_derives_repo_root_from_cwd() {
-        // `cargo test` runs inside this git checkout, so resolution must yield
-        // a real repository root — and it must NOT be the old hardcoded path.
-        let resolved = resolve_agent_workdir()
-            .expect("workdir should resolve to the repo root inside a git checkout");
+        // Exercise cwd-derivation (`git rev-parse --show-toplevel`) without
+        // mutating process-global cwd — `set_current_dir` corrupts concurrent
+        // cwd-readers (e.g. `procfs_probe_detects_self_cwd`) in the same parallel
+        // test binary. Clear any override, then guard on a discoverable root:
+        // assert full invariants inside a checkout (CI); skip cleanly when none is
+        // found (the self-deploy gate's non-git build dir, issue #4505) instead of
+        // `.expect()`-panicking. Serialised because clearing WORKDIR_ENV is shared
+        // with the override tests below.
+        // Contract: docs/testing/checkout-independent-workdir-tests.md
+        let prev = std::env::var_os(WORKDIR_ENV);
+        // SAFETY: env mutation is serialised via the serial key above.
+        unsafe { std::env::remove_var(WORKDIR_ENV) };
+
+        let resolved = resolve_agent_workdir();
+
+        // Restore before asserting so a panic cannot leak the cleared override.
+        unsafe {
+            if let Some(v) = &prev {
+                std::env::set_var(WORKDIR_ENV, v);
+            }
+        }
+
+        let Some(resolved) = resolved else {
+            // No git checkout discoverable from cwd (self-deploy gate) — nothing
+            // to assert; skip cleanly with a traced decision, not a silent fallback.
+            debug!(
+                "resolve_agent_workdir_derives_repo_root_from_cwd: no repo root \
+                 discoverable from cwd — skipping repo-root assertions (issue #4505)"
+            );
+            return;
+        };
+
         assert!(resolved.is_dir(), "resolved workdir must exist");
         assert!(
             resolved.join(".git").exists(),
@@ -802,12 +921,18 @@ mod tests {
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn resolve_agent_workdir_ignores_nonexistent_override() {
+        // A bogus override must be ignored and resolution must fall through to
+        // cwd-derivation. No cwd mutation (see the derives-from-cwd test above for
+        // why): set a non-existent WORKDIR_ENV, restore it, then guard on a
+        // discoverable root. Skips cleanly outside a checkout (issue #4505); either
+        // way it must NEVER be the hardcoded operator path.
         let prev = std::env::var_os(WORKDIR_ENV);
         // SAFETY: env mutation is serialised via the serial key above.
         unsafe { std::env::set_var(WORKDIR_ENV, "/nonexistent/simard/meeting/dir") };
 
         let resolved = resolve_agent_workdir();
 
+        // Restore before asserting so a panic cannot leak the bogus override.
         unsafe {
             match &prev {
                 Some(v) => std::env::set_var(WORKDIR_ENV, v),
@@ -815,9 +940,15 @@ mod tests {
             }
         }
 
-        // A bogus override must fall through to cwd-derivation (the repo root),
-        // never a hardcoded path — so inside the checkout we still get a repo.
-        let resolved = resolved.expect("should fall through to repo root");
+        let Some(resolved) = resolved else {
+            // Bogus override correctly ignored, and no repo root is discoverable
+            // from cwd (self-deploy gate). Nothing to assert; skip cleanly.
+            debug!(
+                "resolve_agent_workdir_ignores_nonexistent_override: bogus override \
+                 ignored and no repo root discoverable from cwd — skipping (issue #4505)"
+            );
+            return;
+        };
         assert_ne!(
             resolved,
             PathBuf::from("/home/azureuser/src/Simard/worktrees/main"),
@@ -832,9 +963,8 @@ mod tests {
         // AC (b): a genuinely idle/hung child — one that produces NO output for
         // the whole idle-liveness window — must still be detected and reaped,
         // surfacing an honest idle-timeout error (never a silent hang, never a
-        // masqueraded empty response). `sh -c 'sleep 30'` ignores the trailing
-        // `-p <prompt>` args (they become $0/$1), so it hangs, silent,
-        // deterministically.
+        // masqueraded empty response). `sh -c 'sleep 30'` ignores its stdin
+        // prompt entirely, so it hangs, silent, deterministically.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "sleep 30".to_string()];
@@ -969,11 +1099,12 @@ mod tests {
 
     #[test]
     fn invoke_agent_uses_piped_stdio_not_a_pty() {
-        // The thin proxy spawns the agent with a null stdin and a piped stdout —
-        // never a PTY/script(1)/bash wrapper (issue #2179, replacing the 30-90s
-        // PTY overhead). A child that inspects its own descriptors must therefore
-        // observe NON-tty stdin and stdout; if a PTY leaked back in, `[ -t 0 ]` /
-        // `[ -t 1 ]` would report a terminal and this assertion would fail.
+        // The thin proxy spawns the agent with a piped stdin (carrying the
+        // prompt) and a piped stdout — never a PTY/script(1)/bash wrapper (issue
+        // #2179, replacing the 30-90s PTY overhead). A child that inspects its
+        // own descriptors must therefore observe NON-tty stdin and stdout; if a
+        // PTY leaked back in, `[ -t 0 ]` / `[ -t 1 ]` would report a terminal
+        // and this assertion would fail.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec![
@@ -1112,5 +1243,260 @@ mod tests {
             response, "hello world",
             "final text must match the streamed substantive content"
         );
+    }
+
+    // ── issue #2640: argv-free stdin prompt transport (meeting/Signal proxy) ──
+    //
+    // LIVE BUG: an inbound Signal message routed through a meeting session hits
+    // `PersistentAgentProxy::invoke_agent_streaming`, which used to inline the
+    // whole turn prompt as a `-p <prompt>` argv token. A large prompt (or one
+    // crossing `MAX_ARG_STRLEN`) made `execve` return E2BIG ("Argument list too
+    // long") PRE-EXEC, so the turn failed instantly (`elapsed_ms=0`) and the
+    // user's message never reached the agent. The fix delivers the prompt on
+    // STDIN (via `spawn_payload::attach_prompt_std` + a feeder thread) and puts
+    // only fixed-size flags on argv. These tests pin that contract; they FAIL
+    // against the pre-fix `-p <prompt>` code (T1 references the not-yet-created
+    // `build_agent_command` seam; the runtime tests E2BIG or mis-shape argv).
+    //
+    // All hermetic: no network, no Signal, no real copilot/claude — argv-shape
+    // is asserted on the builder seam without spawning, and the round-trip /
+    // argv-free tests drive `cat` / `sh -c` stand-ins through the private
+    // `agent_cmd` + `agent_base_args` seam (mirroring the liveness tests above).
+
+    /// T1 — argv-constant guard (spawn-free). The command builder carries ONLY
+    /// the fixed-size base flags; the prompt is not even a parameter, so the
+    /// argv is prompt-independent BY CONSTRUCTION. Asserted on
+    /// `build_agent_command().get_args()` with no spawn. Because
+    /// `attach_prompt_std` adds no argv tokens, this vector is exactly what
+    /// `execve` receives — proving the prompt left argv.
+    #[test]
+    fn build_agent_command_argv_is_fixed_and_prompt_free() {
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "copilot".to_string();
+        proxy.agent_base_args = vec![
+            "--allow-all-tools".to_string(),
+            "--allow-all-paths".to_string(),
+        ];
+
+        // NOTE: `build_agent_command` is the fixed-argv seam introduced by the
+        // fix. It takes NO prompt — that is the whole point (the prompt can
+        // never reach argv even by accident). This call fails to compile against
+        // the pre-fix code, which is the intended TDD "fails initially" signal.
+        let cmd = proxy.build_agent_command();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args, proxy.agent_base_args,
+            "build_agent_command must place ONLY the fixed base args on argv — \
+             no -p, no prompt token"
+        );
+        assert!(
+            !args.iter().any(|a| a == "-p"),
+            "copilot argv must not contain -p: the prompt travels on stdin"
+        );
+        let argv_bytes: usize = args.iter().map(String::len).sum();
+        assert!(
+            argv_bytes < 4096,
+            "argv must stay small and constant-size (got {argv_bytes} bytes) — \
+             a prompt-sized argv is exactly the E2BIG defect (#2640)"
+        );
+    }
+
+    /// T1 (runtime) — the crown-jewel regression guard: a >256 KiB prompt must
+    /// spawn via STDIN, never argv. The child echoes its OWN argv (`$@`); if any
+    /// prompt byte reached argv, (a) `execve` would E2BIG on the single ~300 KB
+    /// argument and the child would never run, and (b) the sentinel would appear
+    /// in the echoed argv. After the fix the prompt is on stdin, the child runs,
+    /// and its argv is free of the sentinel. This also pins the BrokenPipe
+    /// tolerance: `sh -c 'printf …'` exits WITHOUT reading its (huge) stdin, so
+    /// the feeder gets EPIPE — which must be tolerated, not surfaced as an error.
+    #[test]
+    fn large_prompt_is_delivered_on_stdin_not_argv() {
+        const SENTINEL: &str = "MEETING_SIGNAL_ARGV_SENTINEL";
+        let prompt = format!("{SENTINEL}_{}", "X".repeat(300 * 1024));
+        assert!(
+            prompt.len() > 256 * 1024,
+            "test payload must exceed 256 KiB to exercise the E2BIG boundary"
+        );
+
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "sh".to_string();
+        proxy.agent_base_args = vec![
+            "-c".to_string(),
+            "printf 'ARGV_START'; printf '<%s>' \"$@\"; printf 'ARGV_END'".to_string(),
+            // Becomes $0. The fix must add NO further argv token; the pre-fix
+            // code appended `-p <300 KB prompt>` here → instant E2BIG.
+            "meeting-argv-probe".to_string(),
+        ];
+        proxy.idle_window = Some(Duration::from_secs(30));
+
+        let response = proxy
+            .invoke_agent(&prompt)
+            .expect("a >256 KiB prompt must spawn (stdin transport) without E2BIG");
+
+        assert!(
+            response.contains("ARGV_START") && response.contains("ARGV_END"),
+            "the child must have executed (argv small enough to exec): {response:?}"
+        );
+        assert!(
+            !response.contains(SENTINEL),
+            "prompt bytes must NEVER appear in the child's argv — they belong on \
+             stdin (got: {response:?})"
+        );
+    }
+
+    /// T2 — stdin round-trip: a `>= 256 KiB` prompt handed to `cat` (which reads
+    /// stdin and echoes it) comes back in full and byte-exact. Proves the stdin
+    /// transport, that a large payload does NOT E2BIG, and that nothing is
+    /// truncated. Also pins the feeder-thread requirement: `cat` back-pressures
+    /// stdout while the feeder writes 256 KiB to stdin, so an inline (non-thread)
+    /// feeder would deadlock and be reaped by the idle window (Err) instead of
+    /// returning the payload.
+    #[test]
+    fn large_prompt_round_trips_through_stdin_without_truncation() {
+        // Build a >=256 KiB payload of clean, noise-free lines (each distinct so
+        // the assertion also proves ordering and no de-duplication). Every line
+        // is > 2 chars and matches no `line_is_noise` marker, so
+        // `strip_copilot_noise` is a no-op and the round-trip is exact.
+        let mut payload = String::new();
+        let mut i = 0usize;
+        while payload.len() < 256 * 1024 {
+            if i > 0 {
+                payload.push('\n');
+            }
+            payload.push_str(&format!("meeting-signal-payload-line-{i:08}-abcdefghij"));
+            i += 1;
+        }
+        assert!(payload.len() >= 256 * 1024);
+
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "cat".to_string();
+        proxy.agent_base_args = vec![];
+        proxy.idle_window = Some(Duration::from_secs(30));
+
+        let response = proxy
+            .invoke_agent(&payload)
+            .expect("a >=256 KiB prompt must round-trip via stdin with no E2BIG");
+
+        assert_eq!(
+            response.len(),
+            payload.len(),
+            "stdin payload must round-trip without truncation"
+        );
+        assert_eq!(
+            response, payload,
+            "cat must echo the exact bytes fed on stdin (full-fidelity transport)"
+        );
+    }
+
+    /// T3 — small-prompt happy path proving stdin delivery to a child that reads
+    /// stdin. The prompt is fed on stdin (not argv); a `sh -c` stand-in reads it
+    /// and echoes it back. Against the pre-fix `Stdio::null()` stdin this returns
+    /// `got:` (empty) — so it fails until the prompt is piped.
+    #[test]
+    fn small_prompt_reaches_child_on_stdin() {
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "sh".to_string();
+        proxy.agent_base_args = vec![
+            "-c".to_string(),
+            "IFS= read -r line; printf '%s' \"got:$line\"".to_string(),
+        ];
+        proxy.idle_window = Some(Duration::from_secs(30));
+
+        let response = proxy
+            .invoke_agent("hello-from-stdin")
+            .expect("prompt fed on stdin must reach a child that reads stdin");
+        assert_eq!(
+            response, "got:hello-from-stdin",
+            "the prompt must arrive on the child's stdin, not on argv"
+        );
+    }
+
+    /// T4 — injection inertness. A prompt full of shell metacharacters
+    /// (`$(id)`, backtick `whoami`, `;`, `#`, a `rm -rf` token) fed to `cat`
+    /// round-trips byte-identically with NO execution: there is no shell in the
+    /// payload path, so the metacharacters are inert data. The `rm` target is a
+    /// non-existent path purely as defence-in-depth — nothing here ever reaches
+    /// a shell.
+    #[test]
+    fn shell_metacharacters_in_prompt_are_inert() {
+        let payload = "$(id);`whoami`;rm -rf /tmp/nonexistent-meeting-signal-marker #e2big";
+
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "cat".to_string();
+        proxy.agent_base_args = vec![];
+        proxy.idle_window = Some(Duration::from_secs(30));
+
+        let response = proxy
+            .invoke_agent(payload)
+            .expect("cat must echo the raw prompt bytes");
+        assert_eq!(
+            response, payload,
+            "prompt must round-trip byte-identically — no shell interpretation"
+        );
+        assert!(
+            response.contains("$(id)") && response.contains("`whoami`"),
+            "command-substitution text must be preserved verbatim, never expanded"
+        );
+    }
+
+    // T5 — liveness regression: the existing sleep / `exec 1>&-` / `seq` /
+    // `printf` / no-tty tests above (`invoke_agent_degrades_honestly_on_timeout`,
+    // `invoke_agent_uses_piped_stdio_not_a_pty`, etc.) must stay green after the
+    // transport change. `sh -c` scripts ignore stdin, so moving the prompt off
+    // argv does not perturb them. No new test is added here — those tests ARE T5.
+
+    /// T6 — per-provider stdin invocation shape. Neither provider carries the
+    /// prompt on argv: `copilot` omits `-p` (it reads stdin when `-p` is absent),
+    /// while `claude` gains a BARE `-p` (print mode) with the prompt piped on
+    /// stdin. Serialized on the same key as the `runtime_config` env tests
+    /// because it forces the provider via `SIMARD_LLM_PROVIDER`.
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn resolve_agent_command_shapes_argv_for_stdin_prompt() {
+        let saved = std::env::var(crate::runtime_config::ENV_LLM_PROVIDER).ok();
+
+        // Copilot: no -p on argv (prompt on stdin).
+        unsafe { std::env::set_var(crate::runtime_config::ENV_LLM_PROVIDER, "copilot") };
+        let (cmd, args) = resolve_agent_command().expect("copilot provider must resolve");
+        assert_eq!(cmd, "copilot");
+        assert!(
+            !args.iter().any(|a| a == "-p"),
+            "copilot argv must NOT carry -p (prompt goes on stdin): {args:?}"
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--allow-all-tools".to_string(),
+                "--allow-all-paths".to_string(),
+            ],
+        );
+
+        // RustyClawd/claude: a BARE -p (print mode) with the prompt on stdin.
+        unsafe { std::env::set_var(crate::runtime_config::ENV_LLM_PROVIDER, "rustyclawd") };
+        let (cmd, args) = resolve_agent_command().expect("rustyclawd provider must resolve");
+        assert_eq!(cmd, "claude");
+        assert!(
+            args.iter().any(|a| a == "-p"),
+            "claude argv must carry a bare -p (print mode) so the piped stdin \
+             prompt is honoured: {args:?}"
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-p".to_string(),
+                "--allowedTools".to_string(),
+                "all".to_string(),
+            ],
+        );
+
+        // Restore the ambient env so other tests start clean.
+        match saved {
+            Some(v) => unsafe { std::env::set_var(crate::runtime_config::ENV_LLM_PROVIDER, v) },
+            None => unsafe { std::env::remove_var(crate::runtime_config::ENV_LLM_PROVIDER) },
+        }
     }
 }

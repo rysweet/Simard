@@ -91,6 +91,24 @@ pub struct OverseerTickReport {
     pub goals_health_suppressed: usize,
     pub errors: usize,
     pub panicked: bool,
+
+    // ── ADDITIVE (#4080): fatal-cycle signal, health-derivation input ─────
+    /// `true` **only** when the tick's OODA cycle itself failed — either
+    /// `run_cycle()` returned `Err` or the tick panicked (in which case
+    /// `panicked` is also set). It is the fatal-failure signal that (with
+    /// `panicked`) drives the `overseer` meta-thread's `"erroring"` health:
+    /// `last_success = !panicked && !cycle_failed`.
+    ///
+    /// It is deliberately **separate** from `errors`: an isolated
+    /// per-intervention `act()` failure increments `errors` (for visibility)
+    /// but leaves `cycle_failed` **false**, so a transient capability error no
+    /// longer pins the meta-thread in `"erroring"`. Covered by the struct-level
+    /// `#[serde(default)]` (defaults to `false` for legacy JSON written before
+    /// the field existed), so it needs no field-level attribute and does
+    /// **not** bump `SCHEMA_VERSION`. Placed immediately after
+    /// `panicked` so the two fatal-failure signals sit together.
+    pub cycle_failed: bool,
+
     pub duration_ms: u64,
 
     // ── NEW: informative, human-readable detail lists ────────────────────
@@ -156,6 +174,11 @@ JSON below carry their `did:` / `held:` labels, while `observed_details` do not.
   keeps `Clone`, `Debug`, `Default`, `PartialEq`, `Eq`, `Serialize`,
   `Deserialize`. Every call site consumes the report by reference or by a single
   move, so removing `Copy` is source-compatible.
+- The struct-level `#[serde(default)]` also covers the additive
+  `cycle_failed: bool` field (#4080): an older `activity.json` that predates it
+  deserializes with `cycle_failed = false`, and a newer file read by an older
+  binary ignores the unknown field. The derived health value the reader consumes
+  is unaffected either way.
 - The feed's [`SCHEMA_VERSION`](./overseer-activity-feed.md#data-model) stays at
   **`1`**. This is an *additive* change, not an incompatible one, so a
   rolling deploy (old daemon writing, new reader, or vice-versa) is safe in
@@ -331,6 +354,12 @@ context word — never the raw error body:
 ```
 did: intervention verify-and-merge failed — merge blocked (isolated, tick continued)
 ```
+
+Such an isolated failure increments `errors` (for feed / totals visibility) and
+appears here in `action_details`, but it leaves `cycle_failed` **false** and so
+does **not** pin the `overseer` meta-thread in `"erroring"` (#4080) — only a
+failed `run_cycle()` or a panic does. See
+[`health` derivation](./overseer-activity-feed.md#what-sets-the-meta-threads-consecutive_errors-4080).
 
 A genuinely empty tick (no problems, no actions, no holds, nothing suppressed)
 leaves both lists empty and keeps only the existing

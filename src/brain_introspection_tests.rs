@@ -27,7 +27,7 @@
 //!     `consolidated_facts` is the post−pre `(semantic+procedural)` stats delta
 //!     (the call returns `Option<String>`, not a count).
 //!   * NO destructive superseded/semantic deletes happen daemon-side
-//!     (`prune_superseded` over the IPC bridge is a `Ok(0)` no-op — calling it
+//!     (`prune_superseded` over the IPC memory is a `Ok(0)` no-op — calling it
 //!     would be a silent-degradation hazard, so the hook must not call it).
 //!
 //! ```ignore
@@ -56,8 +56,10 @@
 //! }
 //! impl BrainIntrospectionReport { pub fn summary(&self) -> String; }
 //!
-//! pub fn parse_brain_introspection_text(stdout: &str)
-//!     -> Result<BrainIntrospectionReport, String>;
+//! // #4968: the brittle `parse_brain_introspection_text` marker scraper is
+//! //  RETIRED — the rail now reads a typed record fail-closed instead:
+//! pub fn read_verified_brain_introspection(path: &Path, invoke_start: SystemTime)
+//!     -> SimardResult<BrainIntrospectionRecord>;   // R1–R7, in brain_introspection_record.rs
 //! pub(crate) fn resolve_recipe_path(repo_root: &Path, home_override: Option<&Path>)
 //!     -> Option<PathBuf>;
 //! pub fn run_brain_introspection(mem: &dyn CognitiveMemoryOps, repo_root: &Path,
@@ -70,21 +72,29 @@
 use crate::brain_introspection::{
     BrainIntrospectionReport, DEFAULT_BASELINE_RUNS, DEFAULT_INTERVAL_SECS, DEFAULT_MAX_PRUNE,
     baseline_runs_from_env, enforce_prune_cap, interval_secs_from_env, max_prune_from_env,
-    parse_brain_introspection_text, resolve_recipe_path, run_brain_introspection,
-    run_memory_hygiene, should_run_introspection,
+    resolve_recipe_path, run_brain_introspection, run_memory_hygiene, should_run_introspection,
+};
+// #4968: the typed-record read path that replaces `parse_brain_introspection_text`.
+// These symbols do not exist yet, so their unresolved import is the intended,
+// deterministic RED signal under `cargo test` until the Builder lands
+// `src/brain_introspection_record.rs` + the `record-brain-introspection` verb.
+use crate::brain_introspection_record::{
+    BRAIN_INTROSPECTION_SCHEMA, BrainIntrospectionRecord, MAX_AGE_SECS,
+    read_verified_brain_introspection,
 };
 use crate::cognitive_memory::CognitiveMemoryOps;
-use crate::error::SimardResult;
+use crate::error::{SimardError, SimardResult};
 use crate::memory_cognitive::{
     CognitiveFact, CognitiveProcedure, CognitiveProspective, CognitiveStatistics,
     CognitiveWorkingSlot,
 };
 use crate::ooda_brain::prompt_store::embedded_fallback;
+use crate::operator_cli::dispatch_operator_cli;
 
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RECIPE_FILENAME: &str = "brain-introspection.yaml";
 const PROMPT_NAME: &str = "brain_introspection.md";
@@ -206,7 +216,7 @@ impl CognitiveMemoryOps for HygieneStub {
     }
 
     // SAFETY assertion seam: the first increment must NOT call this over the
-    // daemon's IPC bridge (it is a `Ok(0)` no-op there — a silent-degradation
+    // daemon's IPC memory (it is a `Ok(0)` no-op there — a silent-degradation
     // hazard). Any call flips the flag and the `no_destructive_value_prune`
     // test fails.
     fn prune_superseded(&self) -> SimardResult<usize> {
@@ -361,82 +371,356 @@ fn cap_never_exceeds_cap_or_request_property() {
 }
 
 // ===========================================================================
-// 4. parse_brain_introspection_text — recipe marker grammar
+// 4. #4968 — typed BrainIntrospectionRecord read path (replaces the deleted
+//    parse_brain_introspection_text marker grammar).
+//
+//    The recipe's final ACT step writes ONE typed, owner-only (0o600),
+//    freshness-checked record; the rail reads it FAIL-CLOSED via
+//    read_verified_brain_introspection (R1–R7). Every failure mode is a distinct
+//    AdapterInvocationFailed carrying its R-code — NEVER a silent default. Also
+//    covers the gated `simard cognition record-brain-introspection` writer verb
+//    and writer/reader parity (one shared type, no drift).
 // ===========================================================================
 
+/// Current unix-epoch seconds (records must be fresh for R7 to pass).
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+/// Write `bytes` verbatim to `path` as an owner-only `0o600` file (so R6 passes
+/// for every non-R6 case), creating parents. Used to author records the typed
+/// writer would never produce — malformed JSON, an unknown key, over-bounds
+/// lists — so the reader's fail-closed matrix is exercised directly.
+fn write_raw_600(path: &Path, bytes: &[u8]) {
+    std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+    std::fs::write(path, bytes).expect("write raw record");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod 0o600");
+    }
+}
+
+/// A fully-valid, fresh `BrainIntrospectionRecord` as raw JSON (a base to tweak
+/// per fail-closed test).
+fn valid_brain_json(epoch: u64) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "brain-introspection/v1",
+        "written_at_epoch": epoch,
+        "brain_health": ["fallback rate 4.2% (baseline 1.1%)"],
+        "patterns": ["coverage-comment step flakes on cold CI"],
+        "regressions": [],
+        "prune_candidates": [],
+        "prune_requested": 0,
+        "issue_url": serde_json::Value::Null
+    })
+}
+
+/// Assert a reader result is the fail-closed `Err` for R-code `code` (e.g.
+/// `"R4"`) — an `AdapterInvocationFailed` whose reason names that check. The
+/// reader must NEVER return `Ok` (a defaulted/partial record) on a bad input.
+fn assert_read_r(result: SimardResult<BrainIntrospectionRecord>, code: &str) {
+    match result {
+        Ok(rec) => panic!("expected fail-closed {code}, got Ok({rec:?})"),
+        Err(SimardError::AdapterInvocationFailed { reason, .. }) => assert!(
+            reason.contains(code),
+            "expected fail-closed reason to carry {code}, got: {reason}"
+        ),
+        Err(other) => panic!("expected AdapterInvocationFailed carrying {code}, got: {other:?}"),
+    }
+}
+
+/// Drive the operator CLI (the gated writer verb entry point).
+fn cli(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    dispatch_operator_cli(args.iter().map(|s| s.to_string()))
+}
+
+// --- pins: schema + freshness constant ---
+
 #[test]
-fn parse_happy_full_marker_set() {
-    let text = "\
-BRAIN_HEALTH: record_fallback rate 2.0% (baseline 1.8%)
-BRAIN_HEALTH: brain_lifecycle_decision parse-failure rate 0.5%
-PATTERN: ci-fix goals consistently land; refactor goals stall
-PATTERN: repeated `gh pr merge` permission errors
-REGRESSION: 0-succeeded-action cycles up from 1 to 4
-PRUNE_REQUESTED=12
-CONSOLIDATED_FACTS=4
-ISSUE_URL=https://github.com/rysweet/Simard/issues/9999
-";
-    let report = parse_brain_introspection_text(text).expect("valid marker set must parse");
-    assert_eq!(report.brain_health.len(), 2);
-    assert!(report.brain_health[0].contains("record_fallback"));
-    assert_eq!(report.patterns.len(), 2);
-    assert_eq!(report.regressions.len(), 1);
-    assert_eq!(report.prune_requested, 12);
+fn brain_schema_pin_is_v1() {
+    assert_eq!(BRAIN_INTROSPECTION_SCHEMA, "brain-introspection/v1");
+}
+
+#[test]
+fn brain_max_age_secs_is_five_minutes() {
+    assert_eq!(MAX_AGE_SECS, 300);
+}
+
+// --- happy path: a valid, fresh, 0o600 record is accepted ---
+
+#[test]
+fn read_accepts_a_valid_fresh_owner_only_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let epoch = now_epoch();
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_brain_json(epoch)).unwrap(),
+    );
+    // `invoke_start` is the rail's pre-spawn clock; a record written after it,
+    // moments ago, is fresh.
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+
+    let rec = read_verified_brain_introspection(&path, invoke_start)
+        .expect("a valid, fresh, 0o600 record must be accepted");
+    assert_eq!(rec.schema, "brain-introspection/v1");
+    assert_eq!(rec.brain_health.len(), 1);
+    assert!(rec.brain_health[0].contains("fallback rate"));
+    assert_eq!(rec.prune_requested, 0);
+    assert!(rec.issue_url.is_none());
+}
+
+// --- R1: absent / unreadable ---
+
+#[test]
+fn read_r1_absent_record_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R1");
+}
+
+// --- R2: present but not valid JSON ---
+
+#[test]
+fn read_r2_malformed_json_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    write_raw_600(&path, b"this is not valid json {{{");
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R2");
+}
+
+// --- R3: schema version pin ---
+
+#[test]
+fn read_r3_wrong_schema_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let mut json = valid_brain_json(now_epoch());
+    json["schema"] = serde_json::json!("brain-introspection/v2");
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R3");
+}
+
+// --- R4: closed-type parse & bounds (deny_unknown_fields / over-count / over-byte) ---
+
+#[test]
+fn read_r4_unknown_top_level_key_is_fail_closed() {
+    // Well-formed JSON (so it clears R2), but an extra top-level key that a
+    // `#[serde(deny_unknown_fields)]` struct must reject at R4.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let mut json = valid_brain_json(now_epoch());
+    json["bogus_extra_field"] = serde_json::json!(true);
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R4");
+}
+
+#[test]
+fn read_r4_over_count_brain_health_list_is_fail_closed() {
+    // brain_health caps at 32 elements; 33 is rejected (never truncated).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let mut json = valid_brain_json(now_epoch());
+    let over: Vec<String> = (0..33).map(|i| format!("finding {i}")).collect();
+    json["brain_health"] = serde_json::json!(over);
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R4");
+}
+
+#[test]
+fn read_r4_over_byte_brain_health_element_is_fail_closed() {
+    // A single element over the 256-byte per-element cap is rejected.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let mut json = valid_brain_json(now_epoch());
+    json["brain_health"] = serde_json::json!(["x".repeat(300)]);
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R4");
+}
+
+// --- R5: required-field validity (brain_health must be non-empty) ---
+
+#[test]
+fn read_r5_empty_brain_health_is_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let mut json = valid_brain_json(now_epoch());
+    json["brain_health"] = serde_json::json!([]);
+    write_raw_600(&path, &serde_json::to_vec(&json).unwrap());
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R5");
+}
+
+// --- R6: owner-only permissions ---
+
+#[cfg(unix)]
+#[test]
+fn read_r6_non_owner_only_permissions_is_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    // A valid, fresh record — but group/other-readable (0o644), which the reader
+    // must reject as R6 (a record the trusted 0o600 writer would never produce).
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_brain_json(now_epoch())).unwrap(),
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R6");
+}
+
+// --- R7: freshness / anti-replay ---
+
+#[test]
+fn read_r7_mtime_predates_invoke_start_is_fail_closed() {
+    // A record whose mtime predates `invoke_start` is a prior-run artifact the
+    // rail's pre-truncate would have removed; simulate by capturing an
+    // invoke_start in the FUTURE relative to the just-written file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_brain_json(now_epoch())).unwrap(),
+    );
+    let invoke_start = SystemTime::now() + Duration::from_secs(1_000);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R7");
+}
+
+#[test]
+fn read_r7_stale_written_at_epoch_is_fail_closed() {
+    // mtime is fresh, but the embedded written_at_epoch skews far from now,
+    // which the R7 defense-in-depth check must reject even though the file is new.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let stale = now_epoch().saturating_sub(10_000);
+    write_raw_600(
+        &path,
+        &serde_json::to_vec(&valid_brain_json(stale)).unwrap(),
+    );
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+    assert_read_r(read_verified_brain_introspection(&path, invoke_start), "R7");
+}
+
+// --- gated writer verb `simard cognition record-brain-introspection` + parity ---
+
+#[test]
+fn cli_record_brain_introspection_writes_a_record_the_reader_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let epoch = now_epoch();
+    let invoke_start = SystemTime::now() - Duration::from_secs(5);
+
+    cli(&[
+        "cognition",
+        "record-brain-introspection",
+        "--record-path",
+        path.to_str().unwrap(),
+        "--written-at-epoch",
+        &epoch.to_string(),
+        "--brain-health",
+        "fallback rate 4.2% (baseline 1.1%)",
+        "--brain-health",
+        "0-succeeded-action cycles: 3 of 40",
+        "--pattern",
+        "coverage-comment step flakes on cold CI",
+        "--regression",
+        "brain_lifecycle_decision parse-failure rate up 3.1x",
+        "--prune-candidate",
+        "duplicate semantic fact #A/#B (superseded)",
+        "--prune-requested",
+        "4",
+        "--issue-url",
+        "https://github.com/rysweet/Simard/issues/5012",
+    ])
+    .expect("a valid brain-introspection record write must exit Ok");
+
+    // Writer/reader parity — the reader accepts exactly what the writer produced.
+    let rec = read_verified_brain_introspection(&path, invoke_start)
+        .expect("the reader must accept the record the writer just produced (no drift)");
+    assert_eq!(rec.schema, "brain-introspection/v1");
+    assert_eq!(rec.brain_health.len(), 2);
+    assert_eq!(rec.prune_requested, 4);
     assert_eq!(
-        report.issue_url.as_deref(),
-        Some("https://github.com/rysweet/Simard/issues/9999")
+        rec.issue_url.as_deref(),
+        Some("https://github.com/rysweet/Simard/issues/5012")
     );
+
+    // And the file is owner-only 0o600 (persist_json's atomic 0o600 write).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "record must be written owner-only 0o600"
+        );
+    }
 }
 
 #[test]
-fn parse_requires_at_least_one_brain_health_line() {
-    let text = "PATTERN: something\nPRUNE_REQUESTED=0\n";
-    let err = parse_brain_introspection_text(text).expect_err("missing BRAIN_HEALTH must error");
+fn cli_record_brain_introspection_requires_at_least_one_brain_health() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain_introspection/record.json");
+    let res = cli(&[
+        "cognition",
+        "record-brain-introspection",
+        "--record-path",
+        path.to_str().unwrap(),
+        "--written-at-epoch",
+        &now_epoch().to_string(),
+        // no --brain-health at all
+    ]);
     assert!(
-        err.to_lowercase().contains("brain_health"),
-        "error should name the missing required marker, got: {err}"
+        res.is_err(),
+        "at least one --brain-health finding is required (validate-all-then-write-once)"
+    );
+    assert!(
+        !path.exists(),
+        "a validation failure must leave NO file on disk"
     );
 }
 
 #[test]
-fn parse_empty_is_error() {
-    assert!(parse_brain_introspection_text("").is_err());
+fn cli_record_brain_introspection_rejects_non_absolute_record_path() {
+    let res = cli(&[
+        "cognition",
+        "record-brain-introspection",
+        "--record-path",
+        "relative/record.json",
+        "--written-at-epoch",
+        &now_epoch().to_string(),
+        "--brain-health",
+        "ok",
+    ]);
+    assert!(res.is_err(), "--record-path must be absolute");
 }
 
 #[test]
-fn parse_ignores_unknown_lines_forward_compat() {
-    let text = "\
-SOME_FUTURE_MARKER=whatever
-BRAIN_HEALTH: ok
-RANDOM noise line
-PRUNE_REQUESTED=3
-";
-    let report = parse_brain_introspection_text(text).unwrap();
-    assert_eq!(report.brain_health.len(), 1);
-    assert_eq!(report.prune_requested, 3);
-}
-
-#[test]
-fn parse_prune_requested_defaults_to_zero_when_absent() {
-    let report = parse_brain_introspection_text("BRAIN_HEALTH: ok\n").unwrap();
-    assert_eq!(report.prune_requested, 0);
-    assert!(report.issue_url.is_none());
-    assert!(report.patterns.is_empty());
-    assert!(report.regressions.is_empty());
-}
-
-#[test]
-fn parse_handles_whitespace_around_values() {
-    let text = "  BRAIN_HEALTH:  trimmed health  \n  PRUNE_REQUESTED= 7 \n";
-    let report = parse_brain_introspection_text(text).unwrap();
-    assert_eq!(report.brain_health, vec!["trimmed health".to_string()]);
-    assert_eq!(report.prune_requested, 7);
-}
-
-#[test]
-fn parse_invalid_prune_requested_is_error() {
-    let text = "BRAIN_HEALTH: ok\nPRUNE_REQUESTED=lots\n";
-    assert!(parse_brain_introspection_text(text).is_err());
+fn cli_record_brain_introspection_rejects_parent_dir_traversal() {
+    let res = cli(&[
+        "cognition",
+        "record-brain-introspection",
+        "--record-path",
+        "/tmp/../etc/record.json",
+        "--written-at-epoch",
+        &now_epoch().to_string(),
+        "--brain-health",
+        "ok",
+    ]);
+    assert!(res.is_err(), "--record-path must not contain '..'");
 }
 
 // ===========================================================================
@@ -572,7 +856,7 @@ fn hygiene_sensory_prune_is_unbounded_by_cap() {
 #[test]
 fn hygiene_performs_no_destructive_value_prune() {
     // The first increment must never call the destructive superseded-prune
-    // daemon-side (it is a no-op over the IPC bridge — a silent-degradation
+    // daemon-side (it is a no-op over the IPC memory — a silent-degradation
     // hazard). Value-bearing pruning is recommendation-only via the recipe.
     let stub = HygieneStub::new(stats(10, 1, 5, 5, 2, 0), 1, 5);
     let _ = run_memory_hygiene(&stub, 50).unwrap();
@@ -759,18 +1043,23 @@ fn recipe_yaml_covers_all_phases_and_markers() {
         lower.contains("consolidat") || lower.contains("distill"),
         "recipe must reference consolidation/distillation"
     );
-    // Output contract markers the Rust parser consumes.
+    // Output contract: the recipe's final ACT step writes the typed record via
+    // the gated `record-brain-introspection` verb (no more stdout markers).
     assert!(
-        RECIPE_YAML.contains("BRAIN_HEALTH"),
-        "recipe must emit the required BRAIN_HEALTH marker"
+        RECIPE_YAML.contains("record-brain-introspection"),
+        "recipe must call `simard cognition record-brain-introspection` as its final ACT step"
     );
     assert!(
-        RECIPE_YAML.contains("PRUNE_REQUESTED"),
-        "recipe must emit the PRUNE_REQUESTED count marker"
+        RECIPE_YAML.contains("--brain-health"),
+        "recipe must pass the required --brain-health finding(s) to the record verb"
     );
     assert!(
-        RECIPE_YAML.contains("ISSUE_URL"),
-        "recipe must emit the ISSUE_URL marker"
+        RECIPE_YAML.contains("--prune-requested"),
+        "recipe must pass the --prune-requested count to the record verb"
+    );
+    assert!(
+        RECIPE_YAML.contains("--issue-url"),
+        "recipe must pass the --issue-url flag to the record verb"
     );
 }
 

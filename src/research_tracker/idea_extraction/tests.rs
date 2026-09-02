@@ -110,6 +110,68 @@ fn matched_keywords_empty_for_irrelevant_text() {
     assert!(kw.is_empty());
 }
 
+#[test]
+fn matched_keywords_requires_whole_word_not_substring() {
+    // A short signal keyword must NOT match when it is merely *embedded* in an
+    // unrelated word — the raw-substring defect that surfaced off-topic
+    // `research:` proposals from ordinary developer activity.
+    //   * `rl` inside `world` / `curl` / `url`
+    //   * `rag` inside `storage` / `average` / `fragment`
+    //   * `agent` inside `reagent`
+    //   * `memory`/`llm` embedded likewise
+    for text in [
+        "Refactor world state curl url handling",
+        "Optimize storage average fragment layout",
+        "Add reagent buffer to titration step",
+    ] {
+        assert!(
+            matched_keywords(text).is_empty(),
+            "embedded substrings must not match: {text:?} -> {:?}",
+            matched_keywords(text),
+        );
+    }
+}
+
+#[test]
+fn matched_keywords_matches_short_keywords_as_whole_words() {
+    // The very same tokens DO match when they stand as whole words.
+    assert!(matched_keywords("switch to rl for control").contains(&"rl".to_string()));
+    assert!(matched_keywords("evaluate the rag pipeline").contains(&"rag".to_string()));
+    assert!(matched_keywords("spawn a new agent per task").contains(&"agent".to_string()),);
+}
+
+#[test]
+fn matched_keywords_tolerates_plural_inflection() {
+    // Pluralized signals still count (trailing `s`), so recall is not lost —
+    // this is also what the case-insensitive `Embeddings` case relies on.
+    let kw = matched_keywords("Coordinate multiple agents with embeddings and llms");
+    assert!(kw.contains(&"agent".to_string()));
+    assert!(kw.contains(&"embedding".to_string()));
+    assert!(kw.contains(&"llm".to_string()));
+}
+
+#[test]
+fn matched_keywords_matches_hyphenated_compound_keywords() {
+    // Only the two outer ends are boundary-checked, so a hyphenated compound
+    // keyword matches as one phrase.
+    let kw = matched_keywords("Apply chain-of-thought to a multi-agent system");
+    assert!(kw.contains(&"chain-of-thought".to_string()));
+    assert!(kw.contains(&"multi-agent".to_string()));
+}
+
+#[test]
+fn matched_keywords_boundary_helpers_are_exact() {
+    // Direct unit coverage of the boundary predicate: left boundary, right
+    // boundary, plural tolerance, and rejection of trailing alphanumerics.
+    assert!(term_at_word_boundary("a rag b", "rag"));
+    assert!(term_at_word_boundary("rag", "rag"));
+    assert!(term_at_word_boundary("rags", "rag")); // plural
+    assert!(!term_at_word_boundary("storage", "rag")); // embedded
+    assert!(!term_at_word_boundary("ragged", "rag")); // trailing alnum, not plural
+    assert!(!term_at_word_boundary("", "rag"));
+    assert!(!term_at_word_boundary("anything", ""));
+}
+
 // -- extract_developer_id --
 
 #[test]

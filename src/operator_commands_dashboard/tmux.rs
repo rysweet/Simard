@@ -234,7 +234,7 @@ pub(crate) async fn azlin_tmux_sessions() -> Json<Value> {
     }))
 }
 
-/// GET `/ws/tmux_attach/{host}/{session}` — WebSocket bridging xterm.js to
+/// GET `/ws/tmux_attach/{host}/{session}` — WebSocket connecting xterm.js to
 /// `azlin connect <host> --no-tmux -- tmux attach -t <session>`. The same
 /// azlin exec channel as the snapshot route — no new SSH path.
 pub(crate) async fn ws_tmux_attach_handler(
@@ -411,7 +411,7 @@ mod tests {
     use super::*;
 
     /// No-PTY invariant (Agent Terminal, issue #2717 — mirroring the #2179
-    /// thin-proxy design): the tmux-attach bridge must spawn its child over
+    /// thin-proxy design): the tmux-attach memory must spawn its child over
     /// piped, non-PTY stdio so the browser xterm.js owns the *only* terminal.
     ///
     /// A child that probes its own descriptors through the SAME
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(
             observed, "stdin=notty stdout=notty stderr=notty",
             "Agent Terminal attach must use piped (non-PTY) stdio — a PTY/script(1) \
-             wrapper leaked back into the bridge (issue #2717 / #2179)"
+             wrapper leaked back into the memory (issue #2717 / #2179)"
         );
     }
 }

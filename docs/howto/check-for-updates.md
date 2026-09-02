@@ -1,7 +1,7 @@
 ---
 title: Check for updates and control update notifications
 description: "How to see when a new Simard version is available, respond to the upgrade prompt, run non-interactively, and suppress the check entirely."
-last_updated: 2026-07-06
+last_updated: 2026-07-09
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -78,16 +78,25 @@ When you are ready to upgrade:
 simard update
 ```
 
-This downloads the pre-built binary for your platform, verifies it, and
-replaces the current binary.
+Today this downloads the pre-built binary for your platform, verifies it, and
+replaces the current binary. The planned installer integration is for
+`simard update` to hand the verified release binary and matching prompt assets
+to the same staging, backup, systemd activation, and rollback transaction as
+`simard install`.
 
-If no pre-built binary exists for your platform, build from source:
+If no pre-built binary exists for your platform, the installer-based source
+fallback is:
 
 ```bash
 git pull origin main
 cargo build --release
-cp target/release/simard ~/.simard/bin/simard
+./target/release/simard install
 ```
+
+The source-built fallback uses the installer. Do not copy the built binary over
+`~/.simard/bin/simard`; the installer transaction stages the binary, preserves
+the previous one for rollback, updates prompt assets, and restarts the user
+services safely.
 
 For autonomous daemon upgrades with safety rails (drain → snapshot →
 pre-test → swap → validate → rollback), use `simard safe-update` — see

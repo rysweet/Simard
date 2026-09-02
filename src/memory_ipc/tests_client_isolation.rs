@@ -1,7 +1,7 @@
 //! Failing TDD tests (issues
 //! [#1923](https://github.com/rysweet/Simard/issues/1923) /
 //! [#1925](https://github.com/rysweet/Simard/issues/1925)) for the
-//! bridge-launcher's interaction with the new per-state-root socket
+//! client-launcher's interaction with the new per-state-root socket
 //! resolution.
 //!
 //! The contract under test is the end-to-end hermeticity property:
@@ -83,7 +83,7 @@ fn launch_writer_client_with_tempdir_state_root_does_not_touch_home_simard() {
     let _state = EnvGuard::set(STATE_ROOT_ENV, root.to_str().unwrap());
     let _sock = EnvGuard::unset(MEMORY_SOCKET_ENV);
 
-    let bridge = launch_writer_client(root)
+    let client = launch_writer_client(root)
         .expect("launch_writer_client must succeed against a fresh TempDir state root");
 
     // Write a uniquely-tagged fact so we can prove which DB landed it.
@@ -95,7 +95,7 @@ fn launch_writer_client_with_tempdir_state_root_does_not_touch_home_simard() {
             .map(|d| d.as_nanos())
             .unwrap_or(0),
     );
-    bridge
+    client
         .ops()
         .store_fact(
             &tag,
@@ -121,20 +121,20 @@ fn launch_writer_client_with_tempdir_state_root_does_not_touch_home_simard() {
         });
     assert!(
         tempdir_db_artifact_present,
-        "after a writer bridge round-trip against state_root={}, at \
+        "after a writer client round-trip against state_root={}, at \
          least one `cognitive*` library-store artifact must exist there. \
          If none exists, the writer routed to a different DB — the \
          #1923/#1925 leak.",
         root.display(),
     );
 
-    // Property 2: the bridge must NOT have written to ~/.simard. Inspect
+    // Property 2: the client must NOT have written to ~/.simard. Inspect
     // the operator's live DB only via its facts view, looking for our
     // unique tag. If the tag shows up there, the writer leaked.
     let home_simard = home_simard_path();
     let live_state = home_simard.join("state");
-    if let Ok(live_bridge) = open_reader_client(&live_state) {
-        let hits = live_bridge
+    if let Ok(live_client) = open_reader_client(&live_state) {
+        let hits = live_client
             .ops()
             .search_facts(&tag, 4, 0.0)
             .unwrap_or_default();
@@ -142,7 +142,7 @@ fn launch_writer_client_with_tempdir_state_root_does_not_touch_home_simard() {
             hits.is_empty(),
             "TempDir-rooted writer must NOT have written into \
              {}; tag {} was found there. This is the #1923/#1925 \
-             fixture leak — the bridge connected to the live \
+             fixture leak — the client connected to the live \
              daemon's socket via the hard-coded default path.",
             live_state.display(),
             tag,
@@ -152,7 +152,7 @@ fn launch_writer_client_with_tempdir_state_root_does_not_touch_home_simard() {
 
 #[test]
 #[serial(cognitive_memory)]
-fn writer_and_reader_bridge_round_trip_within_hermetic_state_root() {
+fn writer_and_reader_client_round_trip_within_hermetic_state_root() {
     // Symmetric round-trip: writer + reader against the SAME hermetic
     // state root must observe the fact. Catches a regression where the
     // socket follows the state root but the reader still falls through
@@ -172,7 +172,7 @@ fn writer_and_reader_bridge_round_trip_within_hermetic_state_root() {
     );
 
     {
-        let writer = launch_writer_client(root).expect("writer bridge against hermetic state root");
+        let writer = launch_writer_client(root).expect("writer client against hermetic state root");
         writer
             .ops()
             .store_fact(
@@ -187,7 +187,7 @@ fn writer_and_reader_bridge_round_trip_within_hermetic_state_root() {
 
     // After dropping the writer, opening a reader against the same root
     // must surface the same tag.
-    let reader = open_reader_client(root).expect("reader bridge against hermetic state root");
+    let reader = open_reader_client(root).expect("reader client against hermetic state root");
     let hits = reader
         .ops()
         .search_facts(&tag, 4, 0.0)

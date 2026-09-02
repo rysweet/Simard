@@ -1,7 +1,7 @@
 ---
 title: Dashboard
-description: Read-only web dashboard for inspecting the autonomous OODA daemon across ten tabs — Overview, Goals, Activity, Workers, Pull Requests, Resources, Chat, Overseer, Journal, and Creative Ideas — mirrored by a consistent terminal UI (TUI).
-last_updated: 2026-07-06
+description: Read-only inspection plus lightweight operator controls for the autonomous OODA daemon across eleven tabs — Overview, Goals, Activity, Workers, Pull Requests, Memory, Resources, Chat, Overseer, Journal, and Creative Ideas (with Run now / Promote / Prune) — mirrored by a consistent terminal UI (TUI). The Memory tab is a dedicated top-level tab hosting the live cognitive-memory graph visualization.
+last_updated: 2026-07-07
 owner: simard
 doc_type: howto
 ---
@@ -20,11 +20,15 @@ A login code is generated on first start and printed to stdout. It is also persi
 
 ## Tabs
 
-The dashboard is a single-page app with **nine** top-level tabs. Views that answer
+The dashboard is a single-page app with **eleven** top-level tabs. Views that answer
 the same operator question are grouped into **sub-sections** (panels) inside one
 tab, so every datum the dashboard has ever shown is still one or two clicks away —
-consolidation regroups data, it never removes it. Tabs render in the nav in this
-order:
+consolidation regroups data, it never removes it. The one exception to strict
+consolidation is **Memory**, whose interactive cognitive-memory graph was
+promoted back out of the Resources tab into its own dedicated top-level tab
+([#2627](https://github.com/rysweet/Simard/issues/2627)) — see
+[Memory tab (dedicated cognitive-memory graph)](reference/dashboard-memory-tab.md).
+Tabs render in the nav in this order:
 
 | Tab | Sub-sections | Shows |
 |-----|--------------|-------|
@@ -33,19 +37,22 @@ order:
 | **Activity** | Logs · Traces · Thinking · Failures | The **Background Service Log** (live activity from Simard's always-on background process), the cost ledger, and the **Cycle Reports** card — recent OODA cycles with their live cycle number, real per-cycle tree status, and Observe/Orient/Decide/Act detail, collapsed with a `×N` repeat-count and refreshed live, see [Activity: Cycle Reports](#activity-tab-logs-cycle-reports-26) — with a severity menu (All / Errors / Warnings / Info) and free-text search (**Logs**); recent agent traces from the cost ledger, journald, and in-process spans, plus OTEL status, each row read as plain language — **when**, **what**, **who** (**Traces**); the **Thinking** panel's two halves — a **Cycle History** table (collapsed per-cycle timeline with real timestamps, a `×N` repeat-count for runs of equivalent cycles, difference-carrying summaries, and a self-hiding duration-trend chart) and the **Agent Internal Reasoning** OODA Observe/Orient/Decide/Act breakdown, see [Thinking: Cycle History](#thinking-tab-cycle-history-21) (**Thinking**); and brain-fallback and decision failures (**Failures**). |
 | **Workers** | Processes · Engineers · Terminal | The live process tree under the daemon — engineer subprocesses, LLM sessions, tmux sessions, and their resource usage (**Processes** / **Engineers**) — and a browser-attached PTY into the daemon host, with an [agent picker](operator-dashboard/agent-terminal-agent-picker.md) drop-down for choosing which live agent to attach to (**Terminal**). |
 | **Pull Requests** | Merge Decisions · Readiness | Automated merge decisions and the rationale behind each (**Merge Decisions**), and per-PR readiness checks covering CI, review, and mergeability (**Readiness**). |
-| **Resources** | Memory · Costs | The cognitive memory graph (Working / Semantic / Episodic / Procedural / Prospective / Sensory) with per-type filters, full-text search, the live **Memory Store** counts, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). See [Memory architecture](memory.md). |
+| **Memory** | — | The dedicated cognitive-memory visualization — an interactive, force-directed graph of what Simard remembers (Working / Semantic / Episodic / Procedural / Prospective / Sensory) as nodes linked to their memory-type hubs, with per-type filters, live per-type counts, pan/zoom, node drag-pin, and hover/detail inspection. Rendered **live** from the cognitive store via `GET /api/memory/graph`. See [Memory tab (dedicated cognitive-memory graph)](reference/dashboard-memory-tab.md) and [Memory architecture](memory.md). |
+| **Resources** | Memory · Costs | What Simard has remembered alongside what it costs to run — the live **Memory Store** counts, the "What Simard Remembers" recent-memory list, the **Memory Growth** trend, and the **Memory Files** panel (**Memory**); and per-provider, per-model token spend across the active session (**Costs**). The full interactive memory graph now lives on its own [**Memory** tab](reference/dashboard-memory-tab.md). |
 | **Chat** | — | Direct chat with Simard. Conversations are saved as durable, resumable **sessions**: a sidebar lists every saved chat, the panel fills the page, and assistant replies stream in incrementally. See [Chat: durable, resumable sessions](#chat-tab-durable-resumable-sessions). |
 | **Overseer** | — | The overseer goal-board health view: per-goal health, staleness, and the intervention signals that decide when a stalled goal needs attention. |
-| **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. |
-| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected). |
+| **Journal** | — | The daemon's narrative journal — a human-readable, chronological record of what Simard decided and why, newest entries first. Each day's entry includes a plain-language code-change-proposal table whose **merged** count reflects the pull requests that actually landed on that day (sourced from `gh pr list --state merged --search "merged:<date>"`), so the diary honestly reports "how many changes shipped today" instead of always showing zero ([#4140](https://github.com/rysweet/Simard/issues/4140)). Once a day's entry freezes, a merged-only reconciliation pass revisits the last several past days each tick and folds in any PRs that merged after the day's final write (or before the merged-count wiring existed), so a **past** day's merged count converges to reality instead of freezing at zero — additively only, never touching today ([#4225](https://github.com/rysweet/Simard/issues/4225)). |
+| **Creative Ideas** | — | The pool of candidate self-improvement ideas Simard generates for herself, each reviewed for feasibility, worth, and measurability. Browse and search by review status (new · needs-revision · needs-human-review · accepted · in-progress · completed · deferred · rejected), generate a fresh batch on demand with **Run now**, and **Promote** (accept → goal) or **Prune** (reject) any idea inline — see [Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md). |
 
-**Overseer**, **Journal**, and **Creative Ideas** are standalone tabs with no
-sub-sections; they are owned by separate features and are kept intact by the
-consolidation.
+**Memory**, **Overseer**, **Journal**, and **Creative Ideas** are standalone
+tabs with no sub-sections; Overseer, Journal, and Creative Ideas are owned by
+separate features and are kept intact by the consolidation, while **Memory** is
+a dedicated tab restored from the Resources sub-section
+([#2627](https://github.com/rysweet/Simard/issues/2627)).
 
 Every former standalone tab now lives as a sub-section and keeps its old deep
 link — see [Deep links and tab aliases](#deep-links-and-tab-aliases). The same
-nine-tab taxonomy is mirrored in the terminal UI — see
+tab taxonomy is mirrored in the terminal UI — see
 [Terminal UI (TUI)](#terminal-ui-tui).
 
 ### Activity tab → Logs: filtering by severity (#1687)
@@ -134,6 +141,40 @@ history) — and the live conversation runs over `GET /ws/chat` (optionally
 WebSocket wire protocol (handshake, `restore`, `chunk`/`done`, and the
 non-streaming fallback frame) are documented in the
 [Dashboard Chat reference](reference/dashboard-chat.md).
+
+### Creative Ideas tab: live view + Run now / Promote / Prune (#2805)
+
+The **Creative Ideas** tab renders the **live** pool of candidate ideas the
+Creative Ideas thread has generated and persisted — each card shows the idea
+text, a colour-coded **status pill** (`New` · `NeedsRevision` ·
+`NeedsHumanReview` · `AcceptedForImplementation` · `ImplementationStarted` ·
+`ImplementationCompleted` · `Deferred` · `Rejected`), its **created time**, and
+the reviewer/synthesis signals (review count and success-metric name). The view
+reads the actual persisted ideas through a single shared reader
+(`GET /api/creative-ideas`); it never shows a hard-coded or stale list, and an
+empty pool renders an explicit empty-state message rather than a blank panel.
+
+Three operator controls sit on top of the view:
+
+- **Run now** generates a fresh batch **on demand** — an un-gated generation
+  pass against the live daemon store, bypassing the 24-hour scheduler (which a
+  daemon restart resets). It is guarded against concurrent runs and surfaces any
+  failure in a visible banner (never a silent no-op).
+- **Promote** (per idea) accepts an idea (`AcceptedForImplementation`) and, by
+  default, routes it onto the goal board (advancing it to
+  `ImplementationStarted`, tagged `source:creative-ideas`).
+- **Prune** (per idea) rejects an idea (`Rejected`, terminal).
+
+Both per-idea controls respect the `IdeaStatus` state machine: a control is only
+offered when the transition is valid from the idea's current status, and the
+server re-validates every write — an invalid edge surfaces a clear error and is
+never applied silently. All writes flow through the same cognitive-memory store
+the daemon reads, so actions show up on the next refresh. Full request/response
+JSON, the valid-transition gating table, the DOM contract, and end-to-end
+examples are in the
+[Creative Ideas tab — live view and operator controls](operator-dashboard/creative-ideas-operator-controls.md)
+guide and the
+[Creative Ideas subsystem API reference](reference/creative-ideas-api.md#dashboard-http-api-operator-controls).
 
 ### Overview tab: plain-English action details (#2358)
 
@@ -269,6 +310,37 @@ additive fields on `/api/goals`, and the `active` array is returned sorted by
 priority ascending. See
 [Goals tab hierarchy & differentiated priorities](reference/dashboard-goal-hierarchy-priority.md)
 for the full reference.
+
+### Goals tab: active lifecycle breakdown
+
+The active-goals count line breaks the board down by lifecycle state instead of
+showing a single conflated total. The board's `active` set legitimately holds
+goals that are **blocked**, **paused**, **not started**, or already
+**completed** but not yet archived off the board — so a bare "20 active goal(s)"
+badly overstates in-flight work and hides how many goals are stuck or finished.
+(On a live host, 18 "active" goals were 9 `completed` + 6 `blocked` +
+3 `not-started` with **0 actually in progress** — a fact the old count line
+could not surface.)
+
+`/api/goals` therefore returns an additive `active_status_breakdown` object with
+a faithful per-`GoalProgress`-variant count — always all six keys, zero when
+unused:
+
+```json
+"active_status_breakdown": {
+  "proposed": 0, "not_started": 3, "in_progress": 0,
+  "blocked": 6, "paused": 0, "completed": 9
+}
+```
+
+The buckets partition the active board, so they always sum to `active_count`
+(which is preserved for back-compat). Counting is faithful — an
+`InProgress { percent: 100 }` goal is `in_progress`, never `completed`; the
+terminal view is `GoalProgress::is_terminal` layered additively. The Goals tab
+appends only the **nonzero** buckets to the count line, in a fixed order
+(in progress · blocked · paused · not started · proposed · completed), via the
+`goalBreakdownText` helper — e.g. `18 active goal(s) — 6 blocked · 3 not
+started · 9 completed`.
 
 ### Goals tab → Work Board: plain-English Task Memory & Recent Actions
 
@@ -461,11 +533,11 @@ The terminal UI (`simard tui`) presents the **same tab taxonomy** as the web
 dashboard so an operator moving between the two never has to relearn the layout.
 Tab names, relative order, and grouping match the dashboard exactly.
 
-The TUI renders an **eight-tab subset** of the ten dashboard tabs. It omits
-**Pull Requests** and **Resources**, whose data pipelines exist only in the web
-surface; adding them to the TUI would be new feature work, not consolidation, and
-is deliberately out of scope. The TUI never invents a tab the dashboard does not
-have, and never shows a name the dashboard does not use.
+The TUI renders an **eight-tab subset** of the eleven dashboard tabs. It omits
+**Pull Requests**, **Memory**, and **Resources**, whose data pipelines exist
+only in the web surface; adding them to the TUI would be new feature work, not
+consolidation, and is deliberately out of scope. The TUI never invents a tab the
+dashboard does not have, and never shows a name the dashboard does not use.
 
 | # | TUI tab | Key | Matches dashboard tab | Sub-views |
 |---|---------|-----|-----------------------|-----------|
@@ -495,12 +567,12 @@ The five invariants:
 1. **Unique, non-empty browser `<title>`.** Each tab sets `document.title` to `"{PageName} · Simard"` — including Overview, which uses `"Overview · Simard"`. The format is mechanical and uniform; there are no per-tab exceptions. No two tabs share a title.
 2. **Unique, non-empty visible `<h1>`.** Each tab panel renders exactly one `<h1 class="page-h1">` immediately under the global brand bar. No two tabs share an H1.
 3. **Non-empty plain-English lede.** Each tab panel renders exactly one `<p class="page-lede">` immediately under its H1. The lede is a single sentence that explains what the page is for in language a non-expert can understand.
-4. **No banned jargon in any lede.** The eight strings in the `BANNED_JARGON` constant — `OODA`, `Observe-Orient-Decide-Act`, `spawn_engineer`, `LadybugDB`, `cognitive memory`, `synergize`, `leverage`, and `ideate` — are forbidden anywhere in lede text; the constant is the single source of truth and this doc's own prose is not bound by it. The goal is to ban consultant-speak and insider acronyms that an operator without Simard context cannot decode. The blocklist is enforced at build time by a unit test and again at runtime by the Playwright smoke test. Simard-internal domain vocabulary (`facilitator`, `consolidation`, `episodic`, …) is *allowed* — those are legitimate terms a memory or goals page may need to use; the bar is "no corporate jargon", not "no jargon at all".
+4. **No banned jargon in any lede.** The eight strings in the `BANNED_JARGON` constant — `OODA`, `Observe-Orient-Decide-Act`, `spawn_engineer`, `LadybugDB`, `cognitive memory`, `synergize`, `leverage`, and `ideate` — are forbidden anywhere in lede text; the constant is the single source of truth and this doc's own prose is not bound by it. The goal is to ban consultant-speak and insider acronyms that an operator without Simard context cannot decode. The blocklist is enforced at build time by a Rust unit test (`tab_meta_ledes_no_banned_jargon`) and again in the browser by the TypeScript Playwright suite. Simard-internal domain vocabulary (`facilitator`, `consolidation`, `episodic`, …) is *allowed* — those are legitimate terms a memory or goals page may need to use; the bar is "no corporate jargon", not "no jargon at all".
 5. **Consolidation preserves data.** Grouping related views into sub-sections never drops a datum. Every panel a former standalone tab rendered survives as a labelled sub-section inside its parent tab, and every retired top-level slug still resolves as a deep-link alias to its new home (see [Deep links and tab aliases](#deep-links-and-tab-aliases)). Sub-section headers render as `<h2>`/`<h3>` (never a second `page-h1`), so invariant 2 continues to hold — each tab still has exactly one page `<h1>` when active.
 
 ### Canonical tab taxonomy
 
-There are exactly **nine** dashboard tabs and **seven** TUI tabs, drawn from a single shared taxonomy. Tab names, relative order, and grouping are identical across both surfaces; the TUI omits only the two tabs (Pull Requests, Resources) whose data lives solely in the web dashboard. This table is the durable definition of the tab set — new work extends a tab's sub-sections rather than adding a top-level tab, unless a genuinely new operator question demands one.
+There are exactly **eleven** dashboard tabs and **eight** TUI tabs, drawn from a single shared taxonomy. Tab names, relative order, and grouping are identical across both surfaces; the TUI omits only the three tabs (Pull Requests, Memory, Resources) whose data lives solely in the web dashboard. This table is the durable definition of the tab set — new work extends a tab's sub-sections rather than adding a top-level tab, unless a genuinely new operator question demands one.
 
 | # | Tab | Dashboard slug | Sub-sections | In TUI? |
 |---|-----|----------------|--------------|---------|
@@ -509,12 +581,14 @@ There are exactly **nine** dashboard tabs and **seven** TUI tabs, drawn from a s
 | 3 | **Activity** | `activity` | Logs · Traces · Thinking · Failures | yes (`3`) |
 | 4 | **Workers** | `workers` | Processes · Engineers · Terminal | yes (`4`) |
 | 5 | **Pull Requests** | `pull-requests` | Merge Decisions · Readiness | no (web-only) |
-| 6 | **Resources** | `resources` | Memory · Costs | no (web-only) |
-| 7 | **Chat** | `chat` | — | yes (`5`) |
-| 8 | **Overseer** | `overseer` | — | yes (`6`) |
-| 9 | **Journal** | `journal` | — | yes (`7`) |
+| 6 | **Memory** | `memory` | — | no (web-only) |
+| 7 | **Resources** | `resources` | Memory · Costs | no (web-only) |
+| 8 | **Chat** | `chat` | — | yes (`5`) |
+| 9 | **Overseer** | `overseer` | — | yes (`6`) |
+| 10 | **Journal** | `journal` | — | yes (`7`) |
+| 11 | **Creative Ideas** | `creative-ideas` | — | yes (`8`) |
 
-Tab names never use the word "Bridge". **Overseer** and **Journal** are owned by separate features and are carried through the consolidation unchanged.
+Tab names never use the word "Bridge". **Memory**, **Overseer**, **Journal**, and **Creative Ideas** are standalone tabs; Overseer and Journal are owned by separate features and are carried through the consolidation unchanged, and **Memory** is the dedicated cognitive-memory graph tab restored in [#2627](https://github.com/rysweet/Simard/issues/2627).
 
 The global header (`🌲 Simard Dashboard`) is intentionally demoted from `<h1>` to `<div class="brand">` so that every page has exactly one semantic `<h1>` — the page-specific one — when active.
 
@@ -559,16 +633,16 @@ On the client, the existing tab-click handler in `part_01.rs` sets `document.tit
 
 Adding a tab is a single-file edit followed by writing the panel content:
 
-1. Append a new `TabMeta { … }` entry to `TAB_METADATA` in `tab_meta.rs`. Pick a `slug` matching `^[a-z][a-z0-9-]*$`, a short `label` (one or two words, e.g. `Pull Requests`), a `title` of the form `"{H1} · Simard"`, an `h1` (usually equal to `label`), a `lede` that passes the jargon blocklist, and a `tooltip`. **Prefer adding a sub-section to an existing tab** — the nine-tab taxonomy is deliberately small; only add a top-level tab when a genuinely new operator question needs one.
+1. Append a new `TabMeta { … }` entry to `TAB_METADATA` in `tab_meta.rs`. Pick a `slug` matching `^[a-z][a-z0-9-]*$`, a short `label` (one or two words, e.g. `Pull Requests`), a `title` of the form `"{H1} · Simard"`, an `h1` (usually equal to `label`), a `lede` that passes the jargon blocklist, and a `tooltip`. **Prefer adding a sub-section to an existing tab** — the tab taxonomy is deliberately small; only add a top-level tab when a genuinely new operator question needs one (as the restored **Memory** tab does).
 2. Add the panel to the appropriate `part_NN.rs`: a `<div class="tab-content" id="tab-{slug}">` whose first two children are `<h1 class="page-h1">{h1}</h1>` and `<p class="page-lede">{lede}</p>` with text matching the SoT entry exactly. Sub-sections within the panel use `<h2>`/`<h3>`, never a second `page-h1`.
 3. If the tab is shared with the TUI, add a matching arm to `enum Tab` / `ALL_TABS` in `src/bin/simard_tui/app.rs` using the same label and relative order, so the two surfaces stay consistent.
-4. Run `cargo test` — the unit tests in `tests_tab_meta.rs` verify uniqueness of `slug`, `label`, `title`, `h1`, non-emptiness of `lede`, absence of banned jargon, and that the rendered HTML contains every label / H1 / lede / tooltip from the SoT. The smoke test picks the new tab up automatically (it discovers tabs from the rendered DOM, not from a hardcoded list).
+4. Run `cargo test` — the unit tests in `tests_tab_meta.rs` verify uniqueness of `slug`, `label`, `title`, `h1`, non-emptiness of `lede`, absence of banned jargon, and that the rendered HTML contains every label / H1 / lede / tooltip from the SoT. The TypeScript Playwright structural suite picks the new tab up automatically (it discovers tabs from the rendered DOM, not from a hardcoded list).
 
 No other file needs to change for the strings. There is no second place to update a label.
 
 ### Deep links and tab aliases
 
-Each tab is deep-linkable by its slug (`#overview`, `#goals`, `#activity`, `#workers`, `#pull-requests`, `#resources`, `#chat`, `#overseer`, `#journal`). Because several former standalone tabs are now **sub-sections**, the client keeps a small **alias allowlist** that maps every retired slug to its new parent tab (and, where useful, scrolls to the sub-section). Old bookmarks, browser history, and links in bug reports keep working:
+Each tab is deep-linkable by its slug (`#overview`, `#goals`, `#activity`, `#workers`, `#pull-requests`, `#memory`, `#resources`, `#chat`, `#overseer`, `#journal`, `#creative-ideas`). Because several former standalone tabs are now **sub-sections**, the client keeps a small **alias allowlist** that maps every retired slug to its new parent tab (and, where useful, scrolls to the sub-section). Old bookmarks, browser history, and links in bug reports keep working:
 
 | Legacy deep link | Resolves to |
 |------------------|-------------|
@@ -582,12 +656,13 @@ Each tab is deep-linkable by its slug (`#overview`, `#goals`, `#activity`, `#wor
 | `#terminal` | `#workers` → Terminal |
 | `#merge-decisions` | `#pull-requests` → Merge Decisions |
 | `#pr-readiness` | `#pull-requests` → Readiness |
-| `#memory` | `#resources` → Memory |
 | `#costs` | `#resources` → Costs |
 
 The resolver treats `location.hash` as untrusted input: it strips the leading `#`, matches the value against the allowlist (and the canonical slug set, validated against `^[a-z-]+$`), and **falls back to the default `overview` tab on any unknown or malformed hash**. It never concatenates the hash into a DOM selector or element id. API endpoints are decoupled from slugs and unchanged — for example `/api/workboard` still backs the **Work Board** sub-section even though `#workboard` now lands on the **Goals** tab. (The label lineage is `Whiteboard → Workboard → Work Board`; only the user-facing string ever changed, never the route or storage path.)
 
-The table above covers only the twelve slugs that were real top-level tabs before consolidation (the 17-tab set minus the five that stay top-level: `overview`, `goals`, `chat`, `overseer`, `journal`). Sub-sections that consolidation *introduces* and that were never standalone tabs — **Stats** (under Overview) and **Engineers** (the process-tree view under Workers) — have no legacy slug and therefore no alias entry; they are reached through their parent tab. Do not add `#stats` / `#engineers` aliases: there are no old bookmarks to preserve.
+`#memory` is **not** in the alias table: the cognitive-memory graph was promoted back to its own dedicated **Memory** tab ([#2627](https://github.com/rysweet/Simard/issues/2627)), so `#memory` is now a **canonical slug** that resolves directly to the Memory tab — see [Memory tab (dedicated cognitive-memory graph)](reference/dashboard-memory-tab.md). `#costs` continues to alias to the **Resources** tab.
+
+The table above covers the retired slugs that were real top-level tabs before consolidation and did **not** later get re-promoted. Sub-sections that consolidation *introduces* and that were never standalone tabs — **Stats** (under Overview) and **Engineers** (the process-tree view under Workers) — have no legacy slug and therefore no alias entry; they are reached through their parent tab. Do not add `#stats` / `#engineers` aliases: there are no old bookmarks to preserve.
 
 ## Tests
 
@@ -599,7 +674,7 @@ Three complementary test layers enforce the Tab Identity Contract and the consol
 
 **Source-of-truth table invariants (iterating `TAB_METADATA`):**
 
-- `tab_meta_slugs_unique` — slugs are unique **and** `assert_eq!(TAB_METADATA.len(), 17, "expected 17 tabs")`. **This literal is the tab-count guard: consolidation changes this single `17` to `9`.** It is the only hard-coded tab count in the suite — every other test derives its expectation from `TAB_METADATA.len()`, so no separate "nine canonical tabs" test exists or is needed.
+- `tab_meta_slugs_unique` — slugs are unique **and** `assert_eq!(TAB_METADATA.len(), 11, "expected 11 tabs")`. **This literal is the tab-count guard:** consolidation moved it from `17` to `9`, and restoring the dedicated **Memory** tab ([#2627](https://github.com/rysweet/Simard/issues/2627)) alongside **Creative Ideas** brings it to `11`. It is the only hard-coded tab count in the suite — every other test derives its expectation from `TAB_METADATA.len()`, so no separate "canonical tabs" test exists or is needed.
 - `tab_meta_labels_unique`
 - `tab_meta_titles_unique_and_non_empty`
 - `tab_meta_titles_follow_label_dot_simard_format` — every `title` equals `"{label} · Simard"`.
@@ -646,48 +721,55 @@ Run with:
 cargo test -p simard --bin simard_tui
 ```
 
-### Python Playwright smoke test
+### Rust-native tab-identity coverage
 
-`tests/e2e-dashboard/smoke_python/` is a small pytest suite that exercises the running dashboard end-to-end. It:
+The tab-identity contract is enforced entirely in Rust — there is no Python,
+pytest, or `pip install` step. Coverage is split across the crate:
 
-1. Reads `~/.simard/.dashkey` (or `SIMARD_DASHKEY`) and POSTs it to `/api/login` as a JSON body (`Content-Type: application/json`, field name `code`) to obtain a session cookie. The encoding matches the existing route handler in `operator_commands_dashboard/auth.rs`.
-2. Discovers every nav button by querying `data-tab` attributes — no hardcoded tab list.
-3. Clicks each button in turn and uses Playwright's `expect(locator).to_be_visible()` on `.tab-panel[data-tab="{slug}"]`. This avoids hard-coding a `.active` class name and lets the contract survive future tab-handler refactors.
-4. Captures `document.title`, the visible `.page-h1` text, and the visible `.page-lede` text.
-5. Asserts: at least the nine canonical tabs are present; all titles unique and non-empty; all H1s unique and non-empty; every lede non-empty and free of banned jargon.
-6. Prints a markdown table `slug | title | h1 | lede` to stdout. CI uploads this as build evidence and the PR template links it into the description.
+- **`tab_meta.rs` unit tests** assert the canonical tab set (Overview, Goals,
+  Activity, Workers, Pull Requests, Memory, Resources, Chat, Overseer, Journal,
+  Creative Ideas), that every title/H1 is unique and non-empty, that every lede
+  is non-empty and free of banned jargon (`BANNED_JARGON`), and that each
+  retired-slug deep link (`#status`, `#workboard`, `#logs`, `#traces`,
+  `#thinking`, `#brain-failures`, `#processes`, `#terminal`, `#merge-decisions`,
+  `#pr-readiness`, `#memory`, `#costs`) resolves to its parent tab rather than
+  404-ing, and that an unknown `#hash` falls back to `overview` with no DOM
+  injection. Because these assertions read the same `tab_meta.rs` table the
+  server renders from, `BANNED_JARGON` now lives in exactly one place.
+- **Dashboard route/integration tests** (`operator_commands_dashboard`,
+  e.g. `tests_routes_a.rs`, `tests_goals_crud.rs`, `tests_enrichment_endpoint.rs`,
+  and `tests/dashboard_chat_persistence.rs`) exercise the live `axum` server —
+  login via `POST /api/login`, per-tab endpoints, and chat persistence — using
+  `reqwest`/in-process `axum` test harnesses. These assert the rendered markup
+  carries a unique `data-tab` slug and visible `.page-h1`/`.page-lede` for each
+  canonical tab.
+- **TypeScript Playwright suite** (`tests/e2e-dashboard/`, Node-based, not
+  Python) provides browser-level rendering coverage in CI.
 
-`test_tab_clarity.py` additionally asserts the canonical slug set is present and that each retired-slug deep link (`#status`, `#workboard`, `#logs`, `#traces`, `#thinking`, `#brain-failures`, `#processes`, `#terminal`, `#merge-decisions`, `#pr-readiness`, `#memory`, `#costs`) resolves to its parent tab rather than 404-ing, and that an unknown `#hash` falls back to `overview` with no DOM injection.
-
-The `BANNED_JARGON` constant lives in both `tab_meta.rs` and `test_tab_clarity.py`. They are intentionally duplicated (no shared format file) and contributors are responsible for keeping them in step — both files are referenced from the same line in the "Adding a new tab" checklist, and the two-line list is short enough that drift is unlikely.
+Together these replace the former `smoke_python` pytest/Playwright suite, which
+was removed with all Python in #3181. The behavior it checked (unique,
+non-empty, jargon-free tab identity and retired-slug fallback) is covered by the
+Rust tests above plus the TypeScript Playwright suite.
 
 Run locally:
 
 ```bash
-pip install -r tests/e2e-dashboard/smoke_python/requirements.txt
-python -m playwright install --with-deps chromium
+# Tab-identity + route coverage (pure Rust, no external services)
+cargo test -p simard operator_commands_dashboard
+cargo test --test dashboard_chat_persistence
 
-# In another terminal, start the dashboard:
-simard dashboard serve --port=8080
-
-pytest tests/e2e-dashboard/smoke_python/ -v
+# Browser-level rendering (Node/TypeScript Playwright, no Python)
+npx playwright install chromium
+npx playwright test --config tests/e2e-dashboard/playwright.config.ts --project=structural
 ```
-
-The smoke test pins `playwright==1.59.0` to match the CI image and the TypeScript Playwright suite.
 
 ### CI
 
-The smoke test runs in the existing `e2e-dashboard` job in `.github/workflows/verify.yml`, after the TypeScript Playwright suite has already started the dashboard server and provisioned `~/.simard/.dashkey`. Three steps are appended:
-
-```yaml
-- run: pip install -r tests/e2e-dashboard/smoke_python/requirements.txt
-- run: python -m playwright install --with-deps chromium
-- run: pytest tests/e2e-dashboard/smoke_python/ -v --tb=short
-  env:
-    SIMARD_DASHBOARD_URL: http://localhost:${{ env.PORT }}
-```
-
-The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (defaulting to `http://localhost:8080`) so the same suite runs unchanged in CI and locally on a custom port. A failed assertion fails the job. The evidence table is visible in the job's log.
+The Rust tab-identity and route tests run in the standard `cargo test` step of
+the `verify` job (no `setup-python`, no `pip`, no `pytest`). The TypeScript
+Playwright structural suite runs in the `e2e-dashboard` job against the
+`simard` binary built by the `verify` job. There is no Python step in either
+job.
 
 ## Related
 
@@ -702,5 +784,8 @@ The `SIMARD_DASHBOARD_URL` environment variable is honored by `conftest.py` (def
 - [Thinking tab — Cycle History (timestamps, collapse, duration trend)](reference/dashboard-thinking-cycle-history.md)
 - [Activity tab — Cycle Reports (live cycle number, accurate tree status, shared detail)](reference/dashboard-activity-cycle-reports.md)
 - [Overview Health & live memory-consolidation (Open PRs card removal, live Last Memory Compaction)](reference/dashboard-overview-health-and-live-memory.md)
+- [Memory tab — dedicated cognitive-memory graph (live nodes/edges, per-type filters)](reference/dashboard-memory-tab.md)
+- [Memory graph fail-loud data-load contract (visible error overlay, never a silent blank canvas)](reference/dashboard-memory-graph-fail-loud.md)
 - [Background tab prefetch and refresh (instant tab switches)](reference/dashboard-background-tab-prefetch.md)
 - [Header deployment datetime (build number + PST/PDT deploy time)](reference/dashboard-header-deployment-datetime.md)
+- [Creative Ideas tab — live view and operator controls (Run now / Promote / Prune)](operator-dashboard/creative-ideas-operator-controls.md)

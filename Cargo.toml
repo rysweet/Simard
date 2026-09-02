@@ -1,12 +1,16 @@
 [package]
 name = "simard"
-version = "0.28.0"
+version = "0.42.0"
 edition = "2024"
 default-run = "simard"
 
 [[bin]]
 name = "simard-gym"
 path = "src/bin/simard_gym.rs"
+
+[[bin]]
+name = "coin-gym"
+path = "src/bin/coin_gym.rs"
 
 [[bin]]
 name = "simard-rust-gym"
@@ -95,9 +99,55 @@ path = "src/bin/supply_chain_steward.rs"
 # with no lbug/engine change, so the store format stays v41. The pin points at an
 # upstream-`main` commit (not a feature branch), so the build can never be frozen
 # against an unmerged, GC-able ref.
-amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "e005a5963b38bc02610fa5b0bef7e52625dcd092", features = ["persistent"] }
-rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
-rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "ddae0fdf1b922ae8604b0a4e178a3634ada7e350" }
+#
+# Bumped again (issue #122) to the squash-merge commit of amplihack-memory-lib
+# PR #125 on `main` (2 commits ahead of the #120 pin, no regression), which adds
+# `get_prospective_by_trigger(trigger, limit)` — a trigger-scoped, priority-
+# ordered prospective query whose LIMIT bounds only matching nodes — and makes
+# `get_all_prospective` sort-then-truncate. Simard consumes the new primitive to
+# fix the creative-ideas dashboard read path (ideas fell outside the unscoped
+# 512-row window in a large store). Still an upstream-`main` commit; store format
+# stays v41 (no lbug/engine change).
+#
+# Bumped again (issue #40) to the squash-merge commit of amplihack-memory-lib
+# PR #126 on `main` (1 commit ahead of the #125 pin): the bulk graph-adjacency
+# index for ranked recall. Ranked declarative/episodic recall previously computed
+# the graph-proximity term with a per-node `query_neighbors` BFS — an N+1 fan-out
+# of ~3N lock-serialized Cypher scans per recall that made the OODA daemon's
+# prepare-context spin ~11 min/cycle at ~7,590 facts. The fix serves that term
+# from one bulk edge scan per type: a pure performance refactor with
+# byte-identical ranking. Still an upstream-`main` commit; store format stays v41
+# (no lbug/engine change).
+#
+# Bumped again (issue #3119) to the squash-merge commit of amplihack-memory-lib
+# PR #129 on `main` (1 commit ahead of the #126 pin): the lbug portability fix.
+# The published crates.io `lbug 0.17.1` SIGSEGVs in `std::vformat` during
+# `Database::initBufferManager` on hosts whose libstdc++ `std::format` ABI differs
+# from the prebuilt's (e.g. Ubuntu 26.04), and its build.rs also double-links the
+# bundled third-party archives in source-build mode (duplicate symbols). #129 pins
+# `lbug` to the `rysweet/ladybug-rust` fork (build.rs keeps `link_bundled_deps=false`
+# and links only the self-contained `liblbug.a`), so building from source both cures
+# the ABI SIGSEGV and links cleanly with no unsafe `--allow-multiple-definition`.
+# The fork engine writes on-disk storage format v42 (forward-only from v41; the
+# v40->v41+ no-data-loss gate now accepts v41-or-newer). Simard's direct `lbug` dep
+# below is repointed at the SAME fork rev in lockstep so the final binary links
+# exactly one engine.
+#
+# Issue #4687 (WAL crash-consistency): bumped OFF the WAL-corrupting rev
+# c266e15d… to the single-owner / fsync-durable WAL fix. The pin targets the
+# WAL-only fix commit `0031505b…` (branch `fix/issue-4687-wal-only-on-c266e15`,
+# durably anchored by tag `issue-4687-wal-crash-consistency-c266e15`), which is
+# the SAME diff as the upstream `main` squash-merge (b3033f7…, PR #144) applied
+# directly onto Simard's current base c266e15. We deliberately do NOT pin to the
+# `main` merge commit yet: `main` also carries the #137 multi-writer coordination
+# layer (a new engine-level single-writer store lock), which is a separate,
+# out-of-scope adoption for Simard and would break the pre-existing
+# concurrent-open cognitive-memory tests. Keeping the pin WAL-only stays
+# additive/non-breaking and preserves store format v42. Follow-up: adopt the
+# coordination layer and repin to `main` in its own change.
+amplihack-memory = { git = "https://github.com/rysweet/amplihack-memory-lib.git", rev = "0031505b911151bf47409694a6c45f8b778d91b9", features = ["persistent"] }
+rustyclawd-core = { git = "https://github.com/rysweet/RustyClawd.git", rev = "dcccad80ed381c66a7728565be5cb84120aacbed" }
+rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "dcccad80ed381c66a7728565be5cb84120aacbed" }
 # De-fork (issue #2323): the gym/eval RUNNER is now the upstream
 # `amplihack-agent-eval` crate (native Rust GymRunner + scenario/result types),
 # replacing the private `src/native_gym.rs` reimplementation. Only the bridge
@@ -113,11 +163,13 @@ amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", re
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render
 # the goal board. The cognitive-memory backend itself no longer uses lbug
-# directly — it goes through the amplihack-memory library. Bumped to 0.17.1 in
-# lockstep with the amplihack-memory pin so the final binary links exactly one
-# engine and one storage format (v41).
-lbug = "=0.17.1"
-rusqlite = { version = "=0.31.0", features = ["bundled"] }
+# directly — it goes through the amplihack-memory library. Pinned to the
+# `rysweet/ladybug-rust` fork (issue #3119) at the SAME rev amplihack-memory uses,
+# so cargo unifies to exactly one `lbug` crate / one engine / one storage format.
+# The fork fixes the from-source duplicate-symbol link and the libstdc++
+# std::format ABI SIGSEGV; see amplihack-memory docs/lbug_libstdcxx_abi.md.
+lbug = { git = "https://github.com/rysweet/ladybug-rust", rev = "5a2c107881879f4d1bb594b14967948870e65cdc" }
+rusqlite = { version = "=0.31.0", features = ["backup", "bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 # Issue #2250: the launch-time update check compares semver versions with the
@@ -187,13 +239,22 @@ chrono = "=0.4.44"
 # deliberately minimal binary with `--no-default-features`.
 default = ["signal", "dashboard-audit"]
 
-# THE ONE INTENTIONAL EXCEPTION to the "features are default" rule (issue #2576):
-# `slow-tests` is NOT a shippable product capability — it is a TEST-SELECTION gate
-# that turns on the slow, long-running `#[cfg(feature = "slow-tests")]` tests.
-# Defaulting it would force those slow tests into every `cargo test` / CI run and
-# blow up CI time for zero runtime benefit, so it stays opt-in. Enable explicitly
-# with `cargo test --features slow-tests` when you want the slow suite.
+# TWO INTENTIONAL EXCEPTIONS to the "features are default" rule (issue #2576):
+# `slow-tests` and `canary-tests` are NOT shippable product capabilities — they
+# are TEST-SELECTION gates. Defaulting either would force test-only scaffolding
+# into every `cargo test` / CI run for zero runtime benefit, so both stay opt-in.
+#
+# `slow-tests` turns on the slow, long-running `#[cfg(feature = "slow-tests")]`
+# tests. Enable with `cargo test --features slow-tests`.
 slow-tests = []
+
+# `canary-tests` (issue #4622) turns on the curated, hermetic-by-construction
+# self-deploy canary regression target (`tests/self_deploy_canary.rs`, selected
+# by a whole-target `#![cfg(feature = "canary-tests")]` inner attribute). The
+# self-deploy UnitTest canary enables it explicitly; stock `cargo test` and CI
+# unit runs leave it off so they never pull in the canary-only scaffolding.
+# Enable with `cargo test --test self_deploy_canary --features canary-tests`.
+canary-tests = []
 dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]
 # Issue #2527: the Signal conversation channel (`src/signal_conversation/`).
 # Built by DEFAULT since issue #2576 (see `default` above) so the daemon ships

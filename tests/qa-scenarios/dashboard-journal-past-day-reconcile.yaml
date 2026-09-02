@@ -1,0 +1,36 @@
+# Canonical agentic-test schema (name + agents[] + steps[] with params).
+#
+# Mirrors tests/qa-scenarios/dashboard-journal-merged-count.yaml (the sibling
+# merged-count gate): a single `cli` agent runs a hermetic regression script;
+# the runner treats the script's non-zero exit as a step failure, so this is a
+# real pass/fail gate.
+name: simard-dashboard-journal-past-day-reconcile
+description: >-
+  The dashboard Journal tab does not under-report a PAST day's merged-PR count
+  (#4225). Once a day's entry freezes, a merged-only reconciliation pass folds
+  that day's real merges back into the frozen entry, so a day that shipped PRs
+  after its final tick (or froze before #4140) reports the true merged count
+  instead of a permanent zero — while never touching today, never fabricating an
+  absent day, and never erasing data on a gh blip.
+version: "1.0"
+config:
+  timeout: 300000
+environment:
+  requires: []
+agents:
+  - name: cli-agent
+    type: cli
+    config: {}
+metadata:
+  tags:
+    - cli
+  priority: high
+steps:
+  - name: Run the journal past-day reconciliation regression script
+    agent: cli-agent
+    action: run
+    params:
+      command: bash
+      args:
+        - scripts/qa-journal-past-day-reconcile.sh
+    timeout: 300000

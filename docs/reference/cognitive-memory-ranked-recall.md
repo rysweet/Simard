@@ -70,6 +70,12 @@ normalized signals:
 | **usage** | How often the fact has been recalled. |
 | **graph** | Graph-proximity boost from connected facts (e.g. `DERIVES_FROM` neighbours), up to 1 hop by default. |
 
+> **Shipped for #40.** The **graph** signal above is computed from a single
+> per-recall **bulk adjacency load** rather than ~3 per-node neighbour
+> round-trips — cutting OODA prepare-context wall-clock from ~11 min toward
+> single-digit seconds at ~7,590 facts, with byte-identical ranking. See
+> [Bulk graph-adjacency index for ranked recall](./cognitive-memory-graph-adjacency-index.md).
+
 Results are returned **already sorted in descending score order** — the
 first element is the best match. Simard does not expose the raw numeric
 score on `CognitiveFact`; ordering *is* the ranking. Callers that need
@@ -492,3 +498,4 @@ assert):
 - [Preparation-phase memory filters](./cognitive-memory-preparation-filters.md) — the PR-A snapshot/stale-slug filters that still apply after ranking
 - [File-backed goal store](./cognitive-memory-goal-store.md) — the goal records that now dedup via `goal-store:record:{slug}` caller keys
 - [Cognitive-memory provenance](./cognitive-memory-provenance.md) — `DERIVES_FROM` edges that protect facts from pruning
+- [Bulk graph-adjacency index for ranked recall](./cognitive-memory-graph-adjacency-index.md) — the per-recall bulk adjacency load that makes the **graph** signal fast

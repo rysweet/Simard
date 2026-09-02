@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::goals_status::render_status_and_detail;
 use super::routes::resolve_state_root;
 use super::{
-    dashboard_goal_board_snapshot, dashboard_save_goal_board,
+    dashboard_goal_board_snapshot, dashboard_live_goal_board, dashboard_save_goal_board,
     dashboard_save_goal_board_with_removals,
 };
 use crate::goal_curation::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
@@ -16,7 +16,7 @@ use crate::memory_ipc::open_reader_client;
 
 /// Load the dashboard's view of the goal board from the EXPLICIT `state_root`
 /// instead of resolving `SIMARD_STATE_ROOT` ambiently. Returns an empty
-/// `GoalBoard` when the snapshot is missing or the bridge cannot be opened —
+/// `GoalBoard` when the snapshot is missing or the memory cannot be opened —
 /// the dashboard always renders rather than 500ing.
 ///
 /// `state_root` is trusted-internal: it originates only from a handler
@@ -91,7 +91,28 @@ pub(crate) async fn goals() -> Json<Value> {
 /// (#2408 / #2384). See [`load_board_or_empty_at`] for the trusted-internal
 /// `state_root` invariant.
 pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
-    let board = dashboard_goal_board_snapshot(state_root).unwrap_or_default();
+    // Issue #2922: read the LIVE goal board (snapshot base unioned with the live
+    // `CognitiveMemoryGoalStore` overlay), fail-closed. A live-read failure
+    // surfaces an explicit error payload with zeroed counts and empty lists —
+    // NEVER a silently-empty or stale board that a client could not distinguish
+    // from "no goals". The underlying error chain is logged server-side only
+    // (tracing), never returned to the client.
+    let board = match dashboard_live_goal_board(state_root) {
+        Ok(board) => board,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "dashboard live goal-board read failed; serving fail-closed error payload"
+            );
+            return Json(json!({
+                "active": [],
+                "backlog": [],
+                "active_count": 0,
+                "backlog_count": 0,
+                "error": "goal-board read failed",
+            }));
+        }
+    };
 
     // Issue #2695 follow-up: emit active goals ordered by priority ASCENDING
     // (p1 = highest first) with a stable id tiebreak, so the Goals tab renders a
@@ -100,6 +121,12 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
     // priorities) is the prioritization pass on the curation/decompose path.
     let mut active_goals = board.active;
     active_goals.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+
+    // Lifecycle breakdown of the active board so the Goals tab can distinguish
+    // goals genuinely in progress from ones that are blocked, paused, or
+    // already `Completed` but not yet archived off the board. Computed BEFORE
+    // `active_goals` is consumed below. Additive: `active_count` is unchanged.
+    let active_status_breakdown = active_status_breakdown(active_goals.iter().map(|g| &g.status));
 
     let active: Vec<Value> = active_goals
         .into_iter()
@@ -110,7 +137,7 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
             // is kept as-is (alias) so existing consumers do not break.
             let (chip, detail, detail_full) =
                 render_status_and_detail(g.current_activity.as_deref());
-            json!({
+            let mut obj = json!({
                 "id": g.id,
                 "description": g.description,
                 "priority": g.priority,
@@ -140,7 +167,15 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
                 "detail": detail,
                 "detail_full": detail_full,
                 "wip_refs": g.wip_refs,
-            })
+            });
+            // Issue #2743: additively expose the goal's labels (tags) so the
+            // Goals tab can render label chips and filter by tag. Omitted when
+            // empty (mirrors the serde `skip_serializing_if` contract), so
+            // existing `/api/goals` consumers are unaffected.
+            if !g.labels.is_empty() {
+                obj["labels"] = json!(g.labels);
+            }
+            obj
         })
         .collect();
 
@@ -216,7 +251,56 @@ pub(crate) async fn goals_at(state_root: &std::path::Path) -> Json<Value> {
         "backlog": backlog,
         "active_count": active.len(),
         "backlog_count": backlog.len(),
+        // Issue #4270: additive per-lifecycle breakdown of the active board so
+        // the Goals tab (and API clients) can tell in-progress goals apart from
+        // blocked / paused / not-yet-archived Completed ones, instead of a
+        // single `active_count` that reads e.g. "20 active goal(s)" when half
+        // are finished. Existing consumers are unaffected (fields untouched).
+        "active_status_breakdown": Value::Object(active_status_breakdown),
     }))
+}
+
+/// Per-variant lifecycle breakdown of the active goal board.
+///
+/// Returns a JSON object with a faithful count for every [`GoalProgress`]
+/// variant (`proposed`, `not_started`, `in_progress`, `blocked`, `paused`,
+/// `completed`). No bucketing surprises: an `InProgress { percent: 100 }` goal
+/// counts as `in_progress`, not `completed` — callers that want the terminal
+/// view use [`GoalProgress::is_terminal`] additively. All six keys are always
+/// present (zero when unused) so clients can render a stable layout without
+/// null-checking each field.
+///
+/// This exists because the Goals tab previously showed only `active_count`,
+/// which conflates goals genuinely in progress with ones that are blocked,
+/// paused, or already `Completed` but not yet archived off the board — hiding
+/// what Simard is *actually working on right now*.
+pub(crate) fn active_status_breakdown<'a>(
+    statuses: impl IntoIterator<Item = &'a GoalProgress>,
+) -> serde_json::Map<String, Value> {
+    let mut proposed = 0u64;
+    let mut not_started = 0u64;
+    let mut in_progress = 0u64;
+    let mut blocked = 0u64;
+    let mut paused = 0u64;
+    let mut completed = 0u64;
+    for status in statuses {
+        match status {
+            GoalProgress::Proposed => proposed += 1,
+            GoalProgress::NotStarted => not_started += 1,
+            GoalProgress::InProgress { .. } => in_progress += 1,
+            GoalProgress::Blocked(_) => blocked += 1,
+            GoalProgress::Paused => paused += 1,
+            GoalProgress::Completed => completed += 1,
+        }
+    }
+    let mut breakdown = serde_json::Map::new();
+    breakdown.insert("proposed".to_string(), json!(proposed));
+    breakdown.insert("not_started".to_string(), json!(not_started));
+    breakdown.insert("in_progress".to_string(), json!(in_progress));
+    breakdown.insert("blocked".to_string(), json!(blocked));
+    breakdown.insert("paused".to_string(), json!(paused));
+    breakdown.insert("completed".to_string(), json!(completed));
+    breakdown
 }
 
 pub(crate) async fn seed_goals() -> Json<Value> {
@@ -248,6 +332,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
     });
     board.active.push(ActiveGoal {
         parent_goal_id: None,
@@ -263,6 +348,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
     });
     board.active.push(ActiveGoal {
         parent_goal_id: None,
@@ -276,6 +362,7 @@ pub(crate) async fn seed_goals_at(state_root: &std::path::Path) -> Json<Value> {
         current_activity: Some(format!("Goal seeded via dashboard at {now}")),
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![crate::goal_curation::labels::SOURCE_SEED.to_string()],
     });
     board.backlog.push(BacklogItem {
         id: "distributed-sync".to_string(),
@@ -382,6 +469,7 @@ pub(crate) async fn add_goal_at(
             current_activity: None,
             wip_refs: vec![],
             last_progress_update_at: None,
+            labels: vec![crate::goal_curation::labels::SOURCE_OPERATOR.to_string()],
         });
     }
 
@@ -505,6 +593,7 @@ pub(crate) async fn promote_backlog_item_at(
         Some(i) => board.backlog.remove(i),
         None => return Json(json!({"error": "backlog item not found"})),
     };
+    let promoted_source = crate::goal_curation::labels::source_for_backlog(&item.source);
 
     board.active.push(ActiveGoal {
         parent_goal_id: None,
@@ -518,6 +607,7 @@ pub(crate) async fn promote_backlog_item_at(
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: vec![promoted_source.to_string()],
     });
 
     match dashboard_save_goal_board(state_root, &board) {
@@ -603,5 +693,81 @@ mod tests_backlog_helpers {
         assert_eq!(human_source_label("decision-record"), "From decisions");
         assert_eq!(human_source_label("meeting-note"), "From meeting");
         assert_eq!(human_source_label("other-concept"), "From memory");
+    }
+
+    // ---- active_status_breakdown -----------------------------------------
+
+    #[test]
+    fn breakdown_always_has_all_six_keys() {
+        let empty: Vec<GoalProgress> = vec![];
+        let b = active_status_breakdown(empty.iter());
+        for key in [
+            "proposed",
+            "not_started",
+            "in_progress",
+            "blocked",
+            "paused",
+            "completed",
+        ] {
+            assert_eq!(b.get(key).and_then(Value::as_u64), Some(0), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn breakdown_counts_each_variant_faithfully() {
+        let statuses = vec![
+            GoalProgress::Proposed,
+            GoalProgress::NotStarted,
+            GoalProgress::NotStarted,
+            GoalProgress::InProgress { percent: 40 },
+            GoalProgress::Blocked("some reason".to_string()),
+            GoalProgress::Blocked("another reason".to_string()),
+            GoalProgress::Blocked("third".to_string()),
+            GoalProgress::Paused,
+            GoalProgress::Completed,
+            GoalProgress::Completed,
+        ];
+        let b = active_status_breakdown(statuses.iter());
+        assert_eq!(b["proposed"].as_u64(), Some(1));
+        assert_eq!(b["not_started"].as_u64(), Some(2));
+        assert_eq!(b["in_progress"].as_u64(), Some(1));
+        assert_eq!(b["blocked"].as_u64(), Some(3));
+        assert_eq!(b["paused"].as_u64(), Some(1));
+        assert_eq!(b["completed"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn breakdown_in_progress_at_100_percent_is_not_completed() {
+        // Faithful per-variant counting: an InProgress goal at 100% is still
+        // `in_progress`, never bucketed as `completed` (that terminal view is
+        // GoalProgress::is_terminal, layered additively by callers).
+        let statuses = [GoalProgress::InProgress { percent: 100 }];
+        let b = active_status_breakdown(statuses.iter());
+        assert_eq!(b["in_progress"].as_u64(), Some(1));
+        assert_eq!(b["completed"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn breakdown_sum_equals_input_len() {
+        let statuses = [
+            GoalProgress::Proposed,
+            GoalProgress::InProgress { percent: 10 },
+            GoalProgress::Completed,
+            GoalProgress::Blocked("x".to_string()),
+            GoalProgress::Paused,
+        ];
+        let b = active_status_breakdown(statuses.iter());
+        let sum: u64 = [
+            "proposed",
+            "not_started",
+            "in_progress",
+            "blocked",
+            "paused",
+            "completed",
+        ]
+        .iter()
+        .map(|k| b[*k].as_u64().unwrap_or(0))
+        .sum();
+        assert_eq!(sum as usize, statuses.len());
     }
 }

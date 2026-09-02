@@ -7,6 +7,7 @@ doc_type: reference
 related:
   - ../concepts/adaptive-scaling.md
   - ../howto/configure-adaptive-scaling.md
+  - ./ooda-coverage-parallelism-ceiling.md
   - ./ooda-brain-api.md
   - ../daemon-mode.md
 ---
@@ -41,6 +42,13 @@ SIMARD_SCALING=auto simard ooda run
 SIMARD_SCALING=fixed simard ooda run
 ```
 
+The scaler's **base and ceiling** (its starting value and upper bound) come
+from `OodaConfig.max_concurrent_actions`, which defaults to **24** and is
+overridable with `SIMARD_OODA_MAX_CONCURRENT` (fail-closed, range `1..=64`;
+legacy `SIMARD_MAX_CONCURRENT_ACTIONS` is honoured when the new variable is
+unset). See
+[OODA coverage parallelism ceiling](./ooda-coverage-parallelism-ceiling.md).
+
 ---
 
 ## Public API
@@ -74,9 +82,9 @@ impl AdaptiveScaler {
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `initial` | Value of `OodaConfig.max_concurrent_actions` | Starting concurrency level |
+| `initial` | Value of `OodaConfig.max_concurrent_actions` (default **24**) | Starting concurrency level |
 | `floor` | `1` | Minimum concurrency (never scales below this) |
-| `ceiling` | `initial × 4` | Maximum concurrency (scales proportionally to config) |
+| `ceiling` | `initial` (the configured max) | Maximum concurrency (equals the configured base, default **24**) |
 
 Bounds are validated on construction:
 
@@ -230,32 +238,39 @@ pub struct OodaConfig {
 `Option` because the scaler is `None` when `SIMARD_SCALING=fixed` or
 unset. `Arc` because the scaler contains atomics and a mutex and may be
 shared across the action dispatcher threads. `#[serde(skip)]` because
-the scaler is runtime-only — it is reconstructed from the
-`SIMARD_SCALING` env var on boot, not persisted to JSON.
+the scaler is runtime-only — it is rebuilt by `OodaConfig::default()`
+from the `SIMARD_SCALING` env var on boot, not persisted to JSON.
 
-When `OodaConfig` is deserialized from a snapshot, the `scaler` field
-defaults to `None`. Call `config.with_env_scaler()` after
-deserialization to reconstruct the scaler from the current environment.
+When `OodaConfig` is deserialized from a snapshot, the `scaler` field is
+skipped and stays `None` (verified by
+`ooda_config_scaler_skipped_on_serde_roundtrip`). There is no
+post-deserialization reconstruction call — the scaler is built only by
+`OodaConfig::default()`, which reads `SIMARD_SCALING` on the boot path.
 
 ### Construction
 
 The scaler is constructed during `OodaConfig::default()` when
-`SIMARD_SCALING=auto`:
+`SIMARD_SCALING=auto`. The base (`max_concurrent_actions`) is resolved from the
+environment via the fail-closed `env_u32_bounded` helper — preferring
+`SIMARD_OODA_MAX_CONCURRENT`, falling back to the legacy
+`SIMARD_MAX_CONCURRENT_ACTIONS`, else the default **24** (range `1..=64`; see
+[OODA coverage parallelism ceiling](./ooda-coverage-parallelism-ceiling.md)):
 
 ```rust
-let ceiling = max_concurrent_actions.saturating_mul(4).max(1);
+let ceiling = max_concurrent_actions.max(1); // = the configured base
 let scaler = Some(Arc::new(AdaptiveScaler::new(
     max_concurrent_actions, 1, ceiling,
 )));
 ```
 
-The ceiling is dynamic: `initial × 4` (e.g., if
-`SIMARD_MAX_CONCURRENT_ACTIONS=5`, ceiling is 20). This scales
-proportionally to the operator's configured baseline rather than
-using a fixed cap.
+The ceiling **equals the configured base** (e.g., if
+`SIMARD_OODA_MAX_CONCURRENT=24`, ceiling is 24). 24 is therefore the true
+per-cycle ceiling: the scaler starts at the base, halves toward the floor under
+pressure, and recovers `+1` per low-pressure cycle back up to the base. Raising
+the base with the env override raises the ceiling with it.
 
-The same formula is used in `with_env_scaler()` for deserialized
-configs.
+This construction lives solely in `OodaConfig::default()`; a deserialized
+config keeps `scaler: None` until a fresh default is built on boot.
 
 ### Per-cycle integration point
 
@@ -339,6 +354,9 @@ src/ooda_loop/
 
 ## See also
 
+- [OODA coverage parallelism ceiling](./ooda-coverage-parallelism-ceiling.md)
+  — the 24 default, the `SIMARD_OODA_MAX_CONCURRENT` override, and why 24 is a
+  ceiling rather than a guarantee.
 - [Adaptive scaling concept](../concepts/adaptive-scaling.md) — design
   rationale and theory.
 - [How to configure adaptive scaling](../howto/configure-adaptive-scaling.md)

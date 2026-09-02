@@ -9,6 +9,19 @@ demotion judgment. The orient brain runs as a **recipe step** via
 `recipe-runner-rs`, following the same pattern as `ooda-decide.yaml`,
 `progress-assessment.yaml`, and `merge-readiness-judge.yaml`.
 
+> **Superseded on the OODA path by the typed-record model
+> ([#4719](https://github.com/rysweet/Simard/issues/4719), Group A).**
+> The orient recipe no longer prints an urgency for Rust to scrape. It now calls
+> the gated `simard ooda record-orient` tool, which validates the judgment
+> through the shared `OrientFields::from_fields` chokepoint and atomically writes
+> a typed `OrientDecisionRecord` (`schema: simard.ooda.orient.v1`). `RecipeBrain`
+> reads that record **fail-CLOSED** with `read_verified_orient` and ignores
+> stdout entirely; an absent/malformed/mismatched record keeps the base urgency
+> (safe no-op), never the deterministic floor. The recipe YAML header documents
+> `Output: NONE scraped from stdout`. The 3-tier stdout parser described below is
+> **legacy** and retained only for historical reference. See
+> [Reference: `simard ooda record-orient` / `record-decide`](./ooda-record-orient-decide-cli.md).
+
 > **History:** Before issue
 > [#2115](https://github.com/rysweet/Simard/issues/2115), the orient brain
 > was `RustyClawdOrientBrain`, which compiled the prompt via `include_str!`,

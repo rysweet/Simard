@@ -244,7 +244,9 @@ pub(crate) const PART_01: &str = r#"
         </select>
         <button class="btn" onclick="searchCreativeIdeas()">Search</button>
         <button class="btn" onclick="loadCreativeIdeas()">Refresh</button>
+        <button class="btn" id="ci-run-btn" onclick="runCreativeIdeas()" title="Generate ideas now instead of waiting for the daily scheduled run">Run now</button>
       </div>
+      <div id="ci-run-status" data-testid="ci-run-status" style="min-height:1.1rem;font-size:.78rem;margin-bottom:.5rem"></div>
       <div id="ci-counts" data-testid="ci-counts" style="display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.75rem"></div>
       <div id="ci-list" data-testid="ci-list" style="min-height:220px"><span class="loading">Loading…</span></div>
     </div>
@@ -260,6 +262,10 @@ pub(crate) const PART_01: &str = r#"
           ImplementationCompleted:'#238636', Deferred:'#8b949e', Rejected:'#f85149'
         })[s]||'#8b949e';
       }
+      /* Mirror the server-side state machine: Promote = →AcceptedForImplementation,
+         Prune = →Rejected. Only offer edges the store will actually allow. */
+      function canPromote(s){ return s==='New'||s==='NeedsHumanReview'; }
+      function canPrune(s){ return s!=='Rejected'&&s!=='ImplementationCompleted'; }
       function renderCounts(counts){
         const box=document.getElementById('ci-counts');
         if(!counts){box.innerHTML='';return;}
@@ -273,13 +279,19 @@ pub(crate) const PART_01: &str = r#"
         box.innerHTML=items.map(it=>{
           const c=statusColor(it.status);
           const metric=it.has_metric?'<span style="color:#3fb950;font-size:.7rem"> · metric: '+esc(it.metric||'yes')+'</span>':'';
+          const when=it.created_epoch?'<span style="color:#6e7681;font-size:.7rem"> · '+esc(formatTime(it.created_epoch))+'</span>':'';
+          let actions='';
+          if(canPromote(it.status)) actions+='<button class="btn ci-act" data-act="promote" data-id="'+escAttr(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem">Promote</button>';
+          if(canPrune(it.status)) actions+='<button class="btn ci-act" data-act="prune" data-id="'+escAttr(it.idea_id)+'" style="font-size:.7rem;padding:.15rem .5rem;margin-left:.35rem">Prune</button>';
+          const actionRow=actions?'<div style="margin-top:.4rem;display:flex;gap:.25rem">'+actions+'</div>':'';
           return '<div style="padding:.5rem .6rem;border:1px solid #21262d;border-radius:6px;margin-bottom:.5rem">'
             +'<div style="display:flex;justify-content:space-between;gap:.5rem;align-items:center">'
             +'<strong>'+esc(it.idea)+'</strong>'
             +'<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:10px;background:'+c+'22;color:'+c+';border:1px solid '+c+'">'+esc(it.status)+'</span>'
             +'</div>'
             +'<div style="color:#8b949e;font-size:.78rem;margin-top:.25rem">'+esc(it.rationale||'')+'</div>'
-            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+'</div>'
+            +'<div style="color:#6e7681;font-size:.7rem;margin-top:.25rem">'+esc(String(it.reviews))+' review(s) · '+esc(String(it.links))+' link(s)'+metric+when+'</div>'
+            +actionRow
             +'</div>';
         }).join('');
       }
@@ -304,14 +316,61 @@ pub(crate) const PART_01: &str = r#"
           renderIdeas(d.results||[]);
         }catch(e){box.innerHTML='<span class="err">Search failed — check /api/creative-ideas/search</span>';}
       }
+      function setRunStatus(msg,cls){
+        const el=document.getElementById('ci-run-status');
+        if(el) el.innerHTML=msg?'<span class="'+(cls||'')+'">'+esc(msg)+'</span>':'';
+      }
+      async function runCreativeIdeas(){
+        const btn=document.getElementById('ci-run-btn');
+        if(btn) btn.disabled=true;
+        setRunStatus('Generating ideas…','loading');
+        try{
+          const d=await apiFetch('/api/creative-ideas/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(d&&d.error){ setRunStatus('Run failed: '+d.error,'err'); }
+          else{
+            const r=(d&&d.report)||{};
+            setRunStatus('Run complete — '+(r.persisted||0)+' new idea(s) persisted, '+(r.reviewed||0)+' reviewed.','ok');
+            await loadCreativeIdeas();
+          }
+        }catch(e){ setRunStatus('Run failed — check /api/creative-ideas/run','err'); }
+        finally{ if(btn) btn.disabled=false; }
+      }
+      async function transitionIdea(action,ideaId,btn){
+        /* Disable the clicked control while in flight (same pattern as Run now)
+           so a rapid double-click can't fire a duplicate transition — the second
+           would hit an already-applied edge and surface a spurious error. */
+        if(btn) btn.disabled=true;
+        setRunStatus((action==='promote'?'Promoting':'Pruning')+' idea…','loading');
+        try{
+          const d=await apiFetch('/api/creative-ideas/'+encodeURIComponent(ideaId)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          if(d&&d.error){ setRunStatus((action==='promote'?'Promote':'Prune')+' failed: '+d.error,'err'); }
+          else{
+            const st=(d&&d.idea&&d.idea.status)||'';
+            let msg='Idea '+(action==='promote'?'promoted':'pruned')+' → '+st;
+            if(d&&d.goal_error) msg+=' (accepted, but goal routing failed: '+d.goal_error+')';
+            setRunStatus(msg, d&&d.goal_error?'err':'ok');
+            await loadCreativeIdeas();
+          }
+        }catch(e){ setRunStatus(action+' failed — check /api/creative-ideas','err'); }
+        finally{ if(btn) btn.disabled=false; }
+      }
       window.loadCreativeIdeas=loadCreativeIdeas;
       window.searchCreativeIdeas=searchCreativeIdeas;
+      window.runCreativeIdeas=runCreativeIdeas;
       const ct=document.querySelector('.tab[data-tab="creative-ideas"]');
       if(ct) ct.addEventListener('click',()=>{ if(!ciLoaded) loadCreativeIdeas(); });
       const cs=document.getElementById('ci-search-input');
       if(cs) cs.addEventListener('keypress',e=>{if(e.key==='Enter')searchCreativeIdeas();});
       const cf=document.getElementById('ci-status-filter');
       if(cf) cf.addEventListener('change',()=>searchCreativeIdeas());
+      /* Delegated Promote/Prune clicks so per-idea buttons survive re-render. */
+      const cl=document.getElementById('ci-list');
+      if(cl) cl.addEventListener('click',e=>{
+        const b=e.target.closest('.ci-act');
+        if(!b) return;
+        const act=b.getAttribute('data-act'), id=b.getAttribute('data-id');
+        if(act&&id) transitionIdea(act,id,b);
+      });
     })();
   </script>
 
@@ -896,8 +955,8 @@ pub(crate) const PART_01: &str = r#"
        validated against ^[a-z-]+$, matched against the allowlist, and falls
        back to 'overview' on any miss. The hash is never concatenated into a
        DOM selector, so a crafted hash cannot inject markup. */
-    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','resources','chat','overseer','journal','creative-ideas'];
-    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","memory":"resources","costs":"resources"};
+    const CANONICAL_TABS=['overview','goals','activity','workers','pull-requests','memory','resources','chat','overseer','journal','creative-ideas'];
+    const TAB_ALIASES={"status":"overview","workboard":"goals","logs":"activity","traces":"activity","thinking":"activity","brain-failures":"activity","processes":"workers","terminal":"workers","merge-decisions":"pull-requests","pr-readiness":"pull-requests","costs":"resources"};
 
     /* #2649: the per-tab fetch/refresh chain that used to live here
        (runTabFetches / clearTabTimers) is retired. Background prefetch and
@@ -1003,6 +1062,46 @@ pub(crate) const PART_01: &str = r#"
         if(d.error) html+=`<p class="err" style="margin:.5rem 0 0;font-size:.8rem">${esc(d.error)}</p>`;
         el.innerHTML=html;
       }catch(e){el.innerHTML='<span class="err">Failed to reach /api/cognition/recall-precision</span>';}
+    }
+
+    function enrichAttachClass(rate){
+      if(rate==null) return '';
+      if(rate>=0.95) return 'ok';
+      if(rate>=0.75) return 'warn';
+      return 'err';
+    }
+    async function fetchEnrichment(){
+      const el=document.getElementById('enrichment-panel');
+      if(!el) return;
+      const fresh=document.getElementById('enrichment-freshness');
+      try{
+        const d=await apiFetch('/api/enrichment');
+        if(fresh){
+          const f=d.freshness||'missing';
+          const dot=f==='live'?'#3fb950':(f==='stale'?'#d29922':'#8b949e');
+          fresh.innerHTML=`<span style="color:${dot}">●</span> ${esc(f)}`;
+        }
+        if(!d.available){
+          el.innerHTML='<span class="value">Not tracked yet — no enrichment decisions observed in the live snapshot.</span>';
+          return;
+        }
+        const rate=d.attach_rate;
+        const ratePct=rate==null?'n/a':(rate*100).toFixed(0)+'%';
+        const deg=d.degraded||{};
+        const degMem=deg.memory_ipc||0, degKnow=deg.knowledge_launch||0;
+        const fmt=(v)=>v==null?'n/a':(Math.round(v*10)/10);
+        let html=`
+          <div class="stat"><span class="label">Attach-rate</span><span class="value ${enrichAttachClass(rate)}">${ratePct} <span style="color:#8b949e">(${d.attached}/${d.decisions} decisions)</span></span></div>
+          <div class="stat"><span class="label">Avg facts / decision</span><span class="value">${fmt(d.avg_facts_injected)}</span></div>
+          <div class="stat"><span class="label">Avg procedures / decision</span><span class="value">${fmt(d.avg_procedures_injected)}</span></div>
+          <div class="stat"><span class="label">Avg preamble bytes</span><span class="value">${fmt(d.avg_preamble_bytes)}</span></div>
+          <div class="stat"><span class="label">Recall degrades</span><span class="value ${(degMem||degKnow)?'err':''}">memory-ipc ${degMem} · knowledge ${degKnow}</span></div>`;
+        if(d.last){
+          const l=d.last;
+          html+=`<div class="stat"><span class="label">Last decision</span><span class="value">attached=${l.attached} · ${l.facts_injected} facts · ${l.procedures_injected} procs · ${l.preamble_bytes}B <span style="color:#8b949e">${l.at?timeAgo(l.at):''}</span></span></div>`;
+        }
+        el.innerHTML=html;
+      }catch(e){el.innerHTML='<span class="err">Failed to reach /api/enrichment</span>';}
     }
 
     async function fetchAgentOverview(){

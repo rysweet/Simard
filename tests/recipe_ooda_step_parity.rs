@@ -78,6 +78,7 @@ fn make_goal(id: &str, status: GoalProgress) -> ActiveGoal {
         current_activity: None,
         wip_refs: vec![],
         last_progress_update_at: None,
+        labels: Vec::new(),
     }
 }
 
@@ -162,6 +163,10 @@ fn parity_decide_caps_at_max_concurrent_actions() {
         .collect();
     let config = OodaConfig {
         max_concurrent_actions: 2,
+        // Hermetic: without this, ambient `SIMARD_SCALING=auto` makes `Default`
+        // seed an AIMD scaler that ignores `max_concurrent_actions`, breaking the
+        // `== 2` cap assertion below (and the direct-vs-recipe parity).
+        scaler: None,
         ..Default::default()
     };
 

@@ -335,4 +335,57 @@ mod tests {
         // Just verify we can acquire the lock
         drop(guard);
     }
+
+    // ── #2798: auth secret is decoupled from the state-root resolver ──
+
+    /// The D1 fix (#2798) unified the dashboard `resolve_state_root()` with the
+    /// daemon resolver, so it now follows `SIMARD_STATE_ROOT`. The dashboard
+    /// login secret must NOT move with it: it stays at `$HOME/.simard/.dashkey`,
+    /// decoupled from the durable state root. This is the regression guard the
+    /// design note promises (`docs/reference/creative-ideas-durable-read-after-write.md`),
+    /// so a future "unify every path under the state root" refactor can't
+    /// silently relocate or expose the auth key. Mutating `SIMARD_STATE_ROOT`
+    /// requires the `cognitive_memory` serial key (see
+    /// `docs/testing/cognitive-memory-serial-isolation.md`).
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn dashkey_path_is_decoupled_from_state_root_resolver() {
+        let prev = std::env::var_os("SIMARD_STATE_ROOT");
+        let relocated = "/tmp/simard-2798-auth-decoupling-root";
+        // SAFETY: serialised via #[serial(cognitive_memory)] — no concurrent
+        // env read can tear this mutation.
+        unsafe {
+            std::env::set_var("SIMARD_STATE_ROOT", relocated);
+        }
+        let result = std::panic::catch_unwind(|| {
+            // The dashboard *reader* now honours the relocated state root …
+            assert_eq!(
+                crate::operator_commands_dashboard::routes::resolve_state_root(),
+                std::path::PathBuf::from(relocated),
+                "the D1 resolver must follow SIMARD_STATE_ROOT (#2798)"
+            );
+            // … but the auth secret must stay at $HOME/.simard/.dashkey.
+            let key = dashkey_path().expect("dashkey path resolves when HOME is set");
+            assert!(
+                key.ends_with(".simard/.dashkey"),
+                "the dashkey must stay at ~/.simard/.dashkey, not track the state \
+                 root (#2798); got {key:?}"
+            );
+            assert!(
+                !key.starts_with(relocated),
+                "the auth secret must never relocate under a moved SIMARD_STATE_ROOT \
+                 (#2798); got {key:?}"
+            );
+        });
+        // SAFETY: restore before propagating any panic (same serial key).
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SIMARD_STATE_ROOT", v),
+                None => std::env::remove_var("SIMARD_STATE_ROOT"),
+            }
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
 }

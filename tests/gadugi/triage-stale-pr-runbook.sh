@@ -11,12 +11,13 @@
 # It pins, in particular, the two corrections the architect review demanded:
 #   1. Check-name accuracy — the runbook must classify the ACTUAL CI rollup
 #      checks enumerated live from the workflow YAMLs: `pre-commit`,
-#      `cargo-audit`, `install-real`, `e2e-dashboard` (verify.yml), `coverage`
-#      (coverage.yml), and `build` — the `mkdocs build --strict` job from
-#      docs.yml that fires on docs/`mkdocs.yml`/`Specs/**` PRs. It must NOT
-#      invent a Rust `fmt` job (fmt/clippy/compile run inside `pre-commit`) or
-#      carry the mislabeled `lbug-clippy` prefix, and it must NOT deny the real
-#      `build` check that docs.yml contributes on documentation PRs.
+#      `cargo-audit`, `install-real`, `e2e-dashboard` (verify.yml) and
+#      `coverage` (coverage.yml). It must NOT invent a Rust `fmt` job
+#      (fmt/clippy/compile run inside `pre-commit`), carry the mislabeled
+#      `lbug-clippy` prefix, or resurrect the removed MkDocs `docs.yml` `build`
+#      job — that Python job was deleted in #3181 and docs integrity now runs as
+#      a native Rust test (`tests/docs_integrity.rs`) inside the `pre-commit`
+#      job's `cargo test`.
 #   2. Honest gate framing — the runbook must describe the `gh pr merge` env-red
 #      path as an AUDITED OPERATOR OVERRIDE layered on top of the gate, never as
 #      a tooling-sanctioned bypass (the deterministic gate refuses on any
@@ -34,7 +35,6 @@ DOC="docs/howto/triage-stale-pull-requests.md"
 MKDOCS="mkdocs.yml"
 VERIFY=".github/workflows/verify.yml"
 COVERAGE=".github/workflows/coverage.yml"
-DOCS=".github/workflows/docs.yml"
 
 PASS=0
 fail() {
@@ -60,7 +60,6 @@ lacks() {  # lacks <needle> <message> — fixed-string MUST be absent
 [ -f "$MKDOCS" ]   || fail "$MKDOCS not found"
 [ -f "$VERIFY" ]   || fail "$VERIFY (CI source of truth) not found"
 [ -f "$COVERAGE" ] || fail "$COVERAGE (CI source of truth) not found"
-[ -f "$DOCS" ]     || fail "$DOCS (CI source of truth) not found"
 ok "all ground-truth files present"
 
 # --- Group 1: registration + front-matter -----------------------------------
@@ -89,7 +88,7 @@ ok "front-matter is valid YAML with the required keys"
 # --- Group 2: check-name accuracy, derived from the LIVE workflows -----------
 # The set of real CI checks is read from the workflow files themselves so the
 # runbook fails this gate the moment CI and the doc drift apart.
-LIVE_CHECKS="$(python3 - "$VERIFY" "$COVERAGE" "$DOCS" <<'PY'
+LIVE_CHECKS="$(python3 - "$VERIFY" "$COVERAGE" <<'PY'
 import sys, yaml
 names = []
 for path in sys.argv[1:]:
@@ -113,18 +112,21 @@ hasre "pre-commit.*(real|hard gate)|(real|hard gate).*pre-commit" \
   "runbook must classify pre-commit as a REAL hard gate"
 # Correction #1 (refined): the runbook must (a) explain that there is no SEPARATE
 # Rust build/fmt check — fmt/clippy/compile all run inside `pre-commit` — and
-# (b) correctly document the docs.yml `build` job (`mkdocs build --strict`) that
-# DOES surface as a real gate on docs/`Specs` PRs. The mislabeled `lbug-clippy`
-# prefix must be gone, and the doc must NOT deny the real docs `build` check.
+# (b) document that the former MkDocs `docs.yml` `build` job was removed with all
+# Python (#3181), docs integrity now running as the native Rust
+# `tests/docs_integrity.rs` test inside the verify `cargo test`. The mislabeled
+# `lbug-clippy` prefix and the removed `mkdocs build --strict` command must both
+# be gone.
 lacks "lbug-clippy" "stale 'lbug-clippy' check name must not appear"
-lacks "no \`build\` or \`fmt\` check" \
-  "runbook must not deny the real docs.yml 'build' check"
+lacks "mkdocs build --strict" \
+  "removed MkDocs 'build' command must not be documented as a live check (#3181)"
 hasre "[Nn]o separate Rust .build. or .fmt." \
   "runbook must state there is no SEPARATE Rust build/fmt check (folded into pre-commit)"
-has "docs.yml" "runbook must attribute the 'build' check to docs.yml"
-hasre "mkdocs build --strict" \
-  "runbook must document the docs.yml 'build' job as 'mkdocs build --strict'"
-ok "check-name classification matches the live workflows incl. docs.yml build (correction #1)"
+hasre "removed with all Python|no longer a separate .build.|no .mkdocs build. step" \
+  "runbook must document that the MkDocs docs.yml 'build' job was removed (#3181)"
+has "docs_integrity" \
+  "runbook must attribute docs integrity to the native Rust tests/docs_integrity.rs test"
+ok "check-name classification matches the live workflows incl. Python-free docs integrity (correction #1)"
 
 # --- Group 3: honest operator-override framing (correction #2) ---------------
 hasre "never silently fall back|never silently falls back" \

@@ -297,8 +297,15 @@ mod tests {
     /// now name the offending command and include the shell diagnostic.
     #[test]
     fn run_terminal_script_surfaces_diagnostic_when_wait_step_times_out() {
+        // The wait-for marker never appears, so the step always reaches the
+        // TimedOut branch — that is the code path under test. The timeout is
+        // held generous (not the minimal 1s) so the PTY shell has time to fork,
+        // exec, and emit its `command not found` line into the transcript even
+        // under the CPU-oversubscribed deploy gate; a too-tight window let the
+        // timeout fire before the shell produced any output, yielding a bare
+        // "did not emit expected output" message with no diagnostic to assert on.
         let spec = TerminalTurnSpec::parse(
-            "wait-timeout-seconds: 1\ncommand: definitely-not-a-real-binary-2077 hello\nwait-for: never-seen-marker-2077",
+            "wait-timeout-seconds: 10\ncommand: definitely-not-a-real-binary-2077 hello\nwait-for: never-seen-marker-2077",
             "terminal-shell",
         )
         .unwrap();

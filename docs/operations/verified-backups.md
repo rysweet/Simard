@@ -134,27 +134,59 @@ are confirmed self-consistent by `ensure_backup_valid`.
 ### Bounded corrupt-quarantine retention
 
 When LadybugDB detects a corrupt store or WAL it quarantines the bad bytes in
-place. `simard cleanup` reclaims any entry under `~/.simard` whose name **starts
-with** `cognitive.` or `cognitive_memory.` **and contains** the `.corrupt-<ts>`
-infix — for example `cognitive.corrupt-<ts>`, `cognitive.wal.corrupt-<ts>`,
-`cognitive_memory.corrupt-<ts>`, recursively nested
-`…cognitive.wal.corrupt-<ts>` chains, and matching `.corrupt-<ts>.bak` copies.
-The live store files (`cognitive`, `cognitive.wal`, `cognitive.shadow`) lack the
-`.corrupt-` infix, so they are never matched.
+place, **next to the live store**. Because the live cognitive store lives at
+`<state_root>/state/cognitive` (see [Live-store path resolution](#live-store-path-resolution)),
+fresh quarantines land in `<state_root>/state/` — e.g. `cognitive.corrupt-<ts>`,
+`cognitive.wal.corrupt-<ts>`, recursively nested `…cognitive.wal.corrupt-<ts>`
+chains, corrupt-snapshot shadow side-files that carry the infix
+(`cognitive.corrupt-<ts>.shadow`), and `.corrupt-<ts>.bak` copies. The
+legacy native backend also left `cognitive_memory.corrupt-<ts>` snapshots
+directly under the top-level state root (`~/.simard`).
 
-`remove_old_corrupt_dbs` enforces **two independent bounds** on quarantines:
+`simard cleanup` therefore reclaims quarantines in **both** directories:
+
+| Directory | Helper | Contents |
+|---|---|---|
+| `<state_root>` (`~/.simard`) | `simard_state_root()` | legacy native `cognitive_memory.corrupt-*` snapshots |
+| `<state_root>/state/` (`~/.simard/state/`) | `resolve_subdir("state")` | live-backend `cognitive*.corrupt-*` quarantines (where the store actually lives) |
+
+Both paths are resolved through the [`state_root`](../reference/state-root-resolution.md)
+helpers — there is **no hardcoded duplicate path**. A cleanup entry is a
+quarantine iff its name **starts with** `cognitive.` or `cognitive_memory.` **and
+contains** the `.corrupt-<ts>` infix; the live store files (`cognitive`,
+`cognitive.wal`, `cognitive.shadow`) lack that infix, so they are never matched.
+
+> **Why the second directory matters.** Before this fix, cleanup only scanned the
+> **top-level** `~/.simard` and never read `~/.simard/state/`, so once the store
+> moved into the `state/` subdir (de-fork Phase 2b, #2307) library-backend
+> quarantines accumulated **unbounded** there — one host reached 62 stale
+> artifacts dating back months. Reclaiming `state/` with the same bounds closes
+> that regression.
+
+`remove_old_corrupt_dbs` applies **three bounds, independently per directory**
+(each directory is listed and ranked on its own — the `state/` branch can never
+erode the top-level directory's `keep-N` or largest-asset protection, and vice
+versa):
 
 | Bound | Constant | Default | Effect |
 |---|---|---|---|
-| Age | `CORRUPT_DB_MAX_AGE_DAYS` | `7` days | Remove any quarantine older than N days |
+| Age | `CORRUPT_DB_MAX_AGE_DAYS` | `30` days | Remove any quarantine older than N days |
 | Count | `CORRUPT_DB_KEEP` | `5` | Keep only the newest N; remove the older surplus immediately |
+| Largest-asset floor | `CORRUPT_DB_PROTECT_MIN_BYTES` | `1 MiB` | Never sweep the single largest quarantine at/above the floor — the most likely recovery asset — regardless of age or rank |
 
-A quarantine is removed if it fails **either** check (it is older than the age
-cap **or** it is not among the newest `CORRUPT_DB_KEEP`). The count cap closes
-the gap where a corruption burst inside the age window could accumulate
-unbounded (this host saw 88 MB / 112 artifacts pile up). Neither bound *protects*
-an entry the other would drop — a quarantine within the newest N but older than 7
+A quarantine is removed if it fails **either** of the age/count checks (it is
+older than the age cap **or** it is not among the newest `CORRUPT_DB_KEEP`),
+*unless* it is the protected largest asset. The count cap closes the gap where a
+corruption burst inside the age window could accumulate unbounded (this host saw
+88 MB / 112 artifacts pile up). Neither the age nor count bound *protects* an
+entry the other would drop — a quarantine within the newest N but older than 30
 days is still deleted by the age check.
+
+The **`no_quarantine` self-health probe scans this same live-store directory**
+(`<state_root>/state/`, via the same `state_root` helpers) and flags only *fresh*
+quarantines created since the deploy window — so the retained snapshots this
+retention policy keeps do **not** fail the health check. See
+[`NoQuarantineProbe`](../reference/self-deploy-api.md#noquarantineprobe).
 
 > **Preserve recovery assets (issue #2550).** These caps must never sweep away
 > the inputs an operator needs to recover from a corruption-reset. The retention
@@ -240,7 +272,7 @@ Environment=SIMARD_BACKUP_INTERVAL_SECS=86400
 KillSignal=SIGTERM
 TimeoutStopSec=30
 ExecStart=/usr/local/bin/simard ooda daemon
-Restart=on-failure
+Restart=always
 ```
 
 > The live store is `~/.simard/cognitive`; the daemon's `WorkingDirectory` is
@@ -472,11 +504,14 @@ last good backup if needed.
 
 ### "`~/.simard` is filling with `cognitive.corrupt-*` files"
 
-Quarantines are bounded by both age (7 days) and count (newest 5). Reclaim
-immediately:
+Fresh quarantines land in `~/.simard/state/` (next to the live store); the legacy
+native backend left `cognitive_memory.corrupt-*` snapshots directly under
+`~/.simard`. Both are bounded by age (30 days), count (newest 5), and the
+largest-asset floor, **independently per directory**. Reclaim immediately:
 
 ```bash
-simard cleanup    # applies age + count caps to quarantines, among other artifacts
+simard cleanup    # applies age + count + largest-asset caps to quarantines in
+                  # BOTH ~/.simard and ~/.simard/state/, among other artifacts
 ```
 
 If new `.corrupt-<ts>` files appear every cycle, that is a corruption signal —

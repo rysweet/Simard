@@ -257,20 +257,27 @@ The prompt constrains the label to those three strings, but an LLM
 routinely varies the *surface form* of a label it clearly intends —
 title/upper case (`PR-Pattern`, `BUG-PATTERN`), surrounding whitespace
 or quotes/sentence punctuation (`" bug-pattern "`, `pr-pattern.`), and
-`_`/space separators (`pr_pattern`, `lesson learned`). The parser's
-concept filter (`canonical_distill_concept`) folds these variants back
-to the canonical lower-hyphen label **before** the closed-set match, so
-a well-formed, grounded fact is not lost to cosmetics. Normalization is
-limited to case-folding, trimming, and `_`/space→`-` (with repeated
-hyphens collapsed); a concept that does not normalize to exactly one of
-the three labels — `made-up-label`, `pr-patterns`, `pull-request` — is
-still dropped. Recovered facts are stored under the canonical label, so
-the concept column is uniform for downstream dedup and recall regardless
-of how the model spelled it. This raises fact-yield (fewer legitimate
-facts dropped) without weakening precision (off-spec labels still
-dropped, and the reliability gate still quarantines ungrounded/empty
-facts). See the [fact-yield benchmark](#fact-yield-benchmark) for the
-recorded before/after numbers.
+`_`/space separators (`pr_pattern`, `lesson learned`). The shared
+reliability scorer's [`fact_reliability::canonical_concept`](../reference/distill-write-boundary-gate.md)
+folds these variants back to the canonical lower-hyphen label **before**
+the closed-set match, so a well-formed label is not mistaken for
+off-spec on cosmetics. Normalization is limited to case-folding,
+trimming, and `_`/space→`-` (with repeated hyphens collapsed); a concept
+that does not normalize to exactly one of the three labels —
+`made-up-label`, `pr-patterns`, `pull-request` — canonicalizes to
+`None`.
+
+Post-#2679, concept validity is a **reliability nudge, not a drop
+filter**: the write-boundary gate scores canonical-concept membership as
+`+0.1` on the `[0,1]` reliability score (see the
+[write-boundary gate](./distillation-semantic-handoff.md)), it does not
+gate promotion. A grounded, non-empty fact clears the threshold with or
+without a known concept, so canonicalization *recovers the nudge* for a
+surface-form variant the model clearly intended rather than salvaging a
+fact from being dropped. Recovering the canonical label also keeps the
+concept column uniform for downstream dedup and recall regardless of how
+the model spelled it. See the [fact-yield metric](#fact-yield) for how the
+runtime yield of the whole path is tracked over time.
 
 ---
 
@@ -399,22 +406,29 @@ Before a distilled fact is promoted into semantic memory it is **self-assessed**
 and gated on `Fact.confidence` — turning the formerly-constant `0.7` into a
 live, computed signal (BGML's *information self-assessment ownership*, ISAO).
 
-`assess_fact_reliability(fact, episodes, batch_facts) -> f64` scores each
-candidate in `[0.0, 1.0]` from cheap local signals (no extra LLM call):
+`fact_reliability::score_fact_reliability(concept, content, grounded) -> f64`
+scores each candidate in `[0.0, 1.0]` from cheap local signals (no extra LLM
+call). It is a **pure per-fact** function shared by both write-boundary seams
+(the daemon IPC gate and the in-process distill sink), so a fact scores
+identically no matter which boundary writes it:
 
 | Signal | Weight | Meaning |
 |--------|--------|---------|
-| Provenance grounding | 0.5 | `source_episode_id` is one of the episodes fed to the recipe this pass (not hallucinated). **Necessary**: without it a fact tops out at 0.4 and is always quarantined. |
-| Content quality | ≤0.3 | Empty / whitespace-only content is a **hard gate** (score `0.0`); otherwise ≥3 words earns the full 0.3. |
-| Concept validity | 0.1 | Concept is one of `pr-pattern` / `bug-pattern` / `lesson-learned`. |
-| Corroboration | 0.1 | ≥2 facts agree on the same concept this pass — awarded **only to grounded facts** so hallucinated provenance can't ride on a sibling's corroboration. |
+| Provenance grounding | 0.5 | `source_episode_id` (trimmed via `fact_reliability::normalize_source_episode_id`) is one of the episodes fed to the recipe this pass (not hallucinated). Both seams normalize the cited id the same way, so an id an LLM re-emitted with stray surrounding whitespace still grounds (and threads a resolvable `DERIVES_FROM` edge) instead of being silently quarantined. **Necessary**: without grounding a fact tops out at 0.4 and is always quarantined. |
+| Content quality | ≤0.3 | Empty / whitespace-only content is a **hard gate** (score `0.0`); otherwise ≥3 words earns the full 0.3, 1–2 words a partial 0.15. |
+| Concept validity | 0.1 | Concept canonicalizes to one of `pr-pattern` / `bug-pattern` / `lesson-learned`. A **nudge, not a gate**. |
+
+> The legacy batch scorer's **corroboration** term was **dropped in
+> [#2679](https://github.com/rysweet/Simard/issues/2679)**: a per-fact IPC call
+> has no batch to corroborate against, and the term was disposition-neutral (it
+> only nudged an already-storable `0.9 → 1.0`, never flipped
+> store↔quarantine), so both seams agree on every decision without it.
 
 A candidate scoring below `DISTILL_RELIABILITY_THRESHOLD` (0.5) is **quarantined**
 — not written. Because grounding (0.5) is necessary to reach the threshold, a
-hallucinated-provenance fact scores at most `0.4` (even with corroboration) and
-an empty fact scores `0.0`; both are quarantined. A nominal grounded,
-known-concept, ≥3-word fact scores `0.9` — at or above the legacy baseline — so
-good facts keep their prior behaviour.
+hallucinated-provenance fact scores at most `0.4` and an empty fact scores `0.0`;
+both are quarantined. A nominal grounded, known-concept, ≥3-word fact scores `0.9`
+— at or above the legacy baseline — so good facts keep their prior behaviour.
 
 A surviving candidate is written with its *computed* confidence, but never
 **downgrades** a stronger existing copy of the **same fact**. The don't-clobber
@@ -429,6 +443,12 @@ lower-or-equal confidence, while distinct lessons that share a label accumulate
 Each pass records a `distill_reliability_gate` metric whose value is the
 block-rate (`quarantined / candidate_facts`), with the counts in the context
 payload, so the gate's effect is measurable before/after from `metrics.jsonl`.
+
+That live block-rate is complemented by a fixed-corpus **reliability-gate
+benchmark** — a run-over-run comparable classification-accuracy score for the
+same gate, wired into the gym signal machinery — so a silent regression in the
+gate's *discrimination* raises a gym `Regression` signal. See the
+[reliability-gate benchmark reference](../reference/reliability-gate-benchmark.md).
 
 ### Reduction ratio
 
@@ -451,55 +471,39 @@ cycle.
 
 ---
 
-## Fact-yield benchmark
+## Fact-yield
 
 Fact-yield is the number of facts a pass promotes per unit of
-consolidation input (facts-per-episode-batch). Because the LLM recipe
-call is non-deterministic, the yield of the *deterministic* portion of a
-pass — the JSON parse + concept filter + reliability gate — is pinned by
-a fixed-corpus **regression benchmark**. This records a concrete baseline
-so a regression fails CI; it is **not** an estimate of real-world
-end-to-end LLM yield. The numbers are a property of the fixed corpus
-(which deliberately contains five recoverable surface-form-variant
-labels), not a global production delta.
-
-`src/memory_consolidation/distillation_fact_yield_bench.rs` runs a fixed
-batch of 25 episodes and a fixed facts document of 13 candidate
-facts (canonical, surface-form-variant, off-spec, ungrounded, and
-empty-content cases) through the real production path
-(`parse_facts_document` + `assess_fact_reliability`). It embeds an
-exact-match baseline oracle so the before/after comparison is
-self-contained: reverting the concept canonicalization collapses
-`improved` to `baseline` and fails the strict-improvement assertion.
-
-Recorded numbers (`cargo test --lib
-memory_consolidation::distillation_fact_yield_bench -- --nocapture`):
+consolidation input (facts-per-episode-batch):
 
 ```
-[fact-yield-bench] corpus_episodes=25 candidate_facts=13 \
-  baseline_promoted=3 improved_promoted=8 \
-  baseline_yield=0.120 improved_yield=0.320 \
-  baseline_structural_precision=1.000 improved_structural_precision=1.000
+distill_fact_yield = fact_count / input_count      per completed pass
 ```
 
-On this fixed corpus the canonicalization recovers the five
-surface-form-variant facts the exact-match filter dropped, raising the
-parse+gate fact-yield from **0.120 to 0.320** while **structural
-precision** stays at **1.000**. Precision here is *structural* — every
-promoted fact remains grounded, non-empty, and known-concept (the
-reliability gate's admission invariant); it is not a claim that the
-fact's content is semantically supported by the cited episode. No
-baseline-promoted fact is dropped.
+Because the LLM recipe call is non-deterministic, real end-to-end
+fact-yield is a *runtime* property, not a fixed number. It is therefore
+made **observable and trendable** as a durable self-metric rather than
+asserted by a static benchmark: every **completed** pass records one
+`distill_fact_yield` event to `metrics.jsonl` via
+`self_metrics::record_metric` (see [Observability](#distill_fact_yield-fact-yield-metric)),
+so a regression in the distiller's yield shows up as a falling mean the
+same way `recall_precision_at_k` surfaces ranked-recall regressions. The
+metric `value` is the ratio above; its context carries
+`{input_count, fact_count, quarantined, fact_yield}` so a low yield can be
+attributed to gate blocks versus a low-signal batch.
 
-The benchmark is DB-free (parse + reliability gate only). Because the
-corpus is dedup-neutral against an empty store, its parse+gate survivor
-count equals a full pass's promoted count for a fresh memory — and that
-equality is *exercised*, not merely asserted, by
-`distillation_tests::full_pass_promotes_canonicalized_surface_variants_through_dedup`,
-which routes the same corpus through the real
-`distill_recent_episodes_with_runner` (parse → gate → **dedup guard** →
-store) and confirms all eight survive with the ungrounded and empty
-candidates quarantined.
+> **Retired in [#2679](https://github.com/rysweet/Simard/issues/2679):**
+> the former *deterministic* fact-yield regression benchmark
+> (`distillation_fact_yield_bench.rs`) measured the yield of the
+> `parse_facts_document` + `assess_fact_reliability` parse/filter path,
+> which no longer exists — the distiller now writes each fact directly
+> through the [write-boundary gate](./distillation-semantic-handoff.md).
+> On that path concept canonicalization is a disposition-neutral
+> reliability *nudge* (`+0.1`, [`fact_reliability::score_fact_reliability`](../reference/distill-write-boundary-gate.md)),
+> **not** a promotion gate, so it no longer moves gate fact-yield and the
+> benchmark's before/after premise (canonicalization recovering dropped
+> surface-form variants) no longer holds. Fact-yield is now tracked by the
+> runtime `distill_fact_yield` series above.
 
 ---
 
@@ -574,6 +578,36 @@ parses (not the first), with string-aware brace scanning, so a leading
 banner/thinking object no longer shadows the agent's facts object and an
 accidental trailing empty object never discards earlier facts (the t=7517
 parse-failure mode; see "The recipe" above).
+
+### `distill_fact_yield` (fact-yield metric)
+
+> Perpetual-cognition goal: make distillation fact-yield observable.
+
+Fact-yield — promoted facts per input episode — was previously visible only
+as inert `input_count` / `fact_count` context on `distill_success_rate`,
+which is a **binary** success signal; its mean is the pass success rate, not
+the yield. To make yield itself trendable, every **completed** pass now also
+records one `distill_fact_yield` event to `metrics.jsonl` via
+`self_metrics::record_metric`, mirroring `distill_reliability_gate` and the
+ranked-recall `recall_precision_at_k` series.
+
+```
+distill_fact_yield = fact_count / input_count      per completed pass
+```
+
+The metric `value` is the ratio (`0.0` when a pass pulled no episodes — the
+`DISTILL_MIN_EPISODES` skip makes that unreachable on the emitting path, but
+the helper is total). The context payload carries
+`{input_count, fact_count, quarantined, fact_yield}`, so a consumer can
+recompute the ratio, segment by pass size, or attribute a low yield to gate
+blocks (`quarantined`) versus a low-signal batch. Because the data lives in
+`metrics.jsonl` (operator runtime state, queryable via
+`self_metrics::query_metrics`), the yield mean is computed over a rolling
+window — a regression shows up as a falling mean rather than a silent
+degradation of semantic-memory growth. Emitted only on a completed pass
+(skips and recipe errors emit no yield event), so the series carries signal
+only. Best-effort and `cfg!(test)`-gated so unit tests never append to the
+operator's real `metrics.jsonl`.
 
 ---
 

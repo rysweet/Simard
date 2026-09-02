@@ -6,14 +6,14 @@
 //! * `mark_episode_distilled(node_id) -> SimardResult<()>`
 //! * `list_undistilled_episodes(limit) -> SimardResult<Vec<CognitiveEpisode>>`
 //!
-//! Both methods MUST land with a default no-op impl so legacy bridges
+//! Both methods MUST land with a default no-op impl so legacy memories
 //! keep compiling. `LibraryCognitiveMemory` MUST override them against
 //! the lbug-backed `Episode` schema, which gains a lazy `distilled
 //! INT64 DEFAULT 0` column.
 //!
 //! These tests target `LibraryCognitiveMemory::in_memory()` directly so
 //! the override behaviour is exercised without going through the
-//! bridge layer.
+//! memory layer.
 //!
 //! ## Expected red signal
 //!

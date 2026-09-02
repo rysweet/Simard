@@ -39,6 +39,8 @@ mod tests;
 mod tests_continuity;
 #[cfg(test)]
 mod tests_session_store;
+#[cfg(test)]
+mod tests_transport_group;
 
 pub use allowlist::{Allowlist, AuthDecision};
 pub use channel::{

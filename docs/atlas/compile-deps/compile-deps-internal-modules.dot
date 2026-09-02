@@ -1,0 +1,26 @@
+digraph compile_deps_internal_modules {
+    graph [rankdir=LR, labelloc="t", label="Large internal module dependency layer", fontsize=20];
+    node [shape=box, style="rounded,filled", fillcolor="#f8fbff", color="#0969da", fontname="Arial"];
+    edge [color="#586069", fontname="Arial"];
+
+    operator_commands_dashboard; overseer; goal_curation; ooda_loop; operator_cli; journal; cognitive_memory; ooda_actions; meeting_backend; engineer_loop; gym; memory_consolidation; ooda_brain; coin_gym; self_improve; self_deploy; memory_ipc;
+    error; goals; meeting_facilitator; state_root; session; runtime; memory_cognitive; telemetry; typed_ooda; safe_update; stewardship; engineer_worktree; fact_reliability; recipe_output;
+
+    operator_commands_dashboard -> {goal_curation meeting_backend memory_ipc cognitive_memory overseer journal stewardship error};
+    overseer -> {stewardship error goal_curation cognitive_memory meeting_facilitator engineer_worktree ooda_loop};
+    goal_curation -> {goals error cognitive_memory state_root ooda_loop self_deploy};
+    ooda_loop -> {goal_curation ooda_brain error memory_consolidation meeting_facilitator cognitive_memory goals ooda_actions memory_cognitive};
+    operator_cli -> {typed_ooda goal_curation memory_ipc meeting_facilitator cognitive_memory ooda_loop self_deploy state_root};
+    journal -> {error cognitive_memory stewardship overseer memory_cognitive goal_curation memory_consolidation};
+    cognitive_memory -> {memory_cognitive error memory_consolidation memory_ipc};
+    ooda_actions -> {goal_curation ooda_loop engineer_worktree ooda_brain error typed_ooda cognitive_memory};
+    meeting_backend -> {meeting_facilitator error goals state_root session goal_curation cognitive_memory};
+    engineer_loop -> {session meeting_facilitator error runtime goals goal_curation engineer_worktree safe_update};
+    gym -> {runtime error session};
+    memory_consolidation -> {cognitive_memory session fact_reliability goals error memory_cognitive telemetry ooda_loop};
+    ooda_brain -> {recipe_output ooda_loop goal_curation error telemetry engineer_worktree};
+    coin_gym -> operator_cli;
+    self_improve -> {gym error runtime goals engineer_loop};
+    self_deploy -> {safe_update state_root cognitive_memory error engineer_worktree goal_curation};
+    memory_ipc -> {cognitive_memory goal_curation error fact_reliability state_root memory_cognitive};
+}

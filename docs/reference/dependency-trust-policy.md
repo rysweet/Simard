@@ -83,7 +83,7 @@ cargo-vet:
     - name: Check out repository
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
     - name: Install cargo-vet
-      uses: taiki-e/install-action@7b51dc7487ebab790625f16f2c5f541029a3b0ab # cargo-vet
+      uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
       with:
         tool: cargo-vet
     - name: Run cargo vet
@@ -95,9 +95,20 @@ Properties, identical to the other guardrail jobs:
 - **Lockfile-only** — no crate compilation, not in `pre-commit`, never writes
   the shared `simard-ci-v2` cache.
 - **`contents: read`** only — no token write scope.
-- **SHA-pinned** `taiki-e/install-action` with an explicit `tool: cargo-vet`
-  input (each tool has its own tag/commit, so a SHA pin alone selects the tool
-  baked into that commit — always pass `tool:`).
+- **SHA-pinned** `taiki-e/install-action` — pinned to its **`v2` release**
+  commit (`# v2.82.10`, reachable from the action's default branch so
+  Dependabot's `github_actions` updater can resolve and bump it) with an
+  explicit `tool: cargo-vet` input that selects the tool. Do **not** pin
+  `taiki-e`'s per-tool convenience tags (`# cargo-vet`): their commits are
+  diverged from the default branch and break Dependabot (`no such commit …`).
+- **SHA-pinned** `dtolnay/rust-toolchain` (used by `coverage.yml`, `release.yml`
+  and the `rust-runner-prep` composite action) — pinned to its **`v1` release**
+  commit (`# v1`, reachable from the action's default branch so Dependabot can
+  resolve and bump it) with an explicit `toolchain: stable` / `toolchain: nightly`
+  input that selects the channel. Do **not** pin dtolnay's per-channel *branch*
+  HEADs (`# stable`, `# nightly`): those commits are diverged from the default
+  branch and break Dependabot the same way (`no such commit …`), failing the
+  default-branch `dependabot-updates` run.
 - **`--locked`** — fails on a dirty `Cargo.lock`.
 
 `cargo vet --locked` passes when every third-party crate in the locked graph is
@@ -239,25 +250,29 @@ It is exempted **once per tool**, with identical justification, in
 `.cargo/audit.toml` (existing) and `deny.toml` (added for #2260), and is
 re-checked whenever a fixed `rsa` release ships.
 
-### The `crossbeam-epoch` exemption (RUSTSEC-2026-0204)
+### The `crossbeam-epoch` advisory (RUSTSEC-2026-0204) — resolved by upgrade
 
-The second standing exemption is `crossbeam-epoch` / **RUSTSEC-2026-0204**
-(invalid pointer dereference in the `fmt::Display` impl for `Atomic`/`Shared`):
+`crossbeam-epoch` / **RUSTSEC-2026-0204** (invalid pointer dereference in the
+`fmt::Display` impl for `Atomic`/`Shared`) is **not** a standing exemption. It
+was briefly carried as a stopgap `ignore` on the day it was published
+(2026-07-06), but the upstream fix shipped almost immediately:
 
-- **No fixed release exists** upstream (issued 2026-07-06 with empty
-  *Patched*/*Unaffected* fields), so it fails `cargo deny check advisories`
-  and `cargo audit` by default and must be exempted explicitly.
-- It reaches the graph **transitively**:
+- **A fixed release exists.** The advisory records `patched = ">= 0.9.20"`, so
+  the correct remediation is a **bump, not an ignore**. `Cargo.lock` pins
+  `crossbeam-epoch 0.9.20` and `supply-chain/audits.toml` carries the cargo-vet
+  delta audit `0.9.18 -> 0.9.20`.
+- It reached the graph **transitively**:
   `rustyclawd-tools → moka → crossbeam-epoch`.
-- The dereference only occurs when `Display`-formatting a **null** crossbeam
-  `Atomic`/`Shared`; Simard never formats crossbeam pointers, so the faulty
-  path is unreachable in Simard's usage.
+- The stale stopgap `ignore` has been **removed** from both `.cargo/audit.toml`
+  and `deny.toml`, so the gates once again fail loud if `crossbeam-epoch` ever
+  regresses below `0.9.20`.
 - Tracked upstream: <https://rustsec.org/advisories/RUSTSEC-2026-0204>.
 
-Like `rsa`, it is exempted **once per tool** with identical justification in
-`.cargo/audit.toml` and `deny.toml`, and is re-checked whenever a fixed
-`crossbeam-epoch` release (or a `moka`/`rustyclawd-tools` bump that drops it)
-ships.
+This is precisely the "stale-ignore revalidation → bump" path the remediation
+reasoner enforces (see
+[supply-chain-advisory-stewardship.md](./supply-chain-advisory-stewardship.md)):
+an advisory that once had no fix must be re-routed to a bump — and its stopgap
+ignore removed — the moment a patched release appears.
 
 ### Transitive unmaintained / unsound advisories
 
@@ -287,9 +302,10 @@ start failing — a *new* unmaintained advisory landing on a *direct* dependency
 or one of these being re-classified as a vulnerability or pulled in directly —
 the `workspace` scope forces an explicit decision: carry a *temporary* justified
 `ignore` (ID + "via `<upstream>`, no upgrade yet" + tracking link) in `deny.toml`
-and `.cargo/audit.toml` until the bump lands. The **permanent** `ignore`s in
-the policy are `rsa` (RUSTSEC-2023-0071) and `crossbeam-epoch`
-(RUSTSEC-2026-0204), the two advisories with no upstream fix.
+and `.cargo/audit.toml` until the bump lands. The only **permanent** `ignore` in
+the policy is `rsa` (RUSTSEC-2023-0071), the single advisory with no upstream
+fix; `crossbeam-epoch` (RUSTSEC-2026-0204) was resolved by upgrading to `0.9.20`
+(see above), not by a standing exemption.
 
 ## Workflow: vetting a crate or resolving an advisory
 

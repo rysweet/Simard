@@ -1,0 +1,72 @@
+graph TD
+    Main["src/main.rs"]
+    OperatorCli["operator_cli"]
+    OperatorCommands["operator_commands"]
+    OodaCli["operator_cli::ooda"]
+    MemoryCli["operator_cli::memory"]
+    StatusCli["operator_cli::status"]
+    MeetingCli["operator_cli::meeting"]
+    SignalCli["operator_cli::signal"]
+    Dashboard["operator_commands_dashboard"]
+    Routes["dashboard::routes"]
+    DashboardMemory["dashboard::memory"]
+    DashboardGoals["dashboard::goals"]
+    DashboardChat["dashboard::chat"]
+    DashboardOverseer["dashboard::overseer"]
+    DashboardMetrics["dashboard::metrics"]
+    MeetingBackend["meeting_backend::MeetingBackend"]
+    MeetingPersist["meeting_backend::persist"]
+    MeetingFacilitator["meeting_facilitator"]
+    Meetings["meetings persisted records"]
+    ConversationChannel["conversation_channel"]
+    SignalConversation["signal_conversation feature"]
+    ChatStore["dashboard::chat_store"]
+    GoalCuration["goal_curation"]
+    GoalBoardStore["goal_board_store"]
+    MemoryIpc["memory_ipc"]
+    CognitiveMemory["cognitive_memory"]
+    Status["status::assemble"]
+    Telemetry["telemetry"]
+    Overseer["overseer"]
+    Journal["journal"]
+    TypedOoda["typed_ooda"]
+
+    Main --> OperatorCli
+    OperatorCli --> OperatorCommands
+    OperatorCli --> OodaCli
+    OperatorCli --> MemoryCli
+    OperatorCli --> StatusCli
+    OperatorCli --> MeetingCli
+    OperatorCli --> SignalCli
+    OodaCli --> TypedOoda
+    MemoryCli --> MemoryIpc
+    MemoryCli --> CognitiveMemory
+    StatusCli --> Status
+    MeetingCli --> MeetingFacilitator
+    SignalCli --> SignalConversation
+
+    Dashboard --> Routes
+    Routes --> DashboardMemory
+    Routes --> DashboardGoals
+    Routes --> DashboardChat
+    Routes --> DashboardOverseer
+    Routes --> DashboardMetrics
+    DashboardMemory --> CognitiveMemory
+    DashboardMemory --> MemoryIpc
+    DashboardGoals --> GoalCuration
+    DashboardGoals --> GoalBoardStore
+    DashboardChat --> MeetingBackend
+    DashboardChat --> ChatStore
+    DashboardOverseer --> Overseer
+    DashboardMetrics --> Telemetry
+    DashboardMetrics --> Journal
+
+    MeetingBackend --> MeetingPersist
+    MeetingBackend --> ConversationChannel
+    MeetingPersist --> MeetingFacilitator
+    MeetingPersist --> Meetings
+    MeetingPersist --> CognitiveMemory
+    MeetingFacilitator --> GoalCuration
+    MeetingFacilitator --> CognitiveMemory
+    SignalConversation --> ConversationChannel
+    ConversationChannel --> MeetingBackend

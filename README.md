@@ -1,14 +1,15 @@
 # Simard
 
-A terminal-native engineering agent who drives and curates agentic coding systems.
+A continuously running engineering agent who drives and curates an ecosystem of related repositories. 
+Also: a pltform for building any type of continuously running agentic system. 
 
 Named after [Suzanne Simard](https://en.wikipedia.org/wiki/Suzanne_Simard), the scientist who discovered how trees communicate through underground fungal networks.
 
 ## What is Simard?
 
-Simard is a focused engineering runtime, written in Rust, that operates like a disciplined software engineer. She inspects local repositories, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops.
+Simard is a continuously running agentic platform that operates like a disciplined software engineer. She inspects the repositories under management, forms bounded plans with explicit verification, executes through terminal actions, records evidence, and improves through reviewable loops, all driven by durable goals and long term memory.
 
-Simard is **not** a wrapper around any single agent framework. She is a terminal-native identity with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the amplihack / amplihack-rs goal-seeking agent. Each substrate is one option among several; none of them define what Simard is.
+Simard is **not** a wrapper around any single agent framework. She is an agentic engineering director with her own runtime, prompt assets, memory layers, and benchmark gym, and she composes work over a pluggable set of agent **base types** — backend execution substrates that include local harnesses, the GitHub Copilot SDK, Claude Code SDK, Microsoft Agent Framework, and the rustyclawd/amplihack-rs goal-seeking agents. Each substrate is one option among several; The engineering director is one implementation - but the plat form can be used to build other types of continuously running autonomous agents.
 
 For the full design contract, see [Specs/ProductArchitecture.md](Specs/ProductArchitecture.md).
 
@@ -18,7 +19,7 @@ Simard exposes five user-visible operating modes, each with its own success crit
 
 | Mode | Purpose | v1 status |
 |------|---------|-----------|
-| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through terminal actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
+| **Engineer** | Accept a concrete task, inspect the repo, form a bounded plan, execute through coding agent actions, and report outcomes with evidence. | v1 shipped — read-only repo inspection plus one narrow structured edit on a clean repo; bounded `engineer terminal*` session surfaces and the separate repo-grounded `engineer run` / `engineer read` audit companion are operator-visible. |
 | **Meeting** | Help humans think, decide, and record architecture or planning outcomes without silently drifting into implementation. | v1 shipped — CLI REPL and durable meeting record readback; explicit handoff into engineer mode through a shared `state-root`. |
 | **Goal-curation** | Curate a durable backlog and an explicit active top-5 goal list without pretending implementation work happened. | v1 shipped — durable goal register with active/backlog separation and read-only inspection. |
 | **Improvement-curation** | Consume persisted review findings, require explicit operator approval or deferral, and promote accepted improvements into durable priorities without mutating code. | v1 shipped — approve / defer / promote workflow with read-only state inspection. |
@@ -248,43 +249,35 @@ graph TB
 
 The runtime ships as a single Rust binary. There is no Python runtime requirement and no `pip install` step.
 
-## Install
+## Host install
 
-### With npx (easiest)
-
-Requires [GitHub CLI](https://cli.github.com/) authenticated with repo access.
+`simard install` is the canonical deployment path. It installs the current
+Simard binary and matching prompt assets into `SIMARD_HOME` (default
+`~/.simard`), writes the user systemd units for `simard-ooda.service` and
+`simard-signal.service`, preserves the previous binary for rollback, and
+restarts both services through `systemctl --user`.
 
 ```bash
-# Run Simard directly
-npx github:rysweet/Simard meeting repl
-
-# Install the binary locally (~/.simard/bin)
+# Release install through npm/npx
 npx github:rysweet/Simard install
-```
 
-### From GitHub Releases
-
-```bash
-# Download the latest release binary
-curl -L https://github.com/rysweet/Simard/releases/latest/download/simard-linux-x86_64.tar.gz | tar xz
-chmod +x simard
-sudo mv simard /usr/local/bin/
-```
-
-### From Source
-
-```bash
-git clone https://github.com/rysweet/Simard.git
-cd Simard
+# Or install a locally built candidate
 cargo build --release
-# Binary at target/release/simard
+./target/release/simard install
 ```
 
-### With Cargo
+Use `--simard-home` or `SIMARD_HOME` to install to a non-default home:
 
 ```bash
-cargo install --git https://github.com/rysweet/Simard.git
+./target/release/simard install --simard-home "$HOME/.simard-prod"
 ```
+
+The operator contract is: do not deploy by copying over
+`~/.simard/bin/simard`, moving a binary into `/usr/local/bin`, or pointing
+systemd at `target/release` or a worktree. The installer stages files first and
+then uses atomic replacement for the live binary and prompt assets.
+
+Contract: [Simard installer reference](docs/reference/simard-installer.md).
 
 ## Quick Start
 
@@ -338,10 +331,29 @@ simard gym compare <scenario-id>       # compare results
 simard gym run-suite <suite-id>        # run a suite
 ```
 
+### Atelier example identity (industrial & furniture design)
+Atelier is an **example**, data-only pluggable identity — not a `simard`
+subcommand. It takes a product-brief JSON end-to-end to a parametric 3D model,
+render, and fabrication package (STL, cut list, BOM) via its agentic recipe,
+which drives OpenSCAD (with optional FreeCAD/Blender) on the host — never
+compiled into Simard. Load it with `load_example_identity(..., "atelier", …)`
+from [`examples/identities/atelier/`](examples/identities/atelier/). See
+[Design furniture with Atelier](docs/howto/design-with-atelier.md).
+
+### Vitruvia example identity (architecture & interior design)
+Vitruvia is an **example**, data-only pluggable identity — not a `simard`
+subcommand. It takes a program/site-brief JSON end-to-end to a code-aware BIM
+floor plan, interior layout, technical drawings (plans and elevations), and a
+rendered walkthrough via two agentic recipes, which drive Blender + BlenderBIM /
+IfcOpenShell (with optional FreeCAD) on the host — never compiled into Simard.
+Load it with `load_example_identity(..., "vitruvia", …)` from
+[`examples/identities/vitruvia/`](examples/identities/vitruvia/). See
+[Design buildings with Vitruvia](docs/howto/design-with-vitruvia.md).
+
 ### Self-management
 ```bash
 simard update                          # self-update to the latest release
-simard install                         # install binary to ~/.simard/bin
+simard install                         # install binary/assets and restart user services
 ```
 
 ### Other commands
@@ -358,6 +370,8 @@ simard bootstrap run <identity> <base-type> <topology> <objective>
 | `SIMARD_LLM_PROVIDER` | Override the LLM provider selected from `~/.simard/config.toml` |
 | `SIMARD_COPILOT_GH_ACCOUNT` | GitHub account for Copilot auth (e.g., `rysweet_microsoft`) |
 | `SIMARD_COMMIT_GH_ACCOUNT` | GitHub account for git commits (e.g., `rysweet`) |
+| `SIMARD_HOME` | Install root for `simard install`; defaults to `~/.simard` and becomes the systemd unit `WorkingDirectory` |
+| `SIMARD_OODA_MAX_CONCURRENT` | Per-OODA-cycle goal-coverage parallelism ceiling — how many independent goals a cycle may cover. Default `24`, range `1..=64`, fail-closed to `24` on an invalid value (logged via `tracing::warn!`). Seeds the AIMD scaler base and ceiling. Legacy `SIMARD_MAX_CONCURRENT_ACTIONS` is honoured when this is unset. Raising it only *allows* more coverage — the resource-admission and overlap gates still bound actual spawns. See [OODA coverage parallelism ceiling](docs/reference/ooda-coverage-parallelism-ceiling.md). |
 
 Runtime configuration lives at `~/.simard/config.toml`. The runtime fails loudly when required configuration is missing — there are no silent defaults.
 
@@ -383,7 +397,7 @@ There is no silent default — leaving both the env var and the config-file key 
 - `src/` — Rust runtime, CLI, modes, base-type adapters, memory layers, gym
 - `prompt_assets/` — versioned prompt files kept separate from runtime code
 - `Specs/ProductArchitecture.md` — the product architecture and design contract
-- `docs/` — operator and contributor documentation (mkdocs)
+- `docs/` — operator and contributor documentation (Markdown; navigation manifest in `mkdocs.yml`, validated by a Rust test — no Python build step)
 - `tests/` — integration tests
 - `scripts/` — developer tooling (low-space builds, disk reclamation, etc.)
 
@@ -403,7 +417,7 @@ cargo fmt --all
 cargo run -- gym run repo-exploration-local
 ```
 
-Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features --locked -- -D warnings`, and `cargo test --all-features --locked`.
+Native git hooks (Python-free) mirror the CI gates locally. Enroll once with `git config core.hooksPath hooks` (or `./scripts/install-precommit.sh`); the `pre-commit` hook runs `cargo fmt --all -- --check` plus a fast `cargo clippy --release --no-deps -- -D warnings`, and the `pre-push` hook runs the race-subset `cargo test` plus the full `cargo clippy --all-targets --all-features --locked -- -D warnings`. CI (`.github/workflows/verify.yml`) runs those same commands plus the full `cargo test --all-features --locked`. There is no `pre-commit` framework, `pip`, or `python3` dependency — see [Local Commit Gates](docs/operations/pre-commit-setup.md).
 
 ## Documentation
 
@@ -416,10 +430,12 @@ Pre-commit and pre-push hooks enforce `cargo fmt --all -- --check`, `cargo clipp
 - [Architecture overview](docs/architecture/overview.md)
 - [Cognitive Memory (canonical)](docs/architecture/cognitive-memory.md)
 - [Simard CLI reference](docs/reference/simard-cli.md)
+- [Simard installer reference](docs/reference/simard-installer.md)
 - [Runtime contracts reference](docs/reference/runtime-contracts.md)
 - [Base type adapters reference](docs/reference/base-type-adapters.md)
 - [Agent composition](docs/architecture/agent-composition.md)
 - [Truthful runtime metadata](docs/concepts/truthful-runtime-metadata.md)
+- [Concierge identity (hospitality design + operations software)](docs/concepts/concierge-identity.md)
 
 ## License
 

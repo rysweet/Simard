@@ -15,13 +15,12 @@
 //!   machine-checkable predicate proving M1's exit criterion.
 //!
 //! Reuse map (see `docs/design/overseer.md` §capability table):
-//! `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`),
-//! dedup via `stewardship::failure_signature` (`src/stewardship/dedup.rs`),
-//! backlog enqueue via `goal_curation::enqueue_stewardship_issue`.
+//! `stewardship::process_orchestrator_run` (`src/stewardship/mod.rs:51`) and
+//! dedup via `stewardship::failure_signature` (`src/stewardship/dedup.rs`).
+//! Filed issues are not fed back into the goal board.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::goal_curation::GoalBoard;
 use crate::overseer::capabilities::{
     IssueFiler, IssueOutcome, OrchestratorRunBrief, OverseerError,
 };
@@ -38,55 +37,28 @@ use crate::stewardship::{
 /// when none exists — so repeated Observe cycles over the same failure are
 /// idempotent (`FiledNew` once, `MatchedExisting` thereafter).
 ///
-/// The `gh` handle is the ONLY network surface (a `RealGhClient` in the daemon,
-/// a fake in tests). The goal board is held behind a `Mutex` so `file(&self, …)`
-/// can enqueue the resulting issue without requiring `&mut self`.
+/// The `gh` handle is the only network surface (a `RealGhClient` in the daemon,
+/// a fake in tests).
 pub struct StewardshipIssueFiler {
     gh: Arc<dyn GhClient + Send + Sync>,
-    board: Mutex<GoalBoard>,
 }
 
 impl StewardshipIssueFiler {
-    /// Construct with a fresh, empty goal board.
+    /// Construct an issue filer over the supplied GitHub client.
     pub fn new(gh: Arc<dyn GhClient + Send + Sync>) -> Self {
-        Self {
-            gh,
-            board: Mutex::new(GoalBoard::new()),
-        }
-    }
-
-    /// Construct over an existing board (e.g. the loaded persistent board).
-    pub fn with_board(gh: Arc<dyn GhClient + Send + Sync>, board: GoalBoard) -> Self {
-        Self {
-            gh,
-            board: Mutex::new(board),
-        }
-    }
-
-    /// Snapshot the current backlog length (used by tests / reporting).
-    pub fn backlog_len(&self) -> usize {
-        self.board
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .backlog
-            .len()
+        Self { gh }
     }
 }
 
 impl IssueFiler for StewardshipIssueFiler {
     fn file(&self, run: &OrchestratorRunBrief) -> Result<IssueOutcome, OverseerError> {
         let summary = brief_to_summary(run);
-        let mut board = self
-            .board
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let outcome =
-            process_orchestrator_run(&summary, self.gh.as_ref(), &mut board).map_err(|e| {
-                OverseerError::Capability {
-                    what: "file_issue",
-                    detail: e.to_string(),
-                }
-            })?;
+        let outcome = process_orchestrator_run(&summary, self.gh.as_ref()).map_err(|e| {
+            OverseerError::Capability {
+                what: "file_issue",
+                detail: e.to_string(),
+            }
+        })?;
         Ok(match outcome {
             StewardshipOutcome::FiledNew { url, .. } => IssueOutcome::FiledNew { url },
             StewardshipOutcome::MatchedExisting { url, .. } => {
@@ -145,7 +117,11 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
         // Backlog-coverage gaps are acted on by the acting Overseer (notify +
         // deduped file). The read-only M1 sensor never surveys gaps, so this is
         // unreachable in M1 — surface it in the Report if it ever appears.
-        | ProblemKind::WorkstreamCoverage => Intervention::Report,
+        | ProblemKind::WorkstreamCoverage
+        // Deploy drift is a HIGH-RISK acting-Overseer concern (guarded
+        // self-deploy). The read-only M1 sensor never deploys — surface it in
+        // the Report if it ever appears here.
+        | ProblemKind::DeployDrift => Intervention::Report,
     }
 }
 
@@ -153,12 +129,19 @@ pub fn decide_read_only(problem: &Problem) -> Intervention {
 /// consumed by [`StewardshipIssueFiler`] → `stewardship::process_orchestrator_run`,
 /// which routes on `source_module` and dedups on
 /// `failure_signature(failure_kind, error_text)`.
+///
+/// The `dedup_key` is folded through [`fold_volatile_goal_ids`] before it flows
+/// into BOTH `failure_kind` and the error text (process_health): a re-block
+/// finding embeds a volatile goal identifier (`simard-identity-<slug>` /
+/// positional `goal-<n>`), so without folding every re-observation of the SAME
+/// underlying cause produced a fresh `failure_signature` and filed a duplicate
+/// `recurring_goal_reblock in simard::overseer` issue — the storm this ends.
 fn problem_to_run_brief(problem: &Problem) -> OrchestratorRunBrief {
     OrchestratorRunBrief {
         recipe_name: "overseer-observer".to_string(),
         failed_step: kind_step_label(problem.kind).to_string(),
         source_module: routable_source_module(problem),
-        failure_kind: problem.dedup_key.clone(),
+        failure_kind: fold_volatile_goal_ids(&problem.dedup_key),
         error_text: stable_error_text(problem),
     }
 }
@@ -192,23 +175,77 @@ fn kind_step_label(kind: ProblemKind) -> &'static str {
         ProblemKind::DriftCorrection => "drift_correction",
         ProblemKind::WorkstreamCoverage => "workstream_coverage",
         ProblemKind::StepFailure => "step_failure",
+        ProblemKind::DeployDrift => "deploy_drift",
     }
 }
 
 /// STABLE error text (no fluctuating metric values) so `failure_signature` folds
 /// every recurrence of the same problem into ONE deduplicated issue. Live metric
 /// values live in the periodic Report / `simard status` telemetry, not the issue
-/// body. Keyed on the (already stable) `dedup_key` plus the evidence signal
-/// kinds — both invariant across observation cycles for a given problem.
+/// body. Keyed on the (already stable) `dedup_key` — with volatile goal
+/// identifiers folded via [`fold_volatile_goal_ids`] so re-block recurrences of
+/// the same cause collapse to one signature — plus the evidence signal kinds
+/// (invariant across observation cycles for a given problem).
 fn stable_error_text(problem: &Problem) -> String {
     format!(
         "Overseer read-only observer detected a recurring {kind:?} problem \
          (dedup key `{key}`; evidence: {kinds}). Filed once per recurring \
          signature — see `simard status` telemetry for current values.",
         kind = problem.kind,
-        key = problem.dedup_key,
+        key = fold_volatile_goal_ids(&problem.dedup_key),
         kinds = evidence_kind_labels(&problem.evidence),
     )
+}
+
+/// Fold **volatile goal identifiers** in a stewardship `dedup_key` to stable
+/// placeholders so recurrences of the SAME re-block cause collapse to ONE
+/// `failure_signature` (process_health). Two shapes are folded:
+///
+/// * `simard-identity-<slug>` → `simard-identity-*` (the codename identity goals,
+///   whose slug is a volatile lowercase-and-hyphen codename), and
+/// * positional `goal-<n>` (a run of ASCII digits) → `goal-*`.
+///
+/// Everything else is returned **byte-for-byte** — the fold is deliberately
+/// conservative so two *genuinely different* causes never over-collapse into one
+/// issue. `goal-` NOT followed by a digit (e.g. `coverage-goal-parity`) and a
+/// bare `identity` are left untouched. Pure and total; no `regex` dependency (a
+/// single forward scan) so it is always compiled in.
+pub fn fold_volatile_goal_ids(dedup_key: &str) -> String {
+    const IDENTITY_PREFIX: &str = "simard-identity-";
+    const GOAL_PREFIX: &str = "goal-";
+    // A slug byte: the lowercase-and-hyphen (plus defensive alphanumeric) run
+    // that makes up a codename identity slug. Terminated by a space, `:` etc.
+    fn is_slug_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'-'
+    }
+
+    let bytes = dedup_key.as_bytes();
+    let mut out = String::with_capacity(dedup_key.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &dedup_key[i..];
+        if let Some(slug) = rest.strip_prefix(IDENTITY_PREFIX) {
+            let slug_len = slug.bytes().take_while(|&b| is_slug_byte(b)).count();
+            if slug_len > 0 {
+                out.push_str("simard-identity-*");
+                i += IDENTITY_PREFIX.len() + slug_len;
+                continue;
+            }
+        }
+        if let Some(after) = rest.strip_prefix(GOAL_PREFIX) {
+            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 {
+                out.push_str("goal-*");
+                i += GOAL_PREFIX.len() + digits;
+                continue;
+            }
+        }
+        // Default: copy exactly one UTF-8 scalar, preserving char boundaries.
+        let ch = rest.chars().next().expect("non-empty remainder");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// De-duplicated, order-stable list of the signal *variant* names backing a
@@ -244,6 +281,10 @@ fn signal_kind_label(s: &Signal) -> &'static str {
         Signal::RecurringSignature { .. } => "RecurringSignature",
         Signal::WorkstreamGap { .. } => "WorkstreamGap",
         Signal::StepFailureDiagnosed { .. } => "StepFailureDiagnosed",
+        Signal::StalePrDetected { .. } => "StalePrDetected",
+        Signal::DuplicatePrDetected { .. } => "DuplicatePrDetected",
+        Signal::IssueNeedsWorkstream { .. } => "IssueNeedsWorkstream",
+        Signal::DeployDriftDetected { .. } => "DeployDriftDetected",
     }
 }
 
@@ -262,6 +303,8 @@ pub fn is_m1_permitted(iv: &Intervention) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::error::{SimardError, SimardResult};
     use crate::overseer::decide;
@@ -383,11 +426,6 @@ mod tests {
         );
         assert_eq!(gh.create_calls(), 1, "no duplicate issue created");
         assert_eq!(gh.search_calls(), 2, "each cycle searches exactly once");
-        assert_eq!(
-            filer.backlog_len(),
-            1,
-            "second cycle must not duplicate the backlog row"
-        );
     }
 
     #[test]

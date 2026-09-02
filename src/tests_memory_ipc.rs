@@ -33,17 +33,26 @@ fn reap_stale_lock_noop_when_absent() {
 }
 
 #[test]
-fn reap_stale_lock_removes_file_with_dead_pid() {
+fn reap_stale_lock_removes_unowned_empty_lock_via_flock_probe() {
     let dir = tempfile::tempdir().unwrap();
     let lock = dir.path().join("cognitive_memory.ladybug.open.lock");
-    // Use PID 1 doesn't work (it's always alive) so use a value that's
-    // definitely not a live pid: one with a high number that's unlikely.
-    // But `is_pid_alive` uses kill(0) which is unreliable. Use an empty
-    // file and rely on flock_held=false path instead.
+    // An empty lock file records no owner pid, so `reap_stale_open_lock` cannot
+    // consult `is_pid_alive` (which is unreliable for a fabricated pid anyway:
+    // `kill(pid, 0)` can return EPERM rather than ESRCH). It instead probes the
+    // flock: no live process holds it, the non-blocking `LOCK_EX` succeeds, and
+    // the stale file is reaped. This pins the unknown-owner/flock-not-held
+    // branch; the recorded-live-pid branch is covered by
+    // `memory_ipc::tests_transport_roundtrip::reap_stale_open_lock_keeps_a_lock_owned_by_a_live_process`.
     std::fs::write(&lock, b"").unwrap();
     let reaped = reap_stale_open_lock(dir.path()).unwrap();
-    assert!(reaped);
-    assert!(!lock.exists());
+    assert!(
+        reaped,
+        "an unowned (empty) lock with no flock holder must be reaped"
+    );
+    assert!(
+        !lock.exists(),
+        "the reaped lock file must be removed from disk"
+    );
 }
 
 #[test]

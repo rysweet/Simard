@@ -35,6 +35,52 @@ impl Display for OodaPhase {
     }
 }
 
+/// Resolved identity-scoped cognition threaded into the OODA loop (#3125).
+///
+/// This is the small, OODA-facing projection of an [`IdentityManifest`]'s three
+/// cognition fields — identity seed goals, target-repo scope, and write-authority
+/// posture — carried on [`OodaState`] so the cold-start seeding site and the Act
+/// dispatch rail can consult them without threading the whole manifest.
+///
+/// [`IdentityCognition::default`] represents **Simard herself** (no identity): no
+/// seed-goal override, no explicit target scope, and `authority: None` — which
+/// [`crate::ooda_actions::advance_goal::spawn::posture_permits_spawn`] resolves
+/// to `Full`, so the default is byte-for-byte the pre-#3125 behaviour.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IdentityCognition {
+    /// The resolved identity's name, when one is set (for operator diagnostics).
+    pub identity_name: Option<String>,
+    /// Identity-declared seed goals. Empty => use `DEFAULT_SEED_GOALS`.
+    pub seed_goals: Vec<crate::identity::SeedGoal>,
+    /// Resolved target-repo scope (explicit or the union of seed-goal repos).
+    pub target_repos: Vec<String>,
+    /// Write-authority posture. `None` => no identity => `Full` (Simard). A named
+    /// identity whose posture cannot be resolved must be encoded as
+    /// `Some(IdentityAuthority::read_only())` (fail-closed).
+    pub authority: Option<crate::identity::IdentityAuthority>,
+}
+
+impl IdentityCognition {
+    /// Project the cognition-relevant fields out of a resolved identity manifest.
+    /// A named identity always yields `Some(authority)` so the deterministic
+    /// spawn rail treats it as an identity (never as "no identity").
+    pub fn from_manifest(manifest: &crate::identity::IdentityManifest) -> Self {
+        Self {
+            identity_name: Some(manifest.name.clone()),
+            seed_goals: manifest.seed_goals.clone(),
+            target_repos: manifest.resolved_target_repos(),
+            authority: Some(manifest.authority.clone()),
+        }
+    }
+
+    /// Whether this identity's posture permits dispatching a write-bearing
+    /// engineer. Delegates to the deterministic rail's semantics: no identity
+    /// (`None`) and `Full`/`ScopedWrite` permit; `ReadOnly` does not.
+    pub fn permits_spawn(&self) -> bool {
+        crate::ooda_actions::advance_goal::spawn::posture_permits_spawn(self.authority.as_ref())
+    }
+}
+
 /// Mutable state carried across OODA cycles.
 pub struct OodaState {
     pub current_phase: OodaPhase,
@@ -80,6 +126,9 @@ pub struct OodaState {
     /// done-gate ladder (mark done / drop / escalate). See
     /// `docs/concepts/steerable-ooda-daemon.md` ("The no-progress breaker (Fix 3)").
     pub no_progress_tracker: crate::goal_curation::NoProgressTracker,
+    /// Resolved identity-scoped cognition (#3125). `Default` (no identity) keeps
+    /// Simard unchanged: default seed goals + engineer-dispatching Act phase.
+    pub identity_cognition: IdentityCognition,
 }
 
 impl OodaState {
@@ -98,7 +147,16 @@ impl OodaState {
             engineer_worktrees: HashMap::new(),
             last_distill_cycle: 0,
             no_progress_tracker: crate::goal_curation::NoProgressTracker::new(),
+            identity_cognition: IdentityCognition::default(),
         }
+    }
+
+    /// Attach resolved identity-scoped cognition (#3125). Additive builder; the
+    /// default is [`IdentityCognition::default`] (no identity => Simard).
+    #[must_use]
+    pub fn with_identity_cognition(mut self, cognition: IdentityCognition) -> Self {
+        self.identity_cognition = cognition;
+        self
     }
 
     /// Remove `goal_failure_counts` entries for goal IDs that are no longer
@@ -265,6 +323,19 @@ pub struct OodaConfig {
     /// Issues #2441/#2458. `1` would distil one-off failures (not recommended).
     #[serde(default = "default_lesson_recurrence_threshold")]
     pub lesson_recurrence_threshold: u32,
+    /// When `true`, [`run_ooda_cycle`](super::run_ooda_cycle) performs proactive
+    /// resource cleanup (disk/process reclamation) at the start of every cycle.
+    ///
+    /// This walks the real filesystem (`/tmp/simard-*-target`,
+    /// `~/.cargo-targets/`, each tens of GB) and can kill orphaned cargo
+    /// processes, so it is a **production-only** side effect. It defaults to
+    /// `false` so cargo-test never runs the expensive, non-hermetic cleanup —
+    /// which under a shared CI/dev host would walk hundreds of GB (parallel
+    /// OODA-cycle tests then thrash disk and hang) and could delete sibling
+    /// worktrees' target dirs or kill the test's own cargo. The daemon (the
+    /// live OODA loop) opts in explicitly.
+    #[serde(default)]
+    pub run_resource_cleanup: bool,
     /// AIMD adaptive scaler. Populated when `SIMARD_SCALING=auto`.
     /// Skipped during (de)serialization — reconstructed from env on boot.
     #[serde(skip)]
@@ -285,10 +356,36 @@ fn default_lesson_recurrence_threshold() -> u32 {
 
 impl Default for OodaConfig {
     fn default() -> Self {
-        let max_concurrent_actions = env_u32("SIMARD_MAX_CONCURRENT_ACTIONS", 5);
+        // Issue #2935: per-OODA-cycle goal-coverage parallelism ceiling.
+        // Precedence: SIMARD_OODA_MAX_CONCURRENT (preferred) > legacy
+        // SIMARD_MAX_CONCURRENT_ACTIONS > default 24. Each source is fail-closed
+        // INDEPENDENTLY: a present-but-invalid value uses the default 24 and does
+        // NOT fall through to a lower-precedence source, so a typo in the
+        // preferred variable can never silently resurrect a stale legacy value.
+        // Both are bounds-validated to [MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX].
+        let max_concurrent_actions = if std::env::var("SIMARD_OODA_MAX_CONCURRENT").is_ok() {
+            env_u32_bounded(
+                "SIMARD_OODA_MAX_CONCURRENT",
+                DEFAULT_MAX_CONCURRENT_ACTIONS,
+                MAX_CONCURRENT_MIN,
+                MAX_CONCURRENT_MAX,
+            )
+        } else {
+            env_u32_bounded(
+                "SIMARD_MAX_CONCURRENT_ACTIONS",
+                DEFAULT_MAX_CONCURRENT_ACTIONS,
+                MAX_CONCURRENT_MIN,
+                MAX_CONCURRENT_MAX,
+            )
+        };
         let scaler = match std::env::var("SIMARD_SCALING").as_deref() {
             Ok("auto") => {
-                let ceiling = max_concurrent_actions.saturating_mul(4).max(1);
+                // Issue #2935: the AIMD ceiling IS the configured max (was 4×).
+                // This makes the configured value a TRUE per-cycle ceiling — 24
+                // means at most 24, not 96 — while the scaler still backs off on
+                // pressure and additively recovers up to, never beyond, the
+                // ceiling. It starts at the max so the cap is reached at once.
+                let ceiling = max_concurrent_actions.max(MAX_CONCURRENT_MIN);
                 Some(std::sync::Arc::new(
                     super::adaptive_scaling::AdaptiveScaler::new(
                         max_concurrent_actions,
@@ -317,6 +414,9 @@ impl Default for OodaConfig {
                 crate::memory_consolidation::reflection_lessons::LESSON_RECURRENCE_THRESHOLD_ENV,
                 default_lesson_recurrence_threshold(),
             ),
+            // Off by default so cargo-test never runs the non-hermetic,
+            // filesystem-walking cleanup. The daemon opts in explicitly.
+            run_resource_cleanup: false,
             scaler,
         }
     }
@@ -334,6 +434,52 @@ fn env_u32(key: &str, default: u32) -> u32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Default per-OODA-cycle goal-coverage parallelism ceiling (issue #2935).
+///
+/// Raised from the arbitrary historical value of 5 to 24 so that, when
+/// resources allow and goals are genuinely independent, a single cycle can
+/// cover up to 24 uncovered incomplete goals instead of the ~6 previously
+/// observed live. This is a CEILING, not a guarantee: the resource-aware
+/// admission gate and the overlap/dependency gate still bound actual spawns.
+pub const DEFAULT_MAX_CONCURRENT_ACTIONS: u32 = 24;
+
+/// Lower bound for a validated concurrency override. Zero would stall the
+/// daemon (no action could ever dispatch), so 1 is the minimum sane value.
+pub const MAX_CONCURRENT_MIN: u32 = 1;
+
+/// Upper bound for a validated concurrency override. Well above the 24 target
+/// yet below anything resource-realistic; values beyond this are treated as an
+/// operator misconfiguration and rejected (fail closed).
+pub const MAX_CONCURRENT_MAX: u32 = 64;
+
+/// Parses an unsigned-integer env var with fail-closed bounds validation.
+///
+/// - Absent key → returns `default` silently (an unset var is not a
+///   misconfiguration, so it does not warrant a warning).
+/// - Present but non-numeric, or numeric yet outside `[min, max]` → logs a
+///   `tracing::warn!` and returns `default`. Failing closed means a bad
+///   operator value can never silently escalate concurrency or stall the
+///   daemon; the effective value is always the known-safe fallback.
+fn env_u32_bounded(key: &str, default: u32, min: u32, max: u32) -> u32 {
+    match std::env::var(key) {
+        Err(_) => default,
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(v) if v >= min && v <= max => v,
+            _ => {
+                tracing::warn!(
+                    key,
+                    value = %raw,
+                    min,
+                    max,
+                    default,
+                    "invalid value for {key}; using default {default}"
+                );
+                default
+            }
+        },
+    }
 }
 
 /// Serializable view of [`OodaState`] suitable for round-tripping through
@@ -428,7 +574,7 @@ pub trait OrchestratorSessionFactory: Send + Sync {
     ) -> crate::error::SimardResult<Box<dyn crate::base_types::BaseTypeSession>>;
 }
 
-/// All bridges needed by the OODA loop.
+/// All memories needed by the OODA loop.
 pub struct OodaClients {
     pub memory: Box<dyn CognitiveMemoryOps>,
     pub knowledge: KnowledgeClient,
@@ -479,6 +625,21 @@ pub struct OodaClients {
     /// non-daemon callers. Bounded by the AIMD `cap` (`scaler.current_max()`)
     /// so concurrency stays resource-aware.
     pub session_factory: Option<std::sync::Arc<dyn OrchestratorSessionFactory>>,
+    /// Optional structured-reasoning brain for closed-loop live outcome
+    /// verification (issue #2751). When `Some` (paired with [`Self::live_signals`]),
+    /// a completion-candidate goal is verified LIVE at the curate seam before it
+    /// can archive — the goal is "achieved" only once a verified live signal
+    /// corroborates its real success criteria, not merely because a PR landed.
+    /// When `None` the legacy curate path is unchanged. Production boot wires
+    /// the recipe brain unless `SIMARD_OUTCOME_VERIFY=off`; tests inject a stub.
+    pub outcome_verify_brain: Option<std::sync::Arc<dyn crate::ooda_brain::OodaBrain>>,
+    /// Optional live-signal source paired with [`Self::outcome_verify_brain`].
+    /// Composes the thin adapters over telemetry / journald / deploy-reconcile
+    /// state the daemon already emits; tests inject a hermetic double. `None`
+    /// leaves the legacy curate path in place (both fields must be `Some` for
+    /// verification to run).
+    pub live_signals:
+        Option<std::sync::Arc<dyn crate::goal_curation::live_signal::LiveSignalSource>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +655,9 @@ mod tests_ooda_config {
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_creates_scaler_when_scaling_auto() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
         let config = OodaConfig::default();
         unsafe { std::env::remove_var("SIMARD_SCALING") };
@@ -507,7 +670,9 @@ mod tests_ooda_config {
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_no_scaler_when_scaling_fixed() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::set_var("SIMARD_SCALING", "fixed") };
         let config = OodaConfig::default();
         unsafe { std::env::remove_var("SIMARD_SCALING") };
@@ -520,7 +685,9 @@ mod tests_ooda_config {
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_no_scaler_when_scaling_unset() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::remove_var("SIMARD_SCALING") };
         let config = OodaConfig::default();
         assert!(
@@ -535,7 +702,9 @@ mod tests_ooda_config {
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_default_distill_thresholds() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::remove_var("SIMARD_DISTILL_MIN_EPISODES") };
         unsafe { std::env::remove_var("SIMARD_DISTILL_INTERVAL_CYCLES") };
         let config = OodaConfig::default();
@@ -554,7 +723,9 @@ mod tests_ooda_config {
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_default_lesson_recurrence_threshold() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::remove_var("SIMARD_LESSON_RECURRENCE_THRESHOLD") };
         let config = OodaConfig::default();
         assert_eq!(
@@ -563,27 +734,45 @@ mod tests_ooda_config {
         );
     }
 
+    // Issue #2935: the AIMD ceiling is now the *configured max* itself (was
+    // `4 × max`). This makes the configured value a TRUE per-cycle ceiling —
+    // e.g. 24 means at most 24, not 96 — while the scaler still backs off on
+    // pressure and recovers back up to the ceiling. The scaler therefore also
+    // starts AT the configured max, so the per-cycle cap reaches it immediately.
     #[serial_test::serial(cognitive_memory)]
     #[test]
-    fn ooda_config_auto_scaler_ceiling_is_4x_max() {
-        let _lock = ENV_LOCK.lock().unwrap();
+    fn ooda_config_auto_scaler_ceiling_equals_configured_max() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
         unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
-        unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "3") };
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "8") };
         let config = OodaConfig::default();
-        unsafe { std::env::remove_var("SIMARD_SCALING") };
-        unsafe { std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS") };
+        clear_concurrency_env();
         let scaler = config.scaler.expect("scaler must be Some under auto");
         assert_eq!(
             scaler.ceiling(),
-            12,
-            "ceiling must be 4 × max_concurrent_actions=3"
+            8,
+            "AIMD ceiling must equal the configured max (issue #2935), not a 4x multiple"
+        );
+        assert_eq!(
+            config.max_concurrent_actions, 8,
+            "SIMARD_OODA_MAX_CONCURRENT must seed max_concurrent_actions"
+        );
+        assert_eq!(
+            scaler.current_max(),
+            8,
+            "the scaler starts at the configured max so the per-cycle cap reaches it immediately"
         );
     }
 
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_auto_scaler_adjust_returns_within_bounds() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
         unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "5") };
         let config = OodaConfig::default();
@@ -602,7 +791,9 @@ mod tests_ooda_config {
     #[serial_test::serial(cognitive_memory)]
     #[test]
     fn ooda_config_scaler_skipped_on_serde_roundtrip() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
         let config = OodaConfig::default();
         unsafe { std::env::remove_var("SIMARD_SCALING") };
@@ -613,6 +804,223 @@ mod tests_ooda_config {
         assert!(
             deserialized.scaler.is_none(),
             "scaler must be None after serde round-trip (#[serde(skip)])"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #2935: SIMARD_OODA_MAX_CONCURRENT parsing, precedence, and
+    // fail-closed validation. The per-OODA-cycle goal-coverage parallelism
+    // ceiling is raised from the arbitrary 5 to 24 and made env-configurable.
+    //
+    // All assertions go through the public `OodaConfig::default()` contract
+    // (not the private parser) so the crate keeps compiling in the red phase
+    // and the tests exercise the real end-to-end wiring.
+    // -----------------------------------------------------------------------
+
+    /// Remove every env var that influences the per-cycle concurrency ceiling so
+    /// each test starts from a known-clean baseline (order-independent, no leakage).
+    fn clear_concurrency_env() {
+        unsafe { std::env::remove_var("SIMARD_OODA_MAX_CONCURRENT") };
+        unsafe { std::env::remove_var("SIMARD_MAX_CONCURRENT_ACTIONS") };
+        unsafe { std::env::remove_var("SIMARD_SCALING") };
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn max_concurrent_defaults_to_24_when_unset() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        let config = OodaConfig::default();
+        assert_eq!(
+            config.max_concurrent_actions, 24,
+            "with no override, the per-cycle concurrency default must be 24 (issue #2935)"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn simard_ooda_max_concurrent_overrides_default() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "30") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 30,
+            "a valid SIMARD_OODA_MAX_CONCURRENT must override the default"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn legacy_simard_max_concurrent_actions_still_honored() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "10") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 10,
+            "the legacy var remains functional when the new var is unset (additive change)"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn new_var_takes_precedence_over_legacy_var() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "30") };
+        unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "10") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 30,
+            "SIMARD_OODA_MAX_CONCURRENT must take precedence over the legacy var"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn non_numeric_override_fails_closed_to_default_24() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "not-a-number") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 24,
+            "a non-numeric override must fail closed to the default 24 (and log a warning)"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn invalid_preferred_var_does_not_fall_through_to_legacy() {
+        // Documented fail-closed-INDEPENDENT contract (issue #2935): when the
+        // preferred var is PRESENT but invalid, resolution fails closed to the
+        // default 24 and must NOT resurrect an otherwise-valid legacy value — a
+        // typo in SIMARD_OODA_MAX_CONCURRENT should not silently apply stale
+        // SIMARD_MAX_CONCURRENT_ACTIONS config.
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "not-a-number") };
+        unsafe { std::env::set_var("SIMARD_MAX_CONCURRENT_ACTIONS", "10") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 24,
+            "an invalid PRESENT preferred var must fail closed to 24, not fall through to the legacy 10"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn zero_override_is_rejected_and_fails_closed_to_24() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "0") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 24,
+            "0 is below the minimum of 1; fail closed to 24 (a zero cap would stall the daemon)"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn over_max_override_is_rejected_and_fails_closed_to_24() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "9999") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            config.max_concurrent_actions, 24,
+            "a value above the sane maximum (64) must fail closed to 24"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn boundary_values_1_and_64_are_accepted() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "1") };
+        let low = OodaConfig::default();
+        assert_eq!(
+            low.max_concurrent_actions, 1,
+            "the minimum boundary (1) must be accepted"
+        );
+        unsafe { std::env::set_var("SIMARD_OODA_MAX_CONCURRENT", "64") };
+        let high = OodaConfig::default();
+        clear_concurrency_env();
+        assert_eq!(
+            high.max_concurrent_actions, 64,
+            "the maximum boundary (64) must be accepted"
+        );
+    }
+
+    // ── The per-cycle coverage cap actually reaches 24 (cycle.rs:316) ───────
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn default_coverage_cap_reaches_24_under_auto_scaling() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env();
+        unsafe { std::env::set_var("SIMARD_SCALING", "auto") };
+        let config = OodaConfig::default();
+        clear_concurrency_env();
+        // Mirror the per-cycle coverage-cap derivation in cycle.rs (issue #2935
+        // target site): the AIMD scaler's current_max, else max_concurrent_actions.
+        let cap = config
+            .scaler
+            .as_ref()
+            .map(|s| s.current_max() as usize)
+            .unwrap_or(config.max_concurrent_actions as usize);
+        assert_eq!(
+            cap, 24,
+            "with the raised ceiling, the AIMD per-cycle coverage cap must reach 24"
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn default_coverage_cap_reaches_24_under_fixed_scaling() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        clear_concurrency_env(); // SIMARD_SCALING unset ⇒ scaler is None
+        let config = OodaConfig::default();
+        let cap = config
+            .scaler
+            .as_ref()
+            .map(|s| s.current_max() as usize)
+            .unwrap_or(config.max_concurrent_actions as usize);
+        assert_eq!(
+            cap, 24,
+            "with fixed scaling the cap is max_concurrent_actions, which now defaults to 24"
         );
     }
 }

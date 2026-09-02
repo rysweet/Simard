@@ -99,13 +99,32 @@ including by recency — so a recent but topically-unrelated episode earns a
 non-zero score and would surface. Simard's episodic recall is **relevance-gated**
 (an objective recalls only episodes that share a keyword with it; an unrelated
 objective recalls *nothing*), and that contract is preserved: the adapter gates
-the ranked output to episodes whose `content` contains at least one query keyword
-(case-insensitive substring, matching `search_episodes_by_keywords`). The gate is
-applied **before** truncation, so a relevant episode ranked behind recent noise
-is not dropped before the gate runs. The net effect is "rank the keyword-relevant
-episodes" — the multi-signal ranking upgrades the *ordering* among relevant
-candidates without widening the *set* beyond what lexical recall would have
-returned.
+the ranked output to episodes whose `content` shares a query keyword at a **word
+boundary**. The gate is applied **before** truncation, so a relevant episode
+ranked behind recent noise is not dropped before the gate runs. The net effect
+is "rank the keyword-relevant episodes" — the multi-signal ranking upgrades the
+*ordering* among relevant candidates without widening the *set* beyond what
+lexical recall would have returned.
+
+**Word-boundary matching (not raw substring).** The query is tokenized on
+non-alphanumeric runs (so punctuation attached to a token — `"deploy,"` — folds
+onto the bare word `deploy`), and a query token gates an episode in only when it
+is a **prefix of a whole word** in the episode's content, matched
+case-insensitively. This replaces an earlier raw-substring gate
+(`content.to_lowercase().contains(kw)`) that matched a token wherever it was
+embedded, including the interior or suffix of an unrelated content word — `act`
+in "re**act**or" / "contr**act**", `test` in "la**test**", `own` in
+"d**own**load" (interior) — floating off-topic episodes into the ranked set that
+feeds the OODA cycle's working context and degrading recall precision. Anchoring
+the match to a word boundary drops that interior/suffix noise while **preserving
+inflectional recall**: a query stem still recalls its inflected forms (`deploy`
+recalls "deployed" / "deploys" / "deployment"), which a stricter whole-word
+(equality) gate would have dropped. This aligns episodic recall with the
+word-boundary relevance policy already adopted by
+`knowledge_context::relevance_score`, `memory_consolidation::classifier`, and
+`fact_reliability`. (The separate flat `search_episodes_by_keywords` scan keeps
+its exact case-insensitive substring semantics, which its exact-marker callers —
+e.g. reflection recurrence markers — depend on.)
 
 ### Per-phase weights (shared with fact recall)
 
@@ -385,6 +404,37 @@ Notes:
   once the recalled context is surfaced into the prompt). Per-action attribution
   (only the memory that drove the committed action) is a future refinement.
 
+### Ranked fact recall over the IPC socket (production daemon path)
+
+The per-phase ranked **fact** recall (`recall_facts_ranked`, issue #2329) crosses
+a socket in the primary production topology: the long-lived OODA daemon owns the
+`LibraryCognitiveMemory` store, and every other process (recipe steps, the
+meeting REPL, the engineer subprocess, the dashboard) reaches it through a
+`RemoteCognitiveMemory` **IPC client** (`connect_memory` prefers the live socket
+over a direct `LibraryCognitiveMemory::open`).
+
+The `CognitiveMemoryOps` trait default for `recall_facts_ranked` delegates to
+`search_facts`. That default is correct for a *terminal* non-library backend, but
+the IPC client is not terminal — it is a transport to a `LibraryCognitiveMemory`
+backend. If the client inherited the default it would send a `SearchFacts` RPC,
+and the server's word-boundary-**gated**, confidence-sorted keyword search would
+answer — silently discarding the six-signal, phase-weighted ranking **and** its
+`recall_precision_at_k` metric (both live only inside
+`LibraryCognitiveMemory::recall_facts_ranked`). On the daemon-backed path — the
+one that actually runs in production — the flagship ranked recall would be inert.
+
+To prevent that hollow success, `RemoteCognitiveMemory` **overrides**
+`recall_facts_ranked` to forward a dedicated `MemoryRequest::RecallFactsRanked`
+(carrying the `RecallWeightSet` across the wire), which the server dispatches to
+`memory.recall_facts_ranked(..)` — the genuine library ranker. This is the same
+additive-socket-forward pattern as `list_all_episodes` (#2627): mirror the
+library override on the socket tier instead of collapsing to the trait default.
+A behaviour-verifying transport round-trip test
+(`recall_facts_ranked_forwards_ranked_recall_over_socket`) pins it: a fact that
+`search_facts` gates out (no shared query word) must still be **present** in the
+socket client's `recall_facts_ranked` result — only true forwarding to the
+library ranker can satisfy that.
+
 ### Preparation wiring
 
 OODA preparation swaps the episode gather from the flat keyword scan to ranked
@@ -550,3 +600,6 @@ assert):
   `record_access`
 - [Cognitive Memory Architecture](../architecture/cognitive-memory.md) —
   canonical spec
+- [Bulk graph-adjacency index for ranked recall](./cognitive-memory-graph-adjacency-index.md) —
+  the per-recall bulk adjacency load that makes the graph-proximity signal fast
+  for episodic recall too (byte-identical ordering, seconds not minutes)

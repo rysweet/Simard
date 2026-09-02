@@ -137,7 +137,11 @@ appears as:
 - **Orient** — the prioritised goals with their urgency and reason.
 - **Decide** — the planned action(s) (`kind`, target goal, description).
 - **Act** — the outcomes, including the launched-sub-agent block, the
-  produced-artifact marker (`🔗` for `PR #…` / `commit`), and success/failure.
+  produced-artifact marker (🔗 for a `pr #` reference or a `commit`), and
+  success/failure. The `commit` check excludes the no-progress ledger
+  bookkeeping phrases (`"typed no-action committed"`, `"typed blocked terminal
+  committed"`) so a no-action or blocked terminal is not painted as an artifact
+  (#4292).
 
 For a collapsed run, the newest cycle in the run is the representative whose
 detail is shown, and the row is labelled with its `×N` count and cycle range.

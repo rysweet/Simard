@@ -627,3 +627,155 @@ fn identity_load_request_stores_all_fields() {
     assert_eq!(req.package_version, "2.0.0");
     assert_eq!(req.contract, contract);
 }
+
+// ===========================================================================
+// Standing seed-goal declaration (issue #4927)
+//
+// TEST-FIRST for the un-shipped declarative `standing` attribute on seed goals.
+// `SeedGoal` gains a `standing: bool` (default false) plus a `.standing()`
+// builder, and `TomlSeedGoal` gains `#[serde(default)] standing: bool` while
+// KEEPING `#[serde(deny_unknown_fields)]` so pre-existing identity TOML stays
+// valid and a typo'd flag still fails loud (never silently non-perpetual).
+// ===========================================================================
+
+#[test]
+fn seed_goal_standing_defaults_false() {
+    // The additive field must default false so existing constructors and every
+    // existing seed goal are unchanged (convergence-required, as today).
+    let g = SeedGoal::new(1, "ordinary", "do a bounded thing", None);
+    assert!(!g.standing, "a plain SeedGoal must default to non-standing");
+}
+
+#[test]
+fn seed_goal_standing_builder_marks_standing() {
+    let g = SeedGoal::new(
+        2,
+        "Articulate repo-hygiene backlog",
+        "turn observations into goals",
+        None,
+    )
+    .standing();
+    assert!(
+        g.standing,
+        "the .standing() builder must set the declarative flag"
+    );
+    // The builder is purely declarative — it does not touch the description.
+    assert_eq!(g.description, "turn observations into goals");
+}
+
+#[test]
+fn seed_goal_new_is_omitted_and_never_authorizes_reversal() {
+    // A plain `new` seed is non-standing AND an omitted declaration: it must not
+    // authorize the reconciler to reverse a marker (issue #4927). This is the
+    // three-state distinction — omitted is inert.
+    let g = SeedGoal::new(1, "ordinary", "do a bounded thing", None);
+    assert!(!g.standing, "a plain SeedGoal must default to non-standing");
+    assert!(
+        !g.authorizes_standing_reversal(),
+        "an omitted (default) seed must NEVER authorize reversal"
+    );
+}
+
+#[test]
+fn seed_goal_non_standing_builder_authorizes_reversal_but_stays_non_standing() {
+    // An explicit `.non_standing()` seed stays non-standing (cold seeding treats
+    // it exactly like an omitted seed) yet is the ONLY non-standing form that
+    // authorizes conservative reversal (issue #4927).
+    let g = SeedGoal::new(2, "Articulate repo-hygiene backlog", "d", None).non_standing();
+    assert!(
+        !g.standing,
+        "explicit non_standing must remain non-standing for cold seeding"
+    );
+    assert!(
+        g.authorizes_standing_reversal(),
+        "an explicit standing = false must authorize reversal"
+    );
+    // Purely declarative — never touches the description.
+    assert_eq!(g.description, "d");
+}
+
+#[test]
+fn seed_goal_standing_builder_does_not_authorize_reversal() {
+    // A `standing = true` declaration is explicit but ADDS a marker; it must
+    // never be treated as a reversal.
+    let g = SeedGoal::new(2, "g", "d", None).standing();
+    assert!(g.standing);
+    assert!(
+        !g.authorizes_standing_reversal(),
+        "a standing = true seed adds, it does not reverse"
+    );
+}
+
+#[test]
+fn toml_seed_goal_deserializes_standing_true() {
+    let toml = r#"
+priority = 2
+title = "Articulate repo-hygiene backlog"
+description = "Turn observations into prioritized repo-hygiene goals."
+repo = "hyenas"
+standing = true
+"#;
+    let seed: super::toml_types::TomlSeedGoal =
+        toml::from_str(toml).expect("standing=true seed must deserialize");
+    assert_eq!(
+        seed.standing,
+        Some(true),
+        "standing = true must round-trip from TOML as an explicit Some(true)"
+    );
+}
+
+#[test]
+fn toml_seed_goal_standing_defaults_false_when_omitted() {
+    // Back-compat: every existing seed_goals entry omits `standing` and must
+    // continue to parse, as a non-standing goal.
+    let toml = r#"
+priority = 1
+title = "Observe hyenas repo health"
+description = "OBSERVE ONLY"
+repo = "hyenas"
+"#;
+    let seed: super::toml_types::TomlSeedGoal =
+        toml::from_str(toml).expect("seed without standing must still parse");
+    assert_eq!(
+        seed.standing, None,
+        "omitted standing must be preserved as None (distinct from Some(false))"
+    );
+}
+
+#[test]
+fn toml_seed_goal_deserializes_explicit_standing_false() {
+    // An explicit `standing = false` must be preserved as Some(false), distinct
+    // from an omitted flag (None) — this is what lets the loader map it to an
+    // explicit `.non_standing()` seed that authorizes conservative reversal.
+    let toml = r#"
+priority = 1
+title = "Articulate repo-hygiene backlog"
+description = "d"
+standing = false
+"#;
+    let seed: super::toml_types::TomlSeedGoal =
+        toml::from_str(toml).expect("standing=false seed must deserialize");
+    assert_eq!(
+        seed.standing,
+        Some(false),
+        "explicit standing = false must round-trip as Some(false)"
+    );
+}
+
+#[test]
+fn toml_seed_goal_preserves_deny_unknown_fields() {
+    // The `standing` addition must not weaken the deny_unknown_fields guard: a
+    // typo'd flag must fail loud rather than silently leave a safety goal
+    // non-perpetual.
+    let toml = r#"
+priority = 1
+title = "t"
+description = "d"
+standng = true
+"#;
+    let parsed = toml::from_str::<super::toml_types::TomlSeedGoal>(toml);
+    assert!(
+        parsed.is_err(),
+        "a misspelled flag must be rejected by deny_unknown_fields"
+    );
+}
