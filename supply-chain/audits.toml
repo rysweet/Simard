@@ -6,3 +6,9 @@ who = "Simard operator (rysweet)"
 criteria = "safe-to-deploy"
 delta = "0.9.18 -> 0.9.20"
 notes = "Delta audit for RUSTSEC-2026-0204 security fix (fmt::Pointer invalid-deref). 0.9.18 already certified safe-to-deploy; 0.9.20 is the upstream patch from the crossbeam maintainers."
+
+[[audits.rustls-native-certs]]
+who = "Simard operator (rysweet)"
+criteria = "safe-to-deploy"
+delta = "0.8.3 -> 0.8.4"
+notes = "Reviewed 0.8.3 -> 0.8.4: filters empty certificate-directory paths; no new unsafe code, process execution, network behavior, or dependencies."
