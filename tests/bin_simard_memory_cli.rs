@@ -252,6 +252,23 @@ fn stats_shows_edges_and_dedup_section_via_direct_open() {
         Some(1),
         "the snapshot caller key must be grouped: {report}"
     );
+    // The durable `goal_board_snapshot_dedup_ratio` self-metric uses these
+    // operator-visible goal-board counts. One stream holding one revision is a
+    // healthy liveness of 1.0.
+    let snapshot_facts = report["snapshot_dedup"]["snapshot_facts"]
+        .as_u64()
+        .expect("snapshot_facts must be numeric");
+    let distinct_caller_keys = report["snapshot_dedup"]["distinct_caller_keys"]
+        .as_u64()
+        .expect("distinct_caller_keys must be numeric");
+    assert_eq!(
+        simard::cognitive_memory::metrics::goal_board_snapshot_dedup_ratio(
+            distinct_caller_keys,
+            snapshot_facts,
+        ),
+        Some(1.0),
+        "goal_board_snapshot_dedup_ratio must derive from the operator-visible counts: {report}"
+    );
     assert!(
         report.get("edges_note").is_none(),
         "direct open must compute the edges, not note them: {report}"
