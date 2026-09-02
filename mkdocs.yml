@@ -77,6 +77,8 @@ nav:
     - Episode Distillation: architecture/episode-distillation.md
     - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
     - Reflective Cognitive Threads Act via Tools: architecture/reflective-cognitive-threads.md
+    - The Metacognitive Model (OODA + overseer + threads): architecture/metacognitive-model.md
+    - The Metacognitive Atlas (code-derived diagrams): architecture/metacognitive-atlas.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -216,6 +218,7 @@ nav:
       - Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
       - Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
+    - Triage ERROR Lines in the OODA Daemon Log: howto/triage-ooda-log-error-lines.md
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
     - Diagnose Signal-Meeting E2BIG Spawn Failures: howto/diagnose-signal-meeting-e2big.md
     - Add a Safe Agent/Recipe Spawn Site: howto/add-a-safe-agent-spawn-site.md
@@ -301,6 +304,7 @@ nav:
     - Configure the Cognitive-Thread Batch: howto/configure-cognitive-thread-batch.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
     - Configure the Reflective Cognitive Threads: howto/configure-reflective-cognitive-threads.md
+    - Read a Cognitive Thread's Reasoning Summary: howto/read-cognitive-thread-reasoning.md
     - Record an Investigation Finding (issue/memory, not a repo doc): howto/record-an-investigation-finding.md
     - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
@@ -359,6 +363,7 @@ nav:
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Drift-Resilient Self-Deploy Checkout: reference/self-deploy-drift-resilient-checkout.md
     - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
     - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
     - RPC-Health Readiness & Stats Snapshot: reference/rpc-health-stats-snapshot-readiness.md
@@ -393,11 +398,12 @@ nav:
     - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
     - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
     - OODA Record-Orient/Decide Tools: reference/ooda-record-orient-decide-cli.md
+    - Cognition Record-Thread-Reasoning Tool: reference/simard-cognition-record-thread-reasoning-cli.md
     - OODA Record-Admission Tools: reference/ooda-record-admission-cli.md
     - OODA Record-Idea-Dedup/Consolidation Tools: reference/ooda-record-idea-dedup-consolidation-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
-    - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
+    - Historical Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Memory Write CLI (remember): reference/simard-memory-remember-cli.md
@@ -488,6 +494,7 @@ nav:
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Cognition Record-Brain-Introspection/Self-Quality-Audit Tools: reference/record-brain-introspection-self-audit-cli.md
     - Disk-Health API: reference/disk-health-api.md
     - Disk Reclaim API: reference/disk-reclaim-api.md
     - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md

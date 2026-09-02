@@ -1,7 +1,7 @@
 ---
-title: Distill recipe output capture
-description: How Simard's distillation pass reliably captures the distill agent's { "facts": [...], "procedures": [...] } JSON — the dedicated facts-file channel (facts_output_path), the parse_facts_document / parse_facts parser, field-tolerant deserialization, failure semantics, and the redeploy-local.sh recipe-asset sync that keeps the hot-reload path current.
-last_updated: 2026-07-06
+title: Historical distill recipe output capture
+description: Historical reference for the JSON facts-file result channel shipped in #2622 and removed by the direct cognitive-memory semantic handoff in #2679.
+last_updated: 2026-09-02
 owner: simard
 doc_type: reference
 related:
@@ -13,19 +13,19 @@ related:
   - ../memory.md
 ---
 
-# Distill recipe output capture
+# Historical distill recipe output capture
 
-> **Status — implements the
+> **Status — retired by
+> [#2679](https://github.com/rysweet/Simard/issues/2679).**
+> This page preserves the
 > [#2622](https://github.com/rysweet/Simard/issues/2622) /
-> [#2619](https://github.com/rysweet/Simard/issues/2619) fix.**
-> The distill agent's answer is captured from a **dedicated facts file** the
-> agent writes, not from `recipe-runner-rs` stdout. Present tense below
-> describes the shipped behavior. Locations:
-> parser + invocation `src/memory_consolidation/distillation.rs`;
-> tests `src/memory_consolidation/distillation_tests.rs` and the hermetic
-> `issue_2622_file_channel_tests` in `distillation.rs`;
-> recipe `prompt_assets/simard/recipes/distill-episodes.yaml`;
-> asset sync `scripts/redeploy-local.sh`.
+> [#2619](https://github.com/rysweet/Simard/issues/2619) facts-file design for
+> historical and incident-analysis purposes. It is **not the current
+> distillation result path**. The current agent writes facts directly through
+> the cognitive-memory tool; see
+> [Distillation semantic handoff](../architecture/distillation-semantic-handoff.md).
+> Present-tense descriptions below refer only to the retired #2622
+> implementation as it existed before #2679.
 
 The episode-distillation pass turns batches of episodic memory into
 semantic **facts** and reusable **procedures** by shelling out to
@@ -97,17 +97,18 @@ with `AMPLIHACK_AGENT_BINARY` in the environment.
 - After the runner exits, Simard reads `facts_output_path`, and the tempdir
   (and its contents) is removed when the invocation returns.
 
-`invoke_recipe` builds the argv; `harvest_facts_file` post-processes the
-finished `std::process::Output`: a non-zero exit is an explicit terminal
-error carrying truncated stderr/stdout; a clean run reads the facts file.
-`harvest_facts_file` is factored out so the "stdout noise is ignored"
-contract is hermetically testable without spawning a subprocess.
+In the retired implementation, `invoke_recipe` built the argv and
+`harvest_facts_file` post-processed the finished `std::process::Output`: a
+non-zero exit became an explicit terminal error carrying truncated
+stderr/stdout; a clean run read the facts file. `harvest_facts_file` was
+removed by #2679.
 
 ---
 
-## Parser API
+## Removed parser API
 
-Two `pub(crate)` functions parse the **facts document** (the file contents):
+The retired path used two `pub(crate)` functions to parse the **facts
+document** (the file contents):
 
 - `parse_facts_document(document: &str) -> SimardResult<DistillOutput>` — the
   full parser (facts AND procedures).
@@ -240,17 +241,22 @@ drift:
 
 ---
 
-## Code location
+## Former code location
 
-| Item                                   | File                                                 |
-|----------------------------------------|------------------------------------------------------|
-| `invoke_recipe` (adds `facts_output_path`) | `src/memory_consolidation/distillation.rs`       |
-| `harvest_facts_file` (read file / terminal error) | `src/memory_consolidation/distillation.rs` |
-| `parse_facts_document` / `parse_facts`  | `src/memory_consolidation/distillation.rs`           |
+The facts-file reader and parser were removed from
+`src/memory_consolidation/distillation.rs` by #2679. The current
+`invoke_recipe` launches the direct semantic handoff and judges the subprocess
+by exit status; it does not add `facts_output_path` or deserialize a returned
+document. The retired implementation used these locations:
+
+| Removed item | Former file |
+|--------------|-------------|
+| `harvest_facts_file` | `src/memory_consolidation/distillation.rs` |
+| `parse_facts_document` / `parse_facts` | `src/memory_consolidation/distillation.rs` |
 | `scan_cleaned_for_facts`, `RecipeEnvelope`, `de_lenient_string` | `src/memory_consolidation/distillation.rs` |
-| Recipe (writes `{{facts_output_path}}`) | `prompt_assets/simard/recipes/distill-episodes.yaml` |
-| Recipe asset sync                       | `scripts/redeploy-local.sh`                          |
-| Tests                                   | `src/memory_consolidation/distillation_tests.rs` + `issue_2622_file_channel_tests` |
+| Recipe facts-file instructions | `prompt_assets/simard/recipes/distill-episodes.yaml` |
+| Recipe asset sync | `scripts/redeploy-local.sh` |
+| Facts-file tests | `src/memory_consolidation/distillation_tests.rs` and `issue_2622_file_channel_tests` |
 
 ---
 

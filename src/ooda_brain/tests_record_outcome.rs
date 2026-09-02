@@ -13,11 +13,16 @@
 //! failure that keeps the goal open), never a silent `keep_open_and_report`
 //! (#1711). The R1–R7 matrix below is the load-bearing invariant.
 //!
-//! IMPORTANT (D1 of the requirements): Group D removes ONLY its five owned dead
-//! symbols. The shared `extract_and_parse_json` / `extract.rs` MUST survive —
-//! the engineer-lifecycle `DecisionEnvelope` path still uses it and is OUT of
-//! Group D's two-seam scope. The epic is therefore NOT complete. The
-//! source-shape assertions below are scoped to the Group-D-owned symbols only.
+//! IMPORTANT: Group D removed ONLY its five owned dead symbols, and Group E
+//! (#4967) has since retired the engineer-lifecycle stdout-scrape seam (its ACT
+//! effect is now a typed `EngineerLifecycleRecord` read fail-closed). The shared
+//! `extract.rs` module MUST still survive — but now for the remaining
+//! out-of-scope consumers (journal `pr_source`, goal-curation
+//! `recipe_progress_checker`) via retained helpers like `strip_recipe_noise`.
+//! Its dead JSON scrapers `extract_and_parse_json` / `extract_json_payload` were
+//! retired as unused (#4991). The source-shape assertions below are scoped to the
+//! Group-D-owned symbols only; the removal is asserted by the guard at the
+//! bottom of this file.
 
 use std::path::{Path, PathBuf};
 
@@ -421,8 +426,9 @@ fn mod_exposes_the_outcome_record_surface() {
 #[test]
 fn group_d_owned_dead_symbols_are_deleted() {
     // The five Group-D-owned scrape symbols must be GONE from the tree. This is
-    // scoped to Group-D's own symbols — NOT the shared `extract_and_parse_json`,
-    // which the engineer-lifecycle path still uses (see the survival test below).
+    // scoped to Group-D's own symbols — NOT the shared `extract.rs` module, which
+    // survives for out-of-scope consumers via its retained helpers (see the
+    // survival test below).
     let recipe_brain = read_rel(RECIPE_BRAIN);
     for gone in [
         "OutcomeEnvelope",
@@ -512,26 +518,51 @@ fn operator_cli_dispatches_the_record_outcome_arm() {
 }
 
 // ---------------------------------------------------------------------------
-// D1 RETENTION GUARD — the epic is NOT complete. The shared
-// `extract_and_parse_json` / `extract.rs` MUST survive because the
-// engineer-lifecycle `DecisionEnvelope` path (out of Group D scope) still uses
-// it. Deleting it here would break a live production seam and falsely signal
-// epic #4719 complete.
+// REMOVED-AS-DEAD-CODE GUARD — the shared `extract.rs` module MUST survive
+// because out-of-scope consumers (journal `pr_source`, goal-curation
+// `recipe_progress_checker`) still use `strip_recipe_noise` / other retained
+// helpers. Its dead JSON scrapers `extract_and_parse_json` /
+// `extract_json_payload` were retired as unused (#4991) and MUST be gone. Group E
+// (#4967) retired the engineer-lifecycle stdout-scrape seam: the ACT effect is
+// now a typed `EngineerLifecycleRecord` read fail-closed, so
+// `extract_decision_envelope` / `DecisionEnvelope` MUST be gone from recipe_brain
+// and the typed reader MUST be wired in their place.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shared_extract_survives_group_d_for_the_lifecycle_seam() {
-    // The shared extractor module and function still exist in the tree.
+fn shared_extract_module_survives_but_scrapers_removed() {
+    // The shared extractor module still exists (out-of-scope consumers use its
+    // retained helpers), but the two dead JSON scrapers were deleted (#4991).
     let extract = read_rel("src/recipe_output/extract.rs");
     assert!(
-        extract.contains("extract_and_parse_json"),
-        "extract_and_parse_json MUST survive Group D — the engineer-lifecycle seam still uses it"
+        extract.contains("pub fn strip_recipe_noise"),
+        "extract.rs MUST survive — out-of-scope consumers still use retained helpers"
     );
-    // And recipe_brain STILL calls it via the lifecycle DecisionEnvelope path.
+    assert!(
+        !extract.contains("pub fn extract_and_parse_json")
+            && !extract.contains("pub fn extract_json_payload"),
+        "the dead JSON scrapers MUST be gone — retired as dead code (#4991)"
+    );
+}
+
+#[test]
+fn lifecycle_scrape_path_is_retired_for_the_typed_record() {
+    // Group E (#4967): recipe_brain no longer scrapes the lifecycle decision —
+    // the envelope parsers are gone and the typed fail-closed reader is wired.
     let recipe_brain = read_rel(RECIPE_BRAIN);
     assert!(
-        recipe_brain.contains("extract_decision_envelope")
-            && recipe_brain.contains("DecisionEnvelope"),
-        "the engineer-lifecycle DecisionEnvelope path MUST remain live (epic #4719 NOT complete)"
+        !recipe_brain.contains("extract_decision_envelope")
+            && !recipe_brain.contains("DecisionEnvelope"),
+        "the engineer-lifecycle stdout-scrape envelope path MUST be retired (Group E #4967)"
+    );
+    assert!(
+        recipe_brain.contains("read_verified_engineer_lifecycle_decision"),
+        "the lifecycle rail MUST read the typed record fail-closed"
+    );
+    let cli = read_rel(OODA_CLI);
+    assert!(
+        cli.contains("dispatch_record_lifecycle_decision")
+            && cli.contains("\"record-lifecycle-decision\""),
+        "operator_cli MUST dispatch the gated `record-lifecycle-decision` writer verb"
     );
 }

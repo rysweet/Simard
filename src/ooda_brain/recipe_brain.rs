@@ -109,11 +109,6 @@ const VERDICT_PARSE_METRIC: &str = "brain_verdict_parsed_total";
 /// stale/cumulative count of decisions that actually parsed.
 const BRAIN_PARSE_ERROR_METRIC: &str = "brain_parse_error";
 
-/// Cap on the `first_word` token recorded in the metric context. Generous
-/// enough to capture any legitimate variant name plus stray punctuation, but
-/// bounded so a runaway model response can't bloat the metrics file.
-const METRIC_FIRST_WORD_CHARS: usize = 64;
-
 // ---------------------------------------------------------------------------
 // recipe-runner-rs JSON envelope (issue #2419)
 //
@@ -189,22 +184,30 @@ pub(crate) fn extract_recipe_decision_output(
 // Lifecycle decision outcome classification (issue #2419)
 // ---------------------------------------------------------------------------
 
-/// Outcome of a single `decide_engineer_lifecycle` parse, used as the
+/// Outcome of a single `decide_engineer_lifecycle` ladder rung, used as the
 /// `outcome` label on the [`LIFECYCLE_DECISION_METRIC`] metric so the
 /// parse-failure rate (`outcome != parsed`) is measurable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleParseOutcome {
-    /// First word matched a known variant — a real decision was parsed.
+    /// The typed record was read and verified — a real decision was obtained.
     Parsed,
-    /// Recipe output was empty/whitespace-only → defaulted to
-    /// `continue_skipping`.
+    /// Retained classification variant for the shared ladder's coarse
+    /// empty-output case. Unreachable on the record-native lifecycle path (a
+    /// missing/empty record fails CLOSED as [`Error`](Self::Error)); kept for the
+    /// shared metric-label + `is_parse_failure` contract and exercised by the
+    /// generic-ladder unit tests.
+    #[allow(dead_code)]
     DefaultEmpty,
-    /// Recipe output was non-empty but the first word matched no variant →
-    /// defaulted to `continue_skipping`.
+    /// Retained classification variant for the shared ladder's coarse
+    /// malformed-output case. Unreachable on the record-native lifecycle path (a
+    /// malformed record fails CLOSED as [`Error`](Self::Error)); kept for the
+    /// shared metric-label + `is_parse_failure` contract and exercised by the
+    /// generic-ladder unit tests.
+    #[allow(dead_code)]
     DefaultMalformed,
-    /// recipe-runner-rs invocation or envelope decoding failed — no decision
-    /// could be obtained. Produced on the error path of
-    /// `decide_engineer_lifecycle`, not by the pure parser.
+    /// The recipe invocation failed OR the typed record could not be read and
+    /// verified (fail-CLOSED) — no decision could be obtained. This is the
+    /// base-rung outcome for any read/validation error on the lifecycle path.
     Error,
     /// A real decision was recovered by a SCHEMA-REPAIR re-prompt after the
     /// base attempt produced a parse-miss (issue #2432, BGML progress-aware
@@ -296,31 +299,39 @@ impl LadderAttempt<'_> {
 /// The closed variant token list, echoed into the schema-repair note so the
 /// model is reminded of the exact accepted first words. Kept in sync with the
 /// recipe `OPTIONS` section and `rustyclawd::VALID_VARIANTS`.
-const LIFECYCLE_VARIANT_LIST: &str = "continue_skipping, reclaim_and_redispatch, deprioritize, open_tracking_issue, mark_goal_blocked, consider_self_update";
+pub(crate) const LIFECYCLE_VARIANT_LIST: &str = "continue_skipping, reclaim_and_redispatch, deprioritize, open_tracking_issue, mark_goal_blocked, consider_self_update";
 
 /// Build the `escalation_note` injected into the recipe prompt for a given
-/// rung. Pinned wording — see the `escalation_note_*` content-pin tests.
-pub fn build_escalation_note(rung: LadderRung, prior_output: &str) -> String {
+/// rung after a base record-READ fail-closed (Group E, #4967). Pinned wording —
+/// see the `escalation_note_*` content-pin tests.
+///
+/// The wording instructs the model to RE-RUN THE ACT STEP — i.e. call the
+/// `record-lifecycle-decision` tool exactly once with a valid `--decision` — NOT
+/// to emit a decision word as prose (the retired scrape contract). `prior_output`
+/// is unused on the typed-record path (there is no scraped stdout to feed back);
+/// it is retained only for the shared ladder-backbone invoke-closure signature.
+pub fn build_escalation_note(rung: LadderRung, _prior_output: &str) -> String {
     // Built lazily so the Base rung allocates nothing — base behaviour stays
     // byte-identical to pre-#2432.
-    let schema_repair = || {
-        let prior = truncate(prior_output.trim(), MAX_RATIONALE_CHARS);
+    let act_repair = || {
         format!(
-            "## ⚠️ SCHEMA REPAIR (retry) ## \
-             Your previous response could not be parsed: its FIRST WORD was not a valid decision variant. \
-             Previous response: <<<{prior}>>> \
-             Respond again now. The VERY FIRST WORD of your reply MUST be exactly one of: {LIFECYCLE_VARIANT_LIST}. \
-             Output that variant word first, then your rationale."
+            "## ⚠️ ACT REPAIR (retry) ## \
+             Your engineer-lifecycle decision was NOT recorded (the typed record was missing or \
+             invalid). Re-run the ACT step now: call the `record-lifecycle-decision` tool EXACTLY \
+             ONCE, as specified in the DECISION section, with --decision set to exactly one of: \
+             {LIFECYCLE_VARIANT_LIST}. Do not answer in prose — only the tool call records the \
+             decision."
         )
     };
     match rung {
         LadderRung::Base => String::new(),
-        LadderRung::SchemaRepair => schema_repair(),
+        LadderRung::SchemaRepair => act_repair(),
         LadderRung::Escalate => format!(
             "{} ## HIGH-EFFORT RETRY ## \
              This is a final, higher-effort attempt. Reason carefully, step by step, about the \
-             engineer's state BEFORE answering, then output the single variant word first.",
-            schema_repair()
+             engineer's state BEFORE deciding, then call the record-lifecycle-decision tool once \
+             with a valid --decision.",
+            act_repair()
         ),
     }
 }
@@ -438,66 +449,87 @@ impl LadderTermination {
     }
 }
 
-/// Seam over the raw lifecycle recipe invocation so the escalation ladder is
+/// Seam over one lifecycle recipe invocation so the escalation ladder is
 /// unit-testable without a live `recipe-runner-rs`. Production wires
-/// [`RecipeBrain`]; tests wire a scripted stub. Returns the raw decision text
-/// (the recipe's final step output); errors propagate.
+/// [`RecipeBrain`] (which runs the recipe, writing the typed record to
+/// `record_path`); tests wire a scripted stub. `Err` = a genuine recipe-runner
+/// failure (stops the ladder); `Ok(())` = the recipe ran and the caller reads
+/// the typed record fail-closed (Group E, #4967 — the ACT effect is a typed
+/// record, never scraped stdout).
 pub trait LifecycleInvoker {
     fn invoke_lifecycle(
         &self,
         ctx: &EngineerLifecycleCtx,
         attempt: &LadderAttempt,
-    ) -> SimardResult<String>;
+        record_path: &Path,
+    ) -> SimardResult<()>;
 }
 
-/// Drive the confidence-gated escalation ladder after a base parse-miss.
+/// Drive the confidence-gated escalation ladder after a base record-READ
+/// fail-closed (Group E, #4967). Each rung re-invokes the lifecycle recipe
+/// (overwriting the typed record at `record_path`) and re-reads it fail-closed
+/// via [`read_verified_engineer_lifecycle_decision`](super::read_verified_engineer_lifecycle_decision).
+/// Returns the recovered decision (`Some` on a clean read, `None` when every
+/// rung still fails closed), its outcome (`Repaired`/`Escalated` on recovery,
+/// else `Error`), the total number of brain invocations made (base + rungs), and
+/// the [`LadderTermination`] reason.
 ///
-/// `base_raw` is the (already-invoked) base attempt's raw output and
-/// `base_outcome` its parse-miss classification. Returns the final decision,
-/// its outcome (`Repaired`/`Escalated` on recovery, else the original
-/// parse-miss), the total number of brain invocations made (base + rungs), and
-/// the [`LadderTermination`] reason (so the caller can record a precise `cause`
-/// — distinguishing true exhaustion from an early stop caused by a rung's own
-/// invocation failure, or a disabled ladder).
-///
-/// Bounded by `cfg.max_escalations`; each rung is logged loudly; the
-/// deterministic `continue_skipping` default is returned only when every rung
-/// is exhausted (or an escalation invocation itself fails).
+/// The ladder STRUCTURE is unchanged from the retired scrape path (issue #2432):
+/// only the "parse" primitive is rewired from scraping stdout to reading the
+/// typed record. A genuine recipe-runner failure on a rung stops the ladder as
+/// `InvokeError`; the deterministic terminal is reached only after every rung is
+/// exhausted — and even then the caller surfaces an explicit `Err`, never a
+/// silent `continue_skipping`.
 pub fn run_escalation_ladder(
     invoker: &dyn LifecycleInvoker,
     ctx: &EngineerLifecycleCtx,
-    base_raw: &str,
-    base_outcome: LifecycleParseOutcome,
+    record_path: &Path,
     cfg: &EscalationConfig,
 ) -> (
-    EngineerLifecycleDecision,
+    Option<EngineerLifecycleDecision>,
     LifecycleParseOutcome,
     u32,
     LadderTermination,
 ) {
     // Thin lifecycle-specific wrapper over the generic [`run_brain_ladder`]
-    // backbone (issue #2419 family / #2429): the lifecycle phase owns the
-    // invoke (recipe-runner `LadderAttempt`), the parser
-    // ([`parse_lifecycle_outcome`]), the deterministic default
-    // ([`default_continue_skipping`]), and the decision-label closure; the
+    // backbone (issue #2419 family / #2429): the lifecycle phase owns the invoke
+    // (recipe-runner `LadderAttempt`, writing the typed record) and the "parse"
+    // primitive (now a fail-closed typed-record READ, not a stdout scrape); the
     // generic core owns the bounded rung loop, the loud logging, and the
-    // [`LadderTermination`] accounting. This keeps the decide / orient /
-    // merge-judge phases on the SAME ladder rather than reinventing it.
+    // [`LadderTermination`] accounting. `None` is the placeholder terminal (a
+    // fail-closed read never yields a decision); the caller
+    // ([`finalize_ladder_result`]) converts a parse-failure terminal into an
+    // explicit `Err`, so the placeholder is provably never returned as a real
+    // decision — there is NO silent default.
     run_brain_ladder(
         &ctx.goal_id,
-        base_raw,
-        base_outcome,
+        "",
+        LifecycleParseOutcome::Error,
         cfg,
         |rung, prior| {
             let attempt = LadderAttempt {
                 rung,
                 prior_output: prior,
             };
-            invoker.invoke_lifecycle(ctx, &attempt)
+            // Run the recipe (writes the typed record); its stdout is IGNORED.
+            invoker.invoke_lifecycle(ctx, &attempt, record_path)?;
+            Ok(String::new())
         },
-        parse_lifecycle_outcome,
-        default_continue_skipping,
-        |d| lifecycle_decision_choice(d).to_string(),
+        |_ignored_stdout| match super::read_verified_engineer_lifecycle_decision(
+            record_path,
+            &ctx.goal_id,
+            REASONER_RECORD_CYCLE,
+        ) {
+            Ok(decision) => (Some(decision), LifecycleParseOutcome::Parsed),
+            Err(_) => (None, LifecycleParseOutcome::Error),
+        },
+        || None,
+        |d| {
+            d.as_ref()
+                .map(lifecycle_decision_choice)
+                .unwrap_or("none")
+                .to_string()
+        },
     )
 }
 
@@ -915,21 +947,33 @@ impl RecipeBrain {
 }
 
 impl RecipeBrain {
-    /// Invoke the engineer-lifecycle recipe once for the given ladder rung and
-    /// return the raw decision text (the recipe's final step output). On
+    /// Invoke the engineer-lifecycle recipe once for the given ladder rung. The
+    /// agent records its decision by calling the gated
+    /// `simard ooda record-lifecycle-decision` tool, which validates the closed
+    /// `--decision` variant + bounds/sanitizes the rationale and atomically
+    /// writes ONE typed [`EngineerLifecycleRecord`](super::EngineerLifecycleRecord)
+    /// to `record_path`. Its stdout is IGNORED — the ACT effect is the typed
+    /// record, never scraped prose (Group E, #4967). On a genuine recipe-runner
     /// failure returns the error PLUS a stable `cause` label
-    /// (`spawn_failed` / `nonzero_exit` / `envelope_decode_failed`) for the
-    /// `brain_lifecycle_decision` metric.
+    /// (`spawn_failed` / `nonzero_exit`) for the `brain_lifecycle_decision`
+    /// metric.
     ///
     /// The `escalation_note` context var (empty on `LadderRung::Base`) carries
     /// the schema-repair / high-effort instruction; it is rendered by the
-    /// recipe's `{{escalation_note}}` placeholder. Passing it on every call
-    /// keeps base behaviour byte-identical to the #2419 path.
+    /// recipe's `{{escalation_note}}` placeholder.
     fn invoke_lifecycle_raw(
         &self,
         ctx: &EngineerLifecycleCtx,
         attempt: &LadderAttempt,
-    ) -> Result<String, (SimardError, &'static str)> {
+        record_path: &Path,
+    ) -> Result<(), (SimardError, &'static str)> {
+        let simard_bin = super::resolve_simard_bin(self.adapter_tag).map_err(|e| {
+            (
+                e,
+                // resolve_simard_bin failing is a spawn-class prerequisite fault.
+                "spawn_failed",
+            )
+        })?;
         let sentinel = ctx
             .sentinel_pid
             .map(|p| p.to_string())
@@ -943,11 +987,22 @@ impl RecipeBrain {
 
         let output = Command::new("recipe-runner-rs")
             .arg(self.recipe_path.as_os_str())
-            // issue #2419: text mode prints only a summary banner to stdout —
-            // the agent decision text is only exposed via the JSON envelope.
             .arg("--output-format")
             .arg("json")
             .env("AMPLIHACK_AGENT_BINARY", self.agent_binary)
+            // The typed-decision seam: where to write the record and which binary
+            // records it. Both are trusted (a daemon-owned per-call temp dir + the
+            // resolved current_exe), so they are passed verbatim — never sanitized
+            // (which would fold/truncate a path).
+            .arg("-c")
+            .arg(format!("record_path={}", record_path.display()))
+            .arg("-c")
+            .arg(format!("simard_bin={}", simard_bin.display()))
+            // The record's identity cycle is the REASONER_RECORD_CYCLE sentinel
+            // (the fresh per-call temp dir already scopes freshness); the real
+            // engineer cycle is passed separately as churn-detection context.
+            .arg("-c")
+            .arg(format!("record_cycle_number={REASONER_RECORD_CYCLE}"))
             .arg("-c")
             .arg(format!(
                 "goal_id={}",
@@ -1029,8 +1084,9 @@ impl RecipeBrain {
             ));
         }
 
-        extract_recipe_decision_output(&output.stdout, self.adapter_tag)
-            .map_err(|e| (e, "envelope_decode_failed"))
+        // The decision lives in the typed record the agent wrote via the tool,
+        // NOT in stdout. Stdout is intentionally ignored.
+        Ok(())
     }
 }
 
@@ -1039,90 +1095,127 @@ impl LifecycleInvoker for RecipeBrain {
         &self,
         ctx: &EngineerLifecycleCtx,
         attempt: &LadderAttempt,
-    ) -> SimardResult<String> {
-        self.invoke_lifecycle_raw(ctx, attempt).map_err(|(e, _)| e)
+        record_path: &Path,
+    ) -> SimardResult<()> {
+        self.invoke_lifecycle_raw(ctx, attempt, record_path)
+            .map_err(|(e, _)| e)
     }
 }
 
 impl OodaBrain for RecipeBrain {
+    /// Engineer-lifecycle Act decision (Group E rework, #4967, epic #4719).
+    ///
+    /// The reasoner ACTS by calling the gated
+    /// `simard ooda record-lifecycle-decision` tool, which validates the closed
+    /// `--decision` variant against `LIFECYCLE_VARIANT_LIST` + bounds/sanitizes
+    /// the rationale and atomically writes ONE typed
+    /// [`EngineerLifecycleRecord`](super::EngineerLifecycleRecord). This method
+    /// runs the `ooda-engineer-lifecycle.yaml` recipe over a fresh, UNIQUE
+    /// per-call temp dir, then reads the typed record back with
+    /// [`read_verified_engineer_lifecycle_decision`](super::read_verified_engineer_lifecycle_decision)
+    /// — it NEVER scrapes the agent's prose stdout (the retired #2419/#2432
+    /// seam).
+    ///
+    /// FAIL-CLOSED with confidence-gated recovery (#2432 / #2580 / #1711): a
+    /// genuine recipe-runner failure surfaces loudly as `Err` (never masked). A
+    /// base record-read that fails closed (absent / malformed / wrong-schema /
+    /// out-of-enum / bad-perms / goal- or cycle-mismatch / stale) is the only
+    /// low-confidence case that spends extra compute on the bounded escalation
+    /// ladder. If every rung still fails closed, the caller surfaces an EXPLICIT
+    /// hard error — never a silent `continue_skipping`. A genuine "nothing to do"
+    /// is a real, model-recorded `continue_skipping` decision (read cleanly) and
+    /// never reaches the ladder.
     fn decide_engineer_lifecycle(
         &self,
         ctx: &EngineerLifecycleCtx,
     ) -> SimardResult<EngineerLifecycleDecision> {
-        // Base (cheap) attempt — identical to the #2419 path. A genuine
-        // recipe-runner failure still surfaces loudly as `Err` (it must NOT be
-        // masked by the ladder): only a *parse-miss* on a successful run is
-        // low-confidence enough to escalate.
-        let base_raw = match self.invoke_lifecycle_raw(ctx, &LadderAttempt::base()) {
-            Ok(raw) => raw,
-            Err((e, cause)) => {
-                record_lifecycle_decision_metric(
-                    ctx,
-                    LifecycleParseOutcome::Error,
-                    "",
-                    "none",
-                    cause,
-                    1,
-                );
-                return Err(e);
-            }
-        };
+        // Fresh, UNIQUE per-call temp dir (owner-only, auto-removed on drop). The
+        // ladder overwrites this same record path on each rung; the tempdir guard
+        // is held for the whole method so a recovered read still sees the file.
+        let (_record_tempdir, record_path) = super::alloc_record_tempdir(
+            self.adapter_tag,
+            "simard-ooda-lifecycle-",
+            "per-call lifecycle",
+            "lifecycle.json",
+        )?;
 
-        let (decision, outcome) = parse_lifecycle_outcome(&base_raw);
-        if !outcome.is_parse_failure() {
-            // Parsed on the first try — no extra compute spent.
+        // Base (cheap) attempt. A genuine recipe-runner failure still surfaces
+        // loudly as `Err` (it must NOT be masked by the ladder): only a
+        // fail-closed READ on a successful run is low-confidence enough to
+        // escalate.
+        if let Err((e, cause)) =
+            self.invoke_lifecycle_raw(ctx, &LadderAttempt::base(), &record_path)
+        {
             record_lifecycle_decision_metric(
                 ctx,
-                outcome,
-                &lifecycle_first_word(&base_raw),
-                lifecycle_decision_choice(&decision),
-                "ok",
+                LifecycleParseOutcome::Error,
+                "",
+                "none",
+                cause,
                 1,
             );
-            crate::recipe_output::record_parse_outcome("engineer_lifecycle", true);
-            return Ok(decision);
+            return Err(e);
         }
 
-        // Parse-miss → confidence-gated escalation ladder (issue #2432). Spend
-        // extra compute ONLY on this weak case.
-        let cfg = EscalationConfig::from_env();
-        let (final_decision, final_outcome, attempts, termination) =
-            run_escalation_ladder(self, ctx, &base_raw, outcome, &cfg);
-        // NOTE: `first_word` intentionally always reflects the *base* attempt's
-        // token — it is the diagnostic record of what the cheap first pass
-        // produced (e.g. the banner regression or a malformed reply), even on a
-        // recovered row where `decision` reflects the recovering rung's choice.
-        // `termination.cause_label()` distinguishes recovered / exhausted /
-        // invoke-error / disabled so the two fields read unambiguously together.
-        record_lifecycle_decision_metric(
-            ctx,
-            final_outcome,
-            &lifecycle_first_word(&base_raw),
-            lifecycle_decision_choice(&final_decision),
-            termination.cause_label(),
-            attempts,
-        );
-        crate::recipe_output::record_parse_outcome(
-            "engineer_lifecycle",
-            !final_outcome.is_parse_failure(),
-        );
-        // Operator zero-fallback contract (issue #2580): never return
-        // `Ok(continue_skipping)` on a parse-failure — that is a parse-failure
-        // masquerading as a deliberate no-action (the exact "deterministic
-        // fallback" the operator forbids). Surface an EXPLICIT hard error; the
-        // `spawn.rs` caller records it as a cycle failure and, after N
-        // consecutive failures, marks the goal blocked / files a tracking issue.
-        // A genuine "nothing to do" is a real, model-emitted `continue_skipping`
-        // decision (parsed) — distinct, and it never reaches this branch.
-        finalize_ladder_result(
-            LIFECYCLE_ADAPTER_TAG,
-            BrainPhase::Act,
+        // Read the TYPED record — never scrape prose.
+        match super::read_verified_engineer_lifecycle_decision(
+            &record_path,
             &ctx.goal_id,
-            final_decision,
-            final_outcome,
-            termination,
-            attempts,
-        )
+            REASONER_RECORD_CYCLE,
+        ) {
+            Ok(decision) => {
+                // Read cleanly on the first try — no extra compute spent.
+                record_lifecycle_decision_metric(
+                    ctx,
+                    LifecycleParseOutcome::Parsed,
+                    "",
+                    lifecycle_decision_choice(&decision),
+                    "ok",
+                    1,
+                );
+                crate::recipe_output::record_parse_outcome("engineer_lifecycle", true);
+                Ok(decision)
+            }
+            Err(_read_err) => {
+                // Fail-closed base read → confidence-gated escalation ladder
+                // (issue #2432). Spend extra compute ONLY on this weak case; each
+                // rung re-runs the recipe (overwriting the record) and re-reads it
+                // fail-closed.
+                let cfg = EscalationConfig::from_env();
+                let (final_decision, final_outcome, attempts, termination) =
+                    run_escalation_ladder(self, ctx, &record_path, &cfg);
+                record_lifecycle_decision_metric(
+                    ctx,
+                    final_outcome,
+                    "",
+                    final_decision
+                        .as_ref()
+                        .map(lifecycle_decision_choice)
+                        .unwrap_or("none"),
+                    termination.cause_label(),
+                    attempts,
+                );
+                crate::recipe_output::record_parse_outcome(
+                    "engineer_lifecycle",
+                    !final_outcome.is_parse_failure(),
+                );
+                // Operator zero-fallback contract (issue #2580): never return
+                // `Ok(continue_skipping)` on a fail-closed read — surface an
+                // EXPLICIT hard error. `finalize_ladder_result` returns `Ok` only
+                // on a recovered (non-parse-failure) read, where `final_decision`
+                // is always `Some`; the `.expect` therefore never fires.
+                finalize_ladder_result(
+                    LIFECYCLE_ADAPTER_TAG,
+                    BrainPhase::Act,
+                    &ctx.goal_id,
+                    final_decision,
+                    final_outcome,
+                    termination,
+                    attempts,
+                )
+                .map(|d| d.expect("recovered ladder read is always Some when not a parse failure"))
+            }
+        }
     }
 
     /// Closed-loop outcome verification (issue #2751; Group D rework, #4967).
@@ -2108,124 +2201,22 @@ fn render_live_signals(signals: &[crate::goal_curation::live_signal::LiveSignal]
 }
 
 // ---------------------------------------------------------------------------
-// Parse functions — structured JSON-envelope decision block FIRST, with a
-// backward-compatible first-word / first-number scan as a fallback (issue
-// #2580). The recipe prompts emit a fenced `{"decision": ...}` / `{"adjusted_
-// urgency": ...}` envelope; the extractor consumes THAT through the shared
-// sanitizing chokepoint rather than relying on free-prose keyword-sniffing.
+// Lifecycle decision variant mapping (single source of truth). The former
+// stdout-scrape parsers were retired in Group E (#4967): the ACT effect is now
+// a typed `EngineerLifecycleRecord` written by the gated
+// `record-lifecycle-decision` CLI and read fail-closed — never scraped stdout.
+// This mapping remains the ONE place the closed variant set is decoded, shared
+// by the CLI writer's validation and the record reader.
 // ---------------------------------------------------------------------------
-
-/// A structured decision envelope a reasoner emits as a JSON object. Consumed in
-/// preference to the legacy first-word scan so well-formed structured output
-/// parses deterministically (issue #2580 — operator zero-fallback contract).
-/// `decision` is the required machine-parseable variant token (the action word
-/// for decide, the lifecycle variant for act); `rationale` is optional prose.
-/// Unknown extra fields are ignored for forward-compatibility.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct DecisionEnvelope {
-    decision: String,
-    #[serde(default)]
-    rationale: String,
-}
-
-/// Extract the `{"decision": "...", "rationale": "..."}` envelope from recipe
-/// output, if present. Routes through the shared #2484 sanitizing chokepoint
-/// ([`crate::recipe_output::extract_and_parse_json`] strips the banner, ANSI,
-/// and interleaved log lines, and recovers a trailing-comma-defective body) so
-/// a banner-polluted or trailing-comma envelope still parses. Returns
-/// `None` when no balanced JSON object with a non-empty string `decision` field
-/// is present — the caller then falls back to the legacy first-word scan.
-fn extract_decision_envelope(text: &str) -> Option<DecisionEnvelope> {
-    let env: DecisionEnvelope = crate::recipe_output::extract_and_parse_json(text)?;
-    if env.decision.trim().is_empty() {
-        return None;
-    }
-    Some(env)
-}
-
-/// Choose the rationale string for a parsed [`DecisionEnvelope`]: the model's
-/// `rationale` when present, else the decision token itself (bounded).
-fn envelope_rationale(env: &DecisionEnvelope) -> String {
-    let r = env.rationale.trim();
-    if r.is_empty() {
-        truncate(env.decision.trim(), MAX_RATIONALE_CHARS)
-    } else {
-        truncate(r, MAX_RATIONALE_CHARS)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Lifecycle parse: first-word extraction → ContinueSkipping default
-// ---------------------------------------------------------------------------
-
-/// Parse recipe output for a lifecycle decision variant as the first word.
-/// Case-insensitive match. Defaults to `ContinueSkipping`.
-///
-/// Thin decision-only wrapper over [`parse_lifecycle_outcome`]. Retained as
-/// the documented parser entry point used by the operator replay runbook
-/// (`docs/howto/diagnose-brain-decision-parse-failures.md`, Step 3) and the
-/// `parse_*_from_text` reference trio. Production now routes through
-/// [`parse_lifecycle_outcome`] to capture the parse outcome for the
-/// `brain_lifecycle_decision` metric, so in non-test builds this wrapper has
-/// no internal caller.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn parse_lifecycle_from_text(text: &str) -> EngineerLifecycleDecision {
-    parse_lifecycle_outcome(text).0
-}
-
-/// Parse recipe output into a lifecycle decision AND a
-/// [`LifecycleParseOutcome`] classification.
-///
-/// The outcome distinguishes a genuinely parsed decision (`Parsed`) from the
-/// two distinct ways the parser falls back to `ContinueSkipping`:
-/// `DefaultEmpty` (no text at all) and `DefaultMalformed` (text present but
-/// the first word is not a known variant). This is what makes the
-/// parse-failure rate measurable per issue #2419 — before this split, a real
-/// `continue_skipping` decision and a silent fallback were indistinguishable.
-pub fn parse_lifecycle_outcome(text: &str) -> (EngineerLifecycleDecision, LifecycleParseOutcome) {
-    // Structured JSON envelope FIRST (issue #2580): a well-formed
-    // `{"decision":"<variant>","rationale":"..."}` block — extracted through the
-    // shared #2484 sanitizing chokepoint — parses deterministically, so the
-    // daemon no longer *relies* on free-prose first-word sniffing.
-    if let Some(env) = extract_decision_envelope(text)
-        && let Some(decision) =
-            lifecycle_decision_from_variant(env.decision.trim(), envelope_rationale(&env))
-    {
-        return (decision, LifecycleParseOutcome::Parsed);
-    }
-
-    // Backward-compatible fallback: strip ANSI escapes + drop tracing-log /
-    // runner-banner lines (shared #2484 extractor) so a noise-obscured first-word
-    // decision keyword is not silently defaulted to `continue_skipping` — the
-    // #2419-family non-progress loop. Clean-path zero-copy preserves today's
-    // behaviour on clean output.
-    let cleaned = crate::recipe_output::strip_recipe_noise(text);
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        return (
-            default_continue_skipping(),
-            LifecycleParseOutcome::DefaultEmpty,
-        );
-    }
-    let first_word = trimmed.split_whitespace().next().unwrap_or("");
-    let rest = truncate(trimmed[first_word.len()..].trim(), MAX_RATIONALE_CHARS);
-    match lifecycle_decision_from_variant(first_word, rest) {
-        Some(decision) => (decision, LifecycleParseOutcome::Parsed),
-        None => (
-            default_continue_skipping(),
-            LifecycleParseOutcome::DefaultMalformed,
-        ),
-    }
-}
 
 /// Map a lifecycle decision variant token (case-insensitive) to an
 /// [`EngineerLifecycleDecision`] carrying `rationale`; `None` for an unknown
-/// token. Shared by the structured JSON-envelope path and the legacy first-word
-/// scan so both honour the exact same closed variant set (kept in sync with
-/// [`LIFECYCLE_VARIANT_LIST`]). Variants with extra fields
+/// token. Shared by the CLI writer's closed-set validation and the fail-closed
+/// record reader so both honour the exact same closed variant set (kept in sync
+/// with [`LIFECYCLE_VARIANT_LIST`]). Variants with extra fields
 /// (`reclaim_and_redispatch`, `open_tracking_issue`, `mark_goal_blocked`) reuse
 /// `rationale` for the body/reason, matching the first-word parser's behaviour.
-fn lifecycle_decision_from_variant(
+pub(crate) fn lifecycle_decision_from_variant(
     word: &str,
     rationale: String,
 ) -> Option<EngineerLifecycleDecision> {
@@ -2257,26 +2248,11 @@ fn lifecycle_decision_from_variant(
     }
 }
 
-fn default_continue_skipping() -> EngineerLifecycleDecision {
-    EngineerLifecycleDecision::ContinueSkipping {
-        rationale: format!(
-            "{LIFECYCLE_ADAPTER_TAG}: no decision keyword found in recipe output; defaulting to continue_skipping"
-        ),
-    }
-}
-
-/// The first whitespace-delimited token of `text`, bounded for metric storage.
-fn lifecycle_first_word(text: &str) -> String {
-    truncate(
-        text.split_whitespace().next().unwrap_or(""),
-        METRIC_FIRST_WORD_CHARS,
-    )
-}
-
 /// The snake_case `choice` tag of a decision, matching the
 /// `EngineerLifecycleDecision` serde representation. Used as the `decision`
-/// field of the metric context.
-fn lifecycle_decision_choice(decision: &EngineerLifecycleDecision) -> &'static str {
+/// field of the metric context and as the canonical token the typed-record
+/// writer/reader store (Group E, #4967).
+pub(crate) fn lifecycle_decision_choice(decision: &EngineerLifecycleDecision) -> &'static str {
     match decision {
         EngineerLifecycleDecision::ContinueSkipping { .. } => "continue_skipping",
         EngineerLifecycleDecision::ReclaimAndRedispatch { .. } => "reclaim_and_redispatch",
@@ -2819,14 +2795,6 @@ mod tests {
 
     // ===================================================================
     #[test]
-    fn extract_decision_envelope_recovers_trailing_comma() {
-        let env =
-            extract_decision_envelope(r#"{"decision": "advance_goal", "rationale": "next step",}"#)
-                .expect("trailing-comma decision envelope must parse");
-        assert_eq!(env.decision.trim(), "advance_goal");
-    }
-
-    #[test]
     fn decide_engineer_admission_error_includes_adapter_tag() {
         // Recipe path with no sibling admission recipe ⇒ the resolve fails and
         // the error carries the admission adapter tag (the seam then fails open).
@@ -3148,365 +3116,6 @@ mod tests {
     // must call truncate(&stderr, 500) on all error paths.)
 
     // ===================================================================
-    // parse_lifecycle_from_text — first-word extraction (parsers eliminated)
-    // ===================================================================
-
-    mod parse_lifecycle_tests {
-        use super::super::*;
-
-        // === First-word extraction: variant as first word ===
-
-        #[test]
-        fn first_word_continue_skipping() {
-            let text = "continue_skipping engineer is healthy and making progress";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { rationale } => {
-                    assert!(rationale.contains("healthy") || rationale.contains("progress"));
-                }
-                other => panic!("expected ContinueSkipping, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn first_word_reclaim_and_redispatch() {
-            let text = "reclaim_and_redispatch worktree wedged for 7 hours";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ReclaimAndRedispatch {
-                    rationale,
-                    redispatch_context,
-                } => {
-                    assert!(rationale.contains("wedged"));
-                    assert!(redispatch_context.is_empty());
-                }
-                other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn first_word_deprioritize() {
-            let text = "deprioritize chronic failure, no progress in 10 cycles";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::Deprioritize { rationale } => {
-                    assert!(rationale.contains("chronic") || rationale.contains("failure"));
-                }
-                other => panic!("expected Deprioritize, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn first_word_open_tracking_issue() {
-            let text = "open_tracking_issue engineer panicked on cycle 12, OOM in worker";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::OpenTrackingIssue {
-                    rationale,
-                    title,
-                    body,
-                } => {
-                    assert_eq!(title, "OODA stuck");
-                    assert!(body.contains("panicked") || body.contains("OOM"));
-                    assert!(rationale.contains("panicked") || rationale.contains("OOM"));
-                }
-                other => panic!("expected OpenTrackingIssue, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn first_word_mark_goal_blocked() {
-            let text = "mark_goal_blocked needs API key from user, cannot proceed";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::MarkGoalBlocked { rationale, reason } => {
-                    assert!(reason.contains("API key") || reason.contains("cannot proceed"));
-                    assert!(rationale.contains("API key") || rationale.contains("cannot proceed"));
-                }
-                other => panic!("expected MarkGoalBlocked, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn first_word_consider_self_update() {
-            let text = "consider_self_update binary is 5 commits behind origin/main";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ConsiderSelfUpdate { rationale } => {
-                    assert!(rationale.contains("5 commits") || rationale.contains("behind"));
-                }
-                other => panic!("expected ConsiderSelfUpdate, got {other:?}"),
-            }
-        }
-
-        // === Case insensitivity on first word ===
-
-        #[test]
-        fn first_word_case_insensitive_upper() {
-            let text = "DEPRIORITIZE this stale goal";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::Deprioritize { .. } => {}
-                other => panic!("case-insensitive first word should match; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn first_word_case_insensitive_mixed() {
-            let text = "Continue_Skipping everything is fine";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("case-insensitive first word should match; got {other:?}"),
-            }
-        }
-
-        // === Default behavior ===
-
-        #[test]
-        fn no_keyword_first_word_defaults_to_continue_skipping() {
-            let text = "The engineer appears to be making progress normally.";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { rationale } => {
-                    assert!(
-                        rationale.contains("no decision keyword")
-                            || rationale.contains(LIFECYCLE_ADAPTER_TAG),
-                    );
-                }
-                other => panic!("no keyword first word -> ContinueSkipping; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn empty_text_defaults_to_continue_skipping() {
-            let d = parse_lifecycle_from_text("");
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("empty text -> ContinueSkipping; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn whitespace_only_defaults_to_continue_skipping() {
-            let d = parse_lifecycle_from_text("   \n\t  ");
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("whitespace-only -> ContinueSkipping; got {other:?}"),
-            }
-        }
-
-        // === Keyword NOT first word => default (new behavior) ===
-
-        #[test]
-        fn keyword_in_prose_defaults_to_continue_skipping() {
-            // With first-word extraction, keywords buried in prose don't match
-            let text = "I think we should deprioritize this cycle.";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("keyword not first word -> ContinueSkipping; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn old_marker_format_defaults_to_continue_skipping() {
-            // Old DECISION: marker format no longer recognized
-            let text = "DECISION: deprioritize\nRATIONALE: test";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("DECISION: marker should not be parsed; got {other:?}"),
-            }
-        }
-
-        // === Extra fields use defaults ===
-
-        #[test]
-        fn open_tracking_issue_title_defaults_to_ooda_stuck() {
-            let text = "open_tracking_issue something went wrong";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::OpenTrackingIssue { title, .. } => {
-                    assert_eq!(title, "OODA stuck");
-                }
-                other => panic!("expected OpenTrackingIssue, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn open_tracking_issue_body_is_remaining_text() {
-            let text = "open_tracking_issue engineer OOM on cycle 12";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::OpenTrackingIssue { body, .. } => {
-                    assert!(body.contains("OOM") || body.contains("cycle"));
-                }
-                other => panic!("expected OpenTrackingIssue, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn mark_goal_blocked_reason_is_remaining_text() {
-            let text = "mark_goal_blocked needs API key from user";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::MarkGoalBlocked { reason, .. } => {
-                    assert!(reason.contains("API key"));
-                }
-                other => panic!("expected MarkGoalBlocked, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn reclaim_redispatch_context_always_empty() {
-            let text = "reclaim_and_redispatch wedged for hours";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ReclaimAndRedispatch {
-                    redispatch_context, ..
-                } => {
-                    assert!(redispatch_context.is_empty());
-                }
-                other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
-            }
-        }
-
-        // === Rationale ===
-
-        #[test]
-        fn rationale_is_remaining_text() {
-            let text = "deprioritize chronic failure with no progress for many cycles";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::Deprioritize { rationale } => {
-                    assert!(rationale.contains("chronic") || rationale.contains("failure"));
-                }
-                other => panic!("expected Deprioritize, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn rationale_truncated_for_long_text() {
-            let long_text = format!("deprioritize {}", "x".repeat(2000));
-            let d = parse_lifecycle_from_text(&long_text);
-            match &d {
-                EngineerLifecycleDecision::Deprioritize { rationale } => {
-                    assert!(rationale.chars().count() <= MAX_RATIONALE_CHARS + 1);
-                }
-                other => panic!("expected Deprioritize, got {other:?}"),
-            }
-        }
-
-        // === Leading whitespace ===
-
-        #[test]
-        fn leading_whitespace_trimmed() {
-            let text = "  continue_skipping  everything is fine";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("leading whitespace should be trimmed; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn leading_newline_trimmed() {
-            let text = "\n\ndeprioritize goal is stuck";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::Deprioritize { .. } => {}
-                other => panic!("leading newline should be trimmed; got {other:?}"),
-            }
-        }
-
-        // === Realistic outputs (new format: keyword first) ===
-
-        #[test]
-        fn realistic_continue_skipping() {
-            let text =
-                "continue_skipping\nThe engineer is making steady progress. Last commit 15min ago.";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("expected ContinueSkipping; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn realistic_deprioritize() {
-            let text = "deprioritize goal stuck for 10 cycles, redirect attention";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::Deprioritize { .. } => {}
-                other => panic!("expected Deprioritize; got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn realistic_open_tracking_issue() {
-            let text =
-                "open_tracking_issue\nEngineer OOM at 03:14 UTC. Recurring — needs investigation.";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::OpenTrackingIssue {
-                    title,
-                    body,
-                    rationale,
-                } => {
-                    assert_eq!(title, "OODA stuck");
-                    assert!(body.contains("OOM") || body.contains("investigation"));
-                    assert!(rationale.contains("OOM") || rationale.contains("investigation"));
-                }
-                other => panic!("expected OpenTrackingIssue, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn realistic_no_decision() {
-            let text = "The engineer seems to be working fine. I see recent commits.";
-            let d = parse_lifecycle_from_text(text);
-            match &d {
-                EngineerLifecycleDecision::ContinueSkipping { .. } => {}
-                other => panic!("no keyword -> ContinueSkipping; got {other:?}"),
-            }
-        }
-
-        // === Sentinel/minutes helper tests (kept from original) ===
-
-        #[test]
-        fn sentinel_pid_none_renders_as_none_tag() {
-            let sentinel: Option<i32> = None;
-            let rendered = sentinel
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "<none>".to_string());
-            assert_eq!(rendered, "<none>");
-        }
-
-        #[test]
-        fn minutes_max_renders_as_never() {
-            let minutes = u64::MAX;
-            let rendered = if minutes == u64::MAX {
-                "never".to_string()
-            } else {
-                minutes.to_string()
-            };
-            assert_eq!(rendered, "never");
-        }
-
-        #[test]
-        fn minutes_normal_renders_as_number() {
-            let minutes: u64 = 42;
-            let rendered = if minutes == u64::MAX {
-                "never".to_string()
-            } else {
-                minutes.to_string()
-            };
-            assert_eq!(rendered, "42");
-        }
-    }
-
-    // ===================================================================
     // Issue #2419 — outcome classification, JSON envelope extraction, and
     // the brain_lifecycle_decision metric context.
     // ===================================================================
@@ -3533,99 +3142,6 @@ mod tests {
             }
         }
 
-        // --- Outcome branch 1: parsed (happy-path keyword extraction) ---
-
-        #[test]
-        fn outcome_parsed_real_decision() {
-            let (decision, outcome) =
-                parse_lifecycle_outcome("reclaim_and_redispatch worktree idle 7h, log truncated");
-            assert_eq!(outcome, LifecycleParseOutcome::Parsed);
-            assert!(!outcome.is_parse_failure());
-            assert_eq!(outcome.label(), "parsed");
-            match decision {
-                EngineerLifecycleDecision::ReclaimAndRedispatch { rationale, .. } => {
-                    assert!(rationale.contains("idle"));
-                }
-                other => panic!("expected ReclaimAndRedispatch, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn outcome_parsed_for_every_variant() {
-            let cases = [
-                ("continue_skipping healthy", "continue_skipping"),
-                ("reclaim_and_redispatch wedged", "reclaim_and_redispatch"),
-                ("deprioritize stale", "deprioritize"),
-                ("open_tracking_issue panic", "open_tracking_issue"),
-                ("mark_goal_blocked no key", "mark_goal_blocked"),
-                ("consider_self_update behind", "consider_self_update"),
-            ];
-            for (text, choice) in cases {
-                let (decision, outcome) = parse_lifecycle_outcome(text);
-                assert_eq!(
-                    outcome,
-                    LifecycleParseOutcome::Parsed,
-                    "'{text}' must classify as parsed"
-                );
-                assert_eq!(lifecycle_decision_choice(&decision), choice);
-            }
-        }
-
-        // --- Outcome branch 2: default_empty ---
-
-        #[test]
-        fn outcome_default_empty_for_empty_string() {
-            let (decision, outcome) = parse_lifecycle_outcome("");
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
-            assert!(outcome.is_parse_failure());
-            assert_eq!(outcome.label(), "default_empty");
-            assert!(matches!(
-                decision,
-                EngineerLifecycleDecision::ContinueSkipping { .. }
-            ));
-        }
-
-        #[test]
-        fn outcome_default_empty_for_whitespace_only() {
-            let (_, outcome) = parse_lifecycle_outcome("   \n\t  ");
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
-        }
-
-        // --- Outcome branch 3: default_malformed ---
-
-        #[test]
-        fn outcome_default_malformed_for_unknown_first_word() {
-            let (decision, outcome) = parse_lifecycle_outcome("OK the engineer looks fine to me");
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
-            assert!(outcome.is_parse_failure());
-            assert_eq!(outcome.label(), "default_malformed");
-            assert!(matches!(
-                decision,
-                EngineerLifecycleDecision::ContinueSkipping { .. }
-            ));
-        }
-
-        #[test]
-        fn outcome_default_malformed_for_text_mode_banner_regression() {
-            // This is the EXACT shape recipe-runner-rs emits to stdout in its
-            // default `text` mode. Before issue #2419 the brain parsed this
-            // banner directly, so the first word was always "Recipe:" → every
-            // decision silently defaulted. This regression test pins that the
-            // banner classifies as a parse failure (so the metric counts it),
-            // and the JSON-envelope fix below proves the real decision is
-            // recovered instead.
-            let banner = "Recipe: ooda-engineer-lifecycle (v1.0.0)\nSteps: 1\n\n\
-                          Recipe 'ooda-engineer-lifecycle': SUCCESS (0.0s)\n  \
-                          [completed] engineer-lifecycle-decision (0.0s)\n";
-            let (decision, outcome) = parse_lifecycle_outcome(banner);
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
-            assert_eq!(lifecycle_first_word(banner), "Recipe:");
-            assert!(matches!(
-                decision,
-                EngineerLifecycleDecision::ContinueSkipping { .. }
-            ));
-        }
-
         // --- Outcome branch 4: error (label + numerator semantics) ---
 
         #[test]
@@ -3638,9 +3154,11 @@ mod tests {
 
         #[test]
         fn envelope_extraction_recovers_real_decision() {
-            // A realistic --output-format json envelope. The decision text the
-            // banner hid is in step_results[].output; extracting it and parsing
-            // yields a real (non-default) decision.
+            // The shared recipe-envelope extractor (still used by the overseer
+            // observe/health phases) pulls the terminal step's output from a
+            // `--output-format json` envelope. Group E retired the lifecycle
+            // stdout scrape, so this only pins the extractor's contract — the
+            // lifecycle decision now flows through the typed record instead.
             let json = r#"{
                 "recipe_name": "ooda-engineer-lifecycle",
                 "success": true,
@@ -3654,12 +3172,6 @@ mod tests {
             let extracted =
                 extract_recipe_decision_output(json.as_bytes(), LIFECYCLE_ADAPTER_TAG).unwrap();
             assert_eq!(extracted, "reclaim_and_redispatch worktree idle 7h");
-            let (_, outcome) = parse_lifecycle_outcome(&extracted);
-            assert_eq!(
-                outcome,
-                LifecycleParseOutcome::Parsed,
-                "the JSON-envelope fix must recover a parseable decision"
-            );
         }
 
         #[test]
@@ -3746,13 +3258,6 @@ mod tests {
                 );
             }
         }
-
-        #[test]
-        fn first_word_is_bounded() {
-            let huge = format!("{} rest of response", "z".repeat(500));
-            let fw = lifecycle_first_word(&huge);
-            assert!(fw.chars().count() <= METRIC_FIRST_WORD_CHARS + 1);
-        }
     }
 
     // ===================================================================
@@ -3764,8 +3269,9 @@ mod tests {
         use super::super::*;
         use crate::ooda_brain::EngineerLifecycleCtx;
         use std::collections::VecDeque;
-        use std::path::PathBuf;
+        use std::path::{Path, PathBuf};
         use std::sync::Mutex;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         fn sample_ctx() -> EngineerLifecycleCtx {
             EngineerLifecycleCtx {
@@ -3784,19 +3290,23 @@ mod tests {
             }
         }
 
-        /// A scripted [`LifecycleInvoker`]: each call pops the next queued
-        /// response (`Ok(text)` or a synthesized adapter error) and records the
-        /// rung + rendered escalation note it was asked for.
+        /// A scripted [`LifecycleInvoker`] for the record-native ACT seam
+        /// (Group E, #4967): each call pops the next queued action — write a
+        /// valid typed record for a variant (`Ok(Some(variant))`), leave the
+        /// record fail-closed by removing any file at the path (`Ok(None)`), or
+        /// fail the invocation itself (`Err(())`) — and records the rung + the
+        /// rendered escalation note it was asked for. The ladder then reads the
+        /// typed record the invoke wrote, never scraped stdout.
         struct ScriptedInvoker {
-            responses: Mutex<VecDeque<Result<String, ()>>>,
+            actions: Mutex<VecDeque<Result<Option<&'static str>, ()>>>,
             seen_rungs: Mutex<Vec<LadderRung>>,
             seen_notes: Mutex<Vec<String>>,
         }
 
         impl ScriptedInvoker {
-            fn new(responses: Vec<Result<String, ()>>) -> Self {
+            fn new(actions: Vec<Result<Option<&'static str>, ()>>) -> Self {
                 Self {
-                    responses: Mutex::new(responses.into_iter().collect()),
+                    actions: Mutex::new(actions.into_iter().collect()),
                     seen_rungs: Mutex::new(Vec::new()),
                     seen_notes: Mutex::new(Vec::new()),
                 }
@@ -3809,19 +3319,55 @@ mod tests {
             }
         }
 
+        /// Write a valid, owner-only (`0o600`) typed lifecycle record carrying
+        /// `variant` for `ctx`'s goal, at the record-cycle sentinel — exactly
+        /// what the real CLI writer produces on success.
+        fn write_valid_record(record_path: &Path, ctx: &EngineerLifecycleCtx, variant: &str) {
+            use std::io::Write;
+            let record = crate::ooda_brain::EngineerLifecycleRecord {
+                schema: crate::ooda_brain::ENGINEER_LIFECYCLE_SCHEMA.to_string(),
+                goal_id: ctx.goal_id.clone(),
+                cycle_number: REASONER_RECORD_CYCLE,
+                decision: variant.to_string(),
+                rationale: "scripted rationale".to_string(),
+                written_at_epoch: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            };
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let mut f = std::fs::File::create(record_path).unwrap();
+            f.write_all(&bytes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(record_path, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+        }
+
         impl LifecycleInvoker for ScriptedInvoker {
             fn invoke_lifecycle(
                 &self,
-                _ctx: &EngineerLifecycleCtx,
+                ctx: &EngineerLifecycleCtx,
                 attempt: &LadderAttempt,
-            ) -> SimardResult<String> {
+                record_path: &Path,
+            ) -> SimardResult<()> {
                 self.seen_rungs.lock().unwrap().push(attempt.rung);
                 self.seen_notes
                     .lock()
                     .unwrap()
                     .push(attempt.escalation_note());
-                match self.responses.lock().unwrap().pop_front() {
-                    Some(Ok(s)) => Ok(s),
+                match self.actions.lock().unwrap().pop_front() {
+                    Some(Ok(Some(variant))) => {
+                        write_valid_record(record_path, ctx, variant);
+                        Ok(())
+                    }
+                    Some(Ok(None)) => {
+                        // Leave the path fail-closed (no valid record on disk).
+                        let _ = std::fs::remove_file(record_path);
+                        Ok(())
+                    }
                     Some(Err(())) => Err(SimardError::AdapterInvocationFailed {
                         base_type: "test".into(),
                         reason: "scripted invoke failure".into(),
@@ -3841,10 +3387,10 @@ mod tests {
         #[test]
         fn escalation_note_schema_repair_pins_wording() {
             let note = build_escalation_note(LadderRung::SchemaRepair, "OK looks fine to me");
-            assert!(note.contains("SCHEMA REPAIR"), "note: {note}");
+            assert!(note.contains("ACT REPAIR"), "note: {note}");
             assert!(
-                note.contains("FIRST WORD"),
-                "note must remind about first word"
+                note.contains("record-lifecycle-decision"),
+                "note must instruct re-running the ACT tool"
             );
             assert!(
                 note.contains("continue_skipping")
@@ -3853,15 +3399,19 @@ mod tests {
                 "note must echo the full variant list"
             );
             assert!(
-                note.contains("OK looks fine to me"),
-                "note must feed the malformed prior output back"
+                !note.contains("FIRST WORD"),
+                "the retired scrape-contract 'FIRST WORD' wording must be gone"
+            );
+            assert!(
+                !note.contains("OK looks fine to me"),
+                "the typed-record path must NOT feed scraped prior output back"
             );
         }
 
         #[test]
         fn escalation_note_escalate_adds_high_effort() {
             let note = build_escalation_note(LadderRung::Escalate, "junk");
-            assert!(note.contains("SCHEMA REPAIR"), "escalate still repairs");
+            assert!(note.contains("ACT REPAIR"), "escalate still repairs");
             assert!(
                 note.contains("HIGH-EFFORT"),
                 "escalate adds the effort tier"
@@ -3929,52 +3479,51 @@ mod tests {
 
         // --- ladder behaviour ---
 
-        /// A parse-miss recovered by the FIRST (schema-repair) rung yields a
-        /// real decision, the `Repaired` outcome, and exactly 2 invocations
-        /// (base + 1 rung).
+        /// Allocate a fresh temp record path for a ladder test (mirrors the
+        /// per-call temp dir the production rail allocates).
+        fn tmp_record() -> (tempfile::TempDir, PathBuf) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("lifecycle.json");
+            (dir, path)
+        }
+
+        /// A base read-miss recovered by the FIRST (schema-repair) rung: the
+        /// rung writes a valid typed record, so the ladder reads a real decision
+        /// → `Repaired`, exactly 2 invocations (base + 1 rung).
         #[test]
         fn ladder_recovers_via_schema_repair() {
-            let invoker =
-                ScriptedInvoker::new(vec![Ok("reclaim_and_redispatch worktree idle 7h".into())]);
-            let (decision, outcome, attempts, termination) = run_escalation_ladder(
-                &invoker,
-                &sample_ctx(),
-                "OK the engineer looks fine", // base parse-miss text
-                LifecycleParseOutcome::DefaultMalformed,
-                &EscalationConfig::default(),
-            );
+            let (_dir, path) = tmp_record();
+            let invoker = ScriptedInvoker::new(vec![Ok(Some("reclaim_and_redispatch"))]);
+            let (decision, outcome, attempts, termination) =
+                run_escalation_ladder(&invoker, &sample_ctx(), &path, &EscalationConfig::default());
             assert_eq!(outcome, LifecycleParseOutcome::Repaired);
             assert_eq!(termination, LadderTermination::Recovered);
             assert!(!outcome.is_parse_failure());
             assert_eq!(attempts, 2, "base + one schema-repair rung");
             assert!(matches!(
                 decision,
-                EngineerLifecycleDecision::ReclaimAndRedispatch { .. }
+                Some(EngineerLifecycleDecision::ReclaimAndRedispatch { .. })
             ));
             assert_eq!(invoker.rungs(), vec![LadderRung::SchemaRepair]);
         }
 
-        /// A parse-miss that survives schema-repair is recovered by the SECOND
+        /// A miss that survives schema-repair is recovered by the SECOND
         /// (higher-effort) rung → `Escalated`, 3 invocations.
         #[test]
         fn ladder_escalates_to_second_rung() {
+            let (_dir, path) = tmp_record();
             let invoker = ScriptedInvoker::new(vec![
-                Ok("still not a variant word".into()), // schema-repair misses
-                Ok("deprioritize stale goal".into()),  // escalate recovers
+                Ok(None),                 // schema-repair still fail-closed
+                Ok(Some("deprioritize")), // escalate recovers
             ]);
-            let (decision, outcome, attempts, termination) = run_escalation_ladder(
-                &invoker,
-                &sample_ctx(),
-                "garbage",
-                LifecycleParseOutcome::DefaultMalformed,
-                &EscalationConfig::default(),
-            );
+            let (decision, outcome, attempts, termination) =
+                run_escalation_ladder(&invoker, &sample_ctx(), &path, &EscalationConfig::default());
             assert_eq!(outcome, LifecycleParseOutcome::Escalated);
             assert_eq!(termination, LadderTermination::Recovered);
             assert_eq!(attempts, 3, "base + schema-repair + escalate");
             assert!(matches!(
                 decision,
-                EngineerLifecycleDecision::Deprioritize { .. }
+                Some(EngineerLifecycleDecision::Deprioritize { .. })
             ));
             assert_eq!(
                 invoker.rungs(),
@@ -3982,66 +3531,53 @@ mod tests {
             );
         }
 
-        /// Bounded cap: when every rung still parse-misses, the ladder is
-        /// exhausted and falls to the deterministic default — and never
+        /// Bounded cap: when every rung still fails closed, the ladder is
+        /// exhausted → `Error` outcome + `None` decision (the caller then
+        /// surfaces an explicit hard error — NO silent default), and never
         /// invokes more than `max_escalations` rungs.
         #[test]
-        fn ladder_bounded_cap_exhausts_to_default() {
-            let invoker = ScriptedInvoker::new(vec![Ok("nope".into()), Ok("still nope".into())]);
-            let (decision, outcome, attempts, termination) = run_escalation_ladder(
-                &invoker,
-                &sample_ctx(),
-                "banner noise",
-                LifecycleParseOutcome::DefaultMalformed,
-                &EscalationConfig::default(), // 2 rungs
-            );
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+        fn ladder_bounded_cap_exhausts_to_error() {
+            let (_dir, path) = tmp_record();
+            let invoker = ScriptedInvoker::new(vec![Ok(None), Ok(None)]);
+            let (decision, outcome, attempts, termination) =
+                run_escalation_ladder(&invoker, &sample_ctx(), &path, &EscalationConfig::default());
+            assert_eq!(outcome, LifecycleParseOutcome::Error);
             assert_eq!(termination, LadderTermination::Exhausted);
             assert!(outcome.is_parse_failure());
             assert_eq!(attempts, 3, "base + exactly 2 bounded rungs");
-            assert!(matches!(
-                decision,
-                EngineerLifecycleDecision::ContinueSkipping { .. }
-            ));
+            assert!(decision.is_none(), "exhausted ladder yields NO decision");
             assert_eq!(invoker.rungs().len(), 2, "no more than the configured cap");
         }
 
         /// Ladder disabled (`max_escalations == 0`): no escalation invocations,
-        /// straight to default — the pre-#2432 behaviour.
+        /// straight to the `Error` terminal with no decision.
         #[test]
         fn ladder_disabled_runs_no_escalations() {
+            let (_dir, path) = tmp_record();
             let invoker = ScriptedInvoker::new(vec![]);
             let (decision, outcome, attempts, termination) = run_escalation_ladder(
                 &invoker,
                 &sample_ctx(),
-                "banner noise",
-                LifecycleParseOutcome::DefaultEmpty,
+                &path,
                 &EscalationConfig { max_escalations: 0 },
             );
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultEmpty);
+            assert_eq!(outcome, LifecycleParseOutcome::Error);
             assert_eq!(termination, LadderTermination::Disabled);
             assert_eq!(attempts, 1, "only the base attempt");
-            assert!(matches!(
-                decision,
-                EngineerLifecycleDecision::ContinueSkipping { .. }
-            ));
+            assert!(decision.is_none(), "disabled ladder yields NO decision");
             assert!(invoker.rungs().is_empty(), "no rungs invoked when disabled");
         }
 
-        /// An escalation invocation that itself FAILS must not surface as a hard
-        /// error — the ladder stops and uses the deterministic default (a base
-        /// success already gave us a usable, if low-confidence, signal).
+        /// An escalation invocation that itself FAILS stops the ladder with a
+        /// distinct `InvokeError` termination and no decision (the caller then
+        /// surfaces an explicit hard error).
         #[test]
-        fn ladder_invoke_error_falls_back_to_default() {
+        fn ladder_invoke_error_stops_with_no_decision() {
+            let (_dir, path) = tmp_record();
             let invoker = ScriptedInvoker::new(vec![Err(())]);
-            let (decision, outcome, attempts, termination) = run_escalation_ladder(
-                &invoker,
-                &sample_ctx(),
-                "garbage",
-                LifecycleParseOutcome::DefaultMalformed,
-                &EscalationConfig::default(),
-            );
-            assert_eq!(outcome, LifecycleParseOutcome::DefaultMalformed);
+            let (decision, outcome, attempts, termination) =
+                run_escalation_ladder(&invoker, &sample_ctx(), &path, &EscalationConfig::default());
+            assert_eq!(outcome, LifecycleParseOutcome::Error);
             assert_eq!(attempts, 2, "base + the failed rung, then stop");
             assert_eq!(
                 termination,
@@ -4049,31 +3585,23 @@ mod tests {
                 "an early stop caused by a rung's own invoke failure must be \
                  distinguishable from true exhaustion in the metric cause"
             );
-            assert!(matches!(
-                decision,
-                EngineerLifecycleDecision::ContinueSkipping { .. }
-            ));
+            assert!(decision.is_none(), "invoke-error ladder yields NO decision");
             assert_eq!(invoker.rungs(), vec![LadderRung::SchemaRepair]);
         }
 
-        /// The schema-repair rung feeds the exact malformed prior output back
-        /// into its note so the model can fix it.
+        /// The schema-repair rung's note instructs re-running the ACT tool — it
+        /// no longer feeds scraped prior output back (Group E, #4967).
         #[test]
-        fn ladder_feeds_prior_output_into_repair_note() {
-            let invoker = ScriptedInvoker::new(vec![Ok("continue_skipping healthy".into())]);
+        fn ladder_repair_note_instructs_act_tool() {
+            let (_dir, path) = tmp_record();
+            let invoker = ScriptedInvoker::new(vec![Ok(Some("continue_skipping"))]);
             let cfg = EscalationConfig { max_escalations: 1 };
-            let _ = run_escalation_ladder(
-                &invoker,
-                &sample_ctx(),
-                "the model rambled without a variant word",
-                LifecycleParseOutcome::DefaultMalformed,
-                &cfg,
-            );
+            let _ = run_escalation_ladder(&invoker, &sample_ctx(), &path, &cfg);
             let notes = invoker.notes();
             assert_eq!(notes.len(), 1);
             assert!(
-                notes[0].contains("the model rambled without a variant word"),
-                "repair note must carry the prior output; got {}",
+                notes[0].contains("record-lifecycle-decision"),
+                "repair note must instruct re-running the ACT tool; got {}",
                 notes[0]
             );
         }
@@ -4215,8 +3743,6 @@ mod tests {
 /// cross-consumer regression coverage the issue asks for.
 #[cfg(test)]
 mod issue_2570_cross_consumer_launcher_guard_tests {
-    use super::*;
-
     /// The real Copilot CLI 1.0.66-2 launch preamble the consumers must still
     /// strip. None of these lines begins with a JSON structural token, so the
     /// #2570 guard leaves them classified as launcher noise.
@@ -4229,13 +3755,17 @@ mod issue_2570_cross_consumer_launcher_guard_tests {
     }
 
     #[test]
-    fn lifecycle_still_strips_real_launcher_preamble() {
-        let raw = format!("{}deprioritize the goal is stalled", launcher_preamble());
-        let (decision, outcome) = parse_lifecycle_outcome(&raw);
-        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
+    fn lifecycle_launcher_noise_does_not_reach_the_typed_reader() {
+        // Group E (#4967): the lifecycle rail no longer scrapes stdout at all —
+        // launcher/banner noise on the recipe's stdout is simply IGNORED, and
+        // the decision flows only through the typed record. The shared cleaner
+        // is still exercised by the out-of-scope merge-judge/observe consumers
+        // below; here we only pin that the preamble is recognised as noise.
+        let preamble = launcher_preamble();
+        let cleaned = crate::recipe_output::strip_recipe_noise(&preamble);
         assert!(
-            matches!(decision, EngineerLifecycleDecision::Deprioritize { .. }),
-            "the model's real lifecycle decision must be read, not launcher noise"
+            !cleaned.contains("deprioritize"),
+            "launcher preamble carries no decision token"
         );
     }
 
@@ -4265,18 +3795,6 @@ mod issue_2570_cross_consumer_launcher_guard_tests {
 #[cfg(test)]
 mod zero_fallback_2580_tests {
     use super::*;
-
-    /// The real Copilot CLI launch preamble + an ANSI-coloured tracing line —
-    /// the exact stdout contamination the shared #2484 chokepoint must strip on
-    /// every reasoner capture path before the structured decision is read.
-    fn banner_and_ansi_noise() -> String {
-        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). To change: cfg\n\
-         INFO launching copilot binary=/home/azureuser/.npm-global/bin/copilot \
-         version=\"GitHub Copilot CLI 1.0.66-2.\"\n\
-         Run 'copilot update' to check for updates.\n\
-         \x1b[2m2026-07-04T16:00:00.000000Z\x1b[0m \x1b[32mINFO\x1b[0m simard: cycle begin\n"
-            .to_string()
-    }
 
     // ─────────────────────────────────────────────────────────────────────
     // AC1: no code path emits a deterministic-default decision from a
@@ -4378,48 +3896,6 @@ mod zero_fallback_2580_tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // AC2 + AC3: the shared sanitizing chokepoint covers EVERY reasoner
-    // capture path, and the extractor consumes a structured JSON envelope
-    // (well-formed structured output parses; no free-prose keyword reliance).
-    // ─────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn lifecycle_consumes_json_envelope_through_chokepoint() {
-        let raw = format!(
-            "{}{{\"decision\": \"reclaim_and_redispatch\", \"rationale\": \"worktree wedged\"}}",
-            banner_and_ansi_noise()
-        );
-        let (decision, outcome) = parse_lifecycle_outcome(&raw);
-        assert_eq!(outcome, LifecycleParseOutcome::Parsed);
-        assert!(
-            matches!(
-                decision,
-                EngineerLifecycleDecision::ReclaimAndRedispatch { .. }
-            ),
-            "expected ReclaimAndRedispatch from the envelope, got {decision:?}"
-        );
-    }
-
-    #[test]
-    fn merge_judge_envelope_survives_banner_and_ansi() {
-        // The merge-judge capture path also routes through the shared chokepoint
-        // (`extract_json_payload`); a banner+ANSI-polluted verdict envelope must
-        // still yield the balanced JSON object, not the launcher noise.
-        let raw = format!(
-            "{}{{\"verdict\": \"not_ready\", \"rationale\": \"CI red\", \"blockers\": []}}",
-            banner_and_ansi_noise()
-        );
-        let payload = crate::recipe_output::extract_json_payload(&raw)
-            .expect("the chokepoint must recover the JSON verdict envelope from banner+ANSI noise");
-        assert!(payload.contains("\"verdict\""));
-        assert!(payload.contains("not_ready"));
-        assert!(
-            !payload.contains("launching copilot") && !payload.contains("NODE_OPTIONS"),
-            "the sanitized payload must not carry launcher-preamble noise: {payload}"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
     // A legitimate take-no-action is a DISTINCT, observable outcome — a real
     // model-emitted `continue_skipping` parses (Ok), verifiably separate from
     // a parse-failure (which is an Err), so a genuine no-op is never confused
@@ -4428,38 +3904,56 @@ mod zero_fallback_2580_tests {
 
     #[test]
     fn genuine_no_action_is_a_distinct_ok_outcome_not_a_parse_failure() {
-        // A real model no-action: `continue_skipping` parses cleanly (Parsed).
-        let (decision, outcome) = parse_lifecycle_outcome(
-            r#"{"decision": "continue_skipping", "rationale": "engineer healthy, making progress"}"#,
-        );
-        assert_eq!(
-            outcome,
-            LifecycleParseOutcome::Parsed,
-            "a genuine no-action must be a real parsed decision, not a parse-failure"
-        );
-        assert!(
-            !outcome.is_parse_failure(),
-            "a genuine no-action is NOT on the parse-failure path"
-        );
-        let ok = finalize_ladder_result(
-            "recipe-engineer-lifecycle-brain",
-            BrainPhase::Act,
+        use std::io::Write;
+        // Group E (#4967): a real model no-action is recorded as a typed
+        // `continue_skipping` record; the fail-closed reader returns it as Ok —
+        // verifiably distinct from any parse-failure (which is an Err), so a
+        // genuine no-op is never confused with a laundered default.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("lifecycle.json");
+        let record = crate::ooda_brain::EngineerLifecycleRecord {
+            schema: crate::ooda_brain::ENGINEER_LIFECYCLE_SCHEMA.to_string(),
+            goal_id: "healthy-goal".to_string(),
+            cycle_number: REASONER_RECORD_CYCLE,
+            decision: "continue_skipping".to_string(),
+            rationale: "engineer healthy, making progress".to_string(),
+            written_at_epoch: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+        {
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&bytes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        let decision = crate::ooda_brain::read_verified_engineer_lifecycle_decision(
+            &path,
             "healthy-goal",
-            decision,
-            outcome,
-            LadderTermination::Recovered,
-            1,
-        );
+            REASONER_RECORD_CYCLE,
+        )
+        .expect("a genuine no-action record must read as Ok");
         assert!(
-            matches!(ok, Ok(EngineerLifecycleDecision::ContinueSkipping { .. })),
+            matches!(decision, EngineerLifecycleDecision::ContinueSkipping { .. }),
             "a genuine no-action passes through as Ok(ContinueSkipping) — distinct from a parse-failure Err"
         );
 
-        // Contrast: an UNPARSEABLE response is a parse-failure (not a no-action).
-        let (_default_decision, miss) = parse_lifecycle_outcome("...garbled banner, no variant...");
+        // Contrast: a fail-closed read (no record on disk) is an Err — the
+        // parse-failure path — never a laundered continue_skipping default.
+        let missing = dir.path().join("absent.json");
         assert!(
-            miss.is_parse_failure(),
-            "unparseable output is a parse-failure, distinct from a real continue_skipping"
+            crate::ooda_brain::read_verified_engineer_lifecycle_decision(
+                &missing,
+                "healthy-goal",
+                REASONER_RECORD_CYCLE,
+            )
+            .is_err(),
+            "a fail-closed read is an Err, distinct from a real continue_skipping"
         );
     }
 }

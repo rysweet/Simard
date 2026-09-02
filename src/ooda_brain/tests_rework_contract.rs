@@ -16,10 +16,12 @@
 //! lands.
 //!
 //! CRITICAL scope guard: the rework deletes ONLY the orient/decide-EXCLUSIVE
-//! parse machinery. The SHARED engineer-lifecycle seam
-//! (`run_brain_ladder`, `extract_decision_envelope`, `DecisionEnvelope`,
-//! `LifecycleParseOutcome`, `record_verdict_parse_metric`, `finalize_ladder_result`)
-//! and `src/recipe_output/extract.rs` MUST survive — this file asserts that too.
+//! parse machinery. The SHARED ladder backbone
+//! (`run_brain_ladder`, `LifecycleParseOutcome`, `record_verdict_parse_metric`,
+//! `finalize_ladder_result`) and `src/recipe_output/extract.rs` MUST survive —
+//! this file asserts that too. (Group E #4967 later retired the lifecycle
+//! stdout-scrape envelope itself; the Group E section at the end of this file
+//! pins that seam onto the typed record.)
 
 use std::path::PathBuf;
 
@@ -118,34 +120,35 @@ fn recipe_brain_judge_seams_read_the_typed_record() {
 
 #[test]
 fn recipe_brain_retains_shared_lifecycle_machinery() {
-    // HIGH-risk scope guard: the engineer-lifecycle seam (out of scope for Group
-    // A) still depends on this machinery. Deleting it would break B/C/D.
+    // Scope guard: the shared OODA ladder backbone (used by every brain seam)
+    // still exists. Group A deletes only orient/decide-exclusive parse
+    // machinery; Group E (#4967) later retired the lifecycle stdout-scrape
+    // envelope but PRESERVED this backbone (see the Group E section below).
     let src = read_rel("src/ooda_brain/recipe_brain.rs");
     for retained in [
         "run_brain_ladder",
         "finalize_ladder_result",
         "record_verdict_parse_metric",
-        "extract_decision_envelope",
-        "DecisionEnvelope",
         "LifecycleParseOutcome",
     ] {
         assert!(
             src.contains(retained),
-            "recipe_brain.rs MUST retain shared lifecycle symbol `{retained}` — the rework \
-             deletes ONLY orient/decide-exclusive parse machinery"
+            "recipe_brain.rs MUST retain shared ladder symbol `{retained}` — the rework \
+             deletes ONLY seam-exclusive parse machinery, not the shared backbone"
         );
     }
 }
 
 #[test]
 fn shared_recipe_output_extract_is_not_deleted() {
-    // `extract.rs` still backs lifecycle / per-goal / admission envelopes; it is
-    // blocked from deletion until Groups B/C/D.
+    // `extract.rs` still backs per-goal / admission envelopes and the
+    // out-of-scope text consumers (journal `pr_source`, goal-curation
+    // `recipe_progress_checker`); Group E (#4967) retired the lifecycle use.
     let path = repo_root().join("src/recipe_output/extract.rs");
     assert!(
         path.is_file(),
         "src/recipe_output/extract.rs MUST survive Group A — it is still used by the \
-         lifecycle/per-goal/admission seams"
+         per-goal/admission seams and the out-of-scope text consumers"
     );
 }
 
@@ -282,9 +285,11 @@ fn orient_recipe_has_no_decimal_or_first_token_scrape() {
 // turn GREEN once the rework lands.
 //
 // CRITICAL scope guard (A7): the rework deletes ONLY the SIX admission-EXCLUSIVE
-// scrape symbols. The SHARED `extract.rs` machinery
-// (`extract_and_parse_json` / `extract_json_payload`) is still used by the
-// lifecycle / per-goal / creative-ideas seams and MUST survive — asserted below.
+// scrape symbols. The SHARED `extract.rs` module survives for the per-goal /
+// creative-ideas seams and the out-of-scope text consumers via its retained
+// helpers — asserted below. Its dead JSON scrapers `extract_and_parse_json` /
+// `extract_json_payload` were later retired as unused (#4991). (Group E #4967
+// retired the lifecycle use.)
 // ===========================================================================
 
 #[test]
@@ -348,7 +353,7 @@ fn recipe_brain_admission_seams_read_the_typed_record() {
 #[test]
 fn admission_seams_no_longer_scrape_json_from_stdout() {
     // The two admission seams must not route through the shared JSON scraper any
-    // more. `extract_and_parse_json` survives in the tree for OTHER seams, but it
+    // more. The shared extractor survives in the tree for OTHER seams, but it
     // must appear NOWHERE in the admission-specific writer/reader code — which,
     // post-rework, no longer exists in recipe_brain as a scrape path. We assert
     // the admission adapter tags no longer co-occur with a stdout-scrape call by
@@ -368,21 +373,25 @@ fn admission_seams_no_longer_scrape_json_from_stdout() {
 }
 
 #[test]
-fn shared_recipe_output_extract_survives_group_b() {
-    // A7 retention guard: `extract.rs` + `extract_and_parse_json` /
-    // `extract_json_payload` still back the lifecycle / per-goal / creative-ideas
-    // seams. Group B deletes only the SIX admission-exclusive symbols.
+fn shared_recipe_output_extract_survives_but_scrapers_removed() {
+    // A7 removal guard: `extract.rs` survives for the per-goal / creative-ideas
+    // seams and the out-of-scope text consumers via retained helpers. Group B
+    // deletes only the SIX admission-exclusive symbols; the two dead scrapers
+    // `extract_and_parse_json` / `extract_json_payload` were later retired as
+    // unused (#4991). (Group E #4967 retired the lifecycle use.)
     let path = repo_root().join("src/recipe_output/extract.rs");
     assert!(
         path.is_file(),
         "src/recipe_output/extract.rs MUST survive Group B — still used by non-admission seams"
     );
     let extract = read_rel("src/recipe_output/extract.rs");
-    for retained in ["extract_json_payload", "extract_and_parse_json"] {
+    for removed in [
+        "pub fn extract_json_payload",
+        "pub fn extract_and_parse_json",
+    ] {
         assert!(
-            extract.contains(retained),
-            "extract.rs MUST retain shared helper `{retained}` — Group B deletes only the six \
-             admission-exclusive scrape symbols"
+            !extract.contains(removed),
+            "extract.rs MUST NOT contain dead scraper `{removed}` — retired as dead code (#4991)"
         );
     }
 }
@@ -464,4 +473,118 @@ fn admission_recipes_have_no_json_decision_envelope() {
             "{rel} must not reference the deleted scrape helper in its header/prose"
         );
     }
+}
+
+// ===========================================================================
+// GROUP E — engineer-LIFECYCLE rework (issue #4967, epic #4719).
+//
+// The engineer-lifecycle seam was the LAST OODA reasoner still scraping recipe
+// stdout prose for its ACT effect. Group E retires it onto the same typed-record
+// contract as Group A: `decide_engineer_lifecycle` runs the recipe (whose agent
+// calls `simard ooda record-lifecycle-decision`) then reads a typed
+// `EngineerLifecycleRecord` fail-CLOSED. These pin the *shape* of the
+// post-rework sources and recipe.
+//
+// CRITICAL scope guard: Group E deletes ONLY the lifecycle-EXCLUSIVE scrape
+// symbols. The SHARED ladder backbone (asserted above) and
+// `src/recipe_output/extract.rs` (still used by out-of-scope consumers) MUST
+// survive.
+// ===========================================================================
+
+#[test]
+fn engineer_lifecycle_record_module_exists_and_is_reexported() {
+    let path = repo_root().join("src/ooda_brain/engineer_lifecycle_record.rs");
+    assert!(
+        path.is_file(),
+        "Group E must add the dedicated record module {} (record DTO, schema \
+         const, sanitizing chokepoint, and the fail-CLOSED reader)",
+        path.display()
+    );
+    let src = read_rel("src/ooda_brain/mod.rs");
+    assert!(
+        src.contains("engineer_lifecycle_record"),
+        "mod.rs must declare `mod engineer_lifecycle_record;`"
+    );
+    for symbol in [
+        "ENGINEER_LIFECYCLE_SCHEMA",
+        "EngineerLifecycleRecord",
+        "read_verified_engineer_lifecycle_decision",
+    ] {
+        assert!(
+            src.contains(symbol),
+            "mod.rs must re-export `{symbol}` from the engineer-lifecycle record module"
+        );
+    }
+}
+
+#[test]
+fn recipe_brain_has_no_lifecycle_scrape_machinery() {
+    let src = read_rel("src/ooda_brain/recipe_brain.rs");
+    // The lifecycle-EXCLUSIVE scrape symbols Group E deletes once the seam reads
+    // a typed record.
+    for forbidden in [
+        "parse_lifecycle_outcome",
+        "parse_lifecycle_from_text",
+        "extract_decision_envelope",
+        "DecisionEnvelope",
+        "envelope_rationale",
+        "default_continue_skipping",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "recipe_brain.rs must not contain lifecycle scrape symbol `{forbidden}` after Group E \
+             — the lifecycle seam reads a typed record, it scrapes NOTHING from stdout"
+        );
+    }
+}
+
+#[test]
+fn recipe_brain_lifecycle_seam_reads_the_typed_record() {
+    let src = read_rel("src/ooda_brain/recipe_brain.rs");
+    assert!(
+        src.contains("read_verified_engineer_lifecycle_decision"),
+        "recipe_brain.rs must run the lifecycle recipe then read the typed record via \
+         `read_verified_engineer_lifecycle_decision` (modelled on Group A `read_verified_*`)"
+    );
+}
+
+#[test]
+fn operator_cli_dispatches_the_record_lifecycle_decision_arm() {
+    let src = read_rel("src/operator_cli/ooda.rs");
+    assert!(
+        src.contains("\"record-lifecycle-decision\"")
+            && src.contains("dispatch_record_lifecycle_decision"),
+        "operator_cli must route the `ooda record-lifecycle-decision` command"
+    );
+}
+
+#[test]
+fn lifecycle_recipe_calls_the_record_lifecycle_decision_tool() {
+    let yaml = read_rel("prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml");
+    assert!(
+        yaml.contains("ooda record-lifecycle-decision"),
+        "ooda-engineer-lifecycle.yaml must record its decision by calling `simard ooda \
+         record-lifecycle-decision` once, exactly like ooda-decide.yaml calls `record-decide`"
+    );
+    for flag in ["--record-path", "--goal-id", "--cycle-number", "--decision"] {
+        assert!(
+            yaml.contains(flag),
+            "ooda-engineer-lifecycle.yaml's tool call must pass `{flag}` (binds the record to the live ctx)"
+        );
+    }
+}
+
+#[test]
+fn lifecycle_recipe_has_no_json_envelope_or_first_word_scrape() {
+    let yaml = read_rel("prompt_assets/simard/recipes/ooda-engineer-lifecycle.yaml");
+    let lower = yaml.to_lowercase();
+    assert!(
+        !yaml.contains("\"decision\""),
+        "ooda-engineer-lifecycle.yaml must not instruct the agent to emit a `{{\"decision\": ...}}` \
+         envelope for Rust to scrape (the forbidden emit→parse→act pattern)"
+    );
+    assert!(
+        !lower.contains("first word") && !lower.contains("first token"),
+        "ooda-engineer-lifecycle.yaml must not instruct a first-word/first-token stdout scrape"
+    );
 }

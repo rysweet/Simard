@@ -18,14 +18,20 @@ use std::path::PathBuf;
 pub mod confidence;
 mod context;
 mod decide;
+// Issue #4967 (epic #4719, Group E): typed engineer-lifecycle Act decision record
+// + fail-closed reader that retires the last reasoner-decision stdout scrape.
+mod engineer_lifecycle_record;
 mod fallback;
 mod judgment_record;
 mod orient;
 mod orient_decide_record;
+// Issue #4970: typed cognitive-thread reasoning record + fail-closed reader that
+// replaces the boolean `"{recipe}: ok"` collapse with agentic NL reasoning.
 pub mod parse_failure;
 pub mod prompt_store;
 mod recipe_brain;
 mod rustyclawd;
+mod thread_reasoning_record;
 // Crate-visible so other recipe-runner spawn sites (goal decomposition, progress
 // checking) can bound their free-text `-c` context vars with the same helper —
 // closing the E2BIG argv-overflow class and the #2127 newline/YAML class at once.
@@ -67,6 +73,10 @@ pub use decide::{
     DecideContext, DecideJudgment, DeterministicDecideBrain, OodaDecideBrain,
     PROMPT_NAME as DECIDE_PROMPT_NAME,
 };
+pub use engineer_lifecycle_record::{
+    ENGINEER_LIFECYCLE_SCHEMA, EngineerLifecycleRecord, LifecycleReadError,
+    read_verified_engineer_lifecycle_decision, sanitize_lifecycle_fields,
+};
 pub use fallback::DeterministicLifecycleBrain;
 pub use judgment_record::{
     BrainJudgmentRecord, BrainPhase, clear as clear_brain_judgments, push as push_brain_judgment,
@@ -82,6 +92,10 @@ pub use orient_decide_record::{
     OrientFields, read_verified_decide, read_verified_orient,
 };
 pub use parse_failure::ParseFailureRecord;
+/// The closed engineer-lifecycle variant token list — re-exported crate-wide so
+/// the `simard ooda record-lifecycle-decision` CLI writer enumerates the exact
+/// same accepted set the reader/mapping enforce (Group E, #4967). Never forked.
+pub(crate) use recipe_brain::LIFECYCLE_VARIANT_LIST;
 pub use recipe_brain::RecipeBrain;
 /// Shared escalation-ladder backbone + verdict-parse instrumentation reused by
 /// the recipe-backed merge-judge (issue #2419 family / #2429). Exposed
@@ -89,6 +103,11 @@ pub use recipe_brain::RecipeBrain;
 /// transport / metric as the OODA brains rather than reinventing them.
 pub(crate) use recipe_brain::{
     EscalationConfig, LadderRung, build_phase_escalation_note, extract_recipe_decision_output,
+    lifecycle_decision_choice,
+};
+pub use thread_reasoning_record::{
+    MAX_AGE_SECS, THREAD_REASONING_SCHEMA, ThreadDomain, ThreadName, ThreadReasoningReadError,
+    ThreadReasoningRecord, read_verified_thread_reasoning, sanitize_reasoning_summary,
 };
 /// Backward-compatible type aliases (issue #2132).
 pub type RecipeDecideBrain = RecipeBrain;

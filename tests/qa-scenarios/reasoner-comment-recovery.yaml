@@ -61,6 +61,12 @@ description: |
       four defects together, while a `//` inside a URL string is preserved and a
       genuinely malformed (non-target) envelope stays a loud parse miss.
   No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
 agents:
   - name: simard-cli
     type: cli
@@ -92,7 +98,7 @@ steps:
   # a non-target-malformed body / no object still returns None.
   - action: run
     params:
-      command: "cargo test --locked --lib recipe_output::extract::tests::extract_and_parse_json"
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
     timeout: 900000
   - action: wait_for_output
     params:

@@ -196,6 +196,31 @@ fn plain_summary_drops_node_options_launcher_banner_title() {
          To change: /home/azureuser/.amplihack/config",
     );
     assert_eq!(fix, "A code change.", "banner leaked into journal: {fix}");
+
+    // Bare banner with NO Conventional-Commits prefix: the first colon lives in
+    // the trailing `To change:` path, so `strip_conventional_prefix` is a no-op
+    // and the whole banner reaches `strip_recipe_noise` — it must still collapse.
+    let bare = plainify_pr_title(
+        "\u{2139} NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+         To change: /home/azureuser/.amplihack/config",
+    );
+    assert_eq!(
+        bare, "A code change.",
+        "bare banner leaked into journal: {bare}"
+    );
+
+    // Banner still wearing the recipe-runner per-agent log prefix
+    // (`[HH:MM:SS] [amplihack:copilot:PID] …`), which `strip_recipe_noise`
+    // peels before applying the launcher-line predicate.
+    let prefixed = plainify_pr_title(
+        "[08:26:10] [amplihack:copilot:460198] \u{2139} \
+         NODE_OPTIONS=--max-old-space-size=32768 (saved preference). \
+         To change: /home/azureuser/.amplihack/config",
+    );
+    assert_eq!(
+        prefixed, "A code change.",
+        "agent-prefixed banner leaked into journal: {prefixed}"
+    );
 }
 
 /// Anti-weakening guard (issue #1093): the filter must match the launcher banner

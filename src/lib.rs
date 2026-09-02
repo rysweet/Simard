@@ -37,6 +37,9 @@ pub mod cognitive_threads;
 // statistics / expired-sensory infra (mirrors `disk_health`). Tests live in a
 // `#[cfg(test)]` sibling so release/debug builds never compile them.
 pub mod brain_introspection;
+// #4968: typed brain-introspection record + fail-closed reader (sibling of the
+// adapter, NOT an ooda_brain seam) that retires the text-marker scrape.
+pub mod brain_introspection_record;
 #[cfg(test)]
 mod brain_introspection_tests;
 mod copilot_status_probe;
@@ -173,6 +176,9 @@ pub mod self_metrics;
 // recipe invoker (mirrors `disk_health`) with disk-backed last-run persistence
 // so the ~30-day cadence survives daemon restarts.
 pub mod self_quality_audit;
+// #4968: typed self-quality-audit record + fail-closed reader (sibling of the
+// adapter, NOT an ooda_brain seam) that retires the text-marker scrape.
+pub mod self_quality_audit_record;
 #[cfg(test)]
 mod self_quality_audit_tests;
 pub mod self_relaunch;

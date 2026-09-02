@@ -1079,6 +1079,42 @@ fn prepare_resets_dirty_canonical_checkout_before_checking_out_merged_head() {
 
 #[test]
 #[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
+fn prepare_repeatedly_recovers_the_same_tracked_drift() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _state = EnvGuard::set(STATE_ROOT_ENV, tmp.path());
+    let _override = EnvGuard::set(SELF_DEPLOY_REPO_ENV, Path::new(""));
+
+    let origin = tmp.path().join("origin");
+    init_origin_with_hook(&origin);
+    let persistent = self_deploy_src_dir();
+    clone_local(&origin, &persistent);
+    let c2 = add_merged_commit_touching_hook(&origin);
+
+    for attempt in 1..=2 {
+        dirty_tracked_hook_and_untracked(&persistent);
+        GitSourcePreparer::new()
+            .prepare(&c2)
+            .unwrap_or_else(|err| panic!("prepare attempt {attempt} must recover drift: {err}"));
+
+        assert_eq!(
+            git_out(&persistent, &["rev-parse", "HEAD"]),
+            c2,
+            "attempt {attempt} must leave HEAD at the requested merged commit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(persistent.join(HOOK_REL)).unwrap(),
+            C2_HOOK,
+            "attempt {attempt} must discard the tracked hook drift"
+        );
+        assert!(
+            !persistent.join(STRAY_UNTRACKED).exists(),
+            "attempt {attempt} must remove the untracked stray"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial(simard_state_root_env, simard_self_deploy_repo, cognitive_memory)]
 fn prepare_resets_before_checkout_even_on_the_skip_fetch_present_commit_branch() {
     // The reset must guard BOTH the fetch and the skip-fetch (commit-already-
     // present) paths — otherwise a wedged tree whose target is already local

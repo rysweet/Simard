@@ -19,9 +19,10 @@
 //! a scraped JSON envelope) and turn GREEN once the rework lands.
 //!
 //! CRITICAL scope guard (matches the brief): the rework deletes ONLY the
-//! creative-ideas-EXCLUSIVE scrape symbols. The SHARED `extract.rs` machinery
-//! (`extract_and_parse_json` / `extract_json_payload`) is still used by Group D
-//! (not yet converted) and MUST survive — asserted below.
+//! creative-ideas-EXCLUSIVE scrape symbols. The SHARED `extract.rs` module
+//! survives for Group D (not yet converted) and its retained helpers — asserted
+//! below. Its dead JSON scrapers `extract_and_parse_json` / `extract_json_payload`
+//! were later retired as unused (#4991).
 
 use std::path::PathBuf;
 
@@ -107,8 +108,8 @@ fn recipe_brain_has_no_creative_ideas_scrape_machinery() {
 fn creative_ideas_seams_no_longer_scrape_json_from_stdout() {
     let src = read_rel(RECIPE_BRAIN);
     // The two seams must not route through the shared JSON scraper any more.
-    // `extract_and_parse_json` survives in the tree for Group D, but it must not
-    // co-occur with either creative-ideas adapter tag in a stdout-scrape call.
+    // The shared extractor survives for Group D, but it must not co-occur with
+    // either creative-ideas adapter tag in a stdout-scrape call.
     assert!(
         !src.contains("extract_recipe_decision_output(&output.stdout, IDEA_DEDUP_ADAPTER_TAG)"),
         "the semantic-dedup seam must not scrape recipe stdout"
@@ -140,25 +141,28 @@ fn creative_ideas_seams_read_the_typed_record() {
 }
 
 // ---------------------------------------------------------------------------
-// The shared extract.rs survives (Group D not yet converted).
+// The shared extract.rs survives (Group D not yet converted), but its dead
+// JSON scrapers were removed (#4991).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shared_recipe_output_extract_survives_group_c() {
-    // Retention guard: `extract.rs` + `extract_and_parse_json` /
-    // `extract_json_payload` still back Group D seams. Group C deletes only the
-    // creative-ideas-exclusive symbols and does NOT delete extract.rs.
+fn shared_recipe_output_extract_survives_but_scrapers_removed() {
+    // Removal guard: `extract.rs` survives for retained helpers that still back
+    // Group D seams, but the two dead scrapers `extract_json_payload` /
+    // `extract_and_parse_json` were retired as dead code (#4991).
     let path = repo_root().join("src/recipe_output/extract.rs");
     assert!(
         path.is_file(),
-        "src/recipe_output/extract.rs MUST survive Group C — still used by Group D seams"
+        "src/recipe_output/extract.rs MUST survive Group C — still used via retained helpers"
     );
     let extract = read_rel("src/recipe_output/extract.rs");
-    for retained in ["extract_json_payload", "extract_and_parse_json"] {
+    for removed in [
+        "pub fn extract_json_payload",
+        "pub fn extract_and_parse_json",
+    ] {
         assert!(
-            extract.contains(retained),
-            "extract.rs MUST retain shared helper `{retained}` — Group C deletes only the \
-             creative-ideas-exclusive scrape symbols"
+            !extract.contains(removed),
+            "extract.rs MUST NOT contain dead scraper `{removed}` — retired as dead code (#4991)"
         );
     }
 }
