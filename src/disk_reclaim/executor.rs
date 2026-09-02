@@ -16,6 +16,7 @@ use crate::worktree_gc::under_any_root;
 
 use super::ReclaimMode;
 use super::candidate::{CandidateKind, ReclaimCandidate};
+use super::fs_predicates::is_real_dir_owned_by_euid;
 use super::guard::{GuardContext, ReclaimPrimitive, RejectReason, Verdict, vet_candidate};
 
 /// A path the executor removed (or would remove, in dry-run).
@@ -123,11 +124,46 @@ impl PathRemover for RealPathRemover {
                         canon.display()
                     ));
                 }
+                // TOCTOU re-stat: the resolved target must still be a real,
+                // non-symlink directory owned by the effective UID immediately
+                // before deletion. This closes the residual race where the
+                // canonical path itself is swapped to a symlink (or its owner
+                // changes) in the window between vetting and `remove_dir_all` —
+                // one aborted candidate never fails the run.
+                //
+                // The sub-microsecond window that remains between this re-stat
+                // and the `remove_dir_all` below is deliberately tolerated: even
+                // if the path were swapped to a symlink in that gap,
+                // `std::fs::remove_dir_all` (Rust 1.95) opens the final
+                // component without following it, so it unlinks the symlink
+                // itself rather than recursing into its target — worst case the
+                // one call errors out and this single candidate is skipped. The
+                // euid-ownership check further confines any such swap to paths
+                // the current user already owns, so the blast radius is nil.
+                restat_real_dir_owned(&canon)?;
                 std::fs::remove_dir_all(&canon)
                     .map_err(|e| format!("rm -rf {} failed: {e}", canon.display()))
             }
         }
     }
+}
+
+/// Fail-closed pre-unlink re-stat for a `RemoveDir` target: the (already
+/// canonicalized, in-scope) `canon` must still be a real, non-symlink directory
+/// owned by the effective UID. `symlink_metadata` does not follow the final
+/// component, so a symlink swapped in after vetting is rejected rather than
+/// followed. Returns an error string (aborting only this candidate) on any
+/// mismatch — never panics.
+fn restat_real_dir_owned(canon: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(canon)
+        .map_err(|e| format!("refusing rm -rf — cannot re-stat {}: {e}", canon.display()))?;
+    if !is_real_dir_owned_by_euid(&meta) {
+        return Err(format!(
+            "refusing rm -rf — {} is no longer a real directory owned by the effective UID",
+            canon.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Env-cleared git invocation (only `PATH`/`HOME` survive). Blocks `GIT_*` /
@@ -362,6 +398,7 @@ mod tests {
     ) -> GuardContext<'a> {
         GuardContext {
             allow_roots: &env.allow_roots,
+            build_cache_leaves: &[],
             protected,
             live_probe: live,
             wt_probe: wt,
@@ -577,6 +614,51 @@ mod tests {
             .remove(ReclaimPrimitive::RemoveDir, Path::new("-rf"))
             .expect_err("leading-dash path must be refused");
         assert!(err.contains("leading-dash"), "got: {err}");
+    }
+
+    #[test]
+    fn restat_rejects_symlink_and_accepts_real_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+
+        // A real, euid-owned directory passes the re-stat.
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        assert!(restat_real_dir_owned(&real).is_ok());
+
+        // A symlink (even to a real dir) is rejected: `symlink_metadata` does
+        // not follow the final component, so a swapped-in link cannot be deleted.
+        let link = tmp.path().join("link");
+        symlink(&real, &link).unwrap();
+        let err = restat_real_dir_owned(&link).expect_err("symlink must be rejected");
+        assert!(err.contains("no longer a real directory"), "got: {err}");
+
+        // A regular file (non-directory) is likewise rejected.
+        let file = tmp.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(restat_real_dir_owned(&file).is_err());
+    }
+
+    #[test]
+    fn real_remover_deletes_real_dir_under_allow_root() {
+        // The pre-unlink re-stat must not block a legitimate, euid-owned real
+        // directory under an allow-root.
+        let allow = TempDir::new().unwrap();
+        let victim = allow.path().join("target/debug/incremental");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("data"), b"cache").unwrap();
+
+        let remover = RealPathRemover {
+            parent_repo: allow.path().to_path_buf(),
+            allow_roots: vec![allow.path().to_path_buf()],
+        };
+        remover
+            .remove(ReclaimPrimitive::RemoveDir, &victim)
+            .expect("a real euid-owned dir under an allow-root must be removed");
+        assert!(
+            !victim.exists(),
+            "the real cache dir must have been removed"
+        );
     }
 
     #[test]

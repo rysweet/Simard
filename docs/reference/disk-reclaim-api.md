@@ -9,6 +9,7 @@ related:
   - ../concepts/agentic-disk-reclamation.md
   - ../howto/configure-disk-reclamation.md
   - ./disk-reclaim-telemetry.md
+  - ./disk-reclaim-build-cache-producer.md
   - ./disk-health-api.md
   - ./engineer-worktree-sweep-safety.md
 ---
@@ -38,6 +39,7 @@ for operator usage.
 | `daemon_dir.rs` | `resolve_daemon_working_dirs` — the protected daemon-directory union |
 | `executor.rs` | `exec_reclaim` — largest-first, threshold-stop, TOCTOU-reasserting executor + `ReclaimReport` |
 | `recipe.rs` | Invoke `disk-reclaim.yaml`, strict marker parse, no-fallback error path |
+| `build_cache.rs` | Deterministic sub-artifact `StaleBuildCache` producer + the leaf allowlist threaded into the guard — see [Disk reclaim build-cache producer](./disk-reclaim-build-cache-producer.md) |
 
 ## Data flow
 
