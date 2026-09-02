@@ -150,6 +150,132 @@ fn filter_tombstoned_drops_active_and_backlog() {
 }
 
 #[test]
+fn commit_cycle_reasserts_operator_done_gate_pin_over_stripped_in_flight() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    // Seed the authoritative file with the goal carrying an operator-set
+    // finish line + issue ref (as `goal set-done-gate` would leave it).
+    let mut pinned = goal("roster", 3, None);
+    DoneGatePin {
+        issue: Some("4448".into()),
+        criteria: Some("roster is identity-owned and deploy-durable".into()),
+        ..Default::default()
+    }
+    .apply_to(&mut pinned);
+    mutate(root, |s| {
+        s.board = board(vec![pinned]);
+    })
+    .unwrap();
+
+    // Record the durable pin (the side-channel the operator command writes).
+    record_done_gate_pin(
+        root,
+        "roster",
+        DoneGatePin {
+            issue: Some("4448".into()),
+            criteria: Some("roster is identity-owned and deploy-durable".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // The daemon commits a STRIPPED in-flight copy of the same goal — no refs,
+    // seed prose — exactly the clobber that used to evaporate operator edits.
+    let stripped = goal("roster", 3, None); // description "do roster", wip_refs []
+    let reconciled = commit_cycle(
+        root,
+        &board(vec![stripped]),
+        &NoProgressTracker::new(),
+        1,
+        &[],
+    )
+    .unwrap();
+
+    // In-flight-wins would have dropped the ref + finish line; the pin re-asserts.
+    let g = reconciled
+        .active
+        .iter()
+        .find(|g| g.id == "roster")
+        .expect("goal present");
+    assert!(
+        g.wip_refs
+            .iter()
+            .any(|r| r.kind == "issue" && r.ref_id == "4448"),
+        "operator-pinned issue ref must survive in-flight-wins reconcile"
+    );
+    assert!(
+        g.description
+            .contains("Done when: roster is identity-owned"),
+        "operator finish line must survive: {}",
+        g.description
+    );
+
+    // And it is durable across a reload from the authoritative file.
+    let reloaded = load(root);
+    let g = reloaded
+        .board
+        .active
+        .iter()
+        .find(|g| g.id == "roster")
+        .expect("goal present after reload");
+    assert!(g.wip_refs.iter().any(|r| r.ref_id == "4448"));
+    assert!(g.description.contains("Done when:"));
+
+    // Pin-STORE durability (issue #4930, S3): the finish line surviving on the
+    // board is downstream of the durable pin itself surviving. Assert the pin
+    // record is still present and intact after the commit cycle, so the next
+    // cycle keeps re-asserting it — the marker on the goal is a consequence, not
+    // the source of truth.
+    let pins = load_done_gate_pins(root);
+    let pin = pins
+        .get("roster")
+        .expect("done-gate pin must survive the cycle");
+    assert_eq!(pin.issue.as_deref(), Some("4448"));
+    assert_eq!(
+        pin.criteria.as_deref(),
+        Some("roster is identity-owned and deploy-durable"),
+        "the durable pin fields must be intact, not just the goal marker"
+    );
+}
+
+#[test]
+fn commit_cycle_clears_pin_when_goal_is_tombstoned() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    mutate(root, |s| {
+        s.board = board(vec![goal("done-me", 3, None)]);
+    })
+    .unwrap();
+    record_done_gate_pin(
+        root,
+        "done-me",
+        DoneGatePin {
+            pr: Some("4440".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(load_done_gate_pins(root).contains_key("done-me"));
+
+    // The daemon tombstones the goal this cycle (completed/archived).
+    commit_cycle(
+        root,
+        &board(vec![goal("done-me", 3, None)]),
+        &NoProgressTracker::new(),
+        1,
+        &["done-me".to_string()],
+    )
+    .unwrap();
+
+    assert!(
+        !load_done_gate_pins(root).contains_key("done-me"),
+        "a tombstoned goal's done-gate pin must be cleared so it is not re-asserted forever"
+    );
+}
+
+#[test]
 fn commit_cycle_tombstones_and_persists() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();

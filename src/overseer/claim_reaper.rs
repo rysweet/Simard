@@ -52,6 +52,16 @@ pub enum DeadReason {
     NoWorktree,
     /// A worktree exists; `age_secs` is its newest-file idle age.
     HeartbeatStale,
+    /// A worktree exists AND the engineer occupying it wrote a terminal
+    /// `status=completed` session record: a POSITIVE completion signal, NOT a
+    /// wedge. `age_secs` is its newest-file idle age (the same staleness
+    /// THRESHOLD is applied, so a completion whose claim-release / cleanup is
+    /// still in flight is never raced). Distinguishing this from
+    /// [`DeadReason::HeartbeatStale`] is what stops a cleanly-finished engineer
+    /// from being re-investigated every tick — the `completed`-vs-`wedged`
+    /// conflation behind the unbounded re-archival churn (#4467 / #4500) and the
+    /// leaked-claim churn of #4464.
+    Completed,
 }
 
 impl DeadReason {
@@ -60,6 +70,7 @@ impl DeadReason {
         match self {
             DeadReason::NoWorktree => "no-worktree",
             DeadReason::HeartbeatStale => "heartbeat-stale",
+            DeadReason::Completed => "session-completed",
         }
     }
 }
@@ -89,6 +100,34 @@ pub enum ClaimLiveness {
 /// real filesystem, process, or `gh` is touched.
 pub trait ClaimLivenessProbe: Send + Sync {
     fn assess(&self, claim_key: &str) -> ClaimLiveness;
+
+    /// The set of goal ids the authoritative goal board CONFIRMS are
+    /// standing/perpetual
+    /// ([`ActiveGoal::is_perpetual`](crate::goal_curation::types::ActiveGoal::is_perpetual)).
+    ///
+    /// Read ONCE per cleanup run (outside the per-claim loop) so a single board
+    /// read serves every claim in the sweep. The reaper matches each claim's
+    /// goal id (via the shared claim-key parser) against this set: standing
+    /// claims receive more time for heartbeat inactivity but still undergo
+    /// investigation and removal when old enough. A `HeartbeatStale` claim whose
+    /// goal is in this set gets a larger but BOUNDED idle threshold
+    /// (`stale_secs * 8`) — never a permanent exemption. A `NoWorktree` claim
+    /// (the worktree is physically gone) is provably dead and reclaimed
+    /// regardless of membership, and a `Completed` claim keeps its ordinary
+    /// `stale_secs` threshold.
+    ///
+    /// Fail-closed for the extra time (not for reaping): if the board is
+    /// missing, empty, or unreadable this returns an EMPTY set, so no claim is
+    /// granted extra time — there is no silent success value that hands out more
+    /// time without proof. Only a goal the board CONFIRMS is perpetual earns the
+    /// larger threshold.
+    ///
+    /// Default empty so every existing probe impl keeps ordinary behavior
+    /// (every claim on the plain `stale_secs` threshold) unchanged until it opts
+    /// in.
+    fn perpetual_goal_ids(&self) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
 }
 
 /// Ledger seam the reaper sweeps and reclaims through. Backed in production by
@@ -265,14 +304,24 @@ pub struct ReapSummary {
 ///     no investigation launched).
 ///   * [`ClaimLiveness::Dead`] `{ NoWorktree, .. }` ⇒ reclaim IMMEDIATELY — there
 ///     is no worktree evidence to preserve, so the investigator is NOT consulted.
-///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age > stale_secs`
-///     ⇒ INVESTIGATE first (evidence archived by the seam), then reclaim IFF the
-///     returned [`InvestigationVerdict::should_reap`] (a genuinely-dead verdict).
-///     Any other verdict (still-alive false positive / blocked / recoverable /
+///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age` exceeds the
+///     claim's idle threshold ⇒ INVESTIGATE first (evidence archived by the
+///     seam), then reclaim IFF the returned
+///     [`InvestigationVerdict::should_reap`] (a genuinely-dead verdict). Any
+///     other verdict (still-alive false positive / blocked / recoverable /
 ///     in-flight `Pending`) KEEPS the claim (fail-closed). Interventions are
-///     surfaced on `pending_interventions` REGARDLESS of the verdict.
-///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age <= stale_secs`
-///     ⇒ skip (fresh / quiet-but-alive; fail-closed; not investigated).
+///     surfaced on `pending_interventions` REGARDLESS of the verdict. The idle
+///     threshold is the ordinary `stale_secs` for an ordinary claim, and the
+///     larger but BOUNDED `stale_secs * 8` for a claim the goal board confirms
+///     is standing/perpetual: standing claims receive more time for heartbeat
+///     inactivity but still undergo investigation and removal when old enough
+///     (never a permanent exemption).
+///   * [`ClaimLiveness::Dead`] `{ HeartbeatStale, age }` where `age` is at/under
+///     the claim's idle threshold ⇒ skip (fresh / quiet-but-alive; fail-closed;
+///     not investigated).
+///   * [`ClaimLiveness::Dead`] `{ Completed, age }` keeps its ordinary
+///     `stale_secs` threshold (standing goals get no extra time here) and, once
+///     past it, is reclaimed directly WITHOUT investigation.
 ///   * [`ClaimLiveness::Live`] ⇒ skip.
 ///
 /// Reclaim = [`ClaimLedger::release_engineer_claim`] + [`OrphanWorktreeCleanup`],
@@ -296,6 +345,16 @@ pub fn reap_stale_claims(
         return summary;
     }
 
+    // Read the goal board ONCE per cleanup run (outside the per-claim loop): the
+    // set of goal ids the board CONFIRMS are standing/perpetual. A confirmed
+    // standing goal earns a larger but BOUNDED idle threshold on the
+    // `HeartbeatStale` path (below); every other claim keeps the ordinary
+    // `stale_secs`. Fail-closed for the extra time: a missing / empty /
+    // unreadable board yields an EMPTY set here, so NO claim is granted extra
+    // time — there is no silent success value that hands out more time without
+    // proof.
+    let perpetual_goal_ids = probe.perpetual_goal_ids();
+
     for claim_key in ledger.list_engineer_claims() {
         // Classify the claim's engineer. Fail-closed: anything short of a
         // CONFIDENT dead verdict (Live, or a `HeartbeatStale` age at/under the
@@ -312,10 +371,43 @@ pub fn reap_stale_claims(
             ClaimLiveness::Dead {
                 reason: DeadReason::HeartbeatStale,
                 age_secs,
+            } => {
+                // Standing claims receive more time for heartbeat inactivity but
+                // still undergo investigation and removal when old enough. Match
+                // the goal id with the existing claim-key parser; a malformed or
+                // unmatched key is simply absent from the set and gets ordinary
+                // behavior. Confirmed standing goals get a larger but BOUNDED
+                // threshold (`stale_secs * 8`, saturating), never a permanent
+                // exemption; ordinary claims keep the plain `stale_secs`.
+                let idle_threshold =
+                    if perpetual_goal_ids.contains(goal_id_from_claim_key(&claim_key)) {
+                        stale_secs.saturating_mul(8)
+                    } else {
+                        stale_secs
+                    };
+                match age_secs {
+                    // Strictly OLDER than the threshold ⇒ provably stale.
+                    // Boundary (age == threshold) is protected (no wall-clock
+                    // kill).
+                    Some(age) if age > idle_threshold => (DeadReason::HeartbeatStale, Some(age)),
+                    _ => {
+                        summary.skipped += 1;
+                        continue;
+                    }
+                }
+            }
+            ClaimLiveness::Dead {
+                reason: DeadReason::Completed,
+                age_secs,
             } => match age_secs {
-                // Strictly OLDER than the threshold ⇒ provably stale. Boundary
-                // (age == threshold) is protected (no wall-clock kill).
-                Some(age) if age > stale_secs => (DeadReason::HeartbeatStale, Some(age)),
+                // Same idle THRESHOLD guard as HeartbeatStale: a JUST-completed
+                // worktree whose completion→claim-release / cleanup is still in
+                // flight (age <= threshold) is protected. Older than the
+                // threshold ⇒ a residual completed worktree whose claim leaked;
+                // reclaim it directly (below) instead of re-investigating it.
+                // A completed worktree gets NO standing extra time — completion
+                // is a positive terminal signal regardless of goal kind.
+                Some(age) if age > stale_secs => (DeadReason::Completed, Some(age)),
                 _ => {
                     summary.skipped += 1;
                     continue;
@@ -331,7 +423,37 @@ pub fn reap_stale_claims(
         // reclaimed directly (verdict is `None`, i.e. an unconditional reap).
         let verdict = match reason {
             DeadReason::NoWorktree => None,
+            DeadReason::Completed => {
+                // POSITIVE terminal signal: the engineer's OWN session wrote
+                // `status=completed`. Its durable output is already committed /
+                // pushed, so there is NOTHING to preserve via an agentic
+                // investigation — and re-investigating a naturally-idle
+                // completed worktree every tick IS the unbounded re-archival
+                // churn (#4467) rooted in idle-age conflating *completed* with
+                // *wedged* (#4500), compounded by the leaked-claim-on-completion
+                // path (#4464). Reclaim directly: release the leaked claim and
+                // remove the residual worktree, exactly once. No investigation,
+                // so the churn loop terminates.
+                tracing::info!(
+                    target: "simard::claim_reaper",
+                    claim_key = %claim_key,
+                    "[simard] claim-reaper: {claim_key} engineer session COMPLETED \
+                     (status=completed); reclaiming residual worktree directly \
+                     without agentic investigation (terminates completed-vs-wedged \
+                     re-archival churn)",
+                );
+                None
+            }
             DeadReason::HeartbeatStale => {
+                // Standing claims receive more time for heartbeat inactivity but
+                // still undergo investigation and removal when old enough. Any
+                // extra time was already granted by the larger BOUNDED idle
+                // threshold above (`stale_secs * 8` for a board-confirmed
+                // standing goal); a claim that reaches this point has crossed its
+                // threshold and MUST be investigated before any reap — standing
+                // or not. There is no permanent exemption: an idle-age
+                // (`HeartbeatStale`) engineer has a worktree whose evidence MUST
+                // be preserved and whose death MUST be understood before reclaim.
                 let idle_age = age_secs.unwrap_or(0);
                 let outcome = investigator.investigate(&claim_key, idle_age);
                 // Findings ALWAYS feed the gated Act path — even a kept claim's
@@ -429,6 +551,44 @@ fn goal_id_from_claim_key(claim_key: &str) -> &str {
         .rsplit_once(':')
         .map(|(_, goal)| goal)
         .unwrap_or(claim_key)
+}
+
+/// Whether the engineer occupying `worktree` reached a CLEAN terminal state.
+///
+/// Reads the agent runtime's `.claude/runtime/sessions.jsonl` (one JSON object
+/// per line; the engineer appends a terminal `{"status":"completed", ...}`
+/// record when its session ends normally). Returns `true` iff the LAST record
+/// carrying a `status` field is `"completed"` — so a worktree that a NEW session
+/// has since re-entered (last status back to `"active"`) is correctly NOT
+/// treated as completed and stays on the ordinary idle path.
+///
+/// Fail-closed to `false` (treat as an ordinary — possibly wedged — worktree,
+/// NEVER as completed) on a missing file, any read/parse error, or no status
+/// record at all: a `completed` verdict must be POSITIVELY proven from the
+/// engineer's own record, never assumed. Being wrong in the `false` direction
+/// only keeps the (safe, evidence-preserving) investigate-before-reap path.
+fn engineer_session_completed(worktree: &std::path::Path) -> bool {
+    let sessions = worktree
+        .join(".claude")
+        .join("runtime")
+        .join("sessions.jsonl");
+    let Ok(content) = std::fs::read_to_string(&sessions) else {
+        return false;
+    };
+    let mut last_status: Option<String> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(status) = value.get("status").and_then(|s| s.as_str()) {
+            last_status = Some(status.to_string());
+        }
+    }
+    last_status.as_deref() == Some("completed")
 }
 
 /// Newest-file idle age (seconds) under `worktree`, or `None` if not even the
@@ -541,12 +701,46 @@ impl ClaimLivenessProbe for WorktreeClaimLivenessProbe {
         // the dir metadata can be read, fail-closed to `Live` (never reap on an
         // unknown age).
         match newest_file_age_secs(&worktree) {
-            Some(age_secs) => ClaimLiveness::Dead {
-                reason: DeadReason::HeartbeatStale,
-                age_secs: Some(age_secs),
-            },
+            Some(age_secs) => {
+                // Distinguish a cleanly-COMPLETED engineer from a WEDGED one
+                // (#4500): a completed worktree naturally stops writing files, so
+                // newest-file mtime ALONE would mislabel it `HeartbeatStale` and
+                // drive a perpetual investigate-before-reap loop (#4467). Read the
+                // engineer's OWN terminal session record to tell them apart.
+                let reason = if engineer_session_completed(&worktree) {
+                    DeadReason::Completed
+                } else {
+                    DeadReason::HeartbeatStale
+                };
+                ClaimLiveness::Dead {
+                    reason,
+                    age_secs: Some(age_secs),
+                }
+            }
             None => ClaimLiveness::Live,
         }
+    }
+
+    /// Collect the set of goal ids the authoritative goal board CONFIRMS are
+    /// standing/perpetual, by reading the board rooted at the SAME `state_root`
+    /// the reaper and engineers share and reusing the durable `is_perpetual()`
+    /// marker predicate (issue #4437). Read ONCE per cleanup run; the reaper
+    /// correlates each claim by goal id (recovered from the `claim_key` the same
+    /// repo-agnostic way [`assess`](Self::assess) matches worktrees).
+    ///
+    /// Fail-closed for the extra time (not for reaping): a missing, empty, or
+    /// corrupt board yields an EMPTY set (`goal_board_store::load` returns an
+    /// empty default on both), so no claim is granted the larger idle threshold
+    /// without proof. Only goals the board CONFIRMS are perpetual are included;
+    /// they still undergo investigation and removal once old enough.
+    fn perpetual_goal_ids(&self) -> std::collections::HashSet<String> {
+        crate::goal_board_store::load(&self.state_root)
+            .board
+            .active
+            .iter()
+            .filter(|goal| goal.is_perpetual())
+            .map(|goal| goal.id.clone())
+            .collect()
     }
 }
 
@@ -901,15 +1095,113 @@ fn find_engineer_worktree(state_root: &std::path::Path, goal_id: &str) -> Option
     None
 }
 
+/// The marker written to `evidence.txt` when a worktree yields NO genuine
+/// engineer transcript / recipe-runner tail / exit-status capture. Emitted
+/// INSTEAD of silently substituting checked-in repo fixtures (issue #4449) so a
+/// downstream stale-engineer investigation cannot mistake product/input noise
+/// for a death signal, and instead fails closed to `still-alive`.
+const NO_ENGINEER_OUTPUT_MARKER: &str = "(no engineer transcript/exit-status captured — cannot demonstrate death; \
+     investigation must fail closed to still-alive)\n";
+
+/// True if `rel` (a path RELATIVE to the worktree root) is a CHECKED-IN repo
+/// artifact — a test/source fixture, a tracked build/package manifest, or a
+/// tracked prompt asset — rather than engineer-produced diagnostic output.
+///
+/// Issue #4449: a `git checkout` stamps every tracked file with the SAME mtime,
+/// so a naive newest-mtime-first scan otherwise surfaces arbitrary repo fixtures
+/// (`tests/**/fixtures/**`, `src/**/fixtures/**`, `package.json`, tracked
+/// `prompt_assets/**`) as false "evidence" with zero diagnostic value.
+fn is_checked_in_repo_artifact(rel: &std::path::Path) -> bool {
+    use std::path::Component;
+    // Any `fixtures` directory component ⇒ a checked-in test/source fixture.
+    for comp in rel.components() {
+        if let Component::Normal(seg) = comp
+            && seg == "fixtures"
+        {
+            return true;
+        }
+    }
+    // Tracked prompt assets are INPUTS to the engineer, not its output.
+    if rel.starts_with("prompt_assets") {
+        return true;
+    }
+    // Tracked build/package manifests.
+    if let Some(name) = rel.file_name().and_then(|n| n.to_str()) {
+        if matches!(
+            name,
+            "package.json" | "package-lock.json" | "Cargo.toml" | "Cargo.lock" | "tsconfig.json"
+        ) {
+            return true;
+        }
+        if name.starts_with("tsconfig.") && name.ends_with(".json") {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if `rel` (a path RELATIVE to the worktree root) looks like genuine
+/// engineer-produced diagnostic output — a transcript, recipe-runner tail,
+/// session/runtime log, or captured exit-status — as opposed to an incidental
+/// repo file. Preferred over everything else so a death is root-caused from the
+/// process's OWN signal, never from checkout noise (issue #4449).
+fn is_engineer_output(rel: &std::path::Path) -> bool {
+    use std::path::Component;
+    // Runtime / session / transcript directories the agent writes under
+    // (e.g. `.claude/runtime/sessions.jsonl`, `agent_logs/…`).
+    for comp in rel.components() {
+        if let Component::Normal(seg) = comp
+            && let Some(s) = seg.to_str()
+            && matches!(
+                s,
+                ".claude" | ".simard" | "runtime" | "sessions" | "agent_logs" | "transcripts"
+            )
+        {
+            return true;
+        }
+    }
+    if let Some(name) = rel.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_ascii_lowercase();
+        // Output-shaped extensions.
+        if lower.ends_with(".log")
+            || lower.ends_with(".jsonl")
+            || lower.ends_with(".out")
+            || lower.ends_with(".err")
+        {
+            return true;
+        }
+        // Transcript / recipe-runner / exit-status / session-named captures.
+        if lower.contains("transcript")
+            || lower.contains("recipe-runner")
+            || lower.contains("exit")
+            || lower.contains("session")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Collect a bounded, best-effort evidence blob from a worktree: the tails of its
-/// newest log / transcript / recipe-runner files. Bounded so a huge worktree can
-/// never balloon the archive; a read error on any file is skipped.
+/// newest genuine engineer log / transcript / recipe-runner / exit-status files.
+/// Bounded so a huge worktree can never balloon the archive; a read error on any
+/// file is skipped.
+///
+/// Issue #4449: checked-in repo fixtures/manifests are EXCLUDED and genuine
+/// engineer output is PREFERRED, because a `git checkout` stamps all tracked
+/// files with the same mtime and a naive newest-first scan would otherwise
+/// surface arbitrary fixtures. When no genuine engineer output exists at all, an
+/// explicit [`NO_ENGINEER_OUTPUT_MARKER`] is written instead of substituting
+/// repo noise, so the investigation fails closed by design.
 fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
     const MAX_FILES: usize = 8;
     const TAIL_BYTES: usize = 16 * 1024;
 
-    // Gather candidate files (logs/transcripts/output), newest first.
-    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    // Partition candidates: genuine engineer output vs. everything else. Only
+    // engineer output can demonstrate a death, so it is emitted first and is the
+    // sole thing that suppresses the fail-closed marker.
+    let mut engineer: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut other: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     let mut stack = vec![worktree.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -934,20 +1226,44 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
                 }
                 continue;
             }
+            let Ok(rel) = path.strip_prefix(worktree) else {
+                continue;
+            };
+            // Exclude checked-in repo fixtures/manifests outright (#4449).
+            if is_checked_in_repo_artifact(rel) {
+                continue;
+            }
+            let Ok(mtime) = meta.modified() else {
+                continue;
+            };
+            if is_engineer_output(rel) {
+                engineer.push((mtime, path));
+                continue;
+            }
+            // Otherwise keep only evidence-shaped extensions as secondary context.
             let is_evidence = path
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| matches!(e, "log" | "txt" | "json" | "out" | "err" | "jsonl"))
                 .unwrap_or(false);
-            if is_evidence && let Ok(mtime) = meta.modified() {
-                candidates.push((mtime, path));
+            if is_evidence {
+                other.push((mtime, path));
             }
         }
     }
-    candidates.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+
+    // Fail closed (#4449): with no genuine engineer transcript/exit-status, record
+    // an explicit marker rather than substituting incidental repo files.
+    if engineer.is_empty() {
+        return NO_ENGINEER_OUTPUT_MARKER.to_string();
+    }
+
+    engineer.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    other.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
 
     let mut out = String::new();
-    for (_, path) in candidates.into_iter().take(MAX_FILES) {
+    // Engineer output first, then non-fixture secondary context fills any slack.
+    for (_, path) in engineer.into_iter().chain(other).take(MAX_FILES) {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
@@ -959,7 +1275,7 @@ fn collect_worktree_evidence(worktree: &std::path::Path) -> String {
         out.push('\n');
     }
     if out.is_empty() {
-        out.push_str("(no log/transcript/output files found in worktree)\n");
+        out.push_str(NO_ENGINEER_OUTPUT_MARKER);
     }
     out
 }
@@ -1295,6 +1611,12 @@ mod tests {
     /// Deterministic probe: fixed verdict per claim key.
     struct MapProbe {
         verdicts: BTreeMap<String, ClaimLiveness>,
+        /// Goal ids the board CONFIRMS are standing/perpetual (issue #4437).
+        /// Empty by default so existing tests see ordinary behavior unchanged.
+        perpetual: std::collections::BTreeSet<String>,
+        /// Count of `perpetual_goal_ids` calls, so a test can pin that the goal
+        /// board is looked up EXACTLY ONCE per cleanup run (outside the loop).
+        perpetual_lookups: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MapProbe {
@@ -1304,7 +1626,26 @@ mod tests {
                     .iter()
                     .map(|(k, v)| ((*k).to_string(), v.clone()))
                     .collect(),
+                perpetual: std::collections::BTreeSet::new(),
+                perpetual_lookups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        /// Mark the given claim keys' goals as standing/perpetual so the probe's
+        /// `perpetual_goal_ids` reports their goal ids (issue #4437). Accepts
+        /// full claim keys (as the tests already hold) and stores the parsed goal
+        /// id via the SAME shared claim-key parser the reaper matches with.
+        fn with_perpetual(mut self, keys: &[&str]) -> Self {
+            self.perpetual = keys
+                .iter()
+                .map(|k| goal_id_from_claim_key(k).to_string())
+                .collect();
+            self
+        }
+
+        /// Shared handle to the `perpetual_goal_ids` call counter.
+        fn perpetual_lookup_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.perpetual_lookups)
         }
     }
 
@@ -1315,6 +1656,12 @@ mod tests {
                 .get(claim_key)
                 .cloned()
                 .unwrap_or(ClaimLiveness::Live)
+        }
+
+        fn perpetual_goal_ids(&self) -> std::collections::HashSet<String> {
+            self.perpetual_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.perpetual.iter().cloned().collect()
         }
     }
 
@@ -1578,7 +1925,61 @@ mod tests {
         assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
     }
 
-    // ----- T4: reclaim goes through the shared release path -------------------
+    // ----- T3c: COMPLETED worktree ⇒ reclaimed WITHOUT an agentic investigation
+    // (terminates the completed-vs-wedged re-archival churn: #4467 / #4500 / #4464)
+
+    #[test]
+    fn t3c_completed_worktree_is_reclaimed_without_investigation() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c";
+        let ledger = FakeLedger::new(&[key]);
+        // Idle 20520s (> 1800 threshold) AND the engineer's session COMPLETED —
+        // the exact archived-evidence shape behind the 54× re-archival churn.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::Completed, Some(20_520)))]);
+        let cleanup = FakeCleanup::new();
+        // A spying investigator that records every `investigate` call. A COMPLETED
+        // engineer must be reclaimed DIRECTLY: investigating it every tick IS the
+        // unbounded re-archival churn this fix eliminates.
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        // Reclaimed exactly once, through the shared release chokepoint + cleanup.
+        assert_eq!(summary.reclaimed, vec![key.to_string()]);
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert!(ledger.list_engineer_claims().is_empty());
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        // The churn-breaker invariant: NO agentic investigation was launched for
+        // a positively-completed engineer (nothing to preserve; work is pushed).
+        assert!(
+            investigator.investigated().is_empty(),
+            "a COMPLETED engineer must be reclaimed directly, never investigated \
+             (re-investigating it is the unbounded re-archival churn #4467/#4500)"
+        );
+    }
+
+    // ----- T3d: a just-COMPLETED worktree still under the idle threshold is
+    // protected (completion→claim-release / cleanup may still be in flight).
+
+    #[test]
+    fn t3d_fresh_completed_worktree_is_not_reclaimed() {
+        let key = "rysweet/Simard:just-finished";
+        let ledger = FakeLedger::new(&[key]);
+        // Completed, but idle only 1s ⇒ under threshold ⇒ protected.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::Completed, Some(1)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "a completed worktree under the idle threshold must be protected \
+             (its claim-release / cleanup may still be in flight)"
+        );
+        assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
+        assert!(cleanup.cleaned().is_empty());
+        assert!(investigator.investigated().is_empty());
+    }
 
     #[test]
     fn t4_reclaim_uses_release_chokepoint_and_cleans_worktree() {
@@ -1777,6 +2178,7 @@ mod tests {
     fn dead_reason_labels_are_stable() {
         assert_eq!(DeadReason::NoWorktree.label(), "no-worktree");
         assert_eq!(DeadReason::HeartbeatStale.label(), "heartbeat-stale");
+        assert_eq!(DeadReason::Completed.label(), "session-completed");
     }
 
     // ----- Production probe: filesystem seam (NoWorktree / fresh / failclosed)-
@@ -1823,10 +2225,103 @@ mod tests {
         }
     }
 
-    /// FAIL-CLOSED: an unreadable / absent worktrees ROOT must NOT be mistaken
-    /// for `NoWorktree`. When the root cannot be enumerated the verdict is
-    /// [`ClaimLiveness::Live`] so a transient IO error never mass-reaps live
-    /// claims.
+    /// A worktree whose engineer wrote a terminal `status=completed` record in
+    /// `.claude/runtime/sessions.jsonl` ⇒ `Dead { Completed }`, NOT
+    /// `HeartbeatStale` — this is the completed-vs-wedged distinction (#4500)
+    /// that stops the perpetual re-archival churn (#4467).
+    #[test]
+    fn probe_reports_completed_when_session_terminal_status_completed() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let goal = "advance-rysweet-agent-kgpacks-rs-to-full-parity-f29bb15c";
+        let wt = state_root
+            .path()
+            .join("engineer-worktrees")
+            .join(format!("{goal}-1784990963-3c6c56"));
+        let runtime = wt.join(".claude").join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        // The exact two-line shape observed in the archived evidence: an initial
+        // `active` record, then a terminal `completed` record.
+        std::fs::write(
+            runtime.join("sessions.jsonl"),
+            b"{\"session_id\":\"s1\",\"status\":\"active\",\"end_time\":null}\n\
+              {\"session_id\":\"s1\",\"status\":\"completed\",\"end_time\":1784995274.7}\n",
+        )
+        .expect("write sessions.jsonl");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let verdict = probe.assess(&format!("rysweet/Simard:{goal}"));
+
+        match verdict {
+            ClaimLiveness::Dead {
+                reason: DeadReason::Completed,
+                age_secs: Some(_),
+            } => {}
+            other => panic!("expected Dead {{ Completed }}, got {other:?}"),
+        }
+    }
+
+    /// A worktree a NEW session has re-entered (last `status` back to `active`)
+    /// is NOT completed — it stays on the ordinary `HeartbeatStale` path so a
+    /// genuinely-live engineer is never short-circuit-reclaimed.
+    #[test]
+    fn probe_not_completed_when_last_status_is_active() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let goal = "re-entered-goal";
+        let wt = state_root
+            .path()
+            .join("engineer-worktrees")
+            .join(format!("{goal}-1784990963-aa11bb"));
+        let runtime = wt.join(".claude").join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        std::fs::write(
+            runtime.join("sessions.jsonl"),
+            b"{\"session_id\":\"s1\",\"status\":\"completed\",\"end_time\":1.0}\n\
+              {\"session_id\":\"s2\",\"status\":\"active\",\"end_time\":null}\n",
+        )
+        .expect("write sessions.jsonl");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let verdict = probe.assess(&format!("rysweet/Simard:{goal}"));
+
+        assert!(
+            matches!(
+                verdict,
+                ClaimLiveness::Dead {
+                    reason: DeadReason::HeartbeatStale,
+                    ..
+                }
+            ),
+            "a re-entered (last status=active) worktree must NOT be Completed, got {verdict:?}"
+        );
+    }
+
+    /// Fail-closed: no `sessions.jsonl` at all ⇒ NOT completed (ordinary
+    /// `HeartbeatStale` path). A completed verdict must be positively proven.
+    #[test]
+    fn probe_not_completed_when_no_sessions_file() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let goal = "no-runtime-goal";
+        let wt = state_root
+            .path()
+            .join("engineer-worktrees")
+            .join(format!("{goal}-1784990963-cc22dd"));
+        std::fs::create_dir_all(&wt).expect("create worktree dir");
+        std::fs::write(wt.join("work.txt"), b"x").expect("write file");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let verdict = probe.assess(&format!("rysweet/Simard:{goal}"));
+
+        assert!(
+            matches!(
+                verdict,
+                ClaimLiveness::Dead {
+                    reason: DeadReason::HeartbeatStale,
+                    ..
+                }
+            ),
+            "absent sessions.jsonl must fail-closed to HeartbeatStale, got {verdict:?}"
+        );
+    }
     #[test]
     fn probe_is_fail_closed_when_worktrees_root_unreadable() {
         // state_root points at a path with NO engineer-worktrees dir at all;
@@ -2042,8 +2537,364 @@ mod tests {
         assert_eq!(summary.skipped, 1);
     }
 
-    /// `Blocked` and `Recoverable` engineers may still resume, so neither is
-    /// reaped — but their remediation interventions ARE surfaced for dispatch.
+    // ----- Standing/perpetual claims get MORE TIME, never forever (#4437) -----
+    //
+    // Standing claims receive more time for heartbeat inactivity but still
+    // undergo investigation and removal when old enough. The confirmed-standing
+    // idle threshold is `STALE_SECS * 8` (1800s → 14400s / 4h); every other path
+    // (ordinary claims, `Completed`, `NoWorktree`) is unchanged.
+
+    const STANDING_STALE_SECS: u64 = STALE_SECS * 8; // 14_400s == 4h
+
+    /// A standing/perpetual claim idle BETWEEN the ordinary 30-minute threshold
+    /// and the 4-hour bounded threshold is KEPT without investigation — it has
+    /// merely been granted more time for its benign between-cycle idle. No
+    /// reclaim, no release, no worktree cleanup, and crucially NO investigation
+    /// (the extra time is granted by the larger threshold, before the
+    /// investigate-before-reap step). A `Dead` investigator proves the claim is
+    /// never investigated in this window.
+    #[test]
+    fn standing_claim_between_30min_and_4h_is_kept_without_investigation() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // 1 hour idle: PAST the ordinary 1800s threshold, WELL UNDER the 14400s
+        // standing threshold.
+        let age = 3600;
+        assert!(age > STALE_SECS && age <= STANDING_STALE_SECS);
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "a standing claim inside its bounded window must not be reaped"
+        );
+        assert!(ledger.released.borrow().is_empty());
+        assert_eq!(
+            ledger.list_engineer_claims(),
+            vec![key.to_string()],
+            "the standing claim is preserved inside the bounded window"
+        );
+        assert!(cleanup.cleaned().is_empty());
+        assert!(
+            investigator.investigated().is_empty(),
+            "inside the bounded window the standing claim gets more time via the \
+             larger threshold — it is not investigated at all"
+        );
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.pending_interventions.is_empty());
+    }
+
+    /// A standing/perpetual claim idle PAST the 4-hour bounded threshold is NOT
+    /// kept forever: it flows through the ordinary investigate-before-reap path
+    /// and, when the investigation concludes DEAD, is reclaimed. This is the core
+    /// guarantee that standing claims are never permanently exempt.
+    #[test]
+    fn standing_claim_older_than_4h_is_investigated_and_reaped_when_dead() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // 5 hours idle: PAST the 14400s standing threshold.
+        let age = STANDING_STALE_SECS + 3600;
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a standing claim older than its bounded threshold that investigates \
+             DEAD must be reclaimed — never kept forever"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "past the bounded threshold the standing claim IS investigated before \
+             any reap"
+        );
+    }
+
+    /// A standing/perpetual claim older than the 4-hour threshold is KEPT when
+    /// the investigation concludes STILL-ALIVE — fail-closed exactly like an
+    /// ordinary claim. The extra time is bounded, but a genuinely-live standing
+    /// engineer is still protected by the investigation verdict.
+    #[test]
+    fn old_standing_claim_is_kept_when_investigation_says_alive() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        let age = STANDING_STALE_SECS + 9000; // well past 4h
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))])
+            .with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        // Investigation says the engineer is actually still working.
+        let investigator = FakeInvestigator::dead_unknown()
+            .with_outcome(key, outcome(InvestigationVerdict::StillAlive, Vec::new()));
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert!(
+            summary.reclaimed.is_empty(),
+            "an old standing claim that investigates STILL-ALIVE must be kept"
+        );
+        assert!(ledger.released.borrow().is_empty());
+        assert_eq!(ledger.list_engineer_claims(), vec![key.to_string()]);
+        assert!(cleanup.cleaned().is_empty());
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "the old standing claim IS investigated; the still-alive verdict is \
+             what keeps it (fail-closed), not a permanent exemption"
+        );
+        assert_eq!(summary.skipped, 1);
+    }
+
+    /// An ORDINARY (non-standing) claim still uses the ordinary 30-minute
+    /// threshold: at an idle age that a standing claim would sail through, the
+    /// ordinary claim is investigated and reaped. This pins that the extra time
+    /// is granted ONLY to board-confirmed standing goals.
+    #[test]
+    fn ordinary_claim_still_uses_30min_threshold() {
+        let key = "rysweet/Simard:ship-the-widget";
+        let ledger = FakeLedger::new(&[key]);
+        // 2363s: past the ordinary 1800s threshold, but FAR under the 14400s
+        // standing threshold — a standing claim at this age would be kept.
+        let age = 2363;
+        assert!(age > STALE_SECS && age < STANDING_STALE_SECS);
+        // NOT marked perpetual.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "an ordinary claim past 30 minutes is investigated and reaped"
+        );
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "an ordinary claim uses the ordinary threshold — no extra time"
+        );
+    }
+
+    /// A standing/perpetual `Completed` claim gets NO extra time: completion is a
+    /// positive terminal signal, so it keeps the ordinary 30-minute threshold and
+    /// — once past it — is reclaimed DIRECTLY, without investigation, standing or
+    /// not.
+    #[test]
+    fn standing_completed_claim_uses_30min_and_is_reaped_without_investigation() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // Past the ordinary 1800s threshold but under 14400s: proves completion
+        // does NOT inherit the standing extra time.
+        let age = 2363;
+        assert!(age > STALE_SECS && age < STANDING_STALE_SECS);
+        let probe =
+            MapProbe::new(&[(key, dead(DeadReason::Completed, Some(age)))]).with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a standing Completed claim past 30 minutes is reclaimed directly"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert!(
+            investigator.investigated().is_empty(),
+            "a Completed claim carries a positive terminal signal — reclaimed \
+             without investigation, standing or not"
+        );
+    }
+
+    /// The goal board is read EXACTLY ONCE per cleanup run, outside the per-claim
+    /// loop — even across several claims. Pins the once-per-run contract that
+    /// keeps the sweep from re-reading the board for every claim.
+    #[test]
+    fn goal_board_lookup_happens_once_for_several_claims() {
+        let a = "rysweet/Simard:goal-a";
+        let b = "rysweet/Simard:goal-b";
+        let c = "rysweet/Simard:goal-c";
+        let ledger = FakeLedger::new(&[a, b, c]);
+        let probe = MapProbe::new(&[
+            (a, dead(DeadReason::HeartbeatStale, Some(3600))),
+            (b, dead(DeadReason::HeartbeatStale, Some(100))),
+            (c, dead(DeadReason::NoWorktree, None)),
+        ])
+        .with_perpetual(&[a]);
+        let lookups = probe.perpetual_lookup_counter();
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let _ = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the goal board must be read exactly once per cleanup run, not \
+             per-claim"
+        );
+    }
+
+    /// Fail-closed for the extra time: when the goal board reports NO confirmed
+    /// standing goals (missing / empty / corrupt board ⇒ empty set), a claim that
+    /// would be standing gets NO extra time — it uses the ordinary 30-minute
+    /// threshold and is investigated/reaped. There is no silent success value
+    /// that hands out more time without proof.
+    #[test]
+    fn missing_or_corrupt_board_gives_no_extra_time() {
+        let key = "rysweet/Simard:advance-rysweet-agent-kgpacks-rs-to-full-parity";
+        let ledger = FakeLedger::new(&[key]);
+        // 1 hour idle: inside the standing window BUT past the ordinary
+        // threshold. With an EMPTY perpetual set (the missing/corrupt-board
+        // outcome) it must be treated as ordinary and reaped.
+        let age = 3600;
+        assert!(age > STALE_SECS && age <= STANDING_STALE_SECS);
+        // No `.with_perpetual(...)` ⇒ `perpetual_goal_ids` is empty, exactly what
+        // a missing/empty/corrupt board yields.
+        let probe = MapProbe::new(&[(key, dead(DeadReason::HeartbeatStale, Some(age)))]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "with no confirmed standing goal, no extra time is granted — the \
+             claim uses the ordinary threshold and is reaped"
+        );
+        assert_eq!(
+            investigator.investigated(),
+            vec![key.to_string()],
+            "no board proof ⇒ ordinary threshold ⇒ investigated before reap"
+        );
+    }
+
+    /// Standing extra time is scoped to the idle-age (`HeartbeatStale`) path
+    /// ONLY: a standing/perpetual goal whose worktree is PHYSICALLY GONE
+    /// (`NoWorktree`) is provably dead and IS reclaimed immediately, because a
+    /// standing goal must not leak a claim whose worktree no longer exists.
+    #[test]
+    fn perpetual_goal_with_no_worktree_is_still_reclaimed() {
+        let key = "rysweet/Simard:standing-but-worktree-gone";
+        let ledger = FakeLedger::new(&[key]);
+        let probe =
+            MapProbe::new(&[(key, dead(DeadReason::NoWorktree, None))]).with_perpetual(&[key]);
+        let cleanup = FakeCleanup::new();
+        let investigator = FakeInvestigator::dead_unknown();
+
+        let summary = reap_stale_claims(&ledger, &probe, &cleanup, &investigator, true, STALE_SECS);
+
+        assert_eq!(
+            summary.reclaimed,
+            vec![key.to_string()],
+            "a perpetual goal with a physically-absent worktree is provably \
+             dead and must still be reclaimed"
+        );
+        assert_eq!(*ledger.released.borrow(), vec![key.to_string()]);
+        assert_eq!(cleanup.cleaned(), vec![key.to_string()]);
+        assert!(
+            investigator.investigated().is_empty(),
+            "a NoWorktree claim has no evidence to preserve, so it is reclaimed \
+             directly without investigation — perpetual or not"
+        );
+    }
+
+    // ----- Production probe: perpetual_goal_ids reads the real board ----------
+
+    /// Build a standing/perpetual [`ActiveGoal`] (its description carries the
+    /// `[standing]` sentinel, so [`ActiveGoal::is_perpetual`] is `true`).
+    fn standing_active_goal(id: &str) -> crate::goal_curation::ActiveGoal {
+        crate::goal_curation::ActiveGoal {
+            id: id.to_string(),
+            description: format!("[standing] keep {id} healthy — perpetual goal"),
+            priority: 1,
+            status: crate::goal_curation::GoalProgress::NotStarted,
+            assigned_to: None,
+            repo: None,
+            current_activity: None,
+            wip_refs: Vec::new(),
+            last_progress_update_at: None,
+            parent_goal_id: None,
+            priority_explicit: false,
+            labels: Vec::new(),
+        }
+    }
+
+    /// The production probe collects EXACTLY the goal ids the board confirms are
+    /// standing/perpetual — an ordinary goal on the same board is excluded.
+    #[test]
+    fn production_probe_collects_confirmed_standing_goal_ids() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        crate::goal_board_store::mutate(state_root.path(), |state| {
+            state
+                .board
+                .active
+                .push(standing_active_goal("keep-ci-green"));
+            let mut ordinary = standing_active_goal("ship-one-widget");
+            ordinary.description = "ship one widget then done".to_string();
+            state.board.active.push(ordinary);
+        })
+        .expect("seed board");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+        let ids = probe.perpetual_goal_ids();
+
+        assert!(
+            ids.contains("keep-ci-green"),
+            "a board-confirmed standing goal id must be collected: {ids:?}"
+        );
+        assert!(
+            !ids.contains("ship-one-widget"),
+            "an ordinary goal must not be treated as standing: {ids:?}"
+        );
+        assert_eq!(ids.len(), 1);
+    }
+
+    /// A MISSING goal board yields an EMPTY set — no claim gets extra time
+    /// without proof (fail-closed for the extra time).
+    #[test]
+    fn production_probe_perpetual_ids_empty_when_board_missing() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        // No goal_board.json is ever written under this root.
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+
+        assert!(
+            probe.perpetual_goal_ids().is_empty(),
+            "a missing board must grant no standing extra time"
+        );
+    }
+
+    /// A CORRUPT goal board yields an EMPTY set — a garbage file must never be
+    /// read as a silent success that hands out extra time.
+    #[test]
+    fn production_probe_perpetual_ids_empty_when_board_corrupt() {
+        let state_root = tempfile::tempdir().expect("tempdir");
+        let path = crate::goal_board_store::store_path(state_root.path());
+        std::fs::create_dir_all(path.parent().expect("store parent")).expect("create state dir");
+        std::fs::write(&path, b"{ this is not valid json ]").expect("write corrupt board");
+
+        let probe = WorktreeClaimLivenessProbe::new(state_root.path());
+
+        assert!(
+            probe.perpetual_goal_ids().is_empty(),
+            "a corrupt board must grant no standing extra time"
+        );
+    }
+
     #[test]
     fn blocked_and_recoverable_are_not_reaped_but_surface_interventions() {
         let blocked = "rysweet/Simard:waiting-on-dep";
@@ -2370,6 +3221,117 @@ mod tests {
         assert!(
             evidence.contains("legit engineer log line"),
             "real evidence files must still be collected: {evidence}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Build a throwaway temp dir unique to this process + nanosecond instant.
+    fn unique_tmp(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "reap-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    // Issue #4449 regression: a worktree that only contains CHECKED-IN repo
+    // fixtures/manifests (the exact 8-block signature archived for goal
+    // move-the-governed-repo-roster-out-of-framework-a8f57a50) must yield the
+    // explicit fail-closed marker — NEVER the fixture contents — so a
+    // stale-engineer investigation cannot mistake product noise for a death.
+    #[test]
+    fn collect_worktree_evidence_excludes_checked_in_fixtures_and_fails_closed() {
+        let tmp = unique_tmp("fixtures");
+        let worktree = tmp.join("worktree");
+
+        // The real archive's fixture set: nested fixtures dirs + tracked manifests.
+        for (rel, body) in [
+            (
+                "tests/gadugi/fixtures/ci-health-green.json",
+                "{\"repos\":[]}",
+            ),
+            (
+                "tests/gadugi/fixtures/ci-health-failing.json",
+                "{\"repos\":[]}",
+            ),
+            (
+                "tests/fixtures/atelier/bookcase-brief.json",
+                "{\"kind\":\"bookcase\"}",
+            ),
+            (
+                "src/coin_gym/fixtures/sample_snapshot.json",
+                "{\"snapshot\":\"x\"}",
+            ),
+            (
+                "src/coin_gym/fixtures/improve_loop_snapshot.json",
+                "{\"snapshot\":\"y\"}",
+            ),
+            (
+                "scripts/dashboard-audit/package.json",
+                "{\"name\":\"audit\"}",
+            ),
+            (
+                "prompt_assets/simard/terminal_recipes/copilot-submit.json",
+                "{\"payload\":\"READY\"}",
+            ),
+            ("package.json", "{\"name\":\"@rysweet/simard\"}"),
+        ] {
+            let path = worktree.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+        }
+
+        let evidence = collect_worktree_evidence(&worktree);
+        assert_eq!(
+            evidence, NO_ENGINEER_OUTPUT_MARKER,
+            "only checked-in fixtures present ⇒ fail-closed marker, got: {evidence}"
+        );
+        assert!(
+            !evidence.contains("bookcase") && !evidence.contains("snapshot"),
+            "fixture contents must never be surfaced as evidence: {evidence}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Issue #4449: when the worktree DOES contain genuine engineer output, it must
+    // be surfaced (and the fixtures still excluded) — the collector prefers the
+    // process's own signal over incidental repo files.
+    #[test]
+    fn collect_worktree_evidence_prefers_engineer_output_over_fixtures() {
+        let tmp = unique_tmp("engineer");
+        let worktree = tmp.join("worktree");
+
+        // Checked-in fixture (must be excluded).
+        let fixture = worktree.join("tests/gadugi/fixtures/ci-health-green.json");
+        std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+        std::fs::write(&fixture, "{\"repos\":[\"FIXTURE_NOISE\"]}").unwrap();
+
+        // Genuine engineer runtime output (must be surfaced).
+        let session = worktree.join(".claude/runtime/sessions.jsonl");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(
+            &session,
+            "{\"status\":\"completed\",\"marker\":\"REAL_SESSION\"}",
+        )
+        .unwrap();
+
+        let evidence = collect_worktree_evidence(&worktree);
+        assert!(
+            evidence.contains("REAL_SESSION"),
+            "genuine engineer output must be collected: {evidence}"
+        );
+        assert!(
+            !evidence.contains("FIXTURE_NOISE"),
+            "checked-in fixtures must be excluded even when real output exists: {evidence}"
+        );
+        assert_ne!(
+            evidence, NO_ENGINEER_OUTPUT_MARKER,
+            "real engineer output present ⇒ not the fail-closed marker"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

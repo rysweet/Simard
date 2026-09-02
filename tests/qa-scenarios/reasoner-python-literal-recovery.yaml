@@ -47,7 +47,7 @@ description: |
 
   Sites routed through the chokepoint in `src/ooda_brain/recipe_brain.rs`:
   `parse_admission_decision`, `parse_resource_admission_decision`,
-  `parse_idea_dedup_decision`, `parse_idea_consolidation`, `parse_outcome_decision`,
+  `parse_idea_dedup_decision`, `parse_idea_consolidation`,
   `extract_decision_envelope` (decide). Orient no longer parses an envelope; it reads a typed record via `simard ooda record-orient` (issue #4785).
 
   This scenario drives the hermetic, in-process tests that pin the corrected
@@ -65,6 +65,12 @@ description: |
       + log noise, and composed with all four other defects), while a `True`/`None`
       inside a string is preserved as content.
   No network, no live host mutation. The CLI runner rejects any non-zero exit.
+  NOTE (#4991): the `extract_json_payload` / `extract_and_parse_json` wrapper
+  functions named in the prose above were retired as dead code (zero production
+  callers after the typed record-contract cutover). The JSON-defect recovery they
+  composed is retained in `recover_json_view` (and its component views), which this
+  scenario now exercises directly.
+
 agents:
   - name: simard-cli
     type: cli
@@ -95,7 +101,7 @@ steps:
   # preserved as content.
   - action: run
     params:
-      command: "cargo test --locked --lib recipe_output::extract::tests::extract_and_parse_json"
+      command: "cargo test --locked --lib recipe_output::extract::tests::recover_json_view"
     timeout: 900000
   - action: wait_for_output
     params:

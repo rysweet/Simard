@@ -39,7 +39,9 @@
 //!      gate; a red gate does not silently drop later gates or the aggregate.
 //!   4. GATE ORDER: `default_gates()` stays Smoke → UnitTest → GymBaseline →
 //!      RpcHealth (the `UnitTest` gate is scoped, not removed).
-//!   5. AGGREGATION: `all_gates_passed` is true iff every gate passed.
+//!   5. AGGREGATION (fail-closed): `all_gates_passed` is true iff the verdict
+//!      set is non-empty and every gate passed — an empty set authorizes
+//!      nothing.
 //!   6. DENY-BY-DEFAULT ENV FLOOR (SEC): `canary_gate_env_allowlist()` is a
 //!      minimal Simard deploy-shape allow-list with no hijack-class names.
 
@@ -119,7 +121,21 @@ impl Drop for HermeticEnv {
 /// Smoke gate runs `<binary> --version`; a healthy stub exits 0, a regressed
 /// stub exits non-zero (we use 101, the real deterministic panic code observed
 /// in the crash-loop). No `cargo`, no network — hermetic by construction.
+///
+/// STATIC-ONLY CONTRACT (SEC): `name` and `stdout_line` are interpolated into a
+/// `/bin/sh` script, so callers MUST pass **static test literals only** — never
+/// external, network-, or filesystem-derived (tainted) data. Every current
+/// caller passes a hard-coded string, so this is non-exploitable today; the
+/// `debug_assert!` below fails the test loudly if a future edit ever routes
+/// shell-significant characters through, preventing a latent injection.
 fn write_stub_binary(dir: &Path, name: &str, exit_code: i32, stdout_line: &str) -> PathBuf {
+    debug_assert!(
+        !name.contains(['"', '\'', '`', '$', '\\', '\n', '/'])
+            && !stdout_line.contains(['"', '`', '$', '\\', '\n']),
+        "write_stub_binary is a STATIC-LITERAL-ONLY helper: `name`/`stdout_line` \
+         are interpolated into a /bin/sh script and must not carry \
+         shell-significant characters (got name={name:?}, stdout_line={stdout_line:?})"
+    );
     let path = dir.join(name);
     let script = format!("#!/bin/sh\necho \"{stdout_line}\"\nexit {exit_code}\n");
     fs::write(&path, script).expect("write stub binary");
@@ -255,7 +271,7 @@ fn default_gates_order_is_stable_and_includes_unit_test() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_gates_passed_is_true_iff_every_gate_passed() {
+fn all_gates_passed_is_true_iff_nonempty_and_every_gate_passed() {
     let pass = |gate| GateResult {
         gate,
         passed: true,
@@ -267,8 +283,12 @@ fn all_gates_passed_is_true_iff_every_gate_passed() {
         detail: "regression".to_string(),
     };
 
-    // Vacuous truth: an empty verdict list is not "failed".
-    assert!(all_gates_passed(&[]));
+    // Fail-closed on empty (#4622): an empty verdict list proves nothing, so it
+    // must refuse — never vacuously authorize a relaunch on zero gates.
+    assert!(
+        !all_gates_passed(&[]),
+        "an empty verdict set authorizes nothing — the aggregate must fail-closed"
+    );
 
     let all_green = vec![pass(RelaunchGate::Smoke), pass(RelaunchGate::UnitTest)];
     assert!(all_gates_passed(&all_green));

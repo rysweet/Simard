@@ -154,6 +154,34 @@ the goal has produced no progress; the recipe explains why in operator language.
 The recipe does not grant itself authority to suppress the breaker. It can enrich
 the evidence narrative; it cannot make a looping goal healthy by narration.
 
+### Terminal quarantine — the rung below the guided retry
+
+The no-progress ladder is bounded at the bottom by a **terminal-quarantine
+rung**, owned by Rust as a deterministic safeguard (not a prompt judgment). A
+goal whose done-criteria are structurally unmeasurable (`UNCLEAR-CRITERIA`) gets
+one guided-engineer retry and then, if it keeps surfacing evidence-less
+investigation gaps up to `SURFACED_INVESTIGATION_FAILURE_LIMIT` (3), the breaker
+returns `NoProgressResolution::QuarantineTerminal`. Quarantine:
+
+- sets the goal `Blocked` with a WHY-bearing reason carrying the re-investigation
+  count as evidence (never `evidence=[(none)]`);
+- writes a durable, injection-safe `ooda-breaker-quarantine` marker
+  (fixed-sentinel `ref_id`, never derived from goal text); and
+- **removes the goal from re-scheduling** — `reinvestigate_bare_blocked_goals`
+  skips any quarantined goal, so the daemon spends no further cycles on it. This
+  is what stops the `ooda-stuck` / `recurring_goal_reblock` churn.
+
+Quarantine is **terminal for the daemon but reversible for a human**: an operator
+`simard goal unblock <goal-id>` clears the marker and resets the surfaced-failure
+counter, so the goal earns a fresh bounded guided-retry window rather than
+re-quarantining immediately. The durable fix is to give the goal a
+machine-checkable finish condition (a specific issue `CLOSED`, a PR `MERGED`, or a
+checkable file/command). See
+[The OODA breaker quarantines terminal UNCLEAR-CRITERIA goals](./ooda-breaker-churn-suppression.md)
+and its
+[API reference](../reference/ooda-breaker-churn-suppression-api.md), plus the
+[quarantine-and-recover runbook](../howto/quarantine-and-recover-an-unclear-ooda-goal.md).
+
 ## What Rust owns
 
 Rust is deliberately boring. It owns:
@@ -327,5 +355,7 @@ contract plus stricter contract validation, not a larger parser.
 
 - [How to run the OODA daemon](../howto/run-ooda-daemon.md)
 - [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
+- [The OODA breaker quarantines terminal UNCLEAR-CRITERIA goals](./ooda-breaker-churn-suppression.md)
+- [Quarantine and recover an unclear OODA goal](../howto/quarantine-and-recover-an-unclear-ooda-goal.md)
 - [Simard CLI reference](../reference/simard-cli.md)
 - [OODA coverage parallelism ceiling](../reference/ooda-coverage-parallelism-ceiling.md)

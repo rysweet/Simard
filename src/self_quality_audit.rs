@@ -24,10 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
-
 use crate::error::{SimardError, SimardResult};
 use crate::runtime_config::RuntimeConfig;
+use crate::self_quality_audit_record::read_verified_self_quality_audit;
 
 /// Stable adapter tag used in error envelopes and logs.
 const ADAPTER_TAG: &str = "monthly-self-quality-audit";
@@ -93,11 +92,12 @@ pub fn write_last_run(path: &Path, epoch_secs: u64) -> std::io::Result<()> {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Structured report + marker parser
+// Structured report
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Structured result of one self-quality-audit run, built by parsing text
-/// markers from the recipe's stdout.
+/// Structured result of one self-quality-audit run, built from the typed record
+/// the recipe writes via its gated ACT step (read fail-closed by
+/// [`read_verified_self_quality_audit`](crate::self_quality_audit_record::read_verified_self_quality_audit)).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelfQualityAuditReport {
     /// Number of SEEK→VALIDATE→FIX waves that reached completion
@@ -132,93 +132,9 @@ impl SelfQualityAuditReport {
     }
 }
 
-/// Parse the self-quality-audit text markers from recipe stdout.
-///
-/// Recognized markers (each on its own line; surrounding whitespace tolerated):
-/// ```text
-/// AUDIT_STARTED                 # advisory, ignored
-/// WAVE_START=<n>                # advisory, ignored (does NOT count as complete)
-/// WAVE_COMPLETE=<n>             # counted into waves_completed
-/// PR_OPENED=<url>               # collected in order
-/// PR_MERGED=<url>               # collected in order
-/// CRUSTY_APPROVED=<url>         # collected in order
-/// CRUSTY_UNRESOLVED=<url>       # collected in order
-/// AUDIT_COMPLETE=<summary>      # REQUIRED, non-empty terminal marker
-/// ```
-///
-/// A missing or empty `AUDIT_COMPLETE` marker is a hard parse error: without a
-/// terminal marker the run is not trustworthy. Any unrecognized line is
-/// silently ignored (forward-compatible with human-readable agent prose).
-pub fn parse_self_quality_audit_text(stdout: &str) -> Result<SelfQualityAuditReport, String> {
-    let mut waves_completed: u32 = 0;
-    let mut prs_opened: Vec<String> = Vec::new();
-    let mut prs_merged: Vec<String> = Vec::new();
-    let mut crusty_approved: Vec<String> = Vec::new();
-    let mut crusty_unresolved: Vec<String> = Vec::new();
-    let mut summary_line: Option<String> = None;
-
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(val) = trimmed.strip_prefix("AUDIT_COMPLETE=") {
-            summary_line = Some(val.trim().to_string());
-        } else if trimmed.strip_prefix("WAVE_COMPLETE=").is_some() {
-            waves_completed += 1;
-        } else if let Some(val) = trimmed.strip_prefix("PR_OPENED=") {
-            push_url(&mut prs_opened, val);
-        } else if let Some(val) = trimmed.strip_prefix("PR_MERGED=") {
-            push_url(&mut prs_merged, val);
-        } else if let Some(val) = trimmed.strip_prefix("CRUSTY_APPROVED=") {
-            push_url(&mut crusty_approved, val);
-        } else if let Some(val) = trimmed.strip_prefix("CRUSTY_UNRESOLVED=") {
-            push_url(&mut crusty_unresolved, val);
-        }
-        // AUDIT_STARTED, WAVE_START=, and all unknown lines are ignored.
-    }
-
-    let summary_line =
-        summary_line.ok_or_else(|| "missing AUDIT_COMPLETE marker in recipe output".to_string())?;
-    if summary_line.is_empty() {
-        return Err("AUDIT_COMPLETE marker has an empty summary".to_string());
-    }
-
-    Ok(SelfQualityAuditReport {
-        waves_completed,
-        prs_opened,
-        prs_merged,
-        crusty_approved,
-        crusty_unresolved,
-        summary_line,
-    })
-}
-
-/// Trim a marker value and push it onto `dst` when non-empty.
-fn push_url(dst: &mut Vec<String>, raw: &str) {
-    let v = raw.trim();
-    if !v.is_empty() {
-        dst.push(v.to_string());
-    }
-}
-
 // ───────────────────────────────────────────────────────────────────────────
-// Recipe invocation (disk_health no-fallback model)
+// Recipe invocation (disk_health no-fallback model) — typed-record read path
 // ───────────────────────────────────────────────────────────────────────────
-
-/// JSON envelope returned by `recipe-runner-rs --output-format json`. Extra
-/// fields (e.g. `step_id`) are ignored by serde.
-#[derive(Debug, Deserialize)]
-struct RecipeOutput {
-    success: bool,
-    step_results: Vec<StepResult>,
-}
-
-/// A single step's result inside the [`RecipeOutput`] envelope.
-#[derive(Debug, Deserialize)]
-struct StepResult {
-    output: String,
-}
 
 /// Resolve the recipe YAML path. Checks, in order:
 ///   1. `~/.simard/prompt_assets/simard/recipes/<name>` (hot-reload path)
@@ -249,13 +165,18 @@ fn resolve_recipe_path(repo_root: &Path, home_override: Option<&Path>) -> Option
 
 /// Build the `recipe-runner-rs` [`Command`] for the self-quality-audit recipe.
 ///
-/// Sets the recipe path, JSON output format, and the `state_root` / `repo_path`
-/// context vars. Exports `AMPLIHACK_AGENT_BINARY` (Copilot/Claude parity) and
+/// Sets the recipe path, JSON output format, the `state_root` / `repo_path` /
+/// `record_path` context vars. Exports `AMPLIHACK_AGENT_BINARY` (Copilot/Claude
+/// parity) and
 /// [`WORKFLOW_PR_LABELS_ENV`](crate::overseer::config::WORKFLOW_PR_LABELS_ENV) =
 /// [`SIMARD_ENGINEER_PR_LABEL`](crate::overseer::config::SIMARD_ENGINEER_PR_LABEL)
 /// so the PRs this monthly audit opens against rysweet/Simard carry the durable
 /// engineer marker and are visible to the self-merge queue (#4097). Inert until
 /// the amplihack publish consumer (#979) lands.
+///
+/// `record_path` is the ABSOLUTE path the recipe's gated ACT step
+/// (`simard cognition record-self-quality-audit --record-path {{record_path}}`)
+/// writes its typed record to, and which the rail then reads fail-closed.
 ///
 /// Extracted as a seam so the env contract is unit-testable via
 /// [`Command::get_envs`] without spawning `recipe-runner-rs`.
@@ -263,6 +184,7 @@ fn build_audit_command(
     recipe_path: &Path,
     state_root: &Path,
     repo_root: &Path,
+    record_path: &Path,
     agent_binary: &str,
 ) -> Command {
     let mut cmd = Command::new("recipe-runner-rs");
@@ -277,8 +199,16 @@ fn build_audit_command(
         .arg("-c")
         .arg(format!("state_root={}", state_root.display()))
         .arg("-c")
-        .arg(format!("repo_path={}", repo_root.display()));
+        .arg(format!("repo_path={}", repo_root.display()))
+        .arg("-c")
+        .arg(format!("record_path={}", record_path.display()));
     cmd
+}
+
+/// The per-run record path: one file under the state root, pre-truncated each
+/// invocation so a prior month's record can never be read as current.
+fn audit_record_path(state_root: &Path) -> PathBuf {
+    state_root.join("self_quality_audit").join("record.json")
 }
 
 /// Run the monthly self-quality-audit recipe via `recipe-runner-rs`.
@@ -289,8 +219,10 @@ fn build_audit_command(
 /// home for recipe resolution.
 ///
 /// No-fallback contract (mirrors [`crate::disk_health::run_disk_health_check`]):
-/// a missing recipe, a spawn failure, a non-zero exit, `success=false`, or an
-/// unparseable marker set all become [`SimardError::AdapterInvocationFailed`].
+/// a missing recipe, a spawn failure, a non-zero exit, or a fail-closed record
+/// read (R1–R7) all become [`SimardError::AdapterInvocationFailed`]. The result
+/// is sourced ONLY from the typed record the recipe wrote via its gated tool
+/// call — NEVER scraped from stdout.
 pub fn run_self_quality_audit(
     repo_root: &Path,
     state_root: &Path,
@@ -307,70 +239,46 @@ pub fn run_self_quality_audit(
 
     let agent_binary = RuntimeConfig::load()?.llm_provider.agent_binary_value();
 
-    let output = build_audit_command(&recipe_path, state_root, repo_root, agent_binary)
-        .output()
-        .map_err(|e| SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!("recipe-runner-rs spawn failed: {e}"),
-        })?;
+    // Anti-replay: derive + PRE-TRUNCATE the record path, then capture
+    // `invoke_start` BEFORE spawn so a record written this run has
+    // `mtime >= invoke_start` (R7).
+    let record_path = audit_record_path(state_root);
+    let _ = std::fs::remove_file(&record_path);
+    let invoke_start = SystemTime::now();
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!(
-                "recipe exited with {}: {}",
-                output.status,
-                truncate(&stderr, 500)
-            ),
-        });
-    }
-
-    let envelope: RecipeOutput = serde_json::from_slice(&output.stdout).map_err(|e| {
-        SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: format!("failed to deserialize recipe JSON output: {e}"),
-        }
+    let status = build_audit_command(
+        &recipe_path,
+        state_root,
+        repo_root,
+        &record_path,
+        agent_binary,
+    )
+    .status()
+    .map_err(|e| SimardError::AdapterInvocationFailed {
+        base_type: ADAPTER_TAG.to_string(),
+        reason: format!("recipe-runner-rs spawn failed: {e}"),
     })?;
 
-    if !envelope.success {
+    if !status.success() {
         return Err(SimardError::AdapterInvocationFailed {
             base_type: ADAPTER_TAG.to_string(),
-            reason: "recipe reported success=false in JSON output".to_string(),
+            reason: format!("recipe exited with {status}"),
         });
     }
 
-    if envelope.step_results.is_empty() {
-        return Err(SimardError::AdapterInvocationFailed {
-            base_type: ADAPTER_TAG.to_string(),
-            reason: "no step results in recipe JSON output".to_string(),
-        });
-    }
+    // The recipe exited 0 — the ONLY source of truth is the typed record it
+    // wrote via its gated tool call. Read it FAIL-CLOSED (R1–R7): a recipe that
+    // "ran" but wrote no valid record is a hard failure, never a silent default.
+    let record = read_verified_self_quality_audit(&record_path, invoke_start)?;
 
-    // Concatenate every step's output so terminal markers emitted by any step
-    // (the orchestrator prints them last) are captured.
-    let combined = envelope
-        .step_results
-        .iter()
-        .map(|s| s.output.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    parse_self_quality_audit_text(&combined).map_err(|e| SimardError::AdapterInvocationFailed {
-        base_type: ADAPTER_TAG.to_string(),
-        reason: format!("failed to parse recipe text output: {e}"),
+    Ok(SelfQualityAuditReport {
+        waves_completed: record.waves_completed,
+        prs_opened: record.prs_opened,
+        prs_merged: record.prs_merged,
+        crusty_approved: record.crusty_approved,
+        crusty_unresolved: record.crusty_unresolved,
+        summary_line: record.summary_line,
     })
-}
-
-/// Truncate `s` to at most `max` characters, appending an ellipsis if cut.
-fn truncate(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let prefix: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        prefix + "…"
-    } else {
-        prefix
-    }
 }
 
 #[cfg(test)]
@@ -389,6 +297,7 @@ mod tests {
             Path::new("/tmp/recipe.yaml"),
             Path::new("/home/agent/.simard"),
             Path::new("/home/agent/src/Simard"),
+            Path::new("/home/agent/.simard/self_quality_audit/record.json"),
             "copilot",
         );
 

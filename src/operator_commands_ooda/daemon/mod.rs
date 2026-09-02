@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
@@ -100,6 +100,22 @@ fn clear_stale_draining_flag_at_boot_in(state_dir: &std::path::Path, log_root: &
             &format!("[simard] boot: failed to clear stale draining.flag; continuing boot: {e}"),
         ),
     }
+}
+
+fn purge_actor_sessions_on_startup(
+    state_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ledger_path = crate::typed_ooda::ledger_path(state_root);
+    let ledger_parent = ledger_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("typed-OODA ledger path has no parent directory"))?;
+    std::fs::create_dir_all(ledger_parent)?;
+    let handler = crate::typed_ooda::CapabilityHandler::open(
+        &ledger_path,
+        crate::typed_ooda::CapabilityPolicy::new("daemon-startup"),
+    )?;
+    handler.purge_actor_sessions()?;
+    Ok(())
 }
 
 /// Resolve the identity-scoped cognition (#3125) for the daemon from the
@@ -281,6 +297,7 @@ pub fn run_ooda_daemon(
     let state_root = state_root_override.unwrap_or_else(memory_ipc::default_state_root);
 
     std::fs::create_dir_all(&state_root)?;
+    purge_actor_sessions_on_startup(&state_root)?;
     clear_stale_draining_flag_at_boot(&state_root);
 
     // Freshness gate at daemon startup (issue #439): belt-and-suspenders run of
@@ -891,17 +908,21 @@ pub fn run_ooda_daemon(
     // cadence and side-effects are byte-for-byte preserved; the scheduler is
     // invoked only AFTER the inline cycle and never gates it.
     //
-    // Two INDEPENDENT gates share the one runtime:
-    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-OFF) owns the maintenance +
-    //     engineer-log threads — their gating and timing stay unchanged.
+    // Two INDEPENDENT gates share the one runtime (issue #4845 — both default-ON
+    // opt-out now):
+    //   * SIMARD_COGNITIVE_THREADS_ENABLED (default-ON, opt-out) owns the
+    //     maintenance + engineer-log + ten reflective threads. It is enabled
+    //     UNLESS set to an explicit falsy token (0/false/no/off).
     //   * SIMARD_CREATIVE_IDEAS_ENABLED (default-ON, opt-out) owns the Creative
     //     Ideas generator (issue #2647), consistent with the default-ON
     //     Overseer/Journal threads — so it runs on a stock deployment WITHOUT
     //     the generic master switch.
-    let cognitive_threads_enabled = std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
-        .ok()
-        .map(|s| matches!(s.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false);
+    let cognitive_threads_enabled = crate::cognitive_threads::recipe_rail::env_gate_open(
+        std::env::var("SIMARD_COGNITIVE_THREADS_ENABLED")
+            .ok()
+            .as_deref(),
+        None,
+    );
     let creative_ideas_cfg = crate::creative_ideas::CreativeIdeasConfig::from_env();
     let creative_ideas_enabled = creative_ideas_cfg.enabled();
     let cognitive_repo_root = memories.repo_root.clone();
@@ -926,8 +947,11 @@ pub fn run_ooda_daemon(
     };
     let mut mind = crate::cognitive_threads::Mind::new();
     if cognitive_runtime.is_some() {
-        // Maintenance + engineer-log stay behind the generic master switch so
-        // their default-OFF gating and timing are unchanged.
+        // Maintenance + engineer-log + the ten reflective threads register under
+        // the DEFAULT-ON master gate (issue #4845). Each thread's own per-thread
+        // gate (default-ON opt-out) decides whether it actually ticks; the
+        // scheduler skips any that report `!enabled()`, so registration is safe
+        // and observable even when a thread is individually opted out.
         if cognitive_threads_enabled {
             mind.register(Box::new(
                 crate::cognitive_threads::MaintenanceThread::from_env(),
@@ -935,10 +959,9 @@ pub fn run_ooda_daemon(
             mind.register(Box::new(
                 crate::cognitive_threads::EngineerLogAnalysisThread::from_env(),
             ));
-            // Issue #5: the ten reflective threads. Each is additive and OFF by
-            // default behind its own per-thread gate; registered only under the
-            // master gate (this block), so with it unset nothing registers, and a
-            // registered-but-disabled thread never ticks. Recipes over new plumbing.
+            // Issue #5 + #4845: the ten reflective threads. Additive and now
+            // ENABLED by default behind each thread's own opt-out gate. Recipes
+            // over new plumbing.
             crate::cognitive_threads::threads::register_reflective_threads(
                 &mut mind,
                 &cognitive_repo_root,
@@ -967,6 +990,29 @@ pub fn run_ooda_daemon(
                 mind.len()
             ),
         );
+        // Per-thread startup roster (issue #4845): one line per registered
+        // thread so `ooda.log` shows exactly which threads are ENABLED (with
+        // their cadence) or DISABLED (operator opt-out) — no thread is invisible.
+        for h in mind.health() {
+            let line = if h.enabled {
+                match h.cadence_secs {
+                    Some(secs) => format!(
+                        "[simard] OODA daemon: cognitive thread '{}' ENABLED (interval={}s)",
+                        h.id, secs
+                    ),
+                    None => format!(
+                        "[simard] OODA daemon: cognitive thread '{}' ENABLED (reactive)",
+                        h.id
+                    ),
+                }
+            } else {
+                format!(
+                    "[simard] OODA daemon: cognitive thread '{}' DISABLED (operator opt-out)",
+                    h.id
+                )
+            };
+            daemon_log(&state_root, &line);
+        }
     }
     // Creative-ideas startup line (mirrors the Journal thread) — logged
     // unconditionally so the operator can confirm the gate from journalctl.
@@ -1005,6 +1051,19 @@ pub fn run_ooda_daemon(
     let mut overseer_gap_scan_tick_idx: u64 = 0;
     // Prevents overlapping ticks from stacking up if one runs long.
     let overseer_tick_running = Arc::new(AtomicBool::new(false));
+    // Liveness watchdog (Observed Problem #3): the monotonic second the current
+    // in-flight tick was armed, plus a generation token. A tick that HANGS on a
+    // long gh/network call never clears `overseer_tick_running` via its Drop
+    // guard, so without a watchdog every later scheduled tick is silently
+    // dropped and the Overseer goes stale (the observed 86-minute gaps). The
+    // watchdog reclaims a tick that has exceeded its wall-clock budget; the
+    // generation token makes the reclaim race-free — a later-finishing hung tick
+    // sees a bumped generation and does NOT clear the fresh catch-up tick's
+    // guard. Bound: three cadence intervals, floored at 10 minutes.
+    let overseer_tick_armed_at = Arc::new(AtomicU64::new(0));
+    let overseer_tick_generation = Arc::new(AtomicU64::new(0));
+    let overseer_tick_watchdog =
+        crate::overseer::TickWatchdog::new(overseer_interval_secs.saturating_mul(3).max(600));
     // #893: running count of CONSECUTIVE transient (self-healable) cycle
     // failures, owned by the daemon across ticks (each tick rebuilds the
     // Overseer on a fresh thread). Reset to 0 on any completed tick; incremented
@@ -1464,6 +1523,10 @@ pub fn run_ooda_daemon(
                 "cycle_number": state.cycle_count + 1,
                 "status": "running",
                 "cycle_phase": state.current_phase.to_string(),
+                // Additive, observability-only (issue #4929): stamp the daemon's
+                // own PID so `simard status` can sample /proc/<pid> RSS + CPU
+                // instead of rendering "daemon CPU / RSS absent".
+                "main_pid": std::process::id(),
                 "cycle_start_epoch": cycle_start_epoch,
                 "interval_secs": interval_secs,
                 "actions_taken": format!("Starting cycle #{}", state.cycle_count + 1),
@@ -1590,6 +1653,9 @@ pub fn run_ooda_daemon(
                         "cycle_number": state.cycle_count,
                         "status": "healthy",
                         "cycle_phase": "sleep",
+                        // Additive, observability-only (issue #4929): see the
+                        // cycle-start heartbeat above.
+                        "main_pid": std::process::id(),
                         "cycle_start_epoch": cycle_start_epoch,
                         "cycle_duration_secs": cycle_elapsed.as_secs(),
                         "interval_secs": interval_secs,
@@ -1607,6 +1673,35 @@ pub fn run_ooda_daemon(
                 // Collect self-improvement metrics at end of each cycle.
                 if let Err(e) = crate::self_metrics::collect_and_record_all(cycle_elapsed) {
                     eprintln!("[simard] OODA metrics: failed to record: {e}");
+                }
+
+                // Bounded WAL-retention cadence (issue #4929): checkpoint the
+                // cognitive store every N cycles so the LadybugDB WAL is
+                // compacted into the main file regularly instead of growing for
+                // the daemon's whole uptime (which inflates replay work and the
+                // `cognitive.wal.corrupt` rotation surface). Adapter-scoped —
+                // `amplihack-memory-lib` is untouched. Failures are surfaced via
+                // structured tracing, never silently swallowed.
+                {
+                    const WAL_CHECKPOINT_EVERY_CYCLES: u32 = 20;
+                    if state.cycle_count > 0
+                        && state
+                            .cycle_count
+                            .is_multiple_of(WAL_CHECKPOINT_EVERY_CYCLES)
+                    {
+                        match shared_mem.checkpoint() {
+                            Ok(()) => tracing::debug!(
+                                cycle = state.cycle_count,
+                                cadence = WAL_CHECKPOINT_EVERY_CYCLES,
+                                "cognitive-store WAL checkpoint (bounded retention cadence)"
+                            ),
+                            Err(e) => tracing::warn!(
+                                cycle = state.cycle_count,
+                                error = %e,
+                                "cognitive-store WAL checkpoint failed; WAL retention not compacted this cadence"
+                            ),
+                        }
+                    }
                 }
 
                 // Issue #2528: emit unified cycle telemetry (OTel + in-process
@@ -1802,12 +1897,57 @@ pub fn run_ooda_daemon(
         // never crashes the daemon.
         if overseer_acting_enabled {
             let now_secs = overseer_epoch.elapsed().as_secs();
+            // Liveness watchdog (Observed Problem #3): before scheduling, check
+            // whether a previously-armed tick has hung past its wall-clock
+            // budget. If so, reclaim its slot so a catch-up tick can run rather
+            // than letting the stuck guard drop every future tick. Bumping the
+            // generation token invalidates the hung tick's Drop guard (the
+            // stale-clear race), and we surface a clear staleness/liveness
+            // signal via structured tracing + the durable daemon log.
+            if overseer_tick_watchdog.should_reclaim(
+                overseer_tick_running.load(Ordering::SeqCst),
+                overseer_tick_armed_at.load(Ordering::SeqCst),
+                now_secs,
+            ) {
+                let inflight = overseer_tick_watchdog
+                    .inflight_secs(overseer_tick_armed_at.load(Ordering::SeqCst), now_secs);
+                overseer_tick_generation.fetch_add(1, Ordering::SeqCst);
+                overseer_tick_running.store(false, Ordering::SeqCst);
+                tracing::warn!(
+                    target: "simard.overseer.watchdog",
+                    inflight_secs = inflight,
+                    max_inflight_secs = overseer_tick_watchdog.max_inflight_secs(),
+                    "overseer tick hung past its budget; reclaiming the slot for a catch-up tick"
+                );
+                daemon_log(
+                    &state_root,
+                    &format!(
+                        "[simard] WARN: overseer tick hung {inflight}s (budget {}s) — \
+                         reclaiming the overlap guard so scheduled ticks resume (liveness watchdog)",
+                        overseer_tick_watchdog.max_inflight_secs(),
+                    ),
+                );
+            }
             if overseer_cadence.due(now_secs)
                 && overseer_tick_running
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
             {
+                // Record the arm time + this tick's generation so the watchdog
+                // can detect a hang and the Drop guard can clear the slot only
+                // while this tick still owns it.
+                overseer_tick_armed_at.store(now_secs, Ordering::SeqCst);
+                let tick_generation = overseer_tick_generation.load(Ordering::SeqCst);
                 let running = Arc::clone(&overseer_tick_running);
+                let generation_for_tick = Arc::clone(&overseer_tick_generation);
+                // #4981: two more handles on the SAME shared generation token so
+                // the worker can (a) cooperatively cancel — stop acting the moment
+                // the watchdog reclaim bumps the generation past `tick_generation`
+                // — and (b) gate its own stale publications on generation
+                // equality. Both reuse the single fencing token the ClearOnDrop /
+                // watchdog already coordinate on; no new token is introduced.
+                let generation_for_cancel = Arc::clone(&overseer_tick_generation);
+                let generation_for_publish = Arc::clone(&overseer_tick_generation);
                 let consecutive_transient_counter = Arc::clone(&overseer_consecutive_transient);
                 let transient_ceiling = overseer_transient_ceiling;
                 let mem_for_tick = Arc::clone(&shared_mem);
@@ -1832,14 +1972,32 @@ pub fn run_ooda_daemon(
                 let spawn = std::thread::Builder::new()
                     .name("overseer-tick".to_string())
                     .spawn(move || {
-                        // Always clear the overlap guard, even on panic.
-                        struct ClearOnDrop(Arc<AtomicBool>);
+                        // Clear the overlap guard when this tick finishes (even
+                        // on panic) — but ONLY if this tick still owns the slot.
+                        // A liveness-watchdog reclaim bumps the generation, so a
+                        // hung tick that finishes AFTER being reclaimed must not
+                        // clear the fresh catch-up tick's guard (the stale-clear
+                        // race, pinned by `guard_generation_matches`).
+                        struct ClearOnDrop {
+                            running: Arc<AtomicBool>,
+                            generation: Arc<AtomicU64>,
+                            my_generation: u64,
+                        }
                         impl Drop for ClearOnDrop {
                             fn drop(&mut self) {
-                                self.0.store(false, Ordering::SeqCst);
+                                if crate::overseer::guard_generation_matches(
+                                    self.my_generation,
+                                    self.generation.load(Ordering::SeqCst),
+                                ) {
+                                    self.running.store(false, Ordering::SeqCst);
+                                }
                             }
                         }
-                        let _clear = ClearOnDrop(running);
+                        let _clear = ClearOnDrop {
+                            running,
+                            generation: generation_for_tick,
+                            my_generation: tick_generation,
+                        };
 
                         // Apply the gap-scan cadence for THIS tick on top of the
                         // config default build_overseer sets.
@@ -1855,9 +2013,42 @@ pub fn run_ooda_daemon(
                             // (name + purpose + cadence) captured from
                             // `Mind::health()` above, so the deterministic
                             // oversight pass can reason about each thread.
-                            .with_thread_registry(thread_healths.clone());
+                            .with_thread_registry(thread_healths.clone())
+                            // #4981: cooperative cancellation fenced on the SAME
+                            // generation token. Returns `true` once the watchdog
+                            // reclaim has bumped the shared generation past the
+                            // one THIS tick captured — i.e. a catch-up tick has
+                            // superseded this one. The tick then stops taking
+                            // further actions (an in-flight act still finishes).
+                            .with_cancel_check(Box::new(move || {
+                                generation_for_cancel.load(Ordering::SeqCst) != tick_generation
+                            }));
                         let (report, problem_entries) =
                             crate::overseer::run_overseer_tick_isolated_detailed(&mut overseer);
+                        // #4981: gate BOTH stale publications on generation
+                        // equality. If the liveness watchdog reclaimed this
+                        // tick's slot mid-flight (bumping the shared generation
+                        // past the one captured at arm time), this worker is
+                        // STALE: it must publish NEITHER the daemon-log tick
+                        // summary NOR the durable activity-feed record, so it can
+                        // never overwrite the fresh catch-up tick's state (or its
+                        // self-heal counter) with its superseded outcome. Emit one
+                        // bounded warning — generations + the observational
+                        // `superseded` flag only, never any tick payload — and
+                        // return. `ClearOnDrop` is already a no-op for a stale
+                        // generation, so returning here does not touch the guard.
+                        if generation_for_publish.load(Ordering::SeqCst) != tick_generation {
+                            tracing::warn!(
+                                target: "simard.overseer.watchdog",
+                                tick_generation,
+                                current_generation =
+                                    generation_for_publish.load(Ordering::SeqCst),
+                                superseded = report.superseded,
+                                "overseer tick superseded by watchdog reclaim; suppressing \
+                                 stale publication (no tick summary, no activity-feed write)"
+                            );
+                            return;
+                        }
                         daemon_log(
                             &state_root_for_tick,
                             &format!(
@@ -2321,6 +2512,74 @@ mod tests {
         clear_stale_draining_flag_at_boot_in(state.path(), log_root.path());
 
         assert!(crate::safe_update::draining_flag_path(state.path()).exists());
+    }
+
+    #[test]
+    fn startup_purge_removes_stale_actor_session_but_preserves_live_scope_guard() {
+        use crate::typed_ooda::{
+            ActionKind, AuthenticatedToolContext, CapabilityErrorCode, CapabilityGrant,
+            CapabilityHandler, CapabilityPolicy, RepositoryRef,
+        };
+
+        let state = tempfile::tempdir().expect("state root");
+        let ledger_path = crate::typed_ooda::ledger_path(state.path());
+        std::fs::create_dir_all(ledger_path.parent().expect("ledger parent"))
+            .expect("create ledger directory");
+        let actor = |cycle_id: &str, observe_only: bool| {
+            AuthenticatedToolContext::new(
+                "goal-session-actor",
+                "ooda-stable-goal-session",
+                [CapabilityGrant::RecordAction(ActionKind::SpawnEngineer)],
+            )
+            .scoped_to_repository(RepositoryRef::new("rysweet", "Simard"))
+            .bound_to_cycle_goal(cycle_id, "goal-perpetual")
+            .with_engineer_permissions(["repo_read"])
+            .with_observe_only(observe_only)
+        };
+        let lease = Duration::from_secs(30 * 24 * 60 * 60);
+
+        let prior_process =
+            CapabilityHandler::open(&ledger_path, CapabilityPolicy::new("policy-v1"))
+                .expect("open prior-process ledger");
+        prior_process
+            .register_actor_session(
+                &actor("cycle-before-restart", false),
+                "request-before-restart",
+                "cycle-before-restart",
+                "goal-perpetual",
+                lease,
+            )
+            .expect("persist future-dated prior-process lease");
+        drop(prior_process);
+
+        purge_actor_sessions_on_startup(state.path()).expect("startup purge must succeed");
+
+        let current_process =
+            CapabilityHandler::open(&ledger_path, CapabilityPolicy::new("policy-v1"))
+                .expect("reopen ledger after startup purge");
+        current_process
+            .register_actor_session(
+                &actor("cycle-after-restart", true),
+                "request-after-restart",
+                "cycle-after-restart",
+                "goal-perpetual",
+                lease,
+            )
+            .expect("startup purge must allow the stable session under its new scope");
+
+        let error = current_process
+            .register_actor_session(
+                &actor("cycle-live-scope-change", false),
+                "request-live-scope-change",
+                "cycle-live-scope-change",
+                "goal-perpetual",
+                lease,
+            )
+            .expect_err("a live scope change must still be rejected");
+        assert_eq!(
+            error.code(),
+            CapabilityErrorCode::AuthorizationScopeViolation
+        );
     }
 
     // ── shutdown_daemon ─────────────────────────────────────────────

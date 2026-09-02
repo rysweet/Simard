@@ -11,7 +11,7 @@ description: >
   plain-English operator notification on both channels). Deliberately WITHOUT
   record_step_failure plumbing or an N-identical-failure threshold counter: the
   journal already contains every failure, and an agent reading it sees them all.
-last_updated: 2026-07-21
+last_updated: 2026-07-27
 review_schedule: as-needed
 owner: simard
 doc_type: concept
@@ -126,9 +126,15 @@ caret, or surrounding backticks *before* matching a marker — otherwise a
 well-formed `LAUNCH_RECIPE=` line dressed as `- LAUNCH_RECIPE=…` would be
 silently dropped and a real crash-loop would go un-remediated with no signal
 (the terminal marker still parses, so the degraded-pass ladder never fires).
-Stripping decoration never *invents* a decision: only the three distinctive
-markers are ever acted on, a bulleted line of prose normalises to prose and
-matches nothing, and a malformed-JSON or empty-field decision is still skipped.
+Symmetrically, agents also append a short justification *after* a decision's JSON
+(`LAUNCH_RECIPE={…} — fixes the crash-loop`); because `serde_json` rejects a
+value with trailing non-whitespace, the rail first extracts the leading
+balanced JSON object (respecting braces inside string values) so that trailing
+clause is ignored rather than dropping the whole decision. Neither rail ever
+*invents* a decision: only the three distinctive markers are ever acted on, a
+bulleted line of prose normalises to prose and matches nothing, an
+unbalanced/truncated object is still skipped fail-closed, and a malformed-JSON or
+empty-field decision is still dropped.
 
 ### The verdict is observable, never a silent pass
 
@@ -141,20 +147,36 @@ gives `merge_reasoning_status`: an operator can always tell the three cases apar
 
 | `health_review_status` | Meaning |
 | --- | --- |
-| `NotRun` | no pass ran this tick — the rail is unwired, opted out, or off-cadence (the additive default) |
+| `NotRun` | no pass ran this tick — the rail is unwired or the tick is off-cadence (the additive default). An operator opt-out is **not** folded in here; it surfaces LOUD as `Disabled` |
+| `Disabled { reason }` | an operator EXPLICITLY opted out — either the dedicated `SIMARD_OVERSEER_HEALTH_REVIEW` knob or the shared `SIMARD_OVERSEER_GAP_SCAN` throttle; `reason` names WHICH knob so the disable is observable, never a silent `NotRun` |
 | `Reviewed { summary, decisions }` | a pass produced an honest verdict; `decisions` is the count of typed remediations it drove (`0` on a HEALTHY pass — an observable "reviewed, nothing to do", **not** a silent no-op) |
 | `Degraded` | a pass ran but degraded to no remediation (a base infra fault, or a truncated report the escalation ladder could not recover) — surfaced LOUD, never a silent OFF |
 
-The rail still fabricates nothing: `Reviewed { decisions: 0 }` and `Degraded`
-both leave the plan unchanged. The status only records WHAT the pass concluded,
-so a quiet-but-green Simard is distinguishable from one whose self-review never
-ran or silently degraded.
+The rail still fabricates nothing: `Disabled`, `Reviewed { decisions: 0 }`, and
+`Degraded` all leave the plan unchanged. The status only records WHAT the pass
+concluded (or WHY it did not run), so a quiet-but-green Simard is distinguishable
+from one whose self-review is opted out, never ran, or silently degraded.
+Surfacing the opt-out as `Disabled { reason }` — rather than letting the shared
+gap-scan throttle silently drop the crash-loop self-heal to `NotRun` — mirrors
+exactly how `observe_merge_queue` surfaces the SAME `SIMARD_OVERSEER_GAP_SCAN`
+opt-out on `merge_reasoning_status`.
 
 The surface is the cycle's `ObservedState` — the same reasoning-cycle field
 `merge_reasoning_status` lives on, carried on the `CycleReport` and asserted by
 the wiring tests. Like that precedent, this closes the *silent-pass* gap at the
-reasoning boundary (the verdict is no longer parsed-and-discarded); it does not
-add a new TUI/feed widget beyond the parity that field already establishes.
+reasoning boundary (the verdict is no longer parsed-and-discarded).
+
+The verdict also reaches the **operator feed**: `observed_details_from`
+(`src/overseer/wiring.rs`) renders a `Reviewed` pass as a `health-review:
+<summary>` line, a `Degraded` pass as a loud `health-review: degraded …` line,
+and a `Disabled` opt-out as a loud `health-review: disabled — <reason>` line
+naming the knob, which `humanize_tick_details` surfaces (prefixed `observed:`)
+in `simard status`, the TUI Overseer pane, and the dashboard SPA. Only a
+`NotRun` tick (unwired rail / off-cadence) adds no line, keeping the feed quiet
+on what genuinely did not run — an operator opt-out is never folded into that
+silence. So the "never a silent no-op / never a silent OFF" guarantee holds at
+the operator surface, not only on the struct field — a HEALTHY pass leaves a
+visible breadcrumb instead of an empty tick, and a disabled reflex says so.
 
 ### Systemic vs per-goal
 
@@ -189,7 +211,7 @@ leave the plan unchanged.
 | Env var | Effect | Default |
 | --- | --- | --- |
 | `SIMARD_OVERSEER_HEALTH_REVIEW` | opt-out for the whole rail | ON with the acting Overseer; an explicit falsey value (`0`/`false`/`no`/`off`) disables it |
-| `SIMARD_OVERSEER_GAP_SCAN` | shared throttle for ALL agentic Overseer scans | ON; also disables health-review when off |
+| `SIMARD_OVERSEER_GAP_SCAN` | shared throttle for ALL agentic Overseer scans | ON; when off it also disables health-review, surfaced LOUD as `health_review_status = Disabled` (never a silent skip) |
 | `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` | cadence divisor (run once every N ticks) | `1` (every tick), floored at `1` |
 | `SIMARD_OVERSEER_HEALTH_REVIEW_UNIT` | systemd `--user` unit whose journal to read | `simard-ooda.service` |
 | `SIMARD_BRAIN_ESCALATION_MAX_ATTEMPTS` | rungs the degraded-pass escalation ladder climbs after a base parse-miss (shared with the OODA brains); `0` disables the ladder | `2`, hard-capped at `3` |

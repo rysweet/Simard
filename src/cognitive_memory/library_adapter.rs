@@ -725,6 +725,14 @@ fn partition_fact_query(query: &str) -> FactQueryNeedles {
 ///
 /// Both fields are checked because the library matches a query against concept
 /// AND content, so gating on content alone would drop a legitimate concept hit.
+///
+/// This word-boundary judgment is the **served** relevance definition (#1 of the
+/// three the cognition stack carries — issue #4378). It deliberately differs from
+/// the substring-proxy oracle the `recall_precision_at_k` self-metric uses
+/// ([`crate::cognitive_memory::metrics::precision_at_k`]): a fact this gate
+/// EXCLUDES on an interior/suffix hit can still count as relevant for that metric.
+/// The divergence is intentional and pinned by
+/// `cognitive_memory::tests_relevance_definition_divergence`.
 fn fact_shares_query_relevance(concept: &str, content: &str, needles: &FactQueryNeedles) -> bool {
     if !needles.clean.is_empty()
         && (shares_word_prefix(content, &needles.clean)
@@ -1912,12 +1920,19 @@ impl CognitiveMemoryOps for LibraryCognitiveMemory {
     }
 
     fn checkpoint(&self) -> SimardResult<()> {
-        // The library exposes durability via `close`, which issues a LadybugDB
-        // CHECKPOINT (collapsing the WAL into the main file) while keeping the
-        // store usable. Flushing here mirrors the native backend's CHECKPOINT so
-        // a subsequent reopen of the same path observes all committed writes.
-        self.lock()?.close();
-        Ok(())
+        // Delegate to the library's purpose-built `CognitiveMemory::checkpoint`,
+        // which issues a LadybugDB CHECKPOINT (collapsing the WAL into the main
+        // file) and — crucially — leaves the store's warm schema/id caches
+        // intact. `close` would also work the CHECKPOINT, but it is a pre-drop
+        // teardown that clears those caches (forcing a schema reload on the next
+        // op) AND logs-and-swallows a failed CHECKPOINT, so routing through it
+        // would make this method return `Ok(())` even when the flush failed.
+        // `checkpoint` PROPAGATES the failure instead, so the daemon's bounded
+        // WAL-retention cadence (issue #4929) surfaces checkpoint errors rather
+        // than silently swallowing them.
+        self.lock()?
+            .checkpoint()
+            .map_err(|e| map_op_err("checkpoint", e))
     }
 }
 

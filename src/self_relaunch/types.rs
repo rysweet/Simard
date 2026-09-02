@@ -65,7 +65,12 @@ pub struct GateResult {
 impl Display for GateResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let status = if self.passed { "PASS" } else { "FAIL" };
-        write!(f, "[{}] {}: {}", status, self.gate, self.detail)
+        // Sanitise `detail` through the same redaction+length bound the
+        // tracing/OTel sink uses (#4511). `detail` is built from untrusted
+        // subprocess stderr and can embed a token-bearing remote URL; the
+        // operator-CLI sink (`eprintln!("{r}")`) must not print it raw.
+        let detail = super::gates::bound_gate_detail(&self.detail);
+        write!(f, "[{}] {}: {}", status, self.gate, detail)
     }
 }
 
@@ -189,5 +194,42 @@ mod tests {
         };
         let debug = format!("{result:?}");
         assert!(debug.contains("RpcHealth"), "{debug}");
+    }
+
+    // #4511: the operator-CLI sink (`eprintln!("{r}")`) must sanitise `detail`
+    // symmetrically with the tracing/OTel sink — never printing an embedded
+    // credential nor an unbounded blob.
+    #[test]
+    fn gate_result_display_redacts_embedded_credentials() {
+        let result = GateResult {
+            gate: RelaunchGate::Smoke,
+            passed: false,
+            detail: "clone failed: https://x-access-token:ghp_SECRETTOKEN123@github.com/o/r.git"
+                .to_string(),
+        };
+        let display = result.to_string();
+        assert!(
+            !display.contains("ghp_SECRETTOKEN123"),
+            "token leaked to operator-CLI sink: {display}"
+        );
+        assert!(display.contains("***@github.com"), "{display}");
+    }
+
+    #[test]
+    fn gate_result_display_bounds_oversized_detail() {
+        let result = GateResult {
+            gate: RelaunchGate::UnitTest,
+            passed: false,
+            detail: "x".repeat(4096),
+        };
+        let display = result.to_string();
+        // Prefix "[FAIL] unit-test: " + bounded 512-char detail + "..." — the
+        // full 4096-char blob must never reach the terminal.
+        assert!(
+            display.len() < 600,
+            "detail not bounded on operator-CLI sink: len={}",
+            display.len()
+        );
+        assert!(display.ends_with("..."), "{display}");
     }
 }

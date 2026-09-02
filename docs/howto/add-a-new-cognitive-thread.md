@@ -20,8 +20,8 @@ related:
 !!! note "Status — shipped (#2419)"
     The `CognitiveThread` trait, the `Mind`, and the `src/cognitive_threads/`
     module **have shipped**, so this guide is directly actionable. The scheduler
-    is additive and off by default in the live daemon (enable it with
-    `SIMARD_COGNITIVE_THREADS_ENABLED`); see
+    is enabled by default (opt-out) in the live daemon (silence it with
+    `SIMARD_COGNITIVE_THREADS_ENABLED=0`); see
     [Configure and monitor cognitive-thread scheduling](./configure-cognitive-thread-scheduling.md).
     The signatures, derives, and reuse contracts below match the
     [design reference](../reference/cognitive-thread-scheduling.md).

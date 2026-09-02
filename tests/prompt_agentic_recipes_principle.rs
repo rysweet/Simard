@@ -45,7 +45,7 @@ const RAIL_PHRASE: &str = "thin deterministic rail";
 const G3_REF: &str = "G3";
 const ENGINEER_SYSTEM_REF: &str = "engineer_system.md";
 
-/// The nine REASONING assets that must carry the canonical block, each paired
+/// The ten REASONING assets that must carry the canonical block, each paired
 /// with the output-contract anchor(s) the block must precede. `engineer_system.md`
 /// is intentionally absent — it already owns G3, which the block references.
 ///
@@ -59,6 +59,7 @@ const TARGETS: &[(&str, &[&str])] = &[
     ("overseer/observe.md", &["## OUTPUT"]),
     ("overseer/escalation_triage.md", &["## OUTPUT"]),
     ("overseer/deploy_gate.md", &["## OUTPUT"]),
+    ("overseer/health_review.md", &["## OUTPUT"]),
     ("goal_decomposition.md", &["## Output"]),
     ("improvement_curator_system.md", &["## Expected Outcomes"]),
     ("engineer_planning.md", &["Return ONLY"]),
@@ -73,11 +74,11 @@ fn prompt(rel: &str) -> String {
 }
 
 #[test]
-fn canonical_sentence_embedded_in_all_nine_reasoners() {
+fn canonical_sentence_embedded_in_all_reasoners() {
     assert_eq!(
         TARGETS.len(),
-        9,
-        "exactly nine reasoning assets must carry the block"
+        10,
+        "exactly ten reasoning assets must carry the block"
     );
     for (rel, _) in TARGETS {
         let contents = prompt(rel);

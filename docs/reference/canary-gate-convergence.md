@@ -255,6 +255,14 @@ values. This mirrors the credential redaction now applied to
 gate's detail is bounded and clean on **both** the per-gate span and the composed
 refusal reason.
 
+`bound_gate_detail` is also the single source of truth for the **operator-CLI
+sink**: `GateResult`'s `Display` (rendered by `operator_cli`'s
+`eprintln!("  {r}")` during a pre-handover gate run) routes `detail` through the
+same redact-then-bound path (#4511). Previously only the tracing/OTel sink
+sanitised the detail while the terminal path printed it raw, so a token-bearing
+or multi-megabyte stderr could leak to the operator console even though telemetry
+was clean. Both sinks now share `bound_gate_detail`, so they cannot diverge.
+
 | Attribute | Type | Present when | Example |
 | --- | --- | --- | --- |
 | `gate` | string | always (per span) | `rpc-health` |

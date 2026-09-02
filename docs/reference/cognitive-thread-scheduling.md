@@ -5,14 +5,15 @@ processes" vision; **this PR implements the scheduler + three threads**:
 the primary `OodaThread`, plus two exemplars — `MaintenanceThread` and
 `EngineerLogAnalysisThread`.
 
-!!! note "As shipped in this PR (additive & OFF by default)"
-    The scheduler landed **additively and disabled by default** to honour the
+!!! note "Default-ON (opt-out) since issue #4845"
+    The scheduler is **enabled by default (opt-out)** while preserving the
     byte-for-byte OODA-parity hard constraint:
 
-    - The `Mind` and all three threads exist and are fully unit-tested.
-    - In the **live daemon** the `Mind` is created only when
-      `SIMARD_COGNITIVE_THREADS_ENABLED` is truthy, and it hosts **only the two
-      background exemplars** (`MaintenanceThread`, `EngineerLogAnalysisThread`).
+    - The `Mind` and all threads exist and are fully unit-tested.
+    - In the **live daemon** the `Mind` is created unless
+      `SIMARD_COGNITIVE_THREADS_ENABLED` is set to an explicit falsy token, and
+      it hosts the full roster (`MaintenanceThread`, `EngineerLogAnalysisThread`,
+      the ten reflective threads, and `creative_ideas`).
       It runs **after** the daemon's existing inline OODA cycle each iteration,
       so it can never delay or starve OODA.
     - The daemon's authoritative OODA cycle stays **inline and unchanged**

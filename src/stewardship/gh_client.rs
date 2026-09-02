@@ -28,6 +28,17 @@ pub trait GhClient {
     fn search_issues(&self, repo: &str, signature: &str) -> SimardResult<Vec<GhIssue>>;
     /// Create a new issue in `repo`.
     fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue>;
+
+    /// Add a comment to an existing issue `number` in `repo` (issue #4930).
+    ///
+    /// Used by the durable issue-cooldown "comment-and-throttle" path to keep a
+    /// still-observed finding alive on its ONE canonical tracking issue instead
+    /// of filing a duplicate. The default implementation is a no-op (`Ok(())`)
+    /// so backends without comment support — and existing test fakes — keep
+    /// compiling; only [`RealGhClient`] actually posts the comment.
+    fn comment_on_issue(&self, _repo: &str, _number: u64, _body: &str) -> SimardResult<()> {
+        Ok(())
+    }
 }
 
 /// Production implementation that shells out to the `gh` binary.
@@ -238,7 +249,19 @@ fn issue_list_args(repo: &str, query: &IssueListQuery) -> Vec<String> {
     match query {
         IssueListQuery::Signature(signature) => {
             args.push("--search".to_string());
-            args.push(format!("stewardship-signature:{signature} in:body"));
+            // Full-text search for the bare 16-hex signature in the issue body.
+            //
+            // The signature MUST NOT be prefixed with the `stewardship-signature:`
+            // marker here: GitHub issue search parses a leading `<word>:` token as
+            // a *search qualifier*, so `stewardship-signature:<sig>` is treated as
+            // an unknown qualifier and silently matches NOTHING — the fast search
+            // then always returns empty, defeating dedup and letting a re-observed
+            // failure re-file a fresh `[stewardship] …` issue every tick (the
+            // observed issue-churn storm, #4962/#4956/#4951/#4945/#4942/#4957).
+            // A bare 16-hex signature is specific enough to full-text match only
+            // the intended tracking issue, and mirrors the working query in
+            // `supply_chain_steward::gh` (`"{signature} in:body"`).
+            args.push(format!("{signature} in:body"));
         }
         IssueListQuery::RecentOpen(limit) => {
             args.push("--limit".to_string());
@@ -342,6 +365,52 @@ impl GhClient for RealGhClient {
     fn create_issue(&self, repo: &str, title: &str, body: &str) -> SimardResult<GhIssue> {
         create_issue_with(OsStr::new("gh"), execute_create_issue, repo, title, body)
     }
+
+    fn comment_on_issue(&self, repo: &str, number: u64, body: &str) -> SimardResult<()> {
+        // Pass the body via stdin (`--body-file -`) so an arbitrarily large or
+        // metacharacter-bearing body is never expanded on the argv, mirroring the
+        // create-issue path's stdin discipline.
+        let mut child = Command::new("gh")
+            .args([
+                "issue",
+                "comment",
+                &number.to_string(),
+                "--repo",
+                repo,
+                "--body-file",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| SimardError::StewardshipGhCommandFailed {
+                reason: format!("`gh issue comment` spawn failed: {e}"),
+            })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(body.as_bytes()).map_err(|e| {
+                SimardError::StewardshipGhCommandFailed {
+                    reason: format!("`gh issue comment` stdin write failed: {e}"),
+                }
+            })?;
+        }
+        let output =
+            child
+                .wait_with_output()
+                .map_err(|e| SimardError::StewardshipGhCommandFailed {
+                    reason: format!("`gh issue comment` wait failed: {e}"),
+                })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SimardError::StewardshipGhCommandFailed {
+                reason: format!(
+                    "`gh issue comment {number} -R {repo}` exited {} with stderr:\n{stderr}",
+                    output.status
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -376,12 +445,35 @@ mod tests {
         assert!(args.windows(2).any(|w| w
             == [
                 "--search".to_string(),
-                "stewardship-signature:cafef00dcafef00d in:body".to_string()
+                "cafef00dcafef00d in:body".to_string()
             ]));
         assert!(!args.iter().any(|a| a == "--limit"));
         assert_eq!(
             args[0..6],
             ["issue", "list", "-R", "o/r", "--state", "open"]
+        );
+    }
+
+    /// Regression (#4962): the signature search MUST be a bare full-text term,
+    /// never a `stewardship-signature:` qualifier. GitHub parses a leading
+    /// `<word>:` as a search qualifier, so the marker-prefixed form matched
+    /// NOTHING and every re-observed failure re-filed a duplicate issue.
+    #[test]
+    fn signature_search_is_bare_fulltext_not_a_qualifier() {
+        let args = issue_list_args("o/r", &IssueListQuery::Signature("cafef00dcafef00d".into()));
+        let search = args
+            .windows(2)
+            .find(|w| w[0] == "--search")
+            .map(|w| w[1].clone())
+            .expect("Signature query must pass a --search term");
+        assert!(
+            !search.contains("stewardship-signature:"),
+            "the search term must NOT embed the `stewardship-signature:` qualifier \
+             (GitHub would parse it as a qualifier and match nothing): {search:?}"
+        );
+        assert!(
+            search.starts_with("cafef00dcafef00d"),
+            "the search term must lead with the bare signature: {search:?}"
         );
     }
 
