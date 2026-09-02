@@ -109,6 +109,25 @@ the port is at full parity.**
 Out-of-scope `KGP-B*` criteria do **not** gate parity; they are tracked
 separately for the Phase 9+ pack-authoring work.
 
+### Machine-checkable finish signal
+
+So the OODA done-gate can certify completion automatically (rather than
+re-observing "full parity" as unmeasurable and hard-parking the goal), this
+finish condition is bound to a single observable artifact:
+
+- **Tracking issue [rysweet/Simard#4321](https://github.com/rysweet/Simard/issues/4321)** —
+  its **CLOSED** state means full parity is reached. #4321 closes exactly when the
+  remaining in-scope criteria (**KGP-Q4**, **KGP-T3**, **KGP-Q5**) ship and both
+  `cargo test` commands above are green.
+- **[`scripts/check-agent-kgpacks-rs-parity-done-gate.sh`](../scripts/check-agent-kgpacks-rs-parity-done-gate.sh)** —
+  one command the done-gate can run. It exits `0` (certified complete) when #4321
+  is CLOSED, and otherwise exits non-zero after printing the exact remaining
+  criteria as the concrete next step, so this goal is never merely "stuck".
+
+The three in-scope criteria above remain **OPEN**; this binding only makes the
+*definition of done* automatically verifiable — it does not claim the parity work
+is finished.
+
 ## Ordered backlog (so the next cycle is never stuck)
 
 **No in-scope criterion remains OPEN — full parity is achieved.** Per the
