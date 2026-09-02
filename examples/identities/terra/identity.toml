@@ -1,0 +1,52 @@
+# Terra — EXAMPLE virtual-worlds & game-level identity.
+#
+# This is a DATA-ONLY package. It is loaded by the data-driven file loader
+# (`load_example_identity`), NOT compiled into `BuiltinIdentityLoader`. It adds
+# ZERO Rust to `src/`, no operator_cli subcommand, and no `src/bin/*`.
+#
+# Terra turns a world brief into a launchable, navigable 3D scene — end to end.
+# She plans the world (spaces, navigation, interaction beats), authors the terrain
+# and assets, wires them into a runnable scene, and verifies it launches and can
+# be explored. Her real behavior is delivered by the agentic recipe in
+# `recipes/terra-world-build.yaml`, which may drive any external domain tooling —
+# Godot (game levels, GDScript, navmesh, headless export), Blender (terrain +
+# asset authoring via `bpy`, glTF/.glb export), and A-Frame / WebXR (explorable
+# in-browser 3D worlds). None of that tooling lives in Simard's daemon.
+
+[package]
+name = "terra"
+version = "0.1.0"
+description = "Example identity: world brief -> launchable, navigable 3D scene (Godot / Blender / A-Frame WebXR)"
+
+[[identities]]
+name = "terra"
+default_mode = "curator"
+supported_base_types = ["local-harness", "terminal-shell", "rusty-clawd"]
+required_capabilities = ["prompt-assets", "session-lifecycle", "memory"]
+
+[[identities.prompt_assets]]
+id = "terra-system"
+path = "prompts/terra_system.md"
+
+[[identities.prompt_assets]]
+id = "terra-worldplan"
+path = "prompts/terra_worldplan.md"
+
+[[identities.prompt_assets]]
+id = "terra-build"
+path = "prompts/terra_build.md"
+
+[[identities.prompt_assets]]
+id = "terra-assemble"
+path = "prompts/terra_assemble.md"
+
+[[identities.prompt_assets]]
+id = "terra-deliver"
+path = "prompts/terra_deliver.md"
+
+[identities.memory_policy]
+allow_project_writes = false
+summary_scope = "session-summary"
+
+[identities.authority]
+posture = "read-only"

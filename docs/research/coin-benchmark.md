@@ -13,8 +13,11 @@ concrete, verified detail:
 4. **How** its leaderboard is structured — and why our use of it is
    **LOCAL-ONLY**.
 
-For the deeper study (target-construction signal algebra, the skwaq gym, and a
-LOCAL "COIN Gym" design sketch) see the companion document,
+The Phase-2 companion,
+[skwaq self-improvement loop](skwaq-self-improvement-loop.md), studies skwaq's
+gym and maps exactly which of its mechanisms we port into a LOCAL COIN Gym. For
+the deeper study (target-construction signal algebra plus the full LOCAL "COIN
+Gym" design sketch) see the
 [COIN benchmark & skwaq gym study](coin-benchmark-and-skwaq-study.md). This
 primer is deliberately self-contained on the four questions above.
 

@@ -519,11 +519,12 @@ pub(crate) const PART_05: &str = r#"      try {
       'activity':[{fn:fetchLogs,intervalMs:15000,paths:['/api/logs']},{fn:fetchTraces,intervalMs:30000,paths:['/api/traces']},{fn:fetchThinking,intervalMs:30000,paths:['/api/ooda-thinking']},{fn:fetchOodaCycles,intervalMs:30000,paths:['/api/ooda-cycles']},{fn:fetchBrainFailures,intervalMs:30000,paths:['/api/brain-failures']}],
       'workers':[{fn:fetchSubagentSessions,intervalMs:5000,paths:['/api/subagent-sessions']},{fn:fetchTmuxSessions,intervalMs:10000,paths:['/api/azlin/tmux-sessions']},{fn:fetchProcessTree,intervalMs:15000,paths:['/api/processes']}],
       'pull-requests':[{fn:fetchMergeJudge,intervalMs:30000,paths:['/api/merge-judge']},{fn:fetchPrReadiness,intervalMs:30000,paths:['/api/prs']}],
-      'resources':[{fn:fetchRecentMemories,intervalMs:120000,paths:['/api/memory/recent']},{fn:fetchMemoryHistory,intervalMs:120000,paths:['/api/memory/history']},{fn:fetchMemoryGraph,intervalMs:120000,paths:['/api/memory/graph']},{fn:fetchMemory,intervalMs:120000,paths:['/api/memory']},{fn:fetchCosts,intervalMs:120000,paths:['/api/costs']}],
+      'resources':[{fn:fetchRecentMemories,intervalMs:120000,paths:['/api/memory/recent']},{fn:fetchMemoryHistory,intervalMs:120000,paths:['/api/memory/history']},{fn:fetchCosts,intervalMs:120000,paths:['/api/costs']}],
       'chat':[{fn:loadChatSessions,intervalMs:120000,paths:['/api/chat/sessions']}],
       'overseer':[{fn:fetchOverseer,intervalMs:30000,paths:['/api/overseer']}],
       'journal':[{fn:loadJournal,intervalMs:120000,paths:['/api/journal/dates']}],
-      'creative-ideas':[{fn:loadCreativeIdeas,intervalMs:120000,paths:['/api/creative-ideas']}]
+      'creative-ideas':[{fn:loadCreativeIdeas,intervalMs:120000,paths:['/api/creative-ideas']}],
+      'memory':[{fn:fetchMemoryGraph,intervalMs:120000,paths:['/api/memory/graph']},{fn:fetchMemory,intervalMs:120000,paths:['/api/memory']},{fn:fetchEnrichment,intervalMs:30000,paths:['/api/enrichment']}]
     };
     window.TAB_LOADERS=TAB_LOADERS;
 

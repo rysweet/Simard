@@ -3,7 +3,7 @@
 //! The Act phase plans up to `cap = scaler.current_max()` `AdvanceGoal`
 //! actions per OODA round (one per uncovered incomplete goal). Before this
 //! module, every `AdvanceGoal` dispatch serialized on a single global
-//! `bridges`+`state` `Mutex` held across the slow goal-action LLM `run_turn`
+//! `memories`+`state` `Mutex` held across the slow goal-action LLM `run_turn`
 //! (~30-90s) — so only ~1 engineer started per round even when the plan was
 //! parallel.
 //!
@@ -26,6 +26,7 @@
 //! [`super::dispatch_actions_bounded`]; their behavior is unchanged.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Condvar, Mutex};
 
 use crate::base_types::BaseTypeSession;
@@ -37,7 +38,10 @@ use crate::ooda_loop::{
     ActionOutcome, OodaClients, OodaState, OrchestratorSessionFactory, PlannedAction,
 };
 
-use super::advance_goal::spawn::{dispatch_spawn_engineer, is_brain_failure_marker, lock_state};
+#[cfg(test)]
+use super::advance_goal::spawn::dispatch_spawn_engineer;
+use super::advance_goal::spawn::{is_brain_failure_marker, lock_state};
+#[cfg(test)]
 use super::goal_session::{GoalAction, apply_goal_advance_result, build_goal_advance_input};
 use super::make_outcome;
 
@@ -94,6 +98,7 @@ pub(super) fn try_claim(claims: &Mutex<HashSet<String>>, goal_id: &str) -> bool 
 }
 
 /// Shareable, `Sync` context handed to each concurrent dispatch thread.
+#[cfg_attr(not(test), allow(dead_code))]
 struct AdvanceCtx<'a> {
     memory: &'a dyn CognitiveMemoryOps,
     checker: &'a dyn ProgressEvidenceChecker,
@@ -107,6 +112,10 @@ struct AdvanceCtx<'a> {
     state: &'a Mutex<&'a mut OodaState>,
     claims: &'a Mutex<HashSet<String>>,
     sem: &'a Semaphore,
+    /// The daemon's own repository root (for the resource-admission gate's
+    /// `reclaim_first` disk-health recipe lookup — issue #2706).
+    repo_root: &'a Path,
+    observe_only: bool,
 }
 
 /// Dispatch the spawn-path `AdvanceGoal` actions at `indices` concurrently,
@@ -119,24 +128,28 @@ struct AdvanceCtx<'a> {
 pub(super) fn dispatch_advance_concurrent(
     actions: &[PlannedAction],
     indices: &[usize],
-    bridges: &mut OodaClients,
+    memories: &mut OodaClients,
     state: &mut OodaState,
     max_concurrency: usize,
     results: &mut [Option<ActionOutcome>],
 ) {
-    // Decompose the `Send + Sync` bridge pieces (everything AdvanceGoal needs
+    // Decompose the `Send + Sync` memory pieces (everything AdvanceGoal needs
     // except the single non-`Sync` session). Disjoint field borrows.
-    let memory: &dyn CognitiveMemoryOps = &*bridges.memory;
-    let checker: &dyn ProgressEvidenceChecker = &*bridges.progress_evidence;
-    let brain: &dyn OodaBrain = &*bridges.brain;
+    let memory: &dyn CognitiveMemoryOps = &*memories.memory;
+    let checker: &dyn ProgressEvidenceChecker = &*memories.progress_evidence;
+    let brain: &dyn OodaBrain = &*memories.brain;
     let session_factory: Option<&dyn OrchestratorSessionFactory> =
-        bridges.session_factory.as_deref();
+        memories.session_factory.as_deref();
+    // Daemon repo root for the resource-admission reclaim path (issue #2706).
+    let repo_root: &Path = &memories.repo_root;
+    let observe_only =
+        crate::read_only_guard::observe_only_enabled() || !state.identity_cognition.permits_spawn();
 
     // Take ownership of the shared fallback session for the duration of the
     // round so the per-thread context can lend it out by `Box` (avoids tying a
     // `&mut` into the ctx struct). Restored afterwards so daemon shutdown can
     // still close it.
-    let shared_session = Mutex::new(bridges.session.take());
+    let shared_session = Mutex::new(memories.session.take());
 
     let state_mx = Mutex::new(&mut *state);
     let claims = Mutex::new(HashSet::new());
@@ -151,6 +164,8 @@ pub(super) fn dispatch_advance_concurrent(
         state: &state_mx,
         claims: &claims,
         sem: &sem,
+        repo_root,
+        observe_only,
     };
     let ctx_ref = &ctx;
 
@@ -181,7 +196,7 @@ pub(super) fn dispatch_advance_concurrent(
     });
 
     // Restore the shared session so the daemon can close it on shutdown.
-    bridges.session = shared_session
+    memories.session = shared_session
         .into_inner()
         .unwrap_or_else(|p| p.into_inner());
 }
@@ -201,7 +216,7 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
     };
 
     // ── Phase 1: short state lock — classify + atomically claim ──────────
-    let (goal, prepared_context) = {
+    let (goal, _prepared_context) = {
         let mut guard = lock_state(ctx.state);
 
         let Some(goal) = guard
@@ -305,78 +320,103 @@ fn dispatch_advance_goal_concurrent(action: &PlannedAction, ctx: &AdvanceCtx) ->
         (goal, prepared)
     };
 
-    // ── Phase 2: slow goal-action LLM call — NO global lock held ─────────
-    // Acquire a session FIRST so the no-session case fails fast without
-    // building the (git/gh-shelling) turn input.
-    let run_result = match ctx.session_factory {
-        Some(factory) => match factory.open_session() {
-            Ok(mut session) => {
-                let input = build_goal_advance_input(ctx.memory, prepared_context.as_ref(), &goal);
-                let result = session.run_turn(input);
-                // Best-effort close; failure to close never masks the turn.
-                if let Err(e) = session.close() {
-                    tracing::warn!(
-                        target: "simard::ooda",
-                        goal = %goal_id,
-                        error = %e,
-                        "closing per-goal advance session failed; turn result preserved",
+    #[cfg(not(test))]
+    {
+        super::advance_goal::typed_goal_session::run(action, ctx.state, &goal, ctx.repo_root)
+    }
+
+    #[cfg(test)]
+    {
+        // ── Phase 2: slow goal-action LLM call — NO global lock held ─────────
+        // Acquire a session FIRST so the no-session case fails fast without
+        // building the (git/gh-shelling) turn input.
+        let run_result = match ctx.session_factory {
+            Some(factory) => match factory.open_session() {
+                Ok(mut session) => {
+                    let input = build_goal_advance_input(
+                        ctx.memory,
+                        _prepared_context.as_ref(),
+                        &goal,
+                        ctx.observe_only,
                     );
+                    let result = session.run_turn(input);
+                    // Best-effort close; failure to close never masks the turn.
+                    if let Err(e) = session.close() {
+                        tracing::warn!(
+                            target: "simard::ooda",
+                            goal = %goal_id,
+                            error = %e,
+                            "closing per-goal advance session failed; turn result preserved",
+                        );
+                    }
+                    result
                 }
-                result
-            }
-            Err(e) => {
-                return make_outcome(
-                    action,
-                    false,
-                    format!("goal '{goal_id}' cannot advance: failed to open LLM session: {e}"),
-                );
-            }
-        },
-        None => {
-            // No factory: fall back to the single shared session under a lock
-            // (serialized). Holding this session lock across `run_turn` is the
-            // accepted fallback cost; production wires a factory for true
-            // concurrency.
-            let mut sess_guard = ctx.shared_session.lock().unwrap_or_else(|p| p.into_inner());
-            match sess_guard.as_deref_mut() {
-                Some(session) => {
-                    let input =
-                        build_goal_advance_input(ctx.memory, prepared_context.as_ref(), &goal);
-                    session.run_turn(input)
-                }
-                None => {
+                Err(e) => {
                     return make_outcome(
                         action,
                         false,
-                        format!(
-                            "goal '{goal_id}' cannot advance: no LLM session available. Check SIMARD_LLM_PROVIDER and auth config."
-                        ),
+                        format!("goal '{goal_id}' cannot advance: failed to open LLM session: {e}"),
                     );
                 }
+            },
+            None => {
+                // No factory: fall back to the single shared session under a lock
+                // (serialized). Holding this session lock across `run_turn` is the
+                // accepted fallback cost; production wires a factory for true
+                // concurrency.
+                let mut sess_guard = ctx.shared_session.lock().unwrap_or_else(|p| p.into_inner());
+                match sess_guard.as_deref_mut() {
+                    Some(session) => {
+                        let input = build_goal_advance_input(
+                            ctx.memory,
+                            _prepared_context.as_ref(),
+                            &goal,
+                            ctx.observe_only,
+                        );
+                        session.run_turn(input)
+                    }
+                    None => {
+                        return make_outcome(
+                            action,
+                            false,
+                            format!(
+                                "goal '{goal_id}' cannot advance: no LLM session available. Check SIMARD_LLM_PROVIDER and auth config."
+                            ),
+                        );
+                    }
+                }
             }
+        };
+
+        // ── Phase 3: apply the parsed decision (short lock) ──────────────────
+        let result = {
+            let mut guard = lock_state(ctx.state);
+            apply_goal_advance_result(
+                action,
+                ctx.memory,
+                ctx.checker,
+                &mut guard.active_goals,
+                &goal,
+                run_result,
+                ctx.observe_only,
+            )
+        };
+
+        // ── Engineer spawn — short state critical sections only (the git
+        //    worktree allocation + detached subprocess run with NO lock held). ──
+        if let Some(GoalAction::SpawnEngineer { task, .. }) = result.action {
+            return dispatch_spawn_engineer(
+                action,
+                ctx.state,
+                &goal_id,
+                &task,
+                ctx.brain,
+                ctx.repo_root,
+            );
         }
-    };
 
-    // ── Phase 3: apply the parsed decision (short lock) ──────────────────
-    let result = {
-        let mut guard = lock_state(ctx.state);
-        apply_goal_advance_result(
-            action,
-            ctx.memory,
-            ctx.checker,
-            &mut guard.active_goals,
-            &goal,
-            run_result,
-        )
-    };
-
-    // ── Engineer spawn — short state critical sections only (the git
-    //    worktree allocation + detached subprocess run with NO lock held). ──
-    if let Some(GoalAction::SpawnEngineer { task, .. }) = result.action {
-        return dispatch_spawn_engineer(action, ctx.state, &goal_id, &task, ctx.brain);
+        result.outcome
     }
-
-    result.outcome
 }
 
 /// Classify whether an `AdvanceGoal` action is a spawn candidate (goal exists
@@ -398,6 +438,7 @@ pub(super) fn is_concurrent_advance_candidate(action: &PlannedAction, state: &Oo
 #[cfg(test)]
 fn active_goal_for_test(id: &str) -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

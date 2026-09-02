@@ -1,0 +1,28 @@
+digraph AgenticRecipes {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  callers[label="Callers: OODA orient/decide/lifecycle (RecipeBrain),\nstewardship merge judge, journal, disk-health,\ntyped-OODA actor, overseer merge-queue/ecosystem/smart-orchestrator"];
+  resolve[label="resolve_recipe_path (precedence)\n1) ~/.simard/prompt_assets/simard/recipes/<name>.yaml (hot-reload)\n2) <repo>/prompt_assets/simard/recipes/<name>.yaml (in-tree)"];
+  precond[label="RecipeBrain::new preconditions\nrecipe exists + recipe-runner-rs --version + agent binary"];
+  fresh  [label="(engineer-spawn path only) amplihack_freshness_gate\n'amplihack update' pre-spawn  src/amplihack_freshness_gate/"];
+  ctx    [label="ContextFile (only when a var is large; else inline argv)\nlarge vars -> 0700 temp file, -c key_path=... (avoids execve E2BIG)\nsrc/recipe_context_file.rs"];
+  spawn  [label="Command::new(recipe-runner-rs) recipe --output-format json\nenv AMPLIHACK_AGENT_BINARY -c key=value ...\n(overseer: amplihack recipe run smart-orchestrator)"];
+  agent  [label="agent binary (Copilot / Claude) runs recipe steps"];
+  stdout [label="stdout envelope {success, step_results:[{step_id, output}]}"];
+  extract[label="recipe_output: strip_ansi + strip_recipe_noise\nextract_json_payload / extract_verdict\nsrc/recipe_output/extract.rs"];
+  outcome[label="typed decision (OrientJudgment/DecideJudgment/Verdict)\nrecord_parse_outcome -> metrics.jsonl"];
+  back   [label="returned to caller (OODA phase / merge gate / typed-OODA effect)"];
+  inv    [label="prompt_assets/simard/recipes/*.yaml inventory\n(ooda-*, goal-*, merge-readiness-judge, observe-merge-queue,\necosystem-observe, journal-*, disk-*, distill-episodes, ...)", fillcolor="#fff6df"];
+  ext    [label="smart-orchestrator / default-workflow / investigation-workflow\nin amplifier-bundle (downstream), NOT this repo", fillcolor="#fff6df"];
+
+  callers -> resolve -> precond;
+  precond -> fresh [label="if engineer spawn", style=dashed];
+  precond -> ctx [label="if large var", style=dashed];
+  precond -> spawn;
+  fresh -> spawn [style=dashed]; ctx -> spawn [style=dashed];
+  spawn -> agent -> stdout -> extract -> outcome -> back;
+  resolve -> inv [label="reads", style=dashed];
+  spawn -> ext [label="external", style=dashed];
+}

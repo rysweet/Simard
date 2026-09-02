@@ -19,13 +19,13 @@ pub(super) fn test_store() -> CognitiveClientMemoryStore {
             message: format!("unknown method: {method}"),
         }),
     });
-    let bridge = CognitiveMemoryClient::new(Box::new(transport));
+    let client = CognitiveMemoryClient::new(Box::new(transport));
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let path = std::env::temp_dir().join(format!("adapter-test-{unique}.json"));
-    CognitiveClientMemoryStore::new(bridge, path).unwrap()
+    CognitiveClientMemoryStore::new(client, path).unwrap()
 }
 
 pub(super) fn make_record(key: &str, scope: MemoryScope) -> MemoryRecord {

@@ -135,7 +135,9 @@ cargo-audit:
         ref: ${{ steps.pin.outputs.sha }}
         path: .advisory-db
     - name: Install cargo-audit
-      uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
+      uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+      with:
+        tool: cargo-audit
     - name: Run cargo audit (offline, pinned DB)
       run: cargo audit --no-fetch --db .advisory-db
 ```
@@ -208,9 +210,11 @@ jobs:
       - name: Check out default branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install cargo-audit
-        uses: taiki-e/install-action@754bf4dbae00ad1b16b244717154b96ba27d2416 # cargo-audit
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with:
+          tool: cargo-audit
       - name: Install cargo-deny
-        uses: taiki-e/install-action@4e4e4d1450e58bef95d6f394ac20d46ad7d24ebf # cargo-deny
+        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
         with:
           tool: cargo-deny@0.19.9
       - name: Run supply-chain steward (scan DB HEAD, remediate)

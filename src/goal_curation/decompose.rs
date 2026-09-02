@@ -146,6 +146,19 @@ pub fn decompose_goal(
         )));
     }
 
+    // Sub-goals inherit the parent's full label set (so a child of a
+    // `source:creative-ideas` goal stays discoverable as creative-ideas-
+    // originated) and additionally carry `source:decomposition` recording how
+    // the child itself came to exist (issue #2743). Identical for every child.
+    let child_labels = {
+        let mut l = parent.labels.clone();
+        crate::goal_curation::labels::add_label(
+            &mut l,
+            crate::goal_curation::labels::SOURCE_DECOMPOSITION,
+        );
+        l
+    };
+
     // 3) Assign deterministic child ids (stable so a re-run dedups its edges).
     let child_ids: Vec<String> = (1..=proposals.len())
         .map(|i| format!("{goal_id}-c{i}"))
@@ -184,6 +197,7 @@ pub fn decompose_goal(
         parent.id.clone(),
         parent.description.clone(),
         None::<String>,
+        parent.labels.clone(),
     );
     write_node(mem, &parent_node)?;
     for (idx, child_id) in child_ids.iter().enumerate() {
@@ -194,6 +208,7 @@ pub fn decompose_goal(
                 child_id.clone(),
                 proposal.description.clone(),
                 Some(proposal.done_criterion.clone()),
+                child_labels.clone(),
             ),
         )?;
         write_edge(
@@ -246,6 +261,7 @@ pub fn decompose_goal(
                     )
                     .with_repo(parent.repo.clone())
                     .with_parent(Some(goal_id.to_string()))
+                    .with_labels(child_labels.clone())
                 })
                 .collect();
             let signals = sibling_dependency_signals(&child_ids, &proposals);
@@ -705,12 +721,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_rejects_wellformed_json_with_schema_invalid_entry() {
+        // A realistic agent slip: valid JSON, right container, but an entry is
+        // missing the required `done_criterion`. serde enforces the field, so
+        // this is a LOUD `sub_goals` error — never a half-populated proposal.
+        let text = r#"{"sub_goals":[{"description":"A only, no done_criterion"}]}"#;
+        let err = parse_subgoals_json(text)
+            .expect_err("a sub-goal missing a required field must be rejected loudly");
+        match err {
+            SimardError::InvalidGoalRecord { field, .. } => assert_eq!(field, "sub_goals"),
+            other => panic!("expected InvalidGoalRecord{{field:\"sub_goals\"}}, got {other:?}"),
+        }
+    }
+
     // ── Group B: `harvest_subgoals_file` is the hermetic AGENT→SIMARD transport
     //    seam. It reads the dedicated result FILE the agent wrote and NEVER
     //    parses stdout. Constructed with a synthetic `std::process::Output` so
     //    the "stdout noise is inert" contract is provable without a subprocess.
-    //    Mirrors distillation's `harvest_facts_file`, but STRICTER (adds a size
-    //    cap + an empty/whitespace rejection distill lacks). ────────────────────
+    //    Mirrors distillation's *former* file-channel reader
+    //    (`harvest_facts_file`, since retired for its direct-to-memory semantic
+    //    handoff), but STRICTER: it adds a size cap + an empty/whitespace
+    //    rejection that reader lacked. ────────────────────────────────────────
 
     /// A realistic slice of noisy recipe-runner stdout: ANSI, tracing lines, and
     /// the copilot launcher banner. Under the old code its outermost `{…}` slice

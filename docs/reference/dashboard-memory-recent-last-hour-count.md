@@ -1,0 +1,447 @@
+---
+title: Dashboard — honest "items remembered in the last hour" count
+description: Reference for the Resources → Memory headline statistic "items remembered in the last hour", which reflects the LIVE net growth of Simard's long-term cognitive memory over the trailing hour instead of a hardcoded 0. GET /api/memory/recent computes last_hour_count as max(0, live_long_term_total − baseline_long_term_total), where the live total (episodic+semantic+procedural+prospective) is read through the single shared reader open_reader_client → get_statistics(), and the baseline is the most-recent memory_history.json snapshot at-or-before now−3600s. The endpoint also surfaces last_hour_window_secs (now − baseline.epoch) so the caption honestly labels the ACTUAL covered window — "in the last hour" only within ±15 min of an hour, otherwise the true span (#4318) — instead of overstating a sparse-snapshot gap as one hour. The endpoint fails closed (error JSON, count/window null) on a live-read error and never returns a placeholder. Hermetic serial tests and an outside-in gadugi scenario pin the window, caption, and data-source semantics so the metric cannot silently regress.
+last_updated: 2026-07-21
+owner: simard
+doc_type: reference
+related:
+  - ../dashboard.md
+  - ../memory.md
+  - ./dashboard-memory-tab.md
+  - ./dashboard-overview-health-and-live-memory.md
+  - ./cognitive-memory-client-helpers.md
+---
+
+# Dashboard — honest "items remembered in the last hour" count
+
+The Resources → **Memory** sub-section leads with a large headline number and
+the caption **"items remembered / in the last hour"** (`#mem-recent-count`,
+`index_html/part_00.rs`). That number now reports the **live** net growth of
+Simard's long-term cognitive memory over the trailing hour. Previously it was a
+**hardcoded `0`** — the dashboard told operators "Simard has remembered 0 items
+in the last hour" even while memory consolidation was actively running (~30
+actions / 30 min) and the total fact / procedure / episode counts were climbing
+all day ([#2679](https://github.com/rysweet/Simard/issues/2679)).
+
+> **What changed.** The look is unchanged — same headline card, same caption.
+> One thing is fixed: the backend field that feeds it,
+> `GET /api/memory/recent` → `last_hour_count`, is now **computed from live
+> memory state** instead of being emitted as the literal `0` that a prior
+> de-fork ([#2307](https://github.com/rysweet/Simard/issues/2307)) left behind
+> as a placeholder. This is a **data fix to an existing card**, not a new
+> surface.
+
+## Root cause (what was wrong)
+
+`memory_recent()` in `operator_commands_dashboard/memory.rs` read the aggregate
+`total` live — through the healthy `open_reader_client(state_root)?.ops()
+.get_statistics()?` path — but returned `last_hour_count` as a **literal `0`**.
+The per-item recent listing had also been stubbed during de-fork Phase 2b
+(#2307): the library backend exposes no "list nodes newer than T" API, so both
+the last-hour field and the `items` list were hardcoded rather than computed.
+The last-hour field is now computed (below); the `items` list is now populated
+from the newest stored episodes via `list_all_episodes` (newest-first) — the
+same shared reader that backs `/api/memory/graph`. The engine read was
+never broken: the defect was a **stale placeholder binding** in the dashboard's
+aggregation layer.
+
+Because the bug was in the dashboard's read window / aggregation and **not** in
+the memory engine's count or recall read, the fix lands entirely **Simard-side**.
+It touches no `amplihack-memory-lib` code, requires no `amplihack-memory` pin
+bump, and does not supersede the engine-side error-propagation work in
+[PR #113](https://github.com/rysweet/amplihack-memory-lib/pull/113) —
+that memory-arch policy gate is satisfied here by keeping the change in the
+dashboard.
+
+## What the operator sees
+
+| Situation | Headline count | List body |
+|-----------|----------------|-----------|
+| Long-term memory grew by *N* in the trailing hour | *N* (e.g. `27`) | `No new memories in the last hour — <total> total stored.`¹ |
+| A pruning / low-activity hour (net long-term change ≤ 0) | `0` — honestly | same as above |
+| No snapshot history yet (cold start / <1 h uptime) | `0` — a snapshot is seeded so the metric self-heals on the next poll | same as above |
+| Live cognitive store unreachable | `—` (em dash) | the `error` string rendered in red |
+
+¹ The list body still shows this headline summary line; the per-item recent
+list is now populated separately from the newest stored episodes (see the
+`items` field below). The headline count is the honest signal that memory *is*
+moving. Note the count
+is **net** growth (additions minus pruning/consolidation over the hour), not a
+gross count of every item written: an hour that adds many items but prunes at
+least as many reads `0`. For per-type deltas and growth rates, see
+`GET /api/memory/history`
+([Memory tab](./dashboard-memory-tab.md) and
+[live memory-consolidation display](./dashboard-overview-health-and-live-memory.md)).
+
+The caption is honest about the window it covers (#4318). In steady state the
+trailing-hour baseline is ~1 h old and the caption reads **"in the last hour"**.
+But when `memory_history.json` has a gap wider than an hour straddling the 1 h
+mark, the most-recent baseline at-or-before `now − 3600 s` can be arbitrarily
+older (e.g. 2.6 h), so the count is net growth over that **longer** span. The
+endpoint now surfaces the ACTUAL covered window as `last_hour_window_secs` and
+the caption renders it truthfully — "in the last hour" only when the window is
+within ±15 min of an hour (or unknown), otherwise the real span (e.g. **"in the
+last 2.6h"** / **"in the last 34 min"**). The number is never hidden; it is
+simply labelled with the window it actually measures.
+
+## Live data source: `GET /api/memory/recent`
+
+The headline number is driven by the `last_hour_count` field of this endpoint.
+The endpoint reads the **live** cognitive store through the single shared reader
+and derives the trailing-hour delta from the on-disk snapshot history; there is
+no placeholder on the normal path.
+
+### Response shape
+
+```jsonc
+{
+  "items": [                   // newest episodic memories, newest-first (capped at 25)
+    {
+      "category": "Past event",          // the frontend category the panel color-codes
+      "summary": "OODA cycle #1857: 5 actions (4/5 succeeded)…",  // episode content (bounded)
+      "timestamp": "2026-07-21T08:41:57Z", // episode created_at as RFC3339 (issue #4383); null only if the episode genuinely lacks one
+      "source": "ooda-cycle",            // the episode's source label
+      "node_id": "epi_…"                 // stable episode node id
+    }
+  ],
+  "total": 41822,              // live aggregate stored count across all six memory types
+  "last_hour_count": 27,       // LIVE net growth of long-term memory over the trailing hour
+  "last_hour_window_secs": 3661.0, // the ACTUAL span the count covers (now − baseline.epoch); ~3600 in steady state, larger over a sparse-snapshot gap (#4318); null only on the error path
+  "available": true,           // per-item recent listing is available on the library backend
+  "note": "Recent items are the newest episodic memories (events Simard recorded), newest-first; `total` is the live aggregate stored count across all six memory types. See /api/memory/graph for the full per-type graph and /api/memory/history for the per-type growth breakdown.",
+  "server_time": "2026-07-07T18:34:00Z"
+}
+```
+
+### Field contract
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `last_hour_count` | `integer` (`u64`) on the normal path; `null` on the error path | Net growth of **long-term** memory (episodic + semantic + procedural + prospective) over the trailing hour, clamped to ≥ 0. This is the value bound to `#mem-recent-count`. |
+| `last_hour_window_secs` | `number` (`f64` seconds) on the normal path; `null` on the error path | The ACTUAL window the count covers: `now − baseline.epoch_secs` (#4318). ~`3600` in steady state; **larger** when the snapshot history has a gap wider than an hour straddling the 1 h mark (the baseline is then older than 1 h, so the count spans that longer window). The frontend labels the caption honestly from this value — "in the last hour" only within ±15 min of 3600 s (or when `null`), otherwise the true span. On cold start a fresh snapshot is seeded at `now`, so the window is a small, honest near-zero rather than a fabricated 3600. |
+| `total` | `integer` (`u64`); **omitted on the error path** | Live aggregate stored count across **all six** memory types (`CognitiveStatistics::total()`); rendered beside the headline as `<total> total`. Present with the same value on the normal path (unchanged by this fix); on the error path the payload omits it, mirroring `GET /api/memory/history`. |
+| `items` | array of objects | The newest **episodic** memories, newest-first (by `temporal_index`), capped at 25. Each item carries `category` (always `"Past event"`), `summary` (bounded episode content), `timestamp` (the episode's `created_at` as an RFC3339 string so the frontend can render a "time ago" label — issue #4383; `null` only for episodes that genuinely lack a wall-clock instant, never a fabricated epoch), `source`, and `node_id`. Populated through the same shared reader (`open_reader_client` → `list_all_episodes`) that backs `/api/memory/graph`. Empty `[]` when the store holds no episodes or the episode read fails. |
+| `available` | `bool` | Whether per-item recent listing succeeded (`true` when the reader enumerated episodes; `false` on the error path or when the episode read failed). |
+| `note` | `string` | Human-readable, path-free explanation of what `items`/`total` show and where the per-type graph and deltas live. |
+| `server_time` | `string` (RFC 3339) | Server timestamp of the read. |
+| `error` | `string` (only on the error path) | Present only when the live reader could not be opened / read. On this path `last_hour_count` and `last_hour_window_secs` are `null`, `available` is `false`, and `items` is `[]`. |
+
+**Back-compatible.** On the normal (success) path, every field that existed
+before the fix (`items`, `total`, `available`, `note`, `server_time`) is
+preserved with the same type. The behavioural changes are that
+`last_hour_count` went from a constant `0` to a computed value, `items`/
+`available` went from the retired always-`[]`/`false` stub to the live
+newest-episodes feed the Memory tab's "Recent Memories" panel already knew how
+to render, and a purely **additive** `last_hour_window_secs` field was added so
+the caption can label the true window (#4318). No field was removed or renamed
+on the success path. On read failure
+the endpoint **fails closed** — `last_hour_count` and `last_hour_window_secs`
+are `null`, a new `error` field is added, and the count-only fields (`total`,
+`note`) are omitted — instead of the prior behaviour of returning `total: 0`
+with no `error`. This deliberately aligns the failure shape with
+`GET /api/memory/history`.
+
+### How `last_hour_count` is computed
+
+```text
+last_hour_count = max(0, live_long_term_total − baseline_long_term_total)
+```
+
+- **`live_long_term_total`** — the sum of the four long-term memory types
+  (`episodic + semantic + procedural + prospective`) from a single live
+  `get_statistics()` read through `open_reader_client`. This is the same live
+  read path the Memory tab and `/api/memory/history` use, so the number never
+  diverges from the counts shown elsewhere. Transient `sensory` and `working`
+  memory are **excluded** — they are task-scoped churn that pruning makes
+  net-negative and noisy, and "remembered" means *consolidated into long-term
+  memory*.
+- **`baseline_long_term_total`** — the `long_term_total` of the most-recent
+  `MemorySnapshot` in `memory_history.json` whose `epoch_secs ≤ now − 3600`
+  (at-or-before the one-hour edge). This pins the trailing-hour window
+  deterministically.
+- **Fallback** — if the only snapshots are younger than one hour (short
+  uptime), the **earliest** snapshot is used, so the metric honestly reports the
+  growth over the partial window rather than fabricating a full hour.
+- **Cold start** — if there is no history at all, a snapshot is seeded at `now`
+  (via `append_snapshot_if_due`, see below) and the count reads `0` until a
+  real baseline ages past the hour edge. It self-heals on subsequent polls.
+- **Clamp** — a net-negative interval (pruning / consolidation shrank the
+  long-term total) is clamped to `0` with a saturating subtraction. Simard
+  cannot "remember a negative number"; a genuinely low-activity hour honestly
+  reads `0`, never a spurious large value.
+
+Because baselines are discrete snapshots taken at most every
+`SNAPSHOT_MIN_INTERVAL_SECS` (5 min), the window edge has a granularity of about
+one sample interval. That is disclosed in the `note` and is intentional — the
+goal is an **honest non-zero** signal that memory is moving, not sub-second
+window exactness. The helper always selects the closest sample **at or before**
+the edge, bounding the error to one interval.
+
+### Snapshot history and the read-path side effect
+
+`last_hour_count` reuses the same `memory_history.json` ring buffer that powers
+`GET /api/memory/history`:
+
+- Each `MemorySnapshot` carries `epoch_secs`, `total`, and
+  `long_term_total` (= `episodic + semantic + procedural + prospective`).
+- On every `GET /api/memory/recent`, the handler calls
+  `append_snapshot_if_due(...)`, which records a new snapshot only if
+  `SNAPSHOT_MIN_INTERVAL_SECS` (5 min) has elapsed since the last one, and trims
+  the buffer to `HISTORY_MAX_SNAPSHOTS` (500). `append_snapshot_if_due` is the
+  **same shared, already-gated** writer `GET /api/memory/history` uses: it
+  records at most one snapshot per `SNAPSHOT_MIN_INTERVAL_SECS` across **all**
+  callers. Adding this second call site on `/api/memory/recent` therefore does
+  **not** increase snapshot-write frequency — the dashboard polls both endpoints,
+  and whichever fires first inside the 5-minute window records the sample. It
+  simply keeps the baseline accumulating so the metric self-heals over time.
+  (Before this fix `/api/memory/recent` did not touch history at all, so this
+  is a **new write call site** at this endpoint. What is unchanged is the
+  **global snapshot cadence** — at most one write per
+  `SNAPSHOT_MIN_INTERVAL_SECS` across all callers — because the added call
+  shares the same gated writer rather than adding an independent write.)
+
+### Error path (fail-closed)
+
+If the live reader cannot be opened or `get_statistics()` fails, the endpoint
+**fails closed**, mirroring `GET /api/memory/history`:
+
+```jsonc
+{
+  "items": [],
+  "available": false,
+  "last_hour_count": null,
+  "error": "Cannot read cognitive memory: <reason>",
+  "server_time": "2026-07-07T18:34:00Z"
+}
+```
+
+The dashboard renders the `error` string in red and shows `—` for the headline
+(`fetchRecentMemories` in `index_html/part_03.rs` already branches on
+`d.error`). It never shows a fabricated `0` in place of a real read failure.
+
+### Example
+
+```bash
+curl -s --cookie "session=<code>" http://localhost:8080/api/memory/recent \
+  | jq '{last_hour_count, total, available}'
+```
+
+```json
+{
+  "last_hour_count": 27,
+  "total": 41822,
+  "available": true
+}
+```
+
+Confirm the metric is honest by cross-checking the same growth in the per-type
+history endpoint:
+
+```bash
+curl -s --cookie "session=<code>" http://localhost:8080/api/memory/history \
+  | jq '.rate_per_hour'
+```
+
+```json
+{ "total": 30.0, "long_term_total": 27.0, "episodic": 18.0, "semantic": 4.0, "procedural": 3.0, "prospective": 2.0 }
+```
+
+The `long_term_total` growth rate from `/api/memory/history` and the
+`last_hour_count` from `/api/memory/recent` describe the same underlying live
+movement (one as a rate, one as a trailing-hour count), so the two panels agree.
+
+## Backend architecture
+
+### Route wrapper + env-free testable core
+
+Following the established `goals()` → `goals_at(state_root)` split
+(`operator_commands_dashboard/goals.rs`, #2408 / #2384), the handler resolves
+the ambient state root in a thin wrapper and delegates all logic to an
+env-free core that takes an **explicit** `state_root`, so it can be driven
+deterministically without HTTP or environment variables:
+
+```rust
+/// `GET /api/memory/recent` — resolves the ambient state root and delegates.
+pub(crate) async fn memory_recent() -> Json<Value> {
+    memory_recent_at(&resolve_state_root()).await
+}
+
+/// Env-free core of `memory_recent`: computes the trailing-hour long-term
+/// growth from the EXPLICIT `state_root`, so tests can pin `state_root`
+/// directly instead of via `SIMARD_STATE_ROOT`.
+pub(crate) async fn memory_recent_at(state_root: &std::path::Path) -> Json<Value>;
+```
+
+`memory_recent_at`:
+
+1. Reads live stats once via `open_reader_client(state_root)` →
+   `.ops().get_statistics()`. On error it returns the fail-closed JSON above.
+2. Calls `append_snapshot_if_due(&history_path, &stats)` to keep the baseline
+   history current.
+3. Computes `live_long_term_total` inline
+   (`episodic + semantic + procedural + prospective`, mirroring
+   `MemorySnapshot::from_stats`).
+4. Selects the baseline via the pure helper below and returns
+   `max(0, live − baseline)` as `last_hour_count`.
+
+### Pure baseline selector
+
+The window logic is a pure, I/O-free helper so the boundary rule is unit-testable
+with an injected `now`:
+
+```rust
+/// Long-term total of the most-recent snapshot at-or-before `now_secs − 3600`,
+/// falling back to the earliest snapshot; `None` on empty history.
+fn select_last_hour_baseline(history: &[MemorySnapshot], now_secs: f64) -> Option<u64>;
+
+/// Same selection rule, but returns the whole baseline SNAPSHOT so the caller
+/// can read its `epoch_secs` and surface `last_hour_window_secs` (#4318). The
+/// scalar helper above delegates to this.
+fn select_last_hour_baseline_snapshot(
+    history: &[MemorySnapshot],
+    now_secs: f64,
+) -> Option<&MemorySnapshot>;
+```
+
+- `cutoff = now_secs − LAST_HOUR_WINDOW_SECS` (3600 s).
+- Filter to snapshots with `epoch_secs ≤ cutoff`, take the **most-recent** such.
+- If none qualify, fall back to the earliest snapshot; empty history → `None`
+  (the caller then uses the live total, yielding `0` at cold start).
+- The covered window surfaced to the frontend is
+  `last_hour_window_secs = now_secs − baseline.epoch_secs`. It equals ~3600 in
+  steady state but is **larger** when the chosen baseline is older than 1 h (a
+  sparse-snapshot gap), which is exactly what the honest caption reflects
+  (#4318).
+
+### Single shared live reader
+
+The read goes through `open_reader_client(state_root) -> SimardResult<ReaderClient>`
+and `ReaderClient::ops() -> &dyn CognitiveMemoryOps` — the **same** shared live
+read path the Memory tab, `/api/memory/history`, and the rest of the dashboard
+use. There is no second handle and no stale snapshot on the normal path.
+
+> **No "Bridge" identifiers.** The accessor is `open_reader_client` returning
+> `ReaderClient`; this fix introduces no new `*Bridge` symbol.
+
+### No stray diagnostics
+
+The read path emits **no** `println!` / `eprintln!`. Read failures surface
+through the `error` field and normal `Result` handling; any diagnostics use
+`tracing`, keeping production output clean.
+
+## Configuration
+
+No new configuration is introduced. The metric is governed by constants already
+defined in `operator_commands_dashboard/memory.rs`, plus one added window
+constant:
+
+| Constant | Value | Role |
+|----------|-------|------|
+| `LAST_HOUR_WINDOW_SECS` | `3600.0` | Trailing window for `last_hour_count`. A baseline snapshot must be at-or-before `now − LAST_HOUR_WINDOW_SECS`. |
+| `SNAPSHOT_MIN_INTERVAL_SECS` | `300` | Minimum spacing between recorded snapshots (5 min). Sets the effective granularity of the window edge. |
+| `HISTORY_MAX_SNAPSHOTS` | `500` | Ring-buffer cap for `memory_history.json`. |
+
+The snapshot history lives at `<state_root>/memory_history.json`, where
+`state_root` is resolved by `resolve_state_root()` (honouring `SIMARD_STATE_ROOT`).
+
+## Tests
+
+A hermetic, serial regression test pins both the time-window and the
+data-source semantics so the count cannot silently regress to `0`:
+
+1. **Integration — `last_hour_count` is nonzero after in-window writes**
+   (`operator_commands_dashboard/tests_memory_recent_last_hour.rs`, wired via
+   `#[cfg(test)] mod tests_memory_recent_last_hour;` in `mod.rs`, annotated
+   `#[serial_test::serial(cognitive_memory)]`). It:
+   - pins `SIMARD_STATE_ROOT` to a `HermeticState` temp root and opens a live
+     `LibraryCognitiveMemory`, registering it as the in-process writer
+     (`register_in_process_writer`);
+   - captures the current long-term total `T0`, then seeds
+     `memory_history.json` with one baseline `MemorySnapshot` at
+     `epoch_secs = now − 3600` and `long_term_total = T0`;
+   - writes **N** in-window items via `store_episode` / `store_fact` (both feed
+     `long_term_total`);
+   - calls `memory_recent_at(state.state_root())` and asserts
+     `last_hour_count == N` (**not `0`**), that `total` / `available` are
+     preserved, and that no `error` key is present.
+
+2. **Unit — `select_last_hour_baseline` window edge**
+   (same test module, no I/O, injected `now_secs`). Asserts that a snapshot at
+   **exactly** `now − 3600` **is** selected (locking the `≤ cutoff` boundary),
+   that a snapshot at `now − 3599` is **not**, that sub-hour-only history falls
+   back to the earliest snapshot, and that empty history yields `None`. This
+   pins the off-by-one / window-boundary behaviour independently of wall-clock
+   timing.
+
+3. **Honest window (#4318)** — `last_hour_window_secs` disclosure. In the same
+   test module:
+   - **Unit** — `select_last_hour_baseline_snapshot` returns the same baseline
+     the scalar helper reduces to and exposes its `epoch_secs`, so the handler
+     can compute the true window.
+   - **Integration** — with a single baseline seeded **2.6 h** old (a
+     sparse-snapshot gap with nothing near the 1 h mark),
+     `memory_recent_at` reports `last_hour_count == N` **and**
+     `last_hour_window_secs ≈ 9360` (materially wider than an hour), so the
+     caption can label the real 2.6 h span instead of "in the last hour". A
+     steady-state case (~61-min baseline) asserts a ~3660 s window that falls
+     inside the ±15 min "last hour" band, and a cold-start case asserts a
+     small (~0 s) honest window rather than a fabricated 3600.
+   - **HTML renderer contract** (`index_html/tests_memory_tab.rs`) — the caption
+     lives in an addressable `#mem-recent-window` element, `formatWindowCaption`
+     implements the ±15 min honesty rule and hours rendering, and
+     `fetchRecentMemories` wires `formatWindowCaption(d.last_hour_window_secs)`
+     into it.
+   - **Outside-in qa-team scenario**
+     (`tests/gadugi/dashboard-memory-recent-last-hour-window-honesty.yaml` +
+     `.sh`) boots the real dashboard binary, authenticates, and asserts both the
+     live `/api/memory/recent` shape (numeric/`null` `last_hour_window_secs`) and
+     the served HTML renderer contract. Validated with `gadugi-test validate` and
+     run with `gadugi-test run`.
+
+## Constraints honoured
+
+- **Additive / back-compatible on the success path.** No endpoint removed or
+  renamed; `/api/memory`, `/api/memory/recent`, `/api/memory/history`,
+  `/api/memory/search` keep their existing fields. On the success path every
+  prior field is preserved and `last_hour_count` merely changed from a literal
+  `0` to a computed value. The **error path deliberately changes shape** to
+  mirror `GET /api/memory/history` — it adds `error`, sets `last_hour_count:
+  null`, and omits the count-only fields (`total`, `note`) rather than the old
+  behaviour of returning `total: 0` with no `error`.
+- **Live data only.** The count is derived from a live `get_statistics()` read
+  plus the accumulating snapshot history — no stale snapshot or placeholder on
+  the normal path.
+- **Fail-closed.** A live-read error returns an explicit `error` payload with
+  `last_hour_count: null`, never a fabricated `0`.
+- **No new `println!` / `eprintln!`** in the production read path.
+- **No new `*Bridge` identifiers** — the reader is `open_reader_client` →
+  `ReaderClient`.
+- **Engine untouched.** The fix is Simard-side (dashboard aggregation); no
+  `amplihack-memory-lib` change and no `amplihack-memory` pin bump.
+- **Never `--admin` / `--no-verify`.**
+
+## Out of scope
+
+- **Distillation rate (#2679 facts-per-hour).** If distilled *facts* are
+  ~0 / hour (the distill parse-fail tracked separately), the metric still
+  reports honest movement across episodes, procedures, and prospective triggers,
+  so it never implies memory is idle. Fixing the distillation rate itself is out
+  of scope for this display fix.
+- **Per-item recent listing.** Now populated from the newest stored episodes
+  (newest-first, capped at 25) through the same shared reader that backs
+  `/api/memory/graph`; `available` is `true` on the normal path. Per-episode
+  wall-clock time is not retained by the library backend, so each item's
+  `timestamp` is `null` (the panel omits the "time ago" label).
+- **Frontend markup / label.** The caption reads
+  "items remembered / in the last hour" in steady state and is now labelled
+  honestly from `last_hour_window_secs` (#4318) — showing the true span when the
+  covered window materially exceeds an hour — but this is a caption-text change,
+  not a UI redesign.
+
+## Related
+
+- [Dashboard](../dashboard.md) — full tab catalogue and the Tab Identity Contract.
+- [Memory architecture](../memory.md) — the cognitive-memory model behind the count.
+- [Dashboard — dedicated Memory tab](./dashboard-memory-tab.md) — the live memory-graph surface reading the same `open_reader_client` path.
+- [Dashboard — live memory-consolidation display](./dashboard-overview-health-and-live-memory.md) — sibling live-memory display fix and the `/api/memory/history` growth rates.
+- [Cognitive-memory client helpers](./cognitive-memory-client-helpers.md) — `open_reader_client` and the shared read path.

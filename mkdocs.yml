@@ -67,6 +67,7 @@ nav:
   - Architecture:
     - Overview: architecture/overview.md
     - Simard System Architecture: architecture/system-architecture.md
+    - Typed-Capability OODA Loop: architecture/typed-ooda-loop.md
     - RPC Transport Pattern: architecture/rpc-pattern.md
     - Agent Composition: architecture/agent-composition.md
     - Engineer-Loop Agent Orchestration: architecture/engineer-agent-orchestration.md
@@ -75,6 +76,9 @@ nav:
     - Episode Ingestion Policy & Promotion: architecture/episode-ingestion-policy.md
     - Episode Distillation: architecture/episode-distillation.md
     - Distillation Semantic Handoff: architecture/distillation-semantic-handoff.md
+    - Reflective Cognitive Threads Act via Tools: architecture/reflective-cognitive-threads.md
+    - The Metacognitive Model (OODA + overseer + threads): architecture/metacognitive-model.md
+    - The Metacognitive Atlas (code-derived diagrams): architecture/metacognitive-atlas.md
     - Gym Eval Engine — Library Adapter: architecture/gym-eval-library-adapter.md
     - Unified Meeting Backend: architecture/unified-meeting-backend.md
     - Conversation Channels: architecture/conversation-channel.md
@@ -86,19 +90,36 @@ nav:
     - "Overseer — operator/observer co-process (spike)": design/overseer.md
     - "Creative Ideas background thread (spike)": design/creative-ideas-thread.md
     - "Eliminate deterministic fallbacks": design/eliminate-deterministic-fallbacks.md
+    - "Agentic observe/orient merge-queue + issue reasoning": design/agentic-observe-orient-merge-queue.md
   - Research:
     - "COIN benchmark — Phase 1 primer": research/coin-benchmark.md
+    - "COIN benchmark — Phase 1 completion record": research/coin-benchmark-phase1.md
+    - "skwaq self-improvement loop — Phase 2 study": research/skwaq-self-improvement-loop.md
     - "COIN benchmark & skwaq gym study": research/coin-benchmark-and-skwaq-study.md
+    - "COIN Gym — baseline vs. team measurement": research/coin-gym-baseline-vs-team-measurement.md
   - Concepts:
     - Operational Autonomy Model: concepts/operational-autonomy-model.md
+    - Gap-Scan Dedup &amp; Backoff: concepts/gap-scan-backoff-dedup.md
+    - Durable Issue-Cooldown Ledger (stops the auto-issue storm): concepts/durable-issue-cooldown-ledger.md
+    - Autonomous Self-Merge Sensor (ready_prs wire): concepts/autonomous-self-merge-sensor.md
+    - Agentic Merge-Queue + Issue Reasoning (observe/orient): concepts/agentic-merge-queue-reasoning.md
+    - Overseer Agentic Health-Review (self-heal crash-loops): concepts/overseer-agentic-health-review.md
+    - Triage &amp; Course-Correct a Blocked Goal Before Escalating: concepts/escalation-triage-before-human.md
+    - Autonomous-Merge Review Gate (agentic merge-judge): concepts/autonomous-merge-review-gate.md
     - Adaptive Scaling: concepts/adaptive-scaling.md
     - Pluggable Identity: concepts/pluggable-identity.md
+    - Concierge Identity (Hospitality Design + Ops Software): concepts/concierge-identity.md
+    - Multi-Identity Host Isolation: concepts/multi-identity-host-isolation.md
+    - Write-Authority Posture: concepts/write-authority-posture.md
+    - Identity-Scoped Cognition (Seed Goals, Observe-Only Act): concepts/identity-scoped-cognition.md
     - OODA Loop Self-Detection: concepts/ooda-loop-self-detection.md
     - Unified RecipeBrain: concepts/unified-recipe-brain.md
     - Prompt-Driven OODA Brain: concepts/prompt-driven-ooda-brain.md
+    - Agentic Per-Goal, Per-Cycle Decision: concepts/agentic-per-goal-per-cycle.md
     - Prompt-Driven Brain Iteration: concepts/prompt-driven-brain-iteration.md
     - Text-Based Brain Protocol: concepts/text-based-brain-protocol.md
     - Prompt-Driven TDD Discipline: concepts/prompt-driven-tdd-discipline.md
+    - Agentic-Recipes-First Reasoning Principle: concepts/agentic-recipes-first-principle.md
     - Truthful Runtime Metadata: concepts/truthful-runtime-metadata.md
     - Trustworthy Confidence + External Completion: concepts/trustworthy-confidence-and-external-completion.md
     - Progress-Evidence Gating: concepts/progress-evidence-gating.md
@@ -106,18 +127,38 @@ nav:
     - Closing the Procedural-Learning Loop: concepts/procedural-learning-loop.md
     - Reconcile-and-Self-Deploy: concepts/reconcile-and-self-deploy.md
     - Deploy-Aware Done-Gate: concepts/deploy-aware-done-gate.md
+    - Completion-Gate Merged-PR Reconciliation: concepts/completion-gate-merged-pr-reconciliation.md
+    - Closed-Loop Outcome Verification (live-verified done): concepts/closed-loop-outcome-verification.md
+    - Dependency/Overlap-Aware Engineer Scheduling: concepts/dependency-overlap-aware-scheduling.md
+    - Resource-Aware Engineer Admission: concepts/resource-aware-engineer-admission.md
+    - Semantic Dedup + Enhance for Creative Ideas: concepts/semantic-creative-ideas-dedup.md
     - Rust Domain-Expertise Gym (first experiment): concepts/rust-expertise-gym.md
     - Hybrid Cognition Measurement (benchmark + live): concepts/hybrid-cognition-measurement.md
+    - Enrichment Observability (is recall reaching decisions?): concepts/enrichment-observability.md
     - Copilot Launch-Log Preamble Stripping: concepts/copilot-launcher-preamble-stripping.md
     - Self-Diagnose on Step Error (ask WHY): concepts/self-diagnose-on-step-error.md
     - Journal E2BIG Recipe-Spawn (file the context): concepts/journal-recipe-spawn-e2big.md
     - Comprehensive E2BIG Elimination (one facade): concepts/e2big-elimination.md
+    - Signal-Meeting E2BIG (meeting agent proxy spawn site): concepts/signal-meeting-agent-e2big.md
     - Unified Telemetry and Status: concepts/unified-telemetry-and-status.md
     - Goal-Board Persistence: concepts/goal-board-persistence.md
     - Keeping the OODA Daemon Steerable: concepts/steerable-ooda-daemon.md
+    - Salience and the OODA Decide Handoff: concepts/salience-and-decide.md
     - Perpetual Goals Exempt from No-Progress Hard-Block: concepts/perpetual-goal-no-progress-exemption.md
+    - Novelty-First Steering for Standing Research Goals: concepts/novelty-first-standing-research-steering.md
+    - The Standing Research Goal Never Idles (Idle = Fault): concepts/research-goal-never-idle.md
+    - No-Progress Breaker Explains WHY and Self-Resolves: concepts/no-progress-root-cause-resolution.md
+    - Terminal No-Progress Stall Never Parks Empty Evidence: concepts/no-progress-terminal-investigation.md
+    - No-Progress Breaker Suppresses Its Own Issue Storm: concepts/no-progress-breaker-storm-suppression.md
+    - OODA Breaker Quarantines Terminal Unclear Goals: concepts/ooda-breaker-churn-suppression.md
+    - Overseer Reconciles Auto-Doc PRs to One Open: concepts/auto-doc-pr-reconciliation.md
     - Overseer Goal-Board Health: concepts/overseer-goal-board-health.md
+    - Stable Goal-Session Identity: concepts/stable-goal-session-identity.md
+    - Blocked-Goal Escalation Backoff: concepts/blocked-goal-escalation-backoff.md
+    - PID-Reuse-Safe Subordinate Reaper: concepts/pid-reuse-safe-subordinate-reaper.md
+    - Coverage Comment Transient Resilience: concepts/coverage-comment-transient-resilience.md
     - Overseer Root-Cause (WHY) Principle: concepts/overseer-root-cause-why.md
+    - Re-Investigating Already-Blocked OODA Goals: concepts/ooda-reinvestigate-blocked-goals.md
     - Authoritative Goal-Board Store: concepts/authoritative-goal-board-store.md
     - Brain-Relative OODA Cycle Counter: concepts/brain-relative-ooda-cycle-counter.md
     - Goal-Board Corruption Guards: concepts/goal-board-corruption-guards.md
@@ -127,31 +168,60 @@ nav:
     - Goal Stewardship Mode: concepts/stewardship-mode.md
     - The Simard Whisperer: concepts/simard-whisperer.md
     - Automated Disk-Health Management: concepts/automated-disk-health.md
+    - Agentic Disk Reclamation: concepts/agentic-disk-reclamation.md
     - Update-Check Design: concepts/update-check-design.md
     - The amplihack Freshness Gate: concepts/amplihack-freshness-gate.md
+    - Durable-Documentation Policy (G4): concepts/durable-documentation-policy.md
     - The Simard Journal: concepts/simard-journal.md
     - Journal Report Tone Contract: concepts/journal-report-tone-contract.md
+    - Eliminating "bridge" Terminology: concepts/bridge-terminology-elimination.md
+    - Engineer-Claim Liveness Lease: concepts/engineer-claim-liveness-lease.md
+    - Worker-Presence Liveness Verification: concepts/worker-presence-liveness-verification.md
+    - Stale-Engineer-Claim Reaper: concepts/stale-engineer-claim-reaper.md
+    - Investigate-Before-Reap: concepts/investigate-stale-engineer-before-reap.md
+    - Tombstoned-Goal Engineer Reaper: concepts/tombstoned-goal-engineer-reaper.md
   - Tutorials:
+    - Complete a Typed OODA Cycle: tutorials/complete-a-typed-ooda-cycle.md
     - First Local Session: tutorials/run-your-first-local-session.md
     - First Benchmark Suite: tutorials/run-your-first-benchmark-gym.md
     - Read Simard's Daily Journal: tutorials/read-simards-daily-journal.md
+    - Deploy Crocutus (Read-Only Observer): tutorials/deploy-crocutus-read-only-observer.md
   - How-To Guides:
+    - Fix a No-`bridge` Naming Guard Failure: howto/fix-a-no-bridge-naming-guard-failure.md
+    - Run the LOCAL COIN Gym Harness: howto/run-the-coin-gym-harness.md
     - Terminal to Engineer: howto/move-from-terminal-recipes-into-engineer-runs.md
     - Use the Agent-Orchestration Engineer Loop: howto/use-agent-orchestration-engineer-loop.md
     - Bootstrap and Reflection: howto/configure-bootstrap-and-inspect-reflection.md
     - Attach to a Running Engineer: howto/attach-to-a-running-engineer.md
     - Inspect and Clean Engineer Worktrees: howto/inspect-and-clean-engineer-worktrees.md
+    - Diagnose and Clear Leaked Engineer Claims: howto/diagnose-leaked-engineer-claims.md
+    - Investigate a Stale Engineer Before Reap: howto/investigate-a-stale-engineer-before-reap.md
+    - Diagnose a Reaped Engineer After Goal Removal: howto/diagnose-a-reaped-engineer-after-goal-removal.md
     - Grant Engineer Write Permissions: howto/grant-engineer-write-permissions.md
     - Edit the Engineer System Prompt: howto/edit-the-engineer-system-prompt.md
     - Run the OODA Daemon: howto/run-ooda-daemon.md
     - Spawn Engineers from the OODA Daemon: howto/spawn-engineers-from-ooda-daemon.md
+    - Diagnose a Deferred/Serialized Engineer Spawn (overlap): howto/diagnose-a-deferred-engineer-spawn.md
+    - Configure Resource-Aware Engineer Admission: howto/configure-resource-aware-admission.md
     - Unblock Stuck OODA Goals: howto/unblock-stuck-ooda-goals.md
+    - Declare a Standing (Perpetual) Seed Goal: howto/declare-a-standing-seed-goal.md
+    - Diagnose a No-Progress Block and Read Its WHY: howto/diagnose-a-no-progress-block.md
+    - Diagnose a No-Progress Breaker Issue Storm: howto/diagnose-a-no-progress-breaker-issue-storm.md
+    - Quarantine and Recover an Unclear OODA Goal: howto/quarantine-and-recover-an-unclear-ooda-goal.md
+    - Reconcile Stale Auto-Doc PRs: howto/reconcile-stale-auto-doc-prs.md
+    - Re-Investigate Bare-Blocked OODA Goals: howto/reinvestigate-bare-blocked-goals.md
+    - Triage a Blocked-Goal Escalation (Before It Reaches You): howto/triage-a-blocked-goal-escalation.md
     - Add a New Recipe-Brain Phase: howto/add-a-new-recipe-brain-phase.md
     - Edit the OODA Brain Prompt: howto/edit-the-ooda-brain-prompt.md
-    - Diagnose Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
-    - Diagnose Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
+    - Steer a Standing Research Goal Toward Novelty: howto/steer-a-standing-research-goal-toward-novelty.md
+    - Keep the Research Goal Never Idle: howto/keep-the-research-goal-never-idle.md
+    - "Parser-route diagnostics (legacy after typed cutover)":
+      - Brain Decision Parse Failures: howto/diagnose-brain-decision-parse-failures.md
+      - Decide/Orient Parse Failures: howto/diagnose-decide-orient-parse-failures.md
     - Diagnose and Recover OODA Step Failures: howto/diagnose-and-recover-ooda-step-failures.md
+    - Triage ERROR Lines in the OODA Daemon Log: howto/triage-ooda-log-error-lines.md
     - Diagnose Journal E2BIG Spawn Failures: howto/diagnose-journal-e2big-spawn-failures.md
+    - Diagnose Signal-Meeting E2BIG Spawn Failures: howto/diagnose-signal-meeting-e2big.md
     - Add a Safe Agent/Recipe Spawn Site: howto/add-a-safe-agent-spawn-site.md
     - Interpret Brain Confidence and Verify Completion: howto/interpret-brain-confidence-and-verify-completion.md
     - Configure Brain Introspection: howto/configure-brain-introspection.md
@@ -159,6 +229,7 @@ nav:
     - Report a Bug or Request a Feature: howto/report-a-bug-or-request-a-feature.md
     - Resume an Interrupted Meeting: howto/resume-an-interrupted-meeting.md
     - Recover from Meeting-Close Timeout: howto/recover-from-meeting-close-timeout.md
+    - Recover from a Corrupt Cognitive WAL: howto/recover-from-a-corrupt-cognitive-wal.md
     - Use Meeting Templates: howto/use-meeting-templates.md
     - Export Meeting Markdown: howto/export-meeting-markdown.md
     - Inspect Meeting Records: howto/inspect-meeting-records.md
@@ -168,15 +239,21 @@ nav:
     - Inspect the Durable Goal Register: howto/inspect-durable-goal-register.md
     - Inspect and Verify the OODA Cycle Counter: howto/inspect-the-ooda-cycle-counter.md
     - Decompose a Large Goal: howto/decompose-a-large-goal.md
+    - Label and Filter Goals: howto/label-and-filter-goals.md
     - Route a Goal to its Target Repo: howto/route-a-goal-to-its-target-repo.md
     - Diagnose a Rejected Goal Completion: howto/diagnose-a-rejected-goal-completion.md
+    - Diagnose Perpetual Completion Re-Curation: howto/diagnose-perpetual-completion-recuration.md
+    - Diagnose a Re-Opened Goal (live outcome): howto/diagnose-a-reopened-goal.md
     - Diagnose Rejected Progress Claims: howto/diagnose-rejected-progress-claims.md
     - Diagnose search_facts Issues: howto/diagnose-search-facts-issues.md
     - Reconcile Goal–Prospective Drift: howto/reconcile-goal-prospective-drift.md
     - Recover the Goal Board: howto/recover-goal-board.md
     - Troubleshoot Goal Store: howto/troubleshoot-goal-store.md
+    - Diagnose and Recover Lost Creative-Ideas Goals: howto/diagnose-lost-creative-ideas-goals.md
     - Clean Fixture Leaks: howto/clean-fixture-leaks.md
     - Verify and Roll Back a Self-Deploy: howto/verify-and-roll-back-a-self-deploy.md
+    - Verify and Repair PATH-Entrypoint Parity: howto/verify-path-entrypoint-parity.md
+    - Converge a Stuck Red-Canary Self-Deploy: howto/converge-a-stuck-red-canary-self-deploy.md
     - Run Self-Deploy from Any Directory: howto/run-self-deploy-from-any-directory.md
     - Check for Updates: howto/check-for-updates.md
     - Configure the amplihack Freshness Gate: howto/configure-amplihack-freshness-gate.md
@@ -184,6 +261,9 @@ nav:
     - Respond to a Proactive Advisory Remediation: howto/respond-to-a-proactive-advisory-remediation.md
     - Configure Adaptive Scaling: howto/configure-adaptive-scaling.md
     - Configure Pluggable Identity: howto/configure-pluggable-identity.md
+    - Run a Second Agent Identity: howto/run-a-second-agent-identity.md
+    - Design Furniture with Atelier: howto/design-with-atelier.md
+    - Design Buildings with Vitruvia: howto/design-with-vitruvia.md
     - Configure Episode Hygiene and Promotion: howto/configure-episode-hygiene-and-promotion.md
     - Inspect Improvement Curation State: howto/inspect-improvement-curation-state.md
     - Inspect the Procedural-Learning Loop: howto/inspect-the-procedural-learning-loop.md
@@ -191,75 +271,140 @@ nav:
     - Configure the Simard Whisperer: howto/configure-the-simard-whisperer.md
     - Configure the Monthly Self-Quality-Audit: howto/configure-self-quality-audit.md
     - Configure the Disk-Health Check: howto/configure-disk-health-check.md
+    - Configure Disk Reclamation: howto/configure-disk-reclamation.md
     - Reclaim Disk Space (Low-Space Rust Builds): howto/reclaim-disk-space-and-run-low-space-rust-builds.md
     - Fix CI Linker OOM: howto/fix-ci-linker-oom.md
     - Triage Stale Pull Requests: howto/triage-stale-pull-requests.md
+    - Enable Autonomous Self-Merge (canary one repo): howto/enable-autonomous-self-merge-canary.md
     - Diagnose merge-pr Verdict-Parse Failures: howto/diagnose-merge-pr-verdict-parse-failures.md
+    - Enable and Operate the GitHub Merge Queue: howto/merge-queue.md
     - Monitor Simard with the TUI: howto/monitor-simard-with-tui.md
     - Browse the Simard Journal: howto/browse-the-simard-journal.md
     - View Agent Terminal Logs: howto/view-agent-terminal-logs.md
     - Run Dashboard E2E Tests: howto/run-dashboard-e2e-tests.md
     - Capture and Diagnose a Failing Distill Sample: howto/capture-and-diagnose-a-failing-distill-sample.md
     - Verify the Distillation Semantic Handoff: howto/verify-the-distillation-semantic-handoff.md
+    - Verify the Journal's Clean Narrative: howto/verify-the-journal-clean-narrative.md
     - Measure Recall Precision (Hybrid): howto/measure-recall-precision-hybrid.md
+    - Verify Recall Is Reaching Decisions: howto/verify-recall-reaches-decisions.md
     - Read Simard Status: howto/simard-status.md
     - Watch Overseer Activity: howto/watch-overseer-activity.md
     - Configure Overseer Goal-Board Health: howto/configure-overseer-goal-board-health.md
+    - Configure Agentic Merge-Queue Reasoning: howto/configure-agentic-merge-queue-reasoning.md
     - Configure Overseer Memory Recall: howto/configure-overseer-memory-recall.md
     - Configure Overseer Email Notifications: howto/configure-overseer-email-notifications.md
+    - Configure Overseer Signal Notifications: howto/configure-overseer-signal-rpc-notifications.md
     - Review Overseer Workstream Gaps: howto/review-overseer-workstream-gaps.md
+    - Diagnose Recurring Cognitive-Memory Signature: howto/diagnose-recurring-cognitive-memory-signature.md
+    - Configure Overseer Gap-Scan Backoff: howto/configure-overseer-gap-scan-backoff.md
+    - Configure Overseer Gap-Scan Durable Dedup: howto/configure-overseer-gap-scan-durable-dedup.md
     - Configure Overseer Root-Cause Principle: howto/configure-overseer-root-cause-why.md
+    - Configure Overseer Signal Liaison &amp; PR Rework Loop: howto/configure-overseer-signal-liaison-and-rework.md
     - Configure Cognitive-Thread Scheduling: howto/configure-cognitive-thread-scheduling.md
     - Add a New Cognitive Thread: howto/add-a-new-cognitive-thread.md
+    - Configure the Cognitive-Thread Batch: howto/configure-cognitive-thread-batch.md
     - Configure the Creative Ideas Thread: howto/configure-creative-ideas-thread.md
+    - Configure the Reflective Cognitive Threads: howto/configure-reflective-cognitive-threads.md
+    - Read a Cognitive Thread's Reasoning Summary: howto/read-cognitive-thread-reasoning.md
+    - Record an Investigation Finding (issue/memory, not a repo doc): howto/record-an-investigation-finding.md
+    - Configure Creative-Ideas Semantic Dedup: howto/configure-creative-ideas-semantic-dedup.md
   - Reference:
     - CLI Reference: reference/simard-cli.md
+    - Simard Installer: reference/simard-installer.md
+    - OODA Capability API: reference/ooda-capability-api.md
+    - Engineer-Claim Release & Reclaim API: reference/engineer-claim-release-api.md
+    - Stale-Engineer-Claim Reaper API: reference/claim-reaper-api.md
+    - Investigate-Before-Reap API: reference/investigate-stale-engineer-api.md
+    - Tombstoned-Goal Engineer Reaper API: reference/tombstoned-goal-engineer-reaper-api.md
+    - Typed OODA Goal-Session Deterministic Rails: reference/typed-ooda-goal-session-rails.md
+    - Stable Goal-Session Identity API: reference/stable-goal-session-identity-api.md
+    - Standing-Research Novelty-Directive API: reference/standing-research-goal-novelty-directive-api.md
+    - Research-Goal Never-Idle Rail API: reference/research-goal-never-idle-rail-api.md
+    - wip-ref Liveness Reconcile API: reference/wip-ref-liveness-reconcile-api.md
+    - wip-ref Liveness Reconcile — Hardening API: reference/wip-ref-liveness-reconcile-hardening-api.md
+    - Actor-Session Scope-Key API: reference/actor-session-scope-key-api.md
+    - WhisperGate Exponential-Backoff API: reference/whisper-gate-backoff-api.md
+    - Subordinate Kill PID-Guard API: reference/subordinate-kill-pid-guard-api.md
+    - Coverage Comment Resilience: reference/coverage-comment-resilience.md
     - Telemetry Metrics: reference/telemetry-metrics.md
     - Recall-Precision Hybrid Measurement: reference/recall-precision-hybrid-api.md
+    - Reliability-Gate Benchmark: reference/reliability-gate-benchmark.md
+    - Knowledge-Pack Article Relevance Ranking: reference/knowledge-pack-article-relevance-ranking.md
+    - Enrichment Observability API: reference/enrichment-observability-api.md
     - StatusSnapshot API: reference/status-snapshot-api.md
+    - OODA Daemon Bounded Steady-State Memory: reference/ooda-daemon-bounded-memory.md
     - Daily-Budget Display Guard: reference/daily-budget-display-guard.md
     - Overseer Activity Feed: reference/overseer-activity-feed.md
     - Overseer Tick Details: reference/overseer-tick-details.md
     - Overseer Goal-Board Health API: reference/overseer-goal-board-health-api.md
     - Overseer Memory-Recall API: reference/overseer-memory-recall-api.md
     - Overseer Operator Notifications: reference/overseer-operator-notifications.md
+    - Overseer Signal JSON-RPC Transport: reference/overseer-signal-jsonrpc-transport.md
     - Overseer Workstream Gap-Scan: reference/overseer-workstream-gap-scan.md
+    - Overseer BackoffGate &amp; Gap-Scan Dedup: reference/overseer-backoff-gate-api.md
+    - Overseer Gap-Scan Durable Open-Issue Dedup: reference/overseer-gap-scan-durable-dedup.md
+    - Issue-Cooldown Ledger API: reference/issue-cooldown-ledger-api.md
     - Overseer Root-Cause (WHY) API: reference/overseer-root-cause-why-api.md
+    - Escalation-Triage API &amp; Output Contract: reference/escalation-triage-api.md
+    - Overseer Self-Observation Stability: reference/overseer-self-observation-stability.md
+    - Overseer Signal Operator-Liaison: reference/overseer-signal-liaison.md
+    - Overseer Autonomous PR Rework Loop: reference/overseer-rework-loop.md
     - simard-engineer-step CLI: reference/simard-engineer-step.md
     - simard-tui Dashboard: reference/simard-tui.md
+    - Dashboard Memory Tab: reference/dashboard-memory-tab.md
+    - Dashboard Memory Graph Fail-Loud: reference/dashboard-memory-graph-fail-loud.md
+    - Dashboard Memory Last-Hour Count: reference/dashboard-memory-recent-last-hour-count.md
+    - Dashboard Memory Growth Rate Window: reference/dashboard-memory-growth-rate-window.md
+    - Dashboard Memory Records Count: reference/dashboard-memory-records-count.md
     - Journal API: reference/journal-api.md
+    - Journal Narrative Result Channel: reference/journal-narrative-result-channel.md
     - npx / npm Install: reference/npx-npm-install.md
     - Update Check: reference/update-check.md
     - amplihack Freshness Gate: reference/amplihack-freshness-gate.md
     - Multi-Binary Self-Update: reference/multi-binary-self-update.md
     - Self-Deploy API: reference/self-deploy-api.md
     - Self-Deploy Source Prep & Warm Target Dir: reference/self-deploy-source-prep.md
+    - Drift-Resilient Self-Deploy Checkout: reference/self-deploy-drift-resilient-checkout.md
+    - Overseer Deploy Red-Canary Diagnostics: reference/overseer-deploy-canary-diagnostics.md
+    - Canary Gate Isolation & Self-Deploy Convergence: reference/canary-gate-convergence.md
+    - RPC-Health Readiness & Stats Snapshot: reference/rpc-health-stats-snapshot-readiness.md
     - State-Root Resolution: reference/state-root-resolution.md
     - Operator Read State-Root Contract: reference/operator-read-state-root-contract.md
     - Runtime Contracts: reference/runtime-contracts.md
     - Subprocess Prompt Delivery: prompt-delivery.md
     - RPC Wire Protocol: reference/rpc-wire-protocol.md
+    - No-`bridge` Naming Guard: reference/no-bridge-naming-guard.md
     - Argv-Free Copilot/OODA Invocation: reference/argv-free-copilot-invocation.md
+    - Argv-Free Meeting/Signal Agent Proxy: reference/argv-free-meeting-agent-proxy.md
     - Terminal Failure Diagnosis API: reference/terminal-failure-diagnosis-api.md
     - Recipe Context-File Transport: reference/recipe-context-file-transport.md
     - Large-Payload Spawn API: reference/large-payload-spawn-api.md
-    - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
     - Recipe Context-Var Sanitization: reference/recipe-context-var-sanitization.md
     - Engineer-Loop argv Sanitization: reference/engineer-loop-argv-sanitization.md
     - String-Truncation Helpers: reference/string-truncation-helpers.md
     - RecipeBrain API: reference/recipe-brain-api.md
-    - OodaBrain API: reference/ooda-brain-api.md
-    - OODA Brain Decision Protocol: reference/ooda-brain-decision-protocol.md
-    - OODA Brain Parse-Failure Record: reference/ooda-brain-parse-failure-record.md
+    - "Planned: OODA Actor API": reference/ooda-brain-api.md
+    - "Parser contracts (legacy for typed OODA after cutover)":
+      - Text-Parsing Wire Formats: reference/text-parsing-wire-formats.md
+      - OODA Brain Decision Protocol: reference/ooda-brain-decision-protocol.md
+      - OODA Brain Parse-Failure Record: reference/ooda-brain-parse-failure-record.md
+      - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - OODA Brain Prompt Schema: reference/ooda-brain-prompt.md
     - OODA Decide Prompt Schema: reference/ooda-decide-prompt.md
     - OODA Orient Prompt Schema: reference/ooda-orient-prompt.md
     - OODA Orient Recipe: reference/ooda-orient-recipe.md
     - OODA Engineer-Lifecycle Recipe: reference/ooda-engineer-lifecycle-recipe.md
+    - OODA Per-Goal-Cycle API: reference/ooda-per-goal-cycle-api.md
+    - Worker-Presence Liveness API: reference/worker-presence-liveness-api.md
+    - OODA Per-Goal-Cycle Recipe: reference/ooda-per-goal-cycle-recipe.md
+    - OODA Record-Decision Tool: reference/ooda-record-decision-cli.md
+    - OODA Record-Orient/Decide Tools: reference/ooda-record-orient-decide-cli.md
+    - Cognition Record-Thread-Reasoning Tool: reference/simard-cognition-record-thread-reasoning-cli.md
+    - OODA Record-Admission Tools: reference/ooda-record-admission-cli.md
+    - OODA Record-Idea-Dedup/Consolidation Tools: reference/ooda-record-idea-dedup-consolidation-cli.md
     - OODA Procedural Memory: reference/ooda-procedural-memory.md
-    - Recipe-Brain Verdict/Decision Parsing: reference/recipe-brain-verdict-parsing.md
     - OODA Binary-Identity Reload Gate: reference/ooda-binary-identity-reload-gate.md
-    - Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
+    - Historical Distill Recipe-Output Capture: reference/distill-recipe-output-capture.md
     - Base-Type Adapters: reference/base-type-adapters.md
     - Memory Introspection CLI: reference/simard-memory-cli.md
     - Memory Write CLI (remember): reference/simard-memory-remember-cli.md
@@ -272,6 +417,7 @@ nav:
     - Cognitive-Memory Ranked Recall: reference/cognitive-memory-ranked-recall.md
     - Cognitive-Memory Episodic Recall: reference/cognitive-memory-episodic-recall.md
     - Cognitive-Memory Ranked Episodic Recall: reference/cognitive-memory-ranked-episodic-recall.md
+    - Cognitive-Memory Graph-Adjacency Index: reference/cognitive-memory-graph-adjacency-index.md
     - Cognitive-Memory Procedural Idempotency: reference/cognitive-memory-procedural-idempotency.md
     - Cognitive-Memory Goal Store (superseded): reference/cognitive-memory-goal-store.md
     - Backup-Pruning API: reference/backup-pruning-api.md
@@ -285,6 +431,7 @@ nav:
     - Goal-Board API: reference/goal-board-api.md
     - Goal-Board Corruption-Guard API: reference/goal-board-corruption-guard-api.md
     - Goal Decomposition & Goal Graph: reference/goal-decomposition.md
+    - Goal Labels & Tags: reference/goal-labels.md
     - Goal-Decompose Result Channel: reference/goal-decompose-result-channel.md
     - Goal Target-Repo Routing: reference/goal-target-repo-routing.md
     - Goal Coverage Allocation: reference/goal-coverage-allocation.md
@@ -293,7 +440,13 @@ nav:
     - CI-Health Sweep: reference/ci-health-sweep.md
     - Simard Whisperer API: reference/simard-whisperer-api.md
     - Maximum Safe Parallelism: reference/maximum-safe-parallelism.md
+    - OODA Coverage Parallelism Ceiling: reference/ooda-coverage-parallelism-ceiling.md
     - Concurrent Engineer Dispatch: reference/concurrent-engineer-dispatch.md
+    - Engineer Session Checkpoint & Resume: reference/engineer-session-checkpoint-resume.md
+    - Engineer-Admission API (overlap-aware scheduling): reference/engineer-admission-api.md
+    - OODA Engineer-Admission Recipe & Prompt Schema: reference/ooda-engineer-admission-recipe.md
+    - Resource-Admission API (resource-aware admission): reference/resource-admission-api.md
+    - OODA Resource-Admission Recipe & Prompt Schema: reference/ooda-resource-admission-recipe.md
     - Engineer Copilot Permissions: reference/engineer-copilot-permissions.md
     - Engineer Worktree Isolation: reference/engineer-worktree-isolation.md
     - Engineer Worktree Sweep Safety Guards: reference/engineer-worktree-sweep-safety.md
@@ -304,9 +457,23 @@ nav:
     - Agent-Log WebSocket API: reference/agent-log-websocket.md
     - PR-Finalization Review Pipeline: reference/pr-finalization-pipeline.md
     - Cross-Repo Merge Authority: reference/cross-repo-merge-authority.md
+    - ready_prs Sensor API: reference/ready-prs-sensor-api.md
+    - Engineer-PR Label Injection API: reference/engineer-pr-label-injection.md
+    - Agentic Merge-Queue Reasoning API: reference/agentic-merge-queue-reasoning-api.md
+    - Autonomous-Merge Review Gate API: reference/autonomous-merge-review-gate.md
+    - "No Point-in-Time Report Docs Scan (pr-verify #8)": reference/no-point-in-time-docs-scan.md
     - Completion-Evidence Gate API: reference/completion-evidence-gate-api.md
+    - Completion-Gate Issue-Fallback Merged-PR Recovery API: reference/completion-gate-issue-fallback-api.md
+    - Outcome-Verification API: reference/outcome-verification-api.md
     - No-Progress Breaker API: reference/no-progress-breaker-api.md
+    - Standing Seed-Goal Declaration API: reference/standing-seed-goal-declaration-api.md
+    - No-Progress Root-Cause Resolution API: reference/no-progress-root-cause-resolution-api.md
+    - OODA No-Progress WHY Recipe: reference/ooda-no-progress-why-recipe.md
     - Durable OODA Cycle Counter API: reference/durable-ooda-cycle-counter.md
+    - No-Progress Re-Investigation API: reference/no-progress-reinvestigation-api.md
+    - No-Progress Breaker Issue-Storm Suppression API: reference/no-progress-breaker-storm-suppression-api.md
+    - OODA Breaker Churn-Suppression API: reference/ooda-breaker-churn-suppression-api.md
+    - Auto-Doc PR Reconciliation API: reference/auto-doc-pr-reconciliation-api.md
     - Progress-Evidence API: reference/progress-evidence-api.md
     - Trustworthy-Confidence API: reference/trustworthy-confidence-api.md
     - External-Signal Completion Gate: reference/external-signal-completion-gate.md
@@ -323,14 +490,21 @@ nav:
     - Meeting Handoff Schema: reference/meeting-handoff-schema.md
     - Handoff Lifecycle API: reference/handoff-lifecycle-api.md
     - Pluggable Identity API: reference/pluggable-identity-api.md
+    - Agent Instance Isolation: reference/agent-instance-isolation.md
+    - Write-Authority Posture API: reference/write-authority-posture-api.md
+    - Identity-Scoped Cognition API: reference/identity-scoped-cognition-api.md
     - Adaptive Scaling API: reference/adaptive-scaling-api.md
     - Brain Introspection API: reference/brain-introspection-api.md
     - Self-Quality-Audit API: reference/self-quality-audit-api.md
+    - Cognition Record-Brain-Introspection/Self-Quality-Audit Tools: reference/record-brain-introspection-self-audit-cli.md
     - Disk-Health API: reference/disk-health-api.md
+    - Disk Reclaim API: reference/disk-reclaim-api.md
+    - Disk Reclaim Telemetry: reference/disk-reclaim-telemetry.md
     - Dashboard E2E Tests: reference/dashboard-e2e-tests.md
     - Dashboard Action-Detail Humanization: reference/dashboard-action-detail-humanization.md
     - Dashboard Goal Lifecycle-Status Badges: reference/dashboard-goal-lifecycle-status.md
     - Dashboard Goal Hierarchy & Priorities: reference/dashboard-goal-hierarchy-priority.md
+    - Dashboard Live Goal-Board Read: reference/dashboard-live-goal-board-read.md
     - Dashboard Thinking Cycle History: reference/dashboard-thinking-cycle-history.md
     - Dashboard Activity Cycle Reports: reference/dashboard-activity-cycle-reports.md
     - Dashboard Background Tab Prefetch: reference/dashboard-background-tab-prefetch.md
@@ -343,22 +517,41 @@ nav:
     - Supply-Chain Advisory Stewardship: reference/supply-chain-advisory-stewardship.md
     - amplihack Pin Bump to Upstream main (#2626): reference/amplihack-pin-bump-2626.md
     - Release Integrity (SBOM + Signing): reference/release-integrity.md
+    - Idempotent Release Publishing: reference/release-idempotency.md
     - Distill Raw-Capture on Parse Failure: reference/distill-raw-capture-on-parse-failure.md
     - Cognitive-Thread Scheduling: reference/cognitive-thread-scheduling.md
+    - Salience-Signal CLI: reference/simard-cognition-salience-signal-cli.md
+    - Cognitive-Threads Catalog (ten reflective threads): reference/cognitive-threads-catalog.md
+    - Cognitive Threads — Always-On Scheduling, Telemetry & Auto-Remediation: reference/cognitive-thread-full-activation.md
+    - The RecipeInvoker Seam: reference/recipe-invoker-seam.md
     - Creative Ideas Subsystem API: reference/creative-ideas-api.md
+    - Creative Ideas Durable Read-After-Write: reference/creative-ideas-durable-read-after-write.md
+    - Creative-Ideas Goal Routing — Fail-Closed Persistence: reference/creative-ideas-goal-routing-fail-closed.md
+    - Creative Ideas Trigger-Scoped Read: reference/creative-ideas-trigger-scoped-read.md
+    - Creative-Ideas Semantic Dedup-Gate API: reference/creative-ideas-dedup-gate-api.md
+    - Creative-Idea Dedup Recipe & Prompt Schema: reference/creative-idea-dedup-recipe.md
+    - COIN Benchmark Reference: reference/coin-benchmark.md
   - Operations:
     - Overview: operations/index.md
     - Verified Backups of the Live Store: operations/verified-backups.md
     - Cognitive-Memory Durability: operations/cognitive-memory-durability.md
     - Cognitive-Memory WAL Recovery Runbook: operations/cognitive-memory-wal-recovery-runbook.md
+    - Cognitive-Memory Open Serialization: reference/cognitive-memory-open-serialization.md
+    - Cognitive-Memory WAL Crash-Consistency (#4687): reference/cognitive-memory-wal-crash-consistency.md
     - Meeting REPL & Handoff Ingestion: operations/meeting-handoffs.md
     - Progress-Evidence Kill Switch: operations/progress-evidence-kill-switch.md
+    - Outcome-Verification Kill Switch: operations/outcome-verification-kill-switch.md
+    - Engineer-Admission Kill Switch: operations/engineer-admission-kill-switch.md
+    - Claim-Reaper Kill Switch & Tuning: operations/claim-reaper-kill-switch.md
+    - Resource-Admission Kill Switch: operations/resource-admission-kill-switch.md
+    - Creative-Ideas Semantic-Dedup Kill Switch: operations/creative-ideas-semantic-dedup-kill-switch.md
     - Safe Self-Update: safe-self-update.md
     - Pre-Commit Setup: operations/pre-commit-setup.md
   - Operator Dashboard:
     - Azlin Tmux Sessions Panel: operator-dashboard/azlin-tmux-sessions.md
     - Event-Bus Stats in Cluster Topology: operator-dashboard/event-bus-stats.md
     - Agent Terminal Agent Picker: operator-dashboard/agent-terminal-agent-picker.md
+    - Creative Ideas Tab — Live View & Operator Controls: operator-dashboard/creative-ideas-operator-controls.md
     - Hive Event Bus: hive_event_bus/README.md
   - Testing:
     - Test-Coverage Baseline: testing/COVERAGE_BASELINE.md

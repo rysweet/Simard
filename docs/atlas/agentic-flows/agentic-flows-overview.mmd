@@ -1,0 +1,41 @@
+flowchart TB
+  %% Layer 9 - Agentic flows overview: how the six flows link across the atlas layers
+  subgraph L4["Layer 4: Runtime Topology"]
+    daemon["simard-daemon (single native Rust process)"]
+  end
+
+  subgraph FLOWS["Layer 9: Agentic Flows"]
+    ooda["OODA loop\nobserve/orient/decide/act"]
+    overseer["Overseer meta-OODA tick\n(merge-queue + ecosystem reasoning)"]
+    typed["typed-OODA\ncapability/effect model"]
+    recipes["Recipes\n(recipe-runner invocation)"]
+    prompts["Prompt assets\nprompt_assets/simard/*"]
+    memory["Cognitive-memory recall\n(embedded lbug)"]
+  end
+
+  daemon --> ooda
+  daemon --> overseer
+
+  %% OODA orchestrates the other flows
+  ooda -->|prepare/consolidate| memory
+  ooda -->|orient/decide via RecipeBrain| recipes
+  ooda -->|ACT AdvanceGoal| typed
+  overseer -->|observe-merge-queue / ecosystem-observe| recipes
+  overseer -->|recall_pass / write-back| memory
+  overseer -->|smart-orchestrator launch| recipes
+  typed -->|goal-session-actor.yaml| recipes
+  typed -->|SpawnEngineer effect| engineer["engineer worktree agent (Layer 8 journey)"]
+
+  %% recipes + typed-OODA both read prompt assets
+  recipes -->|resolve_recipe_path| prompts
+  typed -->|load_policy| prompts
+
+  %% cross-layer anchors
+  memory --> lbug["(:DataStore lbug-cognitive) Layer 4"]
+  recipes --> rr["(:Process recipe-runner-rs / amplihack) Layer 4"]
+  typed --> ledger["(:DataStore typed-ooda ledger SQLite)"]
+
+  classDef recipe fill:#fff6df,stroke:#d9a441;
+  classDef memcls fill:#eaf6ff,stroke:#4a90d9;
+  class recipes,prompts,rr recipe;
+  class memory,lbug memcls;

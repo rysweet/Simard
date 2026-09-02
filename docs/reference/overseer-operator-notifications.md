@@ -15,9 +15,12 @@ issues: ["#2631"]
 related:
   - ../index.md
   - ../design/overseer.md
+  - ./overseer-operator-notification-dedup.md
   - ./signal-conversation.md
+  - ./overseer-signal-jsonrpc-transport.md
   - ./conversation-channel-api.md
   - ../howto/configure-overseer-email-notifications.md
+  - ../howto/configure-overseer-signal-rpc-notifications.md
   - ../howto/set-up-the-signal-channel.md
   - ../concepts/operational-autonomy-model.md
   - ./cross-repo-merge-authority.md
@@ -45,7 +48,7 @@ inbound gate live in `src/signal_conversation/gating.rs` and
 
 | Channel | Role | Configured by | Unconfigured behavior |
 |---------|------|---------------|-----------------------|
-| **Signal** | **Primary reliable path.** When the `[signal]` transport is wired, the operator is always reached on their phone. | [Signal channel setup](../howto/set-up-the-signal-channel.md) | `Queued { reason: "Signal channel not wired …" }` |
+| **Signal** | **Primary reliable path.** When `SIMARD_SIGNAL_RPC_ACCOUNT`/`SIMARD_SIGNAL_RPC_RECIPIENT` are set, the [`JsonRpcSignalSender`](./overseer-signal-jsonrpc-transport.md) POSTs each notice to the local Signal JSON-RPC service and the operator is reached on their phone. | Env vars + [Signal notification setup](../howto/configure-overseer-signal-rpc-notifications.md) | `Queued { reason: "Signal channel not wired …" }` |
 | **Email** | Secondary durable path via an **authenticated SMTP relay** (office365 or an internal relay). | Env vars (below) + the operator's systemd unit | `Queued { reason: "SMTP not configured …" }` |
 
 The Signal channel is the **primary** path precisely because it is already wired in
@@ -126,6 +129,35 @@ Problem solved:
 (`plain_text()` already ends in a newline and the footer begins with `\n\n`, so the
 rendered notice carries two blank lines before the footer.)
 
+### Autonomous-merge notification wording (plain English)
+
+The merge notification built by `MergePrOps::notification`
+([`src/overseer/merge_ops.rs`](https://github.com/rysweet/Simard/blob/main/src/overseer/merge_ops.rs))
+is deliberately **jargon-free**. The operator gets a message that names, in plain
+English, **what was solved** and **which PR solved it** — not the internal gate
+names (no "objective gates", "pr-verify scans", "base allow-list", "MergeJudge").
+The `problem` field reads like a human status update:
+
+```text
+🔔 SIMARD▶OPERATOR: The Overseer autonomously merged a pull request in rysweet/Simard.
+
+Problem solved:
+  Merged: "Fix flaky retry backoff in the OODA scheduler"
+  It passed every check and review, so Simard merged it for you.
+  https://github.com/rysweet/Simard/pull/4231
+
+
+— Simard automated notice · do not reply
+```
+
+The notification always carries the PR title and the PR URL, so the operator can
+open the merged PR directly from their phone. The DualChannelNotifier still fires
+**both** Signal and email on every autonomous merge (Signal is the primary
+reliable path). The plain wording is a documentation/UX contract: the merge path
+must not surface internal gate jargon to the operator.
+
+---
+
 ### Where wrapping happens
 
 Only the Overseer **notification** path wraps its body. The wrap is applied in
@@ -151,12 +183,15 @@ fn deliver(&self, n: &OperatorNotification) -> ChannelDelivery {
 > **Feature-gating (keeps `--no-default-features` building).** `wrap_operator_notification`
 > lives in `src/signal_conversation/gating.rs`, which is compiled only behind
 > `#[cfg(feature = "signal")]`, whereas `src/overseer/notify.rs` is **always** compiled.
-> The wrap call site is therefore itself `#[cfg(feature = "signal")]`-gated. With the
-> `signal` feature off there is no inbound Signal processor that could self-ingest, and
-> `SignalNotifyChannel::from_env()` returns `sender = None` (so the channel always
-> `Queued`s and the wrapped branch is unreachable) — the marker import is compiled out
-> and the minimal build stays green. `gating.rs` remains the single source of truth for
-> the marker.
+> The wrap call site is therefore itself `#[cfg(feature = "signal")]`-gated. The live
+> [`JsonRpcSignalSender`](./overseer-signal-jsonrpc-transport.md) is **not** gated on the
+> `signal` feature (it is plain `std::net` + `serde_json`), so with the feature **off**
+> `SignalNotifyChannel::from_env()` still wires a live sender when
+> `SIMARD_SIGNAL_RPC_ACCOUNT`/`RECIPIENT` are set — but the body is sent **unwrapped**
+> (plain text). That is safe: with the `signal` feature off there is **no** inbound Signal
+> processor that could self-ingest the notification, so the marker has nothing to guard
+> against. Under the `signal` feature the wrap is applied and the marker import is present;
+> `gating.rs` remains the single source of truth for the marker.
 
 Interactive replies (`status`, high-risk sign-off prompts, meeting turns) are **not**
 wrapped — they are short-lived, in-thread, and already covered by the existing
@@ -412,8 +447,10 @@ All types live in `src/overseer/notify.rs` unless noted.
 | `sanitize_header_value` / `dot_stuff_body` | fn | Shared CWE-93 header/body injection hardening (applied by both senders). |
 | `delivery_variant` | fn | Bare `ChannelDelivery` variant name for the structured summary (no `reason`). |
 | `SignalSender` | trait | `send_text(&str) -> Result<(), String>`. |
+| `SignalRpcConfig` | struct | Env-driven Signal JSON-RPC config (`addr` default `127.0.0.1:7583`, `account`, `recipient`); `from_env`, `from_lookup`, `is_configured`. See the [Signal JSON-RPC transport reference](./overseer-signal-jsonrpc-transport.md). |
+| `JsonRpcSignalSender` | struct | Live, dependency-free, timeout-bounded JSON-RPC-over-TCP `SignalSender` (`std::net` + `serde_json`); wired by `SignalNotifyChannel::from_env` when configured. |
 | `ConversationSignalSender` | struct | Adapts any `ConversationChannel` into a `SignalSender`. |
-| `SignalNotifyChannel` | struct | Signal channel; wraps the body with the operator marker before sending. |
+| `SignalNotifyChannel` | struct | Signal channel; wraps the body with the operator marker before sending. `from_env` wires the `JsonRpcSignalSender` when `SIMARD_SIGNAL_RPC_ACCOUNT`/`RECIPIENT` are set, else `Queued`. |
 | `OPERATOR_NOTIFY_MARKER` | const | Reserved sentinel (`gating.rs`). |
 | `wrap_operator_notification` | fn | Wrap a body in the marker + footer (`gating.rs`). |
 | `is_operator_notification` | fn | Substring marker detection (`gating.rs`). |
@@ -434,6 +471,10 @@ The STARTTLS sender promotes these to direct dependencies, pinned to `Cargo.lock
   — the office365 worked example and systemd unit.
 - [Set up the Signal channel](../howto/set-up-the-signal-channel.md) — wire the primary
   reliable path.
+- [Configure Overseer Signal notifications](../howto/configure-overseer-signal-rpc-notifications.md)
+  — set the account/recipient so the live [`JsonRpcSignalSender`](./overseer-signal-jsonrpc-transport.md) POSTs to the local Signal service.
+- [Signal JSON-RPC transport reference](./overseer-signal-jsonrpc-transport.md) — the wire
+  format, timeouts, and delivery mapping of the live Signal sender.
 - [Signal channel reference](./signal-conversation.md) — the inbound command surface the
   marker gate protects.
 - [Overseer design](../design/overseer.md) — where the notifier sits in the merge/deploy

@@ -1,0 +1,17 @@
+digraph JourneyEngineerPr {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+  planned [label="OODA planned spawn_engineer"];
+  rails [label="identity/read-only rails + duplicate-live checks"];
+  repo [label="resolve target repo"];
+  admission [label="overlap/resource admission"];
+  worktree [label="allocate isolated git worktree"];
+  subordinate [label="spawn_subordinate"];
+  child [label="simard engineer run single-process"];
+  prompt [label="build_agent_prompt + standards"];
+  amplihack [label="amplihack copilot/RustyClawd subprocess"];
+  pr [label="engineer uses git/gh to open PR"];
+  summary [label="summary returned to Simard"];
+  planned -> rails -> repo -> admission -> worktree -> subordinate -> child -> prompt -> amplihack -> pr -> summary;
+}

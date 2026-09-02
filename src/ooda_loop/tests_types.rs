@@ -45,6 +45,7 @@ fn ooda_state_new_defaults() {
 fn ooda_state_new_with_goals() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -66,6 +67,7 @@ fn ooda_state_new_with_goals() {
 fn populated_state() -> OodaState {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -166,6 +168,7 @@ fn snapshot_into_state_constructs_fresh_state() {
 #[test]
 fn goal_snapshot_from_active_goal() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -190,6 +193,7 @@ fn goal_snapshot_from_active_goal() {
 #[test]
 fn goal_snapshot_from_blocked_goal() {
     let goal = ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -243,7 +247,10 @@ fn action_kind_equality() {
 #[test]
 fn ooda_config_default_values() {
     let config = OodaConfig::default();
-    assert_eq!(config.max_concurrent_actions, 5);
+    // Issue #2935: the per-OODA-cycle goal-coverage parallelism ceiling was
+    // raised from the arbitrary low default of 5 to 24 (env-configurable via
+    // SIMARD_OODA_MAX_CONCURRENT).
+    assert_eq!(config.max_concurrent_actions, 24);
     assert!((config.improvement_threshold - 0.02).abs() < f64::EPSILON);
     assert_eq!(config.gym_suite_id, "progressive");
 }
@@ -282,6 +289,7 @@ fn action_outcome_construction() {
 fn prune_stale_failure_counts_removes_absent_goals() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -315,6 +323,7 @@ fn prune_stale_failure_counts_removes_absent_goals() {
 fn prune_stale_failure_counts_noop_when_all_present() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -340,4 +349,105 @@ fn prune_stale_failure_counts_empty_board_clears_all() {
     state.goal_failure_counts.insert("orphan-b".to_string(), 20);
     state.prune_stale_failure_counts();
     assert!(state.goal_failure_counts.is_empty());
+}
+
+// ── F6 (#4929): OODA retained state stays bounded across N cycles ──────────
+// `OodaState` retains two per-goal maps (`goal_failure_counts` and the
+// `no_progress_tracker` counters). The daemon runs an unbounded number of OODA
+// cycles, so if entries for archived/completed goals accumulated, the daemon
+// heap would grow monotonically with uptime. `prune_stale_failure_counts()`
+// (issue #2167), invoked once per cycle, already bounds these to the live goal
+// set. This is the regression gate that keeps it that way: a *non-monotonic
+// bounded envelope*, asserted on the public surface, not an absolute byte
+// threshold (so it is CI-stable and not RSS-flaky).
+
+fn goal_with_id(id: &str) -> crate::goal_curation::ActiveGoal {
+    crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
+        parent_goal_id: None,
+        priority_explicit: false,
+        repo: None,
+        id: id.to_string(),
+        description: format!("goal {id}"),
+        priority: 1,
+        status: GoalProgress::InProgress { percent: 10 },
+        assigned_to: None,
+        current_activity: None,
+        wip_refs: vec![],
+        last_progress_update_at: None,
+    }
+}
+
+#[test]
+fn ooda_retained_state_stays_bounded_across_many_cycles() {
+    // A small, fixed-size sliding window of active goals: each "cycle" retires
+    // the previous goals and activates two brand-new ones. Over N cycles this
+    // churns through 2N distinct goal ids while only ever having 2 live at a
+    // time — exactly the pattern that leaked unboundedly before pruning.
+    const CYCLES: usize = 200;
+    const WINDOW: usize = 2;
+
+    let mut state = OodaState::new(GoalBoard::new());
+
+    for cycle in 0..CYCLES {
+        // Rotate the active board to a fresh window of goal ids.
+        state.active_goals = GoalBoard::new();
+        let mut live_ids = Vec::new();
+        for k in 0..WINDOW {
+            let id = format!("goal-c{cycle}-{k}");
+            state.active_goals.active.push(goal_with_id(&id));
+            live_ids.push(id);
+        }
+
+        // Simulate per-cycle churn: bump failure + no-progress counters for the
+        // live goals AND for a now-stale goal from a prior cycle (the leak
+        // vector). Without pruning these stale ids would accumulate forever.
+        for id in &live_ids {
+            *state.goal_failure_counts.entry(id.clone()).or_insert(0) += 1;
+            state.no_progress_tracker.record_no_action(id);
+        }
+        if cycle > 0 {
+            let stale = format!("goal-c{}-0", cycle - 1);
+            state.goal_failure_counts.insert(stale.clone(), 99);
+            state.no_progress_tracker.record_no_action(&stale);
+        }
+
+        // The once-per-cycle prune the OODA loop performs.
+        state.prune_stale_failure_counts();
+
+        // Envelope invariant, EVERY cycle: retained failure-count entries never
+        // exceed the live window, regardless of how many cycles have elapsed.
+        assert!(
+            state.goal_failure_counts.len() <= WINDOW,
+            "goal_failure_counts grew beyond the live window at cycle {cycle}: {} entries",
+            state.goal_failure_counts.len()
+        );
+
+        // The no-progress tracker is pruned to the same live set: a goal that
+        // left the board carries a zeroed (untracked) counter.
+        if cycle > 0 {
+            let stale = format!("goal-c{}-0", cycle - 1);
+            assert_eq!(
+                state.no_progress_tracker.consecutive(&stale),
+                0,
+                "no_progress_tracker retained a stale goal at cycle {cycle}"
+            );
+        }
+        // Live goals are never dropped by pruning.
+        for id in &live_ids {
+            assert_eq!(
+                state.goal_failure_counts.get(id),
+                Some(&1),
+                "live goal {id} must keep its failure count through pruning"
+            );
+        }
+    }
+
+    // Final envelope: after 200 cycles churning 400 distinct ids, the map is
+    // still bounded by the window — non-monotonic in uptime.
+    assert!(
+        state.goal_failure_counts.len() <= WINDOW,
+        "post-run goal_failure_counts must be bounded by the live window, got {}",
+        state.goal_failure_counts.len()
+    );
 }

@@ -218,30 +218,33 @@ impl Display for SimardError {
             Self::ClockBeforeUnixEpoch { reason } => {
                 write!(f, "system clock is before UNIX epoch: {reason}")
             }
-            Self::RpcSpawnFailed { bridge, reason } => {
-                write!(f, "bridge '{bridge}' failed to spawn: {reason}")
+            Self::RpcSpawnFailed { endpoint, reason } => {
+                write!(f, "rpc endpoint '{endpoint}' failed to spawn: {reason}")
             }
-            Self::RpcTransportError { bridge, reason } => {
-                write!(f, "bridge '{bridge}' transport error: {reason}")
+            Self::RpcTransportError { endpoint, reason } => {
+                write!(f, "rpc endpoint '{endpoint}' transport error: {reason}")
             }
-            Self::RpcProtocolError { bridge, reason } => {
-                write!(f, "bridge '{bridge}' protocol error: {reason}")
+            Self::RpcProtocolError { endpoint, reason } => {
+                write!(f, "rpc endpoint '{endpoint}' protocol error: {reason}")
             }
             Self::RpcCallFailed {
-                bridge,
+                endpoint,
                 method,
                 reason,
             } => {
-                write!(f, "bridge '{bridge}' call to '{method}' failed: {reason}")
-            }
-            Self::RpcCircuitOpen { bridge } => {
                 write!(
                     f,
-                    "bridge '{bridge}' circuit is open — calls are rejected until the bridge recovers"
+                    "rpc endpoint '{endpoint}' call to '{method}' failed: {reason}"
+                )
+            }
+            Self::RpcCircuitOpen { endpoint } => {
+                write!(
+                    f,
+                    "rpc endpoint '{endpoint}' circuit is open — calls are rejected until the endpoint recovers"
                 )
             }
             Self::RpcError(msg) => {
-                write!(f, "bridge error: {msg}")
+                write!(f, "rpc error: {msg}")
             }
             Self::BudgetExceeded {
                 period,
@@ -441,9 +444,9 @@ mod tests {
     }
 
     #[test]
-    fn bridge_transport_error_display() {
+    fn rpc_transport_error_display() {
         let err = SimardError::RpcTransportError {
-            bridge: "subprocess".into(),
+            endpoint: "subprocess".into(),
             reason: "child missing".into(),
         };
         assert!(err.to_string().contains("subprocess"));

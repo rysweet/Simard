@@ -1,8 +1,11 @@
 use super::operations::*;
-use super::types::{ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS};
+use super::types::{
+    ActiveGoal, BacklogItem, GoalBoard, GoalProgress, MAX_ACTIVE_GOALS, STANDING_MARKER_PREFIX,
+};
 
 fn make_goal(id: &str, priority: u32) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -77,6 +80,37 @@ fn promote_to_active_not_found() {
 }
 
 #[test]
+fn promote_to_active_is_fail_closed_and_leaves_backlog_untouched() {
+    // Issue #4930 (B2): `promote_to_active` must run the SAME admission gate as
+    // the direct-add path, not just `validate_priority`. A backlog item whose
+    // record would produce an invalid active goal (here: an empty description,
+    // as a corrupt persisted board could carry) must be rejected — and because
+    // validation runs BEFORE the board is mutated, the item stays in the backlog
+    // rather than being silently dropped.
+    let mut board = GoalBoard::new();
+    board.backlog.push(BacklogItem {
+        id: "b-invalid".to_string(),
+        description: String::new(),
+        source: "test".to_string(),
+        score: 0.0,
+    });
+    let err = promote_to_active(&mut board, "b-invalid", 1, None);
+    assert!(
+        err.is_err(),
+        "an item that would yield an invalid active goal must be rejected on promotion"
+    );
+    assert_eq!(
+        board.backlog.len(),
+        1,
+        "a rejected promotion must leave the backlog item in place (no silent loss)"
+    );
+    assert!(
+        board.active.is_empty(),
+        "a rejected promotion must not insert into the active board"
+    );
+}
+
+#[test]
 fn update_goal_progress_and_archive_completed() {
     let mut board = GoalBoard::new();
     add_active_goal(&mut board, make_goal("g1", 1)).unwrap();
@@ -113,70 +147,6 @@ fn seed_default_board_skips_non_empty() {
     assert_eq!(board.active.len(), 1);
 }
 
-// ── enqueue_stewardship_issue (issue #1167) ─────────────────────────
-
-#[test]
-fn enqueue_stewardship_issue_adds_backlog_row() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "abcdef0123456789",
-    )
-    .unwrap();
-    assert_eq!(board.backlog.len(), 1);
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_Simard-42");
-    assert_eq!(item.source, "stewardship:rysweet/Simard#42");
-    assert!(item.description.contains("abcdef0123456789"));
-    assert!(
-        item.description
-            .contains("https://github.com/rysweet/Simard/issues/42")
-    );
-    assert!(item.score > 0.0 && item.score <= 1.0);
-}
-
-#[test]
-fn enqueue_stewardship_issue_is_idempotent_on_same_issue() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "sig",
-    )
-    .unwrap();
-    // Second call with same (repo, issue#) → no-op (returns Ok, backlog unchanged).
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/Simard",
-        42,
-        "https://github.com/rysweet/Simard/issues/42",
-        "sig",
-    )
-    .unwrap();
-    assert_eq!(board.backlog.len(), 1, "must not duplicate stewardship row");
-}
-
-#[test]
-fn enqueue_stewardship_issue_amplihack_repo() {
-    let mut board = GoalBoard::new();
-    super::enqueue_stewardship_issue(
-        &mut board,
-        "rysweet/amplihack",
-        7,
-        "https://github.com/rysweet/amplihack/issues/7",
-        "deadbeef",
-    )
-    .unwrap();
-    let item = &board.backlog[0];
-    assert_eq!(item.id, "stewardship-rysweet_amplihack-7");
-    assert_eq!(item.source, "stewardship:rysweet/amplihack#7");
-}
-
 // ── load_goal_board / save_goal_board: memory-only contract (issue #1590) ──
 
 /// Serialize access to SIMARD_STATE_ROOT across parallel test threads.
@@ -184,14 +154,14 @@ fn enqueue_stewardship_issue_amplihack_repo() {
 static ENV_MUTEX: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-/// Record of a `memory.store_fact` call captured by the in-memory bridge.
+/// Record of a `memory.store_fact` call captured by the in-memory memory.
 #[derive(Clone, Debug)]
 struct StoredFactCall {
     concept: String,
     content: String,
 }
 
-/// Shared mutable state captured by the in-memory bridge handler closure.
+/// Shared mutable state captured by the in-memory memory handler closure.
 #[derive(Default)]
 struct RpcRecording {
     stored_facts: std::sync::Mutex<Vec<StoredFactCall>>,
@@ -207,9 +177,9 @@ impl RpcRecording {
     }
 }
 
-/// Build a recording bridge whose `memory.search_facts` returns no facts and
+/// Build a recording memory whose `memory.search_facts` returns no facts and
 /// whose `memory.store_fact` records every call into the supplied recording.
-fn recording_bridge_empty(
+fn recording_memory_empty(
     recording: std::sync::Arc<RpcRecording>,
 ) -> crate::memory_client::CognitiveMemoryClient {
     use crate::memory_client::CognitiveMemoryClient;
@@ -246,9 +216,9 @@ fn recording_bridge_empty(
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Build a recording bridge whose `memory.search_facts` returns the given
+/// Build a recording memory whose `memory.search_facts` returns the given
 /// snapshot fact and whose `memory.store_fact` records every call.
-fn recording_bridge_with_snapshot(
+fn recording_memory_with_snapshot(
     snapshot_json: &str,
     recording: std::sync::Arc<RpcRecording>,
 ) -> crate::memory_client::CognitiveMemoryClient {
@@ -296,15 +266,15 @@ fn recording_bridge_with_snapshot(
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-/// Build a bridge whose `memory.search_facts` always returns an error
+/// Build a memory whose `memory.search_facts` always returns an error
 /// (simulates the cognitive-memory subprocess being unavailable).
-fn bridge_search_fails() -> crate::memory_client::CognitiveMemoryClient {
+fn memory_search_fails() -> crate::memory_client::CognitiveMemoryClient {
     use crate::memory_client::CognitiveMemoryClient;
     use crate::rpc_transport::InMemoryRpcTransport;
     let transport = InMemoryRpcTransport::new("test-search-fails", |method, _params| {
         Err(crate::rpc::RpcErrorPayload {
             code: -32000,
-            message: format!("simulated bridge failure for method: {method}"),
+            message: format!("simulated memory failure for method: {method}"),
         })
     });
     CognitiveMemoryClient::new(Box::new(transport))
@@ -348,6 +318,7 @@ fn load_goal_board_reads_from_cognitive_memory() {
     let root = tmp_state_root("mem-read");
     let mut mem_board = GoalBoard::new();
     mem_board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -362,9 +333,9 @@ fn load_goal_board_reads_from_cognitive_memory() {
     });
     let snapshot_json = serde_json::to_string(&mem_board).unwrap();
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_with_snapshot(&snapshot_json, recording.clone());
+    let memory = recording_memory_with_snapshot(&snapshot_json, recording.clone());
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert_eq!(board.active.len(), 1);
     assert_eq!(board.active[0].id, "memory-only-goal");
@@ -379,9 +350,9 @@ fn load_goal_board_reads_from_cognitive_memory() {
 fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
     let root = tmp_state_root("mem-empty");
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(board.active.is_empty());
     assert!(board.backlog.is_empty());
@@ -392,9 +363,9 @@ fn load_goal_board_returns_empty_when_memory_has_no_snapshot() {
 #[serial_test::serial(cognitive_memory)]
 fn load_goal_board_returns_empty_when_search_facts_errors() {
     let root = tmp_state_root("mem-err");
-    let bridge = bridge_search_fails();
+    let memory = memory_search_fails();
 
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(board.active.is_empty());
     assert!(board.backlog.is_empty());
@@ -406,6 +377,7 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     let root = tmp_state_root("migrate");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -422,8 +394,8 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
-    let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let memory = recording_memory_empty(recording.clone());
+    let _ = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(
         !path.exists(),
@@ -442,9 +414,9 @@ fn load_goal_board_migrates_legacy_disk_file_into_memory_then_deletes_it() {
 fn load_goal_board_migration_is_noop_when_no_legacy_file() {
     let root = tmp_state_root("migrate-noop");
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
 
-    let _ = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let _ = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(
         recording.calls().is_empty(),
@@ -460,8 +432,8 @@ fn load_goal_board_migration_handles_corrupt_legacy_file_without_panic() {
     std::fs::write(&path, b"NOT VALID JSON").unwrap();
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
-    let board = with_state_root(&root, || super::load_goal_board(&bridge).unwrap());
+    let memory = recording_memory_empty(recording.clone());
+    let board = with_state_root(&root, || super::load_goal_board(&memory).unwrap());
 
     assert!(board.active.is_empty(), "must return empty board");
     assert!(
@@ -484,6 +456,7 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     let root = tmp_state_root("migrate-once");
     let mut legacy = GoalBoard::new();
     legacy.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -500,10 +473,10 @@ fn load_goal_board_runs_migration_only_once_in_practice() {
     std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
     with_state_root(&root, || {
-        super::load_goal_board(&bridge).unwrap();
-        super::load_goal_board(&bridge).unwrap();
+        super::load_goal_board(&memory).unwrap();
+        super::load_goal_board(&memory).unwrap();
     });
 
     assert!(!path.exists());
@@ -520,6 +493,7 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
     let root = tmp_state_root("save-mem-only");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -534,8 +508,8 @@ fn save_goal_board_persists_only_to_memory_and_writes_no_disk_file() {
     });
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
-    with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
+    let memory = recording_memory_empty(recording.clone());
+    with_state_root(&root, || super::save_goal_board(&board, &memory).unwrap());
 
     assert!(
         !root.join("goal_records.json").exists(),
@@ -556,6 +530,7 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
     let root = tmp_state_root("save-suspect");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -570,9 +545,9 @@ fn save_goal_board_rejects_suspect_board_without_persisting() {
     });
 
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
     let err = with_state_root(&root, || {
-        super::save_goal_board(&board, &bridge).unwrap_err()
+        super::save_goal_board(&board, &memory).unwrap_err()
     });
 
     assert!(
@@ -595,6 +570,7 @@ fn save_goal_board_accepts_a_well_formed_board() {
     let root = tmp_state_root("save-ok");
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -608,9 +584,9 @@ fn save_goal_board_accepts_a_well_formed_board() {
         last_progress_update_at: None,
     });
     let recording = RpcRecording::shared();
-    let bridge = recording_bridge_empty(recording.clone());
+    let memory = recording_memory_empty(recording.clone());
 
-    with_state_root(&root, || super::save_goal_board(&board, &bridge).unwrap());
+    with_state_root(&root, || super::save_goal_board(&board, &memory).unwrap());
 
     assert_eq!(recording.calls().len(), 1);
 }
@@ -636,6 +612,7 @@ fn is_placeholder_description_rejects_long_or_substantive_descriptions() {
 fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -655,6 +632,7 @@ fn board_integrity_suspect_flags_short_ids_and_placeholder_descriptions() {
 fn board_integrity_suspect_passes_well_formed_board() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -676,6 +654,7 @@ fn board_integrity_suspect_passes_well_formed_board() {
 fn clear_goal_assignment_resets_status_and_clears_assigned_to() {
     let mut board = GoalBoard::new();
     board.active.push(ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -720,7 +699,7 @@ fn clear_goal_assignment_returns_err_for_missing_goal() {
 // other's goals (root cause of #1915). They reference three new symbols:
 //
 //   - `merge_boards(persisted, in_flight) -> GoalBoard`     (pure helper)
-//   - `read_latest_snapshot(bridge) -> Option<GoalBoard>`   (read helper)
+//   - `read_latest_snapshot(memory) -> Option<GoalBoard>`   (read helper)
 //   - revised `save_goal_board(...)` that performs
 //        guard(in_flight) -> read_latest_snapshot -> merge -> store_fact
 //
@@ -735,6 +714,7 @@ use super::operations::{merge_boards, read_latest_snapshot};
 /// All other fields default to `None` / `vec![]`.
 fn goal_with(id: &str, priority: u32, status: GoalProgress, desc: &str) -> ActiveGoal {
     ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -759,16 +739,16 @@ fn backlog_with(id: &str, description: &str, source: &str, score: f64) -> Backlo
     }
 }
 
-/// Stateful in-memory bridge that simulates the LadybugDB append-only fact
+/// Stateful in-memory memory that simulates the LadybugDB append-only fact
 /// store. Every `store_fact` appends to a shared `Vec<CognitiveFact>` with a
 /// monotonically-increasing `node_id` (so `max_by(node_id)` always picks
 /// the most recent snapshot — matching production uuid-v7 semantics).
 /// Every `search_facts` returns the current shared vec.
 ///
-/// Returns the bridge and a handle to the shared facts vec so tests can
+/// Returns the memory and a handle to the shared facts vec so tests can
 /// assert on stored counts/content.
 #[allow(clippy::type_complexity)]
-fn stateful_bridge() -> (
+fn stateful_memory() -> (
     crate::memory_client::CognitiveMemoryClient,
     std::sync::Arc<std::sync::Mutex<Vec<crate::memory_cognitive::CognitiveFact>>>,
 ) {
@@ -847,7 +827,7 @@ fn stateful_bridge() -> (
 /// Client whose `memory.search_facts` always errors but whose
 /// `memory.store_fact` succeeds and is recorded. Used to verify the
 /// read-failure fallback path in `save_goal_board`.
-fn bridge_search_fails_store_works(
+fn memory_search_fails_store_works(
     recording: std::sync::Arc<RpcRecording>,
 ) -> crate::memory_client::CognitiveMemoryClient {
     use crate::memory_client::CognitiveMemoryClient;
@@ -1209,11 +1189,11 @@ fn merge_boards_is_deterministic_across_runs() {
 
 // ── read_latest_snapshot: extracted helper ──────────────────────────────
 
-/// `read_latest_snapshot` returns `None` when the bridge has no snapshot.
+/// `read_latest_snapshot` returns `None` when the memory has no snapshot.
 #[test]
 fn read_latest_snapshot_returns_none_when_empty() {
-    let (bridge, _facts) = stateful_bridge();
-    let result = read_latest_snapshot(&bridge);
+    let (memory, _facts) = stateful_memory();
+    let result = read_latest_snapshot(&memory);
     assert!(
         result.is_none(),
         "expected None for empty store, got {result:?}"
@@ -1225,7 +1205,7 @@ fn read_latest_snapshot_returns_none_when_empty() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("read-latest-multi");
 
     let first = GoalBoard {
@@ -1248,12 +1228,12 @@ fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
     // (merge of empty + first, then merge of first + second). Either way
     // there are ≥2 facts and the latest one must be returned.
     with_state_root(&root, || {
-        super::save_goal_board(&first, &bridge).unwrap();
-        super::save_goal_board(&second, &bridge).unwrap();
+        super::save_goal_board(&first, &memory).unwrap();
+        super::save_goal_board(&second, &memory).unwrap();
     });
 
     let latest =
-        read_latest_snapshot(&bridge).expect("must return Some when at least one snapshot exists");
+        read_latest_snapshot(&memory).expect("must return Some when at least one snapshot exists");
     let ids: Vec<&str> = latest.active.iter().map(|g| g.id.as_str()).collect();
     assert!(
         ids.contains(&"second-saved-goal"),
@@ -1261,13 +1241,13 @@ fn read_latest_snapshot_picks_max_node_id_when_multiple_present() {
     );
 }
 
-/// `read_latest_snapshot` returns `None` (not Err / panic) when the bridge
+/// `read_latest_snapshot` returns `None` (not Err / panic) when the memory
 /// errors on search_facts. The caller (save_goal_board) uses this to fall
 /// back to writing the in-flight board unchanged.
 #[test]
-fn read_latest_snapshot_returns_none_on_bridge_search_error() {
-    let bridge = bridge_search_fails();
-    let result = read_latest_snapshot(&bridge);
+fn read_latest_snapshot_returns_none_on_memory_search_error() {
+    let memory = memory_search_fails();
+    let result = read_latest_snapshot(&memory);
     assert!(
         result.is_none(),
         "search_facts error must surface as None, got {result:?}"
@@ -1282,7 +1262,7 @@ fn read_latest_snapshot_returns_none_on_bridge_search_error() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("save-seq-merge");
 
     let writer_a_board = GoalBoard {
@@ -1305,9 +1285,9 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
     };
 
     with_state_root(&root, || {
-        super::save_goal_board(&writer_a_board, &bridge).unwrap();
-        super::save_goal_board(&writer_b_board, &bridge).unwrap();
-        let loaded = super::load_goal_board(&bridge).unwrap();
+        super::save_goal_board(&writer_a_board, &memory).unwrap();
+        super::save_goal_board(&writer_b_board, &memory).unwrap();
+        let loaded = super::load_goal_board(&memory).unwrap();
         let ids: Vec<&str> = loaded.active.iter().map(|g| g.id.as_str()).collect();
         assert!(
             ids.contains(&"alpha-writer-aaaa"),
@@ -1326,7 +1306,7 @@ fn save_goal_board_sequential_two_disjoint_writers_preserves_both() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_collision_persists_in_flight_fields() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("save-collision");
 
     let first = GoalBoard {
@@ -1351,9 +1331,9 @@ fn save_goal_board_collision_persists_in_flight_fields() {
     };
 
     with_state_root(&root, || {
-        super::save_goal_board(&first, &bridge).unwrap();
-        super::save_goal_board(&second, &bridge).unwrap();
-        let loaded = super::load_goal_board(&bridge).unwrap();
+        super::save_goal_board(&first, &memory).unwrap();
+        super::save_goal_board(&second, &memory).unwrap();
+        let loaded = super::load_goal_board(&memory).unwrap();
         assert_eq!(loaded.active.len(), 1);
         let g = &loaded.active[0];
         assert_eq!(g.description, "Updated desc");
@@ -1374,7 +1354,7 @@ fn save_goal_board_collision_persists_in_flight_fields() {
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     let recording = RpcRecording::shared();
-    let bridge = bridge_search_fails_store_works(recording.clone());
+    let memory = memory_search_fails_store_works(recording.clone());
     let root = tmp_state_root("save-readfail");
 
     let board = GoalBoard {
@@ -1388,7 +1368,7 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
     };
 
     with_state_root(&root, || {
-        super::save_goal_board(&board, &bridge)
+        super::save_goal_board(&board, &memory)
             .expect("read-failure must not propagate from save_goal_board");
     });
 
@@ -1411,7 +1391,7 @@ fn save_goal_board_read_failure_falls_back_to_persisting_in_flight() {
 #[test]
 #[serial_test::serial(cognitive_memory)]
 fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
-    let (bridge, _facts) = stateful_bridge();
+    let (memory, _facts) = stateful_memory();
     let root = tmp_state_root("save-capacity");
 
     with_state_root(&root, || {
@@ -1426,9 +1406,9 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
                 )],
                 backlog: vec![],
             };
-            super::save_goal_board(&board, &bridge).unwrap();
+            super::save_goal_board(&board, &memory).unwrap();
         }
-        let loaded = super::load_goal_board(&bridge).unwrap();
+        let loaded = super::load_goal_board(&memory).unwrap();
         assert_eq!(
             loaded.active.len(),
             MAX_ACTIVE_GOALS,
@@ -1460,7 +1440,7 @@ fn save_goal_board_capacity_bound_holds_after_multiple_merges() {
 
 /// Issue #1915 concurrency regression: two threads simultaneously
 /// `save_goal_board` with disjoint single-goal boards against a shared
-/// stateful bridge. After both joins, `load_goal_board` MUST return a
+/// stateful memory. After both joins, `load_goal_board` MUST return a
 /// board containing both goals. Repeated for 50 iterations with a Barrier
 /// to maximise contention on the read-modify-write window.
 #[test]
@@ -1492,14 +1472,14 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
     let _restore = EnvRestore;
 
     for iter in 0..50u32 {
-        let (bridge, _facts) = stateful_bridge();
-        let bridge: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(bridge);
+        let (memory, _facts) = stateful_memory();
+        let memory: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(memory);
         let barrier = Arc::new(Barrier::new(2));
 
         let alpha_id = format!("alpha-concur-{iter:04}");
         let beta_id = format!("beta-concur-{iter:04}");
 
-        let bridge_a = bridge.clone();
+        let memory_a = memory.clone();
         let barrier_a = barrier.clone();
         let alpha_id_thread = alpha_id.clone();
         let h_a = thread::spawn(move || {
@@ -1513,10 +1493,10 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
                 )],
                 backlog: vec![],
             };
-            super::save_goal_board(&board, bridge_a.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_a.as_ref()).unwrap();
         });
 
-        let bridge_b = bridge.clone();
+        let memory_b = memory.clone();
         let barrier_b = barrier.clone();
         let beta_id_thread = beta_id.clone();
         let h_b = thread::spawn(move || {
@@ -1530,7 +1510,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
                 )],
                 backlog: vec![],
             };
-            super::save_goal_board(&board, bridge_b.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_b.as_ref()).unwrap();
         });
 
         h_a.join().expect("alpha thread must not panic");
@@ -1539,7 +1519,7 @@ fn save_goal_board_concurrent_two_writers_preserves_both_goals() {
         // ENV_MUTEX is held for the whole test → calling with_state_root
         // here would deadlock. SIMARD_STATE_ROOT is already pinned, so
         // load_goal_board sees the correct value directly.
-        let loaded = super::load_goal_board(bridge.as_ref()).unwrap();
+        let loaded = super::load_goal_board(memory.as_ref()).unwrap();
         let ids: Vec<String> = loaded.active.iter().map(|g| g.id.clone()).collect();
         assert!(
             ids.iter().any(|id| id == &alpha_id),
@@ -1582,8 +1562,8 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
     let _restore = EnvRestore;
 
     for iter in 0..25u32 {
-        let (bridge, _facts) = stateful_bridge();
-        let bridge: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(bridge);
+        let (memory, _facts) = stateful_memory();
+        let memory: Arc<crate::memory_client::CognitiveMemoryClient> = Arc::new(memory);
         let barrier = Arc::new(Barrier::new(2));
 
         // Seed a guard-clean active goal so board_integrity_suspect passes
@@ -1598,7 +1578,7 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
         let alpha_bk_id = format!("alpha-bk-{iter:04}");
         let beta_bk_id = format!("beta-bk-{iter:04}");
 
-        let bridge_a = bridge.clone();
+        let memory_a = memory.clone();
         let barrier_a = barrier.clone();
         let alpha_bk_id_t = alpha_bk_id.clone();
         let seed_a = seed_goal.clone();
@@ -1608,10 +1588,10 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
                 active: vec![seed_a],
                 backlog: vec![backlog_with(&alpha_bk_id_t, "alpha-bk", "a", 0.3)],
             };
-            super::save_goal_board(&board, bridge_a.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_a.as_ref()).unwrap();
         });
 
-        let bridge_b = bridge.clone();
+        let memory_b = memory.clone();
         let barrier_b = barrier.clone();
         let beta_bk_id_t = beta_bk_id.clone();
         let seed_b = seed_goal.clone();
@@ -1621,14 +1601,14 @@ fn save_goal_board_concurrent_backlog_writers_preserve_both_items() {
                 active: vec![seed_b],
                 backlog: vec![backlog_with(&beta_bk_id_t, "beta-bk", "b", 0.4)],
             };
-            super::save_goal_board(&board, bridge_b.as_ref()).unwrap();
+            super::save_goal_board(&board, memory_b.as_ref()).unwrap();
         });
 
         h_a.join().unwrap();
         h_b.join().unwrap();
 
         // ENV_MUTEX is held → must not call with_state_root (would deadlock).
-        let loaded = super::load_goal_board(bridge.as_ref()).unwrap();
+        let loaded = super::load_goal_board(memory.as_ref()).unwrap();
         let bk_ids: Vec<String> = loaded.backlog.iter().map(|b| b.id.clone()).collect();
         assert!(
             bk_ids.iter().any(|id| id == &alpha_bk_id),
@@ -1737,4 +1717,385 @@ fn board_write_lock_serializes_independent_acquirers() {
     );
 
     handle.join().expect("lock thread should join cleanly");
+}
+
+// ===========================================================================
+// Standing/perpetual seed declaration + warm-board self-heal (issue #4927)
+//
+// TEST-FIRST for the un-shipped `standing` seed attribute and the
+// `reconcile_standing_markers` warm-board self-heal. The live standing goal
+// `articulate-repo-hygiene-backlog` was re-parked every OODA cycle and fed the
+// `UNCLEAR-CRITERIA` issue storm (#4927/#4930/#4934) purely because it was
+// never tagged perpetual — the no-progress breaker's `!is_perpetual()`
+// exemption never fired for it. The fix is entirely in the seed-declaration +
+// reconcile surface: a `standing = true` seed must produce a goal that reads as
+// `is_perpetual()`, and a persisted (already-live) goal matching a standing
+// seed must be self-healed idempotently, by exact id / normalized title-slug
+// only — never by fuzzy prose (which would wrongly exempt a genuinely stuck
+// goal from the safety breaker).
+// ===========================================================================
+
+const HYGIENE_TITLE: &str = "Articulate repo-hygiene backlog";
+const HYGIENE_DESC: &str = "Turn observations into prioritized, target-scoped repo-hygiene goals on this identity's own board.";
+
+fn standing_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
+    crate::identity::SeedGoal::new(2, title, desc, None).standing()
+}
+
+fn ordinary_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
+    crate::identity::SeedGoal::new(2, title, desc, None)
+}
+
+/// An *explicit* `standing = false` seed (issue #4927): non-standing for cold
+/// seeding, yet the only non-standing form that authorizes conservative
+/// reversal — as opposed to [`ordinary_seed`], whose omitted flag is inert.
+fn non_standing_seed(title: &str, desc: &str) -> crate::identity::SeedGoal {
+    crate::identity::SeedGoal::new(2, title, desc, None).non_standing()
+}
+
+#[test]
+fn seed_board_from_seed_goals_marks_a_standing_seed_as_perpetual() {
+    // Cold start: a `standing = true` seed must produce an ActiveGoal that reads
+    // as standing/perpetual (the single `is_perpetual()` predicate the breaker
+    // exemption keys on), so #4927 never recurs on a fresh/re-seeded board.
+    let mut board = GoalBoard::new();
+    let added =
+        seed_board_from_seed_goals(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(added, 1);
+    assert_eq!(board.active.len(), 1);
+    assert!(
+        board.active[0].is_perpetual(),
+        "a standing=true seed must seed a perpetual goal (issue #4927)"
+    );
+}
+
+#[test]
+fn seed_board_from_seed_goals_leaves_an_ordinary_seed_non_perpetual() {
+    // Regression guard: an ordinary (standing omitted) seed must remain a
+    // convergence-required goal — the fix must NOT broadly reclassify goals.
+    let mut board = GoalBoard::new();
+    let added = seed_board_from_seed_goals(
+        &mut board,
+        &[ordinary_seed("Fix broken features", "audit specs")],
+    );
+    assert_eq!(added, 1);
+    assert!(
+        !board.active[0].is_perpetual(),
+        "an ordinary seed must stay non-perpetual (no broad reclassification)"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_self_heals_a_persisted_goal_by_id() {
+    // Warm board: the live `articulate-repo-hygiene-backlog` already sits on the
+    // cognitive-memory board with an UNMARKED description (the #4927 defect). A
+    // seed-only tag can't reach it (the empty-board guard no-ops), so a load-time
+    // reconcile must stamp the standing marker onto the persisted goal whose id
+    // matches the standing seed's slug — turning it perpetual in place.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut goal = ActiveGoal::new(id.clone(), HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    assert!(
+        !goal.is_perpetual(),
+        "precondition: the live goal starts unmarked — the exact #4927 defect"
+    );
+
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(
+        healed.added, 1,
+        "the matching persisted goal must be healed exactly once"
+    );
+    assert_eq!(healed.removed, 0, "an add pass must not remove any marker");
+    assert!(
+        board.active[0].is_perpetual(),
+        "reconcile must make the persisted hygiene goal read as perpetual (issue #4927)"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_matches_by_normalized_title_slug() {
+    // Matching is by the NORMALIZED slug, not a byte-exact title, so a persisted
+    // goal whose id came from a differently-cased/spaced title still self-heals.
+    let id = "articulate-repo-hygiene-backlog".to_string();
+    assert_eq!(
+        crate::goals::goal_slug("Articulate  Repo-Hygiene   Backlog"),
+        id,
+        "slug normalization must collapse case/whitespace"
+    );
+    let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed = reconcile_standing_markers(
+        &mut board,
+        &[standing_seed(
+            "Articulate  Repo-Hygiene   Backlog",
+            HYGIENE_DESC,
+        )],
+    );
+    assert_eq!(healed.added, 1);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_is_idempotent() {
+    // A second reconcile pass must be a no-op (returns 0) and must not
+    // double-prepend the marker — `mark_standing` is idempotent by design.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+    let seeds = [standing_seed(HYGIENE_TITLE, HYGIENE_DESC)];
+
+    assert_eq!(reconcile_standing_markers(&mut board, &seeds).added, 1);
+    let after_first = board.active[0].description.clone();
+    assert!(
+        reconcile_standing_markers(&mut board, &seeds).is_noop(),
+        "a second reconcile must heal nothing"
+    );
+    assert_eq!(
+        board.active[0].description, after_first,
+        "reconcile must not double-stamp the standing marker"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_ignores_unmatched_goals() {
+    // Exact-match-only safety property: a goal whose id does NOT match any
+    // standing seed must never be exempted from the no-progress breaker.
+    let mut goal = ActiveGoal::new("some-other-goal", "unrelated work", 3);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert!(
+        healed.is_noop(),
+        "no non-matching goal may be stamped standing"
+    );
+    assert!(!board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_ignores_non_standing_seeds() {
+    // A seed with standing=false must NEVER stamp (add a marker to) a matching
+    // persisted goal — otherwise every seed would silently become breaker-exempt.
+    // (An explicit false may *reverse* a leading marker, but only on a
+    // `source:seed` goal that actually carries one — covered separately below.)
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut goal = ActiveGoal::new(id, HYGIENE_DESC, 2);
+    goal.status = GoalProgress::NotStarted;
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[ordinary_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(
+        healed.added, 0,
+        "an ordinary (standing=false) seed must never stamp a goal standing"
+    );
+    assert!(!board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_skips_already_perpetual_goals() {
+    // A goal already reading as perpetual must not be re-counted or re-stamped.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let goal = ActiveGoal::new(id, HYGIENE_DESC, 2).mark_standing();
+    assert!(goal.is_perpetual());
+    let before = goal.description.clone();
+    let mut board = GoalBoard::new();
+    board.active.push(goal);
+
+    let healed =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert!(
+        healed.is_noop(),
+        "an already-perpetual goal is not healed again"
+    );
+    assert_eq!(board.active[0].description, before);
+}
+
+// ===========================================================================
+// Conservative REVERSAL of a standing declaration (issue #4927 rework)
+//
+// A standing declaration must be reversible without a board wipe: flipping a
+// seed back to `standing = false` should strip the marker the reconciler itself
+// added. The reversal is deliberately narrow — leading sentinel only, exact
+// slug, `source:seed` label only — so it can never demote a user-created goal,
+// never edit standing *phrases* in prose, and never fire for seed *absence*.
+// ===========================================================================
+
+/// A persisted seed goal (carries the `source:seed` label the seeding path
+/// stamps) whose id is `HYGIENE_TITLE`'s slug and whose description is unmarked.
+fn persisted_seed_goal(desc: &str) -> ActiveGoal {
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut g = ActiveGoal::new(id, desc, 2).with_label(crate::goal_curation::labels::SOURCE_SEED);
+    g.status = GoalProgress::NotStarted;
+    g
+}
+
+#[test]
+fn reconcile_standing_markers_reverses_explicit_false_on_source_seed_goal() {
+    // add-then-reverse: a standing=true pass marks the source:seed goal, then a
+    // standing=false pass on the SAME exact slug strips the leading marker.
+    let mut board = GoalBoard::new();
+    board.active.push(persisted_seed_goal(HYGIENE_DESC));
+
+    let added =
+        reconcile_standing_markers(&mut board, &[standing_seed(HYGIENE_TITLE, HYGIENE_DESC)]);
+    assert_eq!(added.added, 1);
+    assert!(board.active[0].is_perpetual());
+
+    let reversed = reconcile_standing_markers(
+        &mut board,
+        &[non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)],
+    );
+    assert_eq!(
+        (reversed.added, reversed.removed),
+        (0, 1),
+        "an explicit standing=false must reverse exactly the marker it added"
+    );
+    assert!(
+        !board.active[0].is_perpetual(),
+        "after reversal the goal is convergence-required again"
+    );
+    assert_eq!(
+        board.active[0].description, HYGIENE_DESC,
+        "reversal must restore the original description byte-for-byte"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_does_not_reverse_without_source_seed_label() {
+    // A user-created goal (no source:seed) that happens to share the slug and
+    // carry a leading marker must NOT be demoted by an explicit standing=false —
+    // reversal only touches goals this seeding path created.
+    let id = crate::goals::goal_slug(HYGIENE_TITLE);
+    let mut user_goal = ActiveGoal::new(id, HYGIENE_DESC, 2).mark_standing();
+    user_goal.status = GoalProgress::NotStarted;
+    assert!(user_goal.is_perpetual());
+    let before = user_goal.description.clone();
+    let mut board = GoalBoard::new();
+    board.active.push(user_goal);
+
+    let reversed = reconcile_standing_markers(
+        &mut board,
+        &[non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)],
+    );
+    assert!(
+        reversed.is_noop(),
+        "a goal without source:seed must never be reversed"
+    );
+    assert_eq!(board.active[0].description, before);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_omitted_seed_does_not_reverse() {
+    // The three-state guarantee (issue #4927): an OMITTED `standing` — a default
+    // `SeedGoal::new` seed — must NEVER reverse a marker, even on the exact-slug
+    // `source:seed` goal that an explicit `standing = false` WOULD reverse. This
+    // is the case distinct from explicit-false reversal
+    // (`reconcile_standing_markers_reverses_explicit_false_on_source_seed_goal`).
+    let mut board = GoalBoard::new();
+    let mut marked = persisted_seed_goal(HYGIENE_DESC);
+    marked.mark_standing_in_place();
+    assert!(marked.is_perpetual());
+    let before = marked.description.clone();
+    board.active.push(marked);
+
+    // Same exact slug + source:seed label, but the seed OMITS `standing`.
+    let omitted = ordinary_seed(HYGIENE_TITLE, HYGIENE_DESC);
+    assert!(
+        !omitted.authorizes_standing_reversal(),
+        "sanity: an omitted seed must not authorize reversal"
+    );
+    let reversed = reconcile_standing_markers(&mut board, &[omitted]);
+    assert!(
+        reversed.is_noop(),
+        "an omitted (default) seed must never reverse a marker — only explicit false does"
+    );
+    assert_eq!(board.active[0].description, before);
+    assert!(
+        board.active[0].is_perpetual(),
+        "the omitted seed leaves the standing goal perpetual"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_does_not_reverse_on_seed_absence() {
+    // Deleting a seed entirely (slug not present in the seed set) must leave its
+    // marked goal untouched — only an EXPLICIT standing=false reverses.
+    let mut board = GoalBoard::new();
+    let mut marked = persisted_seed_goal(HYGIENE_DESC);
+    marked.mark_standing_in_place();
+    assert!(marked.is_perpetual());
+    let before = marked.description.clone();
+    board.active.push(marked);
+
+    // An unrelated seed set that does not mention the hygiene slug at all.
+    let unrelated = crate::identity::SeedGoal::new(1, "Some other seed", "x", None);
+    let reversed = reconcile_standing_markers(&mut board, &[unrelated]);
+    assert!(
+        reversed.is_noop(),
+        "seed absence must never reverse a marker (only explicit false does)"
+    );
+    assert_eq!(board.active[0].description, before);
+    assert!(board.active[0].is_perpetual());
+}
+
+#[test]
+fn reconcile_standing_markers_reversal_strips_only_the_leading_sentinel_prose_stays_perpetual() {
+    // Prefix-only guarantee: a source:seed goal whose PROSE independently reads
+    // as standing keeps a leading sentinel stripped on reversal, yet stays
+    // perpetual because the phrase in the prose is never edited.
+    let mut board = GoalBoard::new();
+    // A source:seed goal whose prose already reads perpetual AND that the
+    // reconciler previously stamped with a leading sentinel.
+    let mut goal = persisted_seed_goal("standing goal: keep grooming the backlog");
+    goal.description = format!("{STANDING_MARKER_PREFIX}standing goal: keep grooming the backlog");
+    board.active.push(goal);
+    assert!(board.active[0].is_perpetual());
+
+    let reversed = reconcile_standing_markers(
+        &mut board,
+        &[non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)],
+    );
+    assert_eq!(reversed.removed, 1, "the leading sentinel must be stripped");
+    assert!(
+        !board.active[0]
+            .description
+            .starts_with(STANDING_MARKER_PREFIX),
+        "the leading sentinel is gone"
+    );
+    assert!(
+        board.active[0].is_perpetual(),
+        "the untouched standing phrase in prose keeps the goal perpetual"
+    );
+}
+
+#[test]
+fn reconcile_standing_markers_reversal_is_idempotent() {
+    // A second explicit-false pass after reversal changes nothing.
+    let mut board = GoalBoard::new();
+    let mut marked = persisted_seed_goal(HYGIENE_DESC);
+    marked.mark_standing_in_place();
+    board.active.push(marked);
+
+    let seeds = [non_standing_seed(HYGIENE_TITLE, HYGIENE_DESC)];
+    assert_eq!(reconcile_standing_markers(&mut board, &seeds).removed, 1);
+    let after = board.active[0].description.clone();
+    assert!(
+        reconcile_standing_markers(&mut board, &seeds).is_noop(),
+        "a second reversal pass must be a no-op"
+    );
+    assert_eq!(board.active[0].description, after);
 }

@@ -7,16 +7,17 @@
 # non-zero if any test fails, so CI and humans see the full picture at once.
 #
 # Scope: docs-only. This harness never mutates the repo; it only inspects the
-# working tree, the git diff vs the base ref, and the mkdocs build.
+# working tree, the git diff vs the base ref, and the native Rust
+# docs-integrity gate.
 #
 # Usage:
 #   scripts/verify-docs.sh                 # verify vs origin/main
 #   BASE_REF=origin/main scripts/verify-docs.sh
-#   SKIP_MKDOCS=1 scripts/verify-docs.sh   # skip the mkdocs --strict gate (T3)
+#   SKIP_DOCS_INTEGRITY=1 scripts/verify-docs.sh   # skip the docs-integrity gate (T3)
 #
 # Env:
-#   BASE_REF      base ref the docs branch was cut from (default: origin/main)
-#   SKIP_MKDOCS   set to 1 to skip the mkdocs --strict build gate (T3)
+#   BASE_REF             base ref the docs branch was cut from (default: origin/main)
+#   SKIP_DOCS_INTEGRITY  set to 1 to skip the native docs-integrity gate (T3)
 
 set -uo pipefail
 
@@ -105,25 +106,23 @@ else
 fi
 
 # =============================================================================
-# T3 — mkdocs --strict build (authoritative link/nav/orphan integrity gate).
-#      Under --strict, the validation warnings configured in mkdocs.yml
-#      (nav.omitted_files, links.not_found, anchors, ...) become hard errors.
+# T3 — Native docs-integrity gate (link + nav integrity, Python-free).
+#      Replaces the former `mkdocs build --strict` gate (issue #3181): the same
+#      broken-link / broken-nav integrity now runs as a std-only Rust test,
+#      `tests/docs_integrity.rs`, under `cargo test`. No Python `mkdocs`.
 # =============================================================================
-section "T3  mkdocs build --strict (link + nav + anchor integrity)"
-if [ "${SKIP_MKDOCS:-0}" = "1" ]; then
-  info "SKIPPED via SKIP_MKDOCS=1"
-elif ! command -v mkdocs >/dev/null 2>&1; then
-  fail "mkdocs not installed — cannot run the authoritative discoverability gate"
-  info "install with: pip install mkdocs-material pymdown-extensions"
+section "T3  native docs-integrity gate (tests/docs_integrity.rs)"
+if [ "${SKIP_DOCS_INTEGRITY:-0}" = "1" ]; then
+  info "SKIPPED via SKIP_DOCS_INTEGRITY=1"
 else
-  MK_LOG="$(mktemp)"
-  if mkdocs build --strict >"$MK_LOG" 2>&1; then
-    pass "mkdocs build --strict succeeded (0 broken links, 0 orphaned nav pages)"
+  DI_LOG="$(mktemp)"
+  if cargo test --test docs_integrity --quiet >"$DI_LOG" 2>&1; then
+    pass "docs-integrity passed (0 broken links, 0 broken nav entries)"
   else
-    fail "mkdocs build --strict FAILED"
-    grep -iE 'warning|error|not found|omitted|anchor' "$MK_LOG" | grep -viE 'material for mkdocs|mkdocs 2.0|backward-incompat|plugin system|theming system|migration path|contribution model|unlicensed|our full analysis' | tail -30 | sed 's/^/        /'
+    fail "docs-integrity FAILED"
+    grep -iE 'docs-integrity|dead|missing|panicked|FAILED' "$DI_LOG" | tail -30 | sed 's/^/        /'
   fi
-  rm -f "$MK_LOG"
+  rm -f "$DI_LOG"
 fi
 
 # =============================================================================

@@ -1,0 +1,56 @@
+name: "Deploy-aware done-gate blocks evidence-free completions (goal-board merge-gate)"
+description: "Outside-in proof that goal_curation::completion_gate — the goal-board's merge-gate — archives a goal as complete ONLY with hard external evidence (merged PR, closed linked issue, and, for self-affecting changes, a verified deploy). The gate logic is pure (evidence injected via EvidenceSource), so this runs hermetically with no network and no live gh. Exercises the public kill-switch-aware entrypoint archive_completed_evidence_aware (verified archives, unverified retained+annotated, kill-switch restores legacy), the production GhCliEvidenceSource hermetic short-circuits (repo-slug resolution + ref-less clauses), and the headline correctness regressions (evidence-free stays active, source error fails closed, standing goal never archived). Runs the in-tree unit tests and asserts the NAMED tests actually ran so a rename cannot silently no-op the scenario."
+version: "1.0.0"
+
+config:
+  timeout: 300000
+  retries: 1
+  parallel: false
+
+environment:
+  requires: []
+
+agents:
+  - name: "cli-agent"
+    type: "cli"
+    config:
+      workingDirectory: "."
+      defaultTimeout: 300000
+      executionMode: "spawn"
+      captureOutput: true
+      ioConfig:
+        encoding: "utf8"
+        handleInteractivePrompts: false
+      logConfig:
+        logCommands: true
+        logOutput: true
+        logLevel: "info"
+
+steps:
+  - name: "Deploy-aware done-gate evidence policy (completion_gate unit tests)"
+    agent: "cli-agent"
+    action: "execute_command"
+    params:
+      command: "tests/gadugi/completion-gate-evidence.sh"
+    timeout: 300000
+
+assertions: []
+
+cleanup:
+  - name: "CLI agent cleanup"
+    agent: "cli-agent"
+    action: "cleanup"
+
+metadata:
+  tags:
+    - "cli"
+    - "behavior"
+    - "simard"
+    - "goal-curation"
+    - "completion-gate"
+    - "merge-gate"
+    - "done-gate"
+    - "coverage"
+  priority: "high"
+  author: "copilot"
+  test_type: "outside-in"

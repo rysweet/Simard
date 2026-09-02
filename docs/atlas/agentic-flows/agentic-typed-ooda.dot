@@ -1,0 +1,36 @@
+digraph AgenticTypedOoda {
+  rankdir=TB;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+
+  entry [label="OODA ACT: AdvanceGoal -> spawn::dispatch_spawn_engineer\nsrc/ooda_actions/advance_goal/spawn.rs"];
+  route [label="TypedGoalSessionRoute::execute\nsrc/typed_ooda/route.rs"];
+  policy[label="load_policy goal-session-capabilities.toml\n-> CapabilityPolicy (goal-session-policy-v1)\nPRODUCTION grants: record_action.spawn_engineer only"];
+  actor [label="recipe goal-session-actor.yaml via recipe-runner\ncontext: task, reason, observe/orient/decide outputs", fillcolor="#fff6df"];
+  outcome[label="TypedOutcomePayload (one terminal per session/cycle/goal)\nAction | NoAction | Blocked | Completed\nsrc/typed_ooda/types.rs"];
+  tools [label="GoalSessionTools record_* (terminal guard)\nsrc/typed_ooda/executor.rs"];
+  ledger[label="ledger: terminal_outcomes, progress_records, effect_jobs\nSQLite typed-ooda/outcomes.sqlite3  src/typed_ooda/schema.rs", fillcolor="#eaf6ff"];
+  capcheck[label="capability check vs CapabilityGrant\nRecordAction(SpawnEngineer|FileIssue|RequestMerge|RequestDeploy)"];
+  deny  [label="CapabilityError(Authorization) -> Blocked"];
+  dispatch[label="dispatch_outcome -> EffectJob + lease acquire\n(lease_owner, lease_expires_at)  src/typed_ooda/ledger.rs"];
+  effects[label="Action kind", shape=diamond, fillcolor="#f0f0f0"];
+  se [label="SpawnEngineer [GRANTED in production]\n-> engineer worktree + agent_supervisor"];
+  fi [label="FileIssue [enum-only; NOT granted]"];
+  rm [label="RequestMerge [enum-only; NOT granted]"];
+  rd [label="RequestDeploy [enum-only; deployment_environments=[]]"];
+  evidence[label="Evidence: Commit | CheckRun | Issue | EngineerRun\n-> effect_jobs.result", fillcolor="#eaf6ff"];
+  blocker[label="BlockerRef: Goal|Credential|Authorization|Resource|Operator|External\n+ RetryPolicy (Never|AfterGoal|AfterSignal|AfterTime)"];
+
+  entry -> route;
+  route -> policy;
+  route -> actor -> outcome;
+  outcome -> tools -> ledger;
+  outcome -> capcheck;
+  capcheck -> dispatch [label="granted"];
+  capcheck -> deny [label="denied"];
+  dispatch -> effects;
+  effects -> se; effects -> fi; effects -> rm; effects -> rd;
+  se -> evidence; fi -> evidence; rm -> evidence; rd -> evidence;
+  outcome -> blocker [label="Blocked", style=dashed];
+  policy -> capcheck [style=dashed, label="grants"];
+}

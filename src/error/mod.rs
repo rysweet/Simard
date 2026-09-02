@@ -198,24 +198,24 @@ pub enum SimardError {
         reason: String,
     },
     RpcSpawnFailed {
-        bridge: String,
+        endpoint: String,
         reason: String,
     },
     RpcTransportError {
-        bridge: String,
+        endpoint: String,
         reason: String,
     },
     RpcProtocolError {
-        bridge: String,
+        endpoint: String,
         reason: String,
     },
     RpcCallFailed {
-        bridge: String,
+        endpoint: String,
         method: String,
         reason: String,
     },
     RpcCircuitOpen {
-        bridge: String,
+        endpoint: String,
     },
     RpcError(String),
     PlanningUnavailable {
@@ -251,7 +251,9 @@ pub enum SimardError {
     PromptNotFound {
         name: String,
     },
-    /// Stewardship: source-module → repo routing has no matching keyword. Fail-loud — no default repo.
+    /// Stewardship: source-module → repo routing had no matching keyword.
+    /// Retained for API/`Display` stability; **no longer produced by
+    /// `route_failure`**, which now falls back to the default repo instead.
     StewardshipRoutingAmbiguous {
         source: String,
     },

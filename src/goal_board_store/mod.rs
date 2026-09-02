@@ -52,6 +52,12 @@ use crate::goal_curation::{
 #[cfg(test)]
 mod tests;
 
+mod done_gate_pins;
+pub use done_gate_pins::{
+    DONE_WHEN_MARKER, DoneGatePin, apply_done_gate_pins, clear_done_gate_pins, load_done_gate_pins,
+    record_done_gate_pin, upsert_first_ref,
+};
+
 /// On-disk schema version for [`PersistentGoalState`]. Bump on incompatible
 /// layout changes so a loader can migrate; `#[serde(default)]` keeps older
 /// files (which lacked the field) deserializable as version 0.
@@ -416,12 +422,22 @@ pub fn commit_cycle(
 ) -> SimardResult<GoalBoard> {
     if !new_tombstones.is_empty() {
         crate::ooda_loop::tombstone_goals(state_root, new_tombstones)?;
+        // A tombstoned goal is gone — stop re-asserting any operator done-gate
+        // pin for it so a finished/removed goal's finish line is not resurrected.
+        clear_done_gate_pins(state_root, new_tombstones)?;
     }
     let tombstones = crate::ooda_loop::load_tombstones(state_root);
+    // Operator-pinned done-gates (issue: durable UNCLEAR-CRITERIA remedy). Empty
+    // by default, so this is a no-op unless an operator ran `goal set-done-gate`.
+    let pins = load_done_gate_pins(state_root);
     let in_flight = in_flight.clone();
     let tracker = tracker.clone();
     mutate(state_root, move |s| {
-        let reconciled = reconcile(&s.board, &in_flight, &tombstones);
+        let mut reconciled = reconcile(&s.board, &in_flight, &tombstones);
+        // Re-assert operator done-gate pins *after* the in-flight-wins reconcile
+        // so a pinned goal's measurable anchor + finish line survive the daemon's
+        // per-cycle re-derivation (the clobber this closes).
+        apply_done_gate_pins(&mut reconciled, &pins);
         s.board = reconciled.clone();
         s.no_progress = tracker;
         // Persist the brain's lived cycle count with a monotonic guard so a

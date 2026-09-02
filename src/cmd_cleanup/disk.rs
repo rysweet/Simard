@@ -370,24 +370,51 @@ pub(crate) fn is_corrupt_quarantine_name(name: &str) -> bool {
         && name.contains(".corrupt-")
 }
 
-/// Remove quarantined corrupt cognitive-memory snapshots in `~/.simard` that are
-/// either older than [`CORRUPT_DB_MAX_AGE_DAYS`] **or** beyond the newest
-/// [`CORRUPT_DB_KEEP`] quarantines (issue #2420). Covers both the native
-/// single-file `cognitive_memory.corrupt-*` snapshots and the library backend's
+/// Remove quarantined corrupt cognitive-memory snapshots that are either older
+/// than [`CORRUPT_DB_MAX_AGE_DAYS`] **or** beyond the newest [`CORRUPT_DB_KEEP`]
+/// quarantines (issue #2420). Covers both the native single-file
+/// `cognitive_memory.corrupt-*` snapshots and the library backend's
 /// `cognitive.corrupt-*` / `cognitive.wal.corrupt-*` / `*.cognitive.shadow`
 /// quarantines (see [`is_corrupt_quarantine_name`]). These are useful briefly
 /// for forensics then pure dead weight. The live store (`cognitive`,
 /// `cognitive.wal`) is never matched.
 ///
+/// Reclaims BOTH the top-level state root (`~/.simard`, the native pre-#2307
+/// quarantine location) AND the live-store subdir `<state_root>/state/`, where
+/// the de-forked library backend actually drops corrupt snapshots next to the
+/// live `cognitive` store (issue #4469). Before this the driver only scanned the
+/// top level, so 62 corrupt artifacts accumulated unbounded under `state/` on
+/// the live host. Both directories resolve through the canonical
+/// [`crate::state_root`] helpers — one source of truth, no hardcoded duplicate
+/// path. The age / keep-last-N / largest-asset bounds are applied
+/// **independently per directory** (separate listings), so the newer `state/`
+/// branch cannot erode the top-level directory's keep-N / recovery-asset
+/// protection or vice-versa.
+///
 /// The age cap alone leaves a burst of *young* quarantines untouched for a week
 /// (this host saw 88 MB / 112 artifacts accumulate); the keep-last-N cap bounds
 /// that growth immediately while preserving the most recent forensic snapshots.
 pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let simard_dir = PathBuf::from(home).join(".simard");
-    let Ok(entries) = std::fs::read_dir(&simard_dir) else {
+    let state_root = crate::state_root::simard_state_root();
+    let live_store_dir = crate::state_root::resolve_subdir("state");
+
+    reclaim_corrupt_dbs_in_dir(&state_root, report);
+    // `resolve_subdir("state")` is always distinct from the top-level root, but
+    // guard against an unexpected alias so a directory is never scanned twice.
+    if live_store_dir != state_root {
+        reclaim_corrupt_dbs_in_dir(&live_store_dir, report);
+    }
+}
+
+/// Apply the age / keep-last-N / largest-asset quarantine bounds to a single
+/// directory `dir`'s listing (non-recursive). Extracted from
+/// [`remove_old_corrupt_dbs`] so the identical policy can run independently over
+/// each live-store directory (issue #4469). Bounds are computed over `dir`'s own
+/// candidate set only — never merged across directories — so each directory
+/// keeps its own newest-N and its own largest recovery asset. Absent/unreadable
+/// `dir` ⇒ no-op.
+fn reclaim_corrupt_dbs_in_dir(dir: &Path, report: &mut CleanupReport) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let max_age = std::time::Duration::from_secs(CORRUPT_DB_MAX_AGE_DAYS * 24 * 3600);
@@ -400,8 +427,7 @@ pub fn remove_old_corrupt_dbs(report: &mut CleanupReport) {
     // because the largest-asset guard below needs it for every candidate.
     let mut candidates: Vec<(PathBuf, bool, u64, std::time::SystemTime)> = Vec::new();
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !is_corrupt_quarantine_name(&name) {
+        if !is_corrupt_quarantine_name(&entry.file_name().to_string_lossy()) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };

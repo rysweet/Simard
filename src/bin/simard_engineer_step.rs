@@ -125,7 +125,10 @@ fn cmd_persist(args: &[String]) -> Result<(), String> {
         serde_json::from_str(&action_json).map_err(|e| format!("parse action-json: {e}"))?;
     let verification: VerificationReport = serde_json::from_str(&verification_json)
         .map_err(|e| format!("parse verification-json: {e}"))?;
-    let bridge_context: Option<EngineerHandoffContext> = match arg(args, "--terminal-bridge-json") {
+    // `--terminal-bridge-json` is a frozen, published CLI flag (external tooling
+    // invokes it); the value it carries is the renamed EngineerHandoffContext.
+    let handoff_context: Option<EngineerHandoffContext> = match arg(args, "--terminal-bridge-json")
+    {
         Some(s) if !s.is_empty() && s != "null" => {
             Some(serde_json::from_str(&s).map_err(|e| format!("parse terminal-bridge-json: {e}"))?)
         }
@@ -139,7 +142,7 @@ fn cmd_persist(args: &[String]) -> Result<(), String> {
         &inspection,
         &action,
         &verification,
-        bridge_context.as_ref(),
+        handoff_context.as_ref(),
     )
     .map_err(|e| format!("persist_engineer_loop_artifacts failed: {e}"))?;
     println!("{{\"status\":\"persisted\"}}");

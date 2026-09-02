@@ -75,22 +75,21 @@ impl<S: DeploySource> ReconcileDetector<S> {
         Self { source }
     }
 
-    /// Returns [`DeployDrift`]. Never panics; on a source error returns a
-    /// `needs_deploy: false` drift (fail-safe: a transient git failure must not
-    /// spuriously trigger a deploy).
-    pub fn detect(&self) -> DeployDrift {
-        let behind = match self.source.behind_count() {
-            Ok(n) => n,
-            Err(_) => return DeployDrift::current(),
-        };
-        let merged = match self.source.merged_pins() {
-            Ok(m) => m,
-            Err(_) => return DeployDrift::current(),
-        };
-        let running = match self.source.running_pins() {
-            Ok(m) => m,
-            Err(_) => return DeployDrift::current(),
-        };
+    /// Returns [`DeployDrift`], or the underlying source error. Unlike
+    /// [`detect`](Self::detect), this does **not** fail safe: a git/source error
+    /// surfaces as `Err` so callers that must distinguish "positively no drift"
+    /// from "could not determine the deploy state" never mistake an unknown
+    /// state for a confirmed one.
+    ///
+    /// This is the fail-*closed* variant the closed-loop outcome-verification
+    /// step (issue #2751) requires: it stakes Rail-3 on a `verified` live signal
+    /// meaning *authenticated positive corroboration*, so a git probe error must
+    /// become an explicit "unknown" rather than a spurious `needs_deploy: false`
+    /// (which the caller would otherwise read as "confirmed running").
+    pub fn try_detect(&self) -> SimardResult<DeployDrift> {
+        let behind = self.source.behind_count()?;
+        let merged = self.source.merged_pins()?;
+        let running = self.source.running_pins()?;
 
         // A pin has drifted when its merged rev differs from the running rev
         // (including a pin present in the merged tree but absent from the
@@ -102,7 +101,16 @@ impl<S: DeploySource> ReconcileDetector<S> {
             .collect();
         drifted.sort();
 
-        DeployDrift::from_parts(behind, drifted)
+        Ok(DeployDrift::from_parts(behind, drifted))
+    }
+
+    /// Returns [`DeployDrift`]. Never panics; on a source error returns a
+    /// `needs_deploy: false` drift (fail-safe: a transient git failure must not
+    /// spuriously trigger a deploy). Callers that must tell "no drift" apart
+    /// from "unknown" (e.g. the outcome-verify Rail-3, #2751) use
+    /// [`try_detect`](Self::try_detect) instead.
+    pub fn detect(&self) -> DeployDrift {
+        self.try_detect().unwrap_or_else(|_| DeployDrift::current())
     }
 }
 
@@ -121,6 +129,15 @@ pub struct GitDeploySource {
     repo_dir: PathBuf,
     /// Default-branch ref to compare against (e.g. `origin/main`).
     default_branch_ref: String,
+    /// When `true` (operator/CLI path), [`merged_head`](Self::merged_head) falls
+    /// back to local `HEAD` if the default-branch ref cannot be resolved (e.g. a
+    /// shallow/detached checkout). On the AUTONOMOUS self-deploy path this MUST
+    /// be `false` (issue #2590 SR-1): deploying an unverified local `HEAD` would
+    /// bypass the branch-protection / signed-merge root of trust the docs promise
+    /// (`docs/concepts/reconcile-and-self-deploy.md §Security prerequisites`), so
+    /// an unresolved `origin/<default-branch>` must yield an error → no drift →
+    /// no signal, never a `HEAD` deploy.
+    head_fallback: bool,
 }
 
 impl Default for GitDeploySource {
@@ -128,6 +145,7 @@ impl Default for GitDeploySource {
         Self {
             repo_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             default_branch_ref: "origin/main".to_string(),
+            head_fallback: true,
         }
     }
 }
@@ -144,6 +162,17 @@ impl GitDeploySource {
             repo_dir: repo_dir.into(),
             ..Self::default()
         }
+    }
+
+    /// Disable the local-`HEAD` fallback in [`merged_head`](Self::merged_head).
+    /// REQUIRED on the autonomous self-deploy path (#2590 SR-1) so an unresolved
+    /// `origin/<default-branch>` degrades to "no drift" rather than deploying an
+    /// unverified local `HEAD`. Keep the fallback (the default) only on the
+    /// operator/CLI path, where a human is choosing to relaunch a local checkout.
+    #[must_use]
+    pub fn origin_strict(mut self) -> Self {
+        self.head_fallback = false;
+        self
     }
 
     fn git(&self, args: &[&str]) -> SimardResult<String> {
@@ -168,10 +197,18 @@ impl GitDeploySource {
 
 impl DeploySource for GitDeploySource {
     fn merged_head(&self) -> SimardResult<String> {
-        // Prefer the tracked default branch; fall back to local HEAD when the
-        // remote ref is absent (e.g. a shallow or detached checkout).
-        self.git(&["rev-parse", &self.default_branch_ref])
-            .or_else(|_| self.git(&["rev-parse", "HEAD"]))
+        // Prefer the tracked default branch. On the operator/CLI path, fall back
+        // to local `HEAD` when the remote ref is absent (e.g. a shallow or
+        // detached checkout). On the AUTONOMOUS path (`origin_strict`) that
+        // fallback is DISABLED (#2590 SR-1): an unresolved `origin/<default>` is
+        // returned as an error so OBSERVE yields no drift rather than deploying
+        // an unverified local `HEAD` that never passed branch protection.
+        let origin = self.git(&["rev-parse", &self.default_branch_ref]);
+        if self.head_fallback {
+            origin.or_else(|_| self.git(&["rev-parse", "HEAD"]))
+        } else {
+            origin
+        }
     }
 
     fn running_commit(&self) -> SimardResult<String> {
@@ -244,6 +281,54 @@ mod prod_source_tests {
         assert!(
             !drift.needs_deploy,
             "a missing checkout must fail safe (no spurious deploy)"
+        );
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .status()
+            .expect("git spawn")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// SR-1 (#2590): with no `origin/main` ref, the operator/CLI source falls
+    /// back to local `HEAD`, but an `origin_strict` (autonomous) source refuses
+    /// — so OBSERVE yields no drift rather than deploying an unverified `HEAD`.
+    #[test]
+    fn origin_strict_merged_head_refuses_head_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "c0"]);
+
+        // No remote → `origin/main` is unresolvable.
+        let lenient = GitDeploySource::at(dir);
+        let strict = GitDeploySource::at(dir).origin_strict();
+
+        assert!(
+            lenient.merged_head().is_ok(),
+            "operator/CLI path falls back to local HEAD"
+        );
+        assert!(
+            strict.merged_head().is_err(),
+            "autonomous path must NOT fall back to local HEAD"
+        );
+
+        // And the strict source's detector therefore fails safe (no drift).
+        let drift = ReconcileDetector::new(strict).detect();
+        assert!(
+            !drift.needs_deploy,
+            "unresolved origin ref on the strict path must yield no drift"
         );
     }
 }

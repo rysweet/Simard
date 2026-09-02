@@ -6,9 +6,9 @@ use crate::cognitive_memory::CognitiveMemoryOps;
 
 use super::super::types::{ConversationMessage, HandoffActionItem};
 
-/// Store the meeting as an episodic memory via the cognitive bridge.
+/// Store the meeting as an episodic memory via the cognitive memory.
 pub fn store_cognitive_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     topic: &str,
     summary: &str,
     messages: &[ConversationMessage],
@@ -31,7 +31,7 @@ pub fn store_cognitive_memory(
         let episode_content = format!(
             "Meeting transcript — topic: {topic}\n\n{transcript_text}\n\nSummary: {summary}"
         );
-        if let Err(e) = bridge.store_episode(
+        if let Err(e) = memory.store_episode(
             &episode_content,
             "meeting-backend-transcript",
             Some(&serde_json::json!({
@@ -53,7 +53,7 @@ pub fn store_cognitive_memory(
             "summary".to_string(),
             topic.to_string(),
         ];
-        if let Err(e) = bridge.store_fact(
+        if let Err(e) = memory.store_fact(
             &format!("meeting:{topic}"),
             summary,
             0.85,
@@ -74,14 +74,14 @@ pub fn store_cognitive_memory(
 //
 /// Store enriched meeting data (with action items) into episodic memory.
 pub fn store_enriched_cognitive_memory(
-    bridge: &dyn CognitiveMemoryOps,
+    memory: &dyn CognitiveMemoryOps,
     topic: &str,
     summary: &str,
     messages: &[ConversationMessage],
     action_items: &[HandoffActionItem],
     decisions: &[String],
 ) {
-    store_cognitive_memory(bridge, topic, summary, messages);
+    store_cognitive_memory(memory, topic, summary, messages);
 
     if !action_items.is_empty() {
         let action_text: String = action_items
@@ -104,7 +104,7 @@ pub fn store_enriched_cognitive_memory(
             .join("\n");
 
         let episode = format!("Action items from meeting \"{topic}\":\n{action_text}");
-        if let Err(e) = bridge.store_episode(
+        if let Err(e) = memory.store_episode(
             &episode,
             "meeting-action-items",
             Some(&serde_json::json!({
@@ -128,7 +128,7 @@ pub fn store_enriched_cognitive_memory(
             .join("\n");
 
         let episode = format!("Decisions from meeting \"{topic}\":\n{decision_text}");
-        if let Err(e) = bridge.store_episode(
+        if let Err(e) = memory.store_episode(
             &episode,
             "meeting-decisions",
             Some(&serde_json::json!({
@@ -278,39 +278,39 @@ mod tests {
 
     #[test]
     fn store_cognitive_memory_stores_episode_and_fact() {
-        let bridge = MockClient::new();
-        store_cognitive_memory(&bridge, "Sprint", "We decided on TDD", &sample_messages());
-        let episodes = bridge.episodes.lock().unwrap();
+        let memory = MockClient::new();
+        store_cognitive_memory(&memory, "Sprint", "We decided on TDD", &sample_messages());
+        let episodes = memory.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 1);
         assert!(episodes[0].contains("Sprint"));
-        let facts = bridge.facts.lock().unwrap();
+        let facts = memory.facts.lock().unwrap();
         assert_eq!(facts.len(), 1);
         assert!(facts[0].contains("TDD"));
     }
 
     #[test]
     fn store_cognitive_memory_empty_messages_skips_episode() {
-        let bridge = MockClient::new();
-        store_cognitive_memory(&bridge, "empty", "Summary only", &[]);
-        assert!(bridge.episodes.lock().unwrap().is_empty());
+        let memory = MockClient::new();
+        store_cognitive_memory(&memory, "empty", "Summary only", &[]);
+        assert!(memory.episodes.lock().unwrap().is_empty());
     }
 
     #[test]
     fn store_cognitive_memory_empty_summary_skips_fact() {
-        let bridge = MockClient::new();
-        store_cognitive_memory(&bridge, "topic", "", &sample_messages());
-        assert!(bridge.facts.lock().unwrap().is_empty());
+        let memory = MockClient::new();
+        store_cognitive_memory(&memory, "topic", "", &sample_messages());
+        assert!(memory.facts.lock().unwrap().is_empty());
     }
 
     #[test]
     fn store_cognitive_memory_client_error_does_not_panic() {
-        let bridge = MockClient::failing();
-        store_cognitive_memory(&bridge, "topic", "summary", &sample_messages());
+        let memory = MockClient::failing();
+        store_cognitive_memory(&memory, "topic", "summary", &sample_messages());
     }
 
     #[test]
     fn store_enriched_stores_action_items_episode() {
-        let bridge = MockClient::new();
+        let memory = MockClient::new();
         let items = vec![HandoffActionItem {
             description: "Deploy to staging".into(),
             assignee: Some("Bob".into()),
@@ -319,14 +319,14 @@ mod tests {
             priority: None,
         }];
         store_enriched_cognitive_memory(
-            &bridge,
+            &memory,
             "Sprint",
             "Summary",
             &sample_messages(),
             &items,
             &[],
         );
-        let episodes = bridge.episodes.lock().unwrap();
+        let episodes = memory.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 2);
         assert!(episodes[1].contains("Deploy to staging"));
         assert!(episodes[1].contains("[assignee: Bob]"));
@@ -334,31 +334,31 @@ mod tests {
 
     #[test]
     fn store_enriched_stores_decisions_episode() {
-        let bridge = MockClient::new();
+        let memory = MockClient::new();
         let decisions = vec!["Adopt TDD".to_string(), "Use Rust".to_string()];
         store_enriched_cognitive_memory(
-            &bridge,
+            &memory,
             "retro",
             "Good session",
             &sample_messages(),
             &[],
             &decisions,
         );
-        let episodes = bridge.episodes.lock().unwrap();
+        let episodes = memory.episodes.lock().unwrap();
         assert_eq!(episodes.len(), 2);
         assert!(episodes[1].contains("Adopt TDD"));
     }
 
     #[test]
     fn store_enriched_empty_extras_only_stores_base() {
-        let bridge = MockClient::new();
-        store_enriched_cognitive_memory(&bridge, "topic", "summary", &sample_messages(), &[], &[]);
-        assert_eq!(bridge.episodes.lock().unwrap().len(), 1);
+        let memory = MockClient::new();
+        store_enriched_cognitive_memory(&memory, "topic", "summary", &sample_messages(), &[], &[]);
+        assert_eq!(memory.episodes.lock().unwrap().len(), 1);
     }
 
     #[test]
     fn store_enriched_action_fields_all_present() {
-        let bridge = MockClient::new();
+        let memory = MockClient::new();
         let items = vec![HandoffActionItem {
             description: "Write docs".into(),
             assignee: Some("Charlie".into()),
@@ -366,8 +366,8 @@ mod tests {
             linked_goal: Some("docs-goal".into()),
             priority: Some(2),
         }];
-        store_enriched_cognitive_memory(&bridge, "T", "S", &sample_messages(), &items, &[]);
-        let episodes = bridge.episodes.lock().unwrap();
+        store_enriched_cognitive_memory(&memory, "T", "S", &sample_messages(), &items, &[]);
+        let episodes = memory.episodes.lock().unwrap();
         let ep = &episodes[1];
         assert!(ep.contains("[assignee: Charlie]"));
         assert!(ep.contains("[deadline: next sprint]"));
@@ -375,10 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn store_enriched_bridge_error_does_not_panic() {
-        let bridge = MockClient::failing();
+    fn store_enriched_memory_error_does_not_panic() {
+        let memory = MockClient::failing();
         store_enriched_cognitive_memory(
-            &bridge,
+            &memory,
             "t",
             "s",
             &sample_messages(),

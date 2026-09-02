@@ -127,6 +127,66 @@ fn legacy_goal_without_parent_field_deserializes_to_none() {
 // ── decompose_goal: happy path ─────────────────────────────────────────────
 
 #[test]
+fn decompose_children_inherit_parent_labels_plus_decomposition() {
+    // Issue #2743: a decomposition child copies the parent's full label set
+    // (so a child of a source:creative-ideas goal stays discoverable as
+    // creative-ideas-originated) and additionally carries source:decomposition.
+    use super::edges::node_of;
+    use super::labels::{SOURCE_CREATIVE_IDEAS, SOURCE_DECOMPOSITION};
+
+    let m = mem();
+    let mut board = GoalBoard::new();
+    board.active.push(
+        ActiveGoal::new("goal-p", "Big umbrella goal", 1).with_labels(vec![
+            SOURCE_CREATIVE_IDEAS.to_string(),
+            "area:dashboard".to_string(),
+        ]),
+    );
+    let decomposer = CannedDecomposer::ok(vec![
+        sub("Slice A", "A is done"),
+        sub("Slice B", "B is done"),
+    ]);
+
+    let outcome = decompose_goal(&m, &mut board, "goal-p", &decomposer, 6).expect("decompose");
+
+    for cid in &outcome.child_ids {
+        let child = board
+            .active
+            .iter()
+            .find(|g| &g.id == cid)
+            .expect("child on board");
+        assert_eq!(
+            child.labels,
+            vec![
+                SOURCE_CREATIVE_IDEAS.to_string(),
+                "area:dashboard".to_string(),
+                SOURCE_DECOMPOSITION.to_string(),
+            ],
+            "child inherits parent labels (order-preserved) then adds source:decomposition",
+        );
+        // The graph node projection carries the same labels.
+        let node = node_of(&m, cid)
+            .expect("node lookup")
+            .expect("child node exists");
+        assert!(
+            node.labels.iter().any(|l| l == SOURCE_CREATIVE_IDEAS)
+                && node.labels.iter().any(|l| l == SOURCE_DECOMPOSITION),
+            "graph node must project the child's labels for graph-side queries",
+        );
+    }
+
+    // The parent node also projects the parent's labels (snapshot copy).
+    let parent_node = node_of(&m, "goal-p").expect("lookup").expect("parent node");
+    assert!(
+        parent_node
+            .labels
+            .iter()
+            .any(|l| l == SOURCE_CREATIVE_IDEAS),
+        "parent graph node carries the parent's labels",
+    );
+}
+
+#[test]
 fn decompose_writes_children_and_queryable_edges() {
     let m = mem();
     let mut board = board_with_parent();

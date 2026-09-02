@@ -9,10 +9,24 @@ related:
   - ../howto/configure-disk-health-check.md
   - ../reference/disk-health-api.md
   - ../reference/engineer-worktree-isolation.md
+  - ./agentic-disk-reclamation.md
+  - ../howto/configure-disk-reclamation.md
   - ./goal-board-persistence.md
 ---
 
 # Automated disk health management
+
+> **Superseded (2026-07-07).** The primary agentic disk-cleanup capability is now
+> [Agentic disk reclamation](./agentic-disk-reclamation.md) — an agent *proposes*
+> reclaimable candidates and a deterministic Rust executor *disposes* of them
+> behind non-bypassable safety rails. It broadens scope to all managed repos plus
+> `~/.simard` engineer worktrees, adds PR-status and running-process reasoning,
+> and — critically — moves the delete primitive out of the agent's hands. The
+> per-cycle check described below is retained for historical context; new
+> operators should use [Configure disk reclamation](../howto/configure-disk-reclamation.md).
+> The ad-hoc **merge-base-is-ancestor** "already merged, safe to delete"
+> heuristic and manual `find … -mtime +1 -exec rm -rf` runbooks are **deprecated**
+> (the former misfired on every fresh worktree; see the reclamation concept doc).
 
 On 2026-05-24, Simard crashed from `ENOSPC` (No space left on device). The
 `/home` partition was 100% full: 373G used on a 393G disk. Post-mortem

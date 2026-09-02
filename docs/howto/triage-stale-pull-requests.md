@@ -152,13 +152,14 @@ Classify along four axes:
 
 The triage classifies each `statusCheckRollup` entry by its **actual check
 name**. The live Simard CI checks are `pre-commit`, `coverage`, `cargo-audit`,
-`install-real`, `e2e-dashboard`, and `build` (the MkDocs `--strict` job from
-`docs.yml`, present only when the PR touches `docs/**`, `mkdocs.yml`, or
-`Specs/**`). Classify them like this:
+`install-real`, and `e2e-dashboard`. (There is no longer a separate `build`
+docs check: the MkDocs `docs.yml` job was removed with all Python in #3181, and
+docs integrity now runs inside the `pre-commit` job's `cargo test` — see the
+docs-integrity note below.) Classify them like this:
 
 | Class | Checks (actual rollup names) | Blocks merge? |
 |-------|------------------------------|---------------|
-| **Real** (hard gate) | `pre-commit`, `coverage` (present only when the PR touches `src/**`), `build` (present only when the PR touches `docs/**`, `mkdocs.yml`, or `Specs/**`), `e2e-dashboard`, and **every** PR-specific job | **Yes** — must be `SUCCESS` / `NEUTRAL` / `SKIPPED`. |
+| **Real** (hard gate) | `pre-commit`, `coverage` (present only when the PR touches `src/**`), `e2e-dashboard`, and **every** PR-specific job | **Yes** — must be `SUCCESS` / `NEUTRAL` / `SKIPPED`. |
 | **Environmental** (candidate non-blocking) | `cargo-audit`, `install-real` | **Only after a human confirms** the red is dependency/infra noise unrelated to this PR's diff — never automatically. |
 | **Pending / unknown** | any check in `PENDING` / `QUEUED` / `IN_PROGRESS`, or an unrecognised name | **Yes** — blocks until it resolves green. |
 
@@ -171,11 +172,16 @@ Naming pitfalls that matter when you read a real rollup:
   the lint/compile error) and push to the same branch. `pre-commit` is a **real
   hard gate** — `verify.yml` explicitly treats a `pre-commit` failure as a real
   regression — so it is **never** environmental.
-- **A `build` check *does* appear on docs PRs.** When the PR touches `docs/**`,
-  `mkdocs.yml`, or `Specs/**`, `docs.yml` runs a job named **`build`** that
-  executes `mkdocs build --strict`. It is a **real hard gate** (a broken link or
-  malformed Markdown reds it); reproduce it locally with `mkdocs build --strict`
-  and push to the same branch. Don't mistake it for a Rust compile check.
+- **Docs integrity is a native Rust gate, not a separate `build` job.** The old
+  `docs.yml` MkDocs job was removed with all Python (#3181). When a PR touches
+  `docs/**` or `mkdocs.yml`, the `verify` workflow's `cargo test` run exercises
+  `tests/docs_integrity.rs` (fails on dead intra-repo Markdown links and on any
+  `mkdocs.yml` nav entry pointing at a missing file) and
+  `tests/supply_chain_hardening.rs` (asserts the supply-chain reference pages
+  stay linked from the nav). A broken link or a nav entry pointing at a missing
+  file reds `cargo test`. Reproduce locally with
+  `cargo test docs_integrity supply_chain`. There is no `mkdocs build` step and
+  no Python.
 - **`cargo-audit`** goes red on RUSTSEC advisories in transitive dependencies,
   which are frequently unrelated to the PR's diff.
 - **`install-real`** is a ~25-minute from-scratch `cargo install` that can flake

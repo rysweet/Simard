@@ -73,7 +73,7 @@ pub fn gather_environment() -> EnvironmentSnapshot {
 /// Observe: gather goal statuses, environment state, gym health, memory stats,
 /// and pending improvement signals from gym regressions and unprocessed handoffs.
 /// Sub-system failures produce degraded fields rather than aborting (Pillar 11).
-pub fn observe(state: &mut OodaState, bridges: &OodaClients) -> SimardResult<Observation> {
+pub fn observe(state: &mut OodaState, memories: &OodaClients) -> SimardResult<Observation> {
     let goal_statuses: Vec<GoalSnapshot> = state
         .active_goals
         .active
@@ -83,20 +83,20 @@ pub fn observe(state: &mut OodaState, bridges: &OodaClients) -> SimardResult<Obs
 
     let environment = gather_environment();
 
-    let gym_health = match bridges.gym.run_suite("progressive") {
+    let gym_health = match memories.gym.run_suite("progressive") {
         Ok(result) => {
             use crate::gym_scoring::suite_score_from_result;
             Some(suite_score_from_result(&result))
         }
         Err(e) => {
-            eprintln!("[simard] OODA observe: gym bridge unavailable: {e}");
+            eprintln!("[simard] OODA observe: gym memory unavailable: {e}");
             None
         }
     };
-    let memory_stats = match bridges.memory.get_statistics() {
+    let memory_stats = match memories.memory.get_statistics() {
         Ok(stats) => stats,
         Err(e) => {
-            eprintln!("[simard] OODA observe: memory bridge unavailable: {e}");
+            eprintln!("[simard] OODA observe: memory memory unavailable: {e}");
             CognitiveStatistics::default()
         }
     };
@@ -115,7 +115,7 @@ pub fn observe(state: &mut OodaState, bridges: &OodaClients) -> SimardResult<Obs
         eprintln!(
             "[simard] ERROR EVAL WATCHDOG TRIPPED — {reason} \
              — refusing to trust eval-derived priorities this cycle. \
-             Investigate amplihack LLM router, gym bridge, and Copilot \
+             Investigate amplihack LLM router, gym memory, and Copilot \
              auth state. Cycle will skip eval-driven actions."
         );
     }

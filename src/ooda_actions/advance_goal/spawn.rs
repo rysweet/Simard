@@ -1,7 +1,10 @@
 //! AdvanceGoal dispatch — routing, subordinate heartbeat, and session-based advancement.
 
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 use crate::agent_roles::AgentRole;
 use crate::agent_supervisor::{SubordinateConfig, spawn_subordinate};
@@ -13,6 +16,9 @@ use crate::ooda_brain::{
 use crate::ooda_loop::{ActionOutcome, OodaState, PlannedAction};
 
 use crate::ooda_actions::make_outcome;
+
+use super::admission;
+use super::resource_admission;
 
 // ── Issue #1911: brain-failure auto-recovery marker ────────────────────────
 //
@@ -36,6 +42,31 @@ pub const BRAIN_FAILURE_BLOCKED_PREFIX: &str = "\u{1F512} [OODA-SAFEGUARD] OODA 
 
 /// Trailing portion of the deterministic brain-failure `Blocked` reason.
 pub const BRAIN_FAILURE_BLOCKED_SUFFIX: &str = " consecutive cycles; needs human review";
+
+/// Derive a STABLE goal-session id from a goal id (issue #4197).
+///
+/// The previous `format!("ooda-{}", Uuid::now_v7())` minted a FRESH session id
+/// every tick, so a terminal recorded on one tick — keyed by
+/// `(session_id, cycle_id)` — could never be read back on the next, and the goal
+/// was perpetually re-surfaced as blocked and re-escalated. Deriving the session
+/// id deterministically from the goal identity makes the same goal map to the
+/// same session id across ticks and process restarts, so
+/// `CapabilityHandler::terminal_for_session` can recognise a completed session.
+///
+/// The result is always a valid ledger identifier: `ooda-` followed by 32 hex
+/// characters of the SHA-256 of the goal id (37 chars total, `[a-z0-9-]`), so it
+/// satisfies `validate_identifier` even when the goal id itself contains
+/// characters that would need sanitising — and distinct goals never collide onto
+/// the same session id (hashing preserves distinctness that naive sanitising
+/// would erase).
+pub fn derive_session_id(goal_id: &str) -> String {
+    let digest = Sha256::digest(goal_id.as_bytes());
+    let mut hex = String::with_capacity(32);
+    for byte in &digest[..16] {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    format!("ooda-{hex}")
+}
 
 /// Returns `true` iff `reason` was authored by the deterministic
 /// brain-failure safeguard in `dispatch_spawn_engineer`. The predicate
@@ -71,6 +102,91 @@ pub(crate) fn lock_state<'g, 'a>(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Observe-only dispatch floor (issue #1, Crocutus).
+///
+/// Returns `Some(refusal_outcome)` when the process runs under a read-only
+/// identity (`SIMARD_OBSERVE_ONLY` truthy), signalling that no write-bearing
+/// engineer may be dispatched; returns `None` for the ordinary engineer
+/// identity so dispatch proceeds unchanged. Extracted as a pure function so the
+/// short-circuit is unit-testable without constructing a full brain/session.
+///
+/// The outcome is `success = true`: for an observer, *declining to act* is the
+/// correct behaviour, not a failure — it must not bump goal-failure counters or
+/// trip the no-progress breaker.
+fn observe_only_dispatch_refusal(action: &PlannedAction, goal_id: &str) -> Option<ActionOutcome> {
+    if !crate::read_only_guard::observe_only_enabled() {
+        return None;
+    }
+    Some(make_outcome(
+        action,
+        true,
+        format!(
+            "observe-only: refused to dispatch a write-bearing engineer for goal '{goal_id}'. \
+             This read-only identity proposes repo-hygiene goals but dispatches 0 write \
+             actions (no clone-and-push, no PR). Guardrail: SIMARD_OBSERVE_ONLY."
+        ),
+    ))
+}
+
+/// Deterministic spawn rail (#3125) — the thin, pure, default-DENY predicate the
+/// agentic Act cognition runs behind.
+///
+/// Returns `true` only for a definitively *writing* posture (`Full` /
+/// `ScopedWrite`). Semantics:
+///
+/// - `None` — no identity is resolved. This deterministically resolves to
+///   `Full` (Simard's own default), so Simard is unaffected and spawns proceed.
+/// - `Some(Full | ScopedWrite)` — a writing identity: spawn permitted.
+/// - `Some(ReadOnly)` — a bounded observer: spawn denied.
+///
+/// An *unresolved* posture under a named identity must be encoded by the caller
+/// as `Some(IdentityAuthority::read_only())` so it too denies — the rail never
+/// spawns when authority is uncertain (fail-closed). There is no wall-clock
+/// timeout and no fallback-to-dispatch anywhere on this path.
+///
+/// This mirrors the existing `dispatch_spawn_engineer` pattern of an agentic
+/// brain decision paired with a deterministic safeguard: here the safeguard is
+/// this predicate rather than the 3-strikes counter.
+pub fn posture_permits_spawn(authority: Option<&crate::identity::IdentityAuthority>) -> bool {
+    match authority {
+        None => true,
+        Some(a) => a.permits_spawn(),
+    }
+}
+
+/// Cognition-level observe-only refusal (#3125). Returns `Some(outcome)` when the
+/// resolved identity's write-authority posture forbids dispatching a
+/// write-bearing engineer, so the Act phase takes the observe-only branch
+/// *before* ever reaching the shipped `observe_only_dispatch_refusal` floor.
+///
+/// The outcome is `success = true`: for a read-only observer, *declining to
+/// dispatch* is the correct behaviour — it must not bump goal-failure counters
+/// or trip the no-progress breaker. Records which identity/posture refused.
+fn posture_observe_only_refusal(
+    action: &PlannedAction,
+    goal_id: &str,
+    authority: Option<&crate::identity::IdentityAuthority>,
+    identity_name: Option<&str>,
+) -> Option<ActionOutcome> {
+    if posture_permits_spawn(authority) {
+        return None;
+    }
+    let who = identity_name.unwrap_or("identity");
+    let posture = authority
+        .map(|a| a.posture.to_string())
+        .unwrap_or_else(|| "read-only".to_string());
+    Some(make_outcome(
+        action,
+        true,
+        format!(
+            "observe-only (cognition): {who} write-authority posture is '{posture}', so goal \
+             '{goal_id}' takes the observe-only branch — proposes/observes on its own \
+             target-scoped board and dispatches 0 engineer(s). No write-bearing engineer is \
+             spawned. Rail: posture_permits_spawn."
+        ),
+    ))
+}
+
 /// Spawn a subordinate engineer for a goal that the LLM picked
 /// `spawn_engineer` for, then mutate the active board to record the
 /// assignment.
@@ -84,13 +200,62 @@ pub(crate) fn lock_state<'g, 'a>(
 ///
 /// Honours `SIMARD_SUBORDINATE_DEPTH` vs. `SIMARD_MAX_SUBORDINATE_DEPTH`
 /// so a recursing supervisor does not spawn forever.
+///
+/// `repo_root` is the DAEMON's own repository root (from `OodaClients`), used by
+/// the resource-admission gate's `reclaim_first` path to locate the disk-health
+/// recipe (issue #2706) — distinct from the goal's resolved target repo.
 pub fn dispatch_spawn_engineer(
     action: &PlannedAction,
     state: &Mutex<&mut OodaState>,
     goal_id: &str,
     task: &str,
     brain: &dyn OodaBrain,
+    repo_root: &Path,
 ) -> ActionOutcome {
+    // ── Cognition-level observe-only rail (#3125) ───────────────────────────
+    // Defense in depth ABOVE the shipped write-primitive floor below. If the
+    // resolved identity's write-authority posture does not permit a
+    // write-bearing engineer (posture = read-only, or an unresolved posture
+    // under a named identity, encoded fail-closed), take the observe-only branch
+    // BEFORE any brain decision, worktree, or subprocess: the identity observes
+    // and proposes on its own target-scoped board and dispatches 0 engineers.
+    // A read-only identity therefore never even *reaches* the env floor for a
+    // write-bearing action, saving the credits the brain would burn deciding to
+    // spawn. No identity (None) resolves to `full`, so Simard is unaffected.
+    {
+        let (authority, identity_name) = {
+            let guard = lock_state(state);
+            (
+                guard.identity_cognition.authority.clone(),
+                guard.identity_cognition.identity_name.clone(),
+            )
+        };
+        if let Some(refusal) = posture_observe_only_refusal(
+            action,
+            goal_id,
+            authority.as_ref(),
+            identity_name.as_deref(),
+        ) {
+            eprintln!(
+                "[simard] Act: observe-only posture ({}) — refusing engineer dispatch for goal '{goal_id}', dispatched 0 engineer(s)",
+                identity_name.as_deref().unwrap_or("identity")
+            );
+            return refusal;
+        }
+    }
+
+    // ── Observe-only floor (issue #1, Crocutus) ─────────────────────────────
+    // A read-only identity (SIMARD_OBSERVE_ONLY=1) is a bounded OBSERVER: it may
+    // reason about goals but must never dispatch a write-bearing engineer, which
+    // would clone-and-push/PR against a target repo. Short-circuit BEFORE any
+    // worktree is allocated or subprocess launched — fail closed. This is the
+    // capability layer that makes "proposes goals, changes nothing anywhere"
+    // structural, not merely prompt-deep. The engineer identity (env unset) is
+    // unaffected.
+    if let Some(refusal) = observe_only_dispatch_refusal(action, goal_id) {
+        return refusal;
+    }
+
     // Re-check assignment under a short exclusive state lock to prevent a
     // double-spawn race (two cycles/threads parsing spawn_engineer for the
     // same goal). The per-round claim set in the dispatcher is the primary
@@ -337,6 +502,114 @@ pub fn dispatch_spawn_engineer(
         }
     };
 
+    // Issue #2690: dependency/overlap-aware engineer ADMISSION gate. Runs at the
+    // spawn/admission decision point — reached only for a genuinely NEW engineer
+    // on a DIFFERENT goal (same-goal single-flight was enforced by the live-
+    // engineer branch above; the depth guard and repo-resolve are already past).
+    // It reasons about the FILE-FOOTPRINT overlap between this candidate goal and
+    // the in-flight engineers and decides Admit / Defer / SerializeAfter. A THIN
+    // deterministic exact-path rail blocks a CERTAIN collision regardless of the
+    // brain; a brain error fails OPEN (admits). Gather runs OFF the state lock
+    // (best-effort `gh`/`git`), so we snapshot the goal under a short lock first.
+    //
+    // `Defer` reuses the benign spawn-skip outcome shape (`success=true`, no
+    // worktree, `goal_failure_counts` untouched) — retried naturally next cycle.
+    // `SerializeAfter` threads a rebase-after hint into the engineer `task`.
+    let engineer_task_base = {
+        let goal_snapshot = lock_state(state)
+            .active_goals
+            .active
+            .iter()
+            .find(|g| g.id == goal_id)
+            .cloned();
+        match goal_snapshot {
+            Some(goal) => {
+                let state_root_admission = engineer_worktree_state_root();
+                match admission::run_admission_gate(
+                    &state_root_admission,
+                    &goal,
+                    &parent_repo,
+                    task,
+                    brain,
+                ) {
+                    admission::AdmissionOutcome::Defer { detail } => {
+                        eprintln!(
+                            "[simard] spawn_engineer deferred for goal '{goal_id}': {detail}"
+                        );
+                        return make_outcome(action, true, detail);
+                    }
+                    admission::AdmissionOutcome::Admit { task: augmented } => augmented,
+                }
+            }
+            // Goal vanished from the board between the earlier checks and here —
+            // nothing to admit against; fall through with the base task
+            // (worktree allocation will surface any real inconsistency).
+            None => task.to_string(),
+        }
+    };
+    let task = engineer_task_base.as_str();
+
+    // Issue #2706: resource-aware engineer ADMISSION gate. AFTER the overlap gate
+    // and BEFORE worktree allocation. Spawning another engineer allocates a git
+    // worktree and runs parallel `cargo` builds; this gate weighs the HOST
+    // resource picture (disk %, build-cache / worktree count, load average,
+    // in-flight engineers) and decides Admit / Defer / ReclaimFirst. It augments
+    // the upstream AIMD COUNT control with resource ADMISSION: count-control is
+    // blind to the disk that piled-up parallel builds consume (the 91% ENOSPC
+    // incident). A THIN deterministic disk-ceiling rail BLOCKS a spawn past a
+    // configurable ceiling regardless of the brain (the ENOSPC guard); a brain
+    // error fails CLOSED (defers). The gate runs OFF the state lock.
+    //
+    // `Defer`/`ReclaimFirst` reuse the benign spawn-skip outcome (`success=true`,
+    // no worktree, `goal_failure_counts` untouched) — retried naturally next
+    // cycle. `ReclaimFirst` runs the disk-reclaim capability HERE (in the caller,
+    // which owns the daemon `repo_root` the reclaim recipe needs — the reclaim
+    // recipe belongs to Simard, not the goal's resolved target repo), then defers.
+    {
+        let state_root_resource = engineer_worktree_state_root();
+        match resource_admission::run_resource_admission_gate(
+            &state_root_resource,
+            goal_id,
+            brain,
+            &crate::disk_pressure::RealDiskStatProvider,
+        ) {
+            resource_admission::ResourceAdmissionOutcome::Admit => {}
+            resource_admission::ResourceAdmissionOutcome::Defer { detail } => {
+                eprintln!(
+                    "[simard] spawn_engineer resource-deferred for goal '{goal_id}': {detail}"
+                );
+                return make_outcome(action, true, detail);
+            }
+            resource_admission::ResourceAdmissionOutcome::ReclaimFirst { detail } => {
+                // Best-effort reclaim; a reclaim error is warn-logged, never a
+                // cycle failure (issue #2706). `repo_root` is the DAEMON's repo
+                // (locates the reclaim recipe's in-tree fallback), not the goal's
+                // resolved target repo. Drives the agentic disk-reclaim capability
+                // (issue #2704): dry-run + human-review unless the operator opts
+                // into `SIMARD_DISK_RECLAIM_DAEMON_APPLY=1`.
+                let mode = crate::disk_reclaim::daemon_apply_from_env();
+                let target_pct = crate::disk_reclaim::reclaim_pct_from_env();
+                if let Err(e) = crate::disk_reclaim::run_disk_reclaim(
+                    repo_root,
+                    &state_root_resource,
+                    None,
+                    mode,
+                    target_pct,
+                    crate::disk_reclaim::ReclaimSource::Daemon,
+                ) {
+                    tracing::warn!(
+                        target: "simard::ooda_brain",
+                        goal = %goal_id,
+                        error = %e,
+                        "resource-admission reclaim_first: disk reclaim failed; deferring anyway",
+                    );
+                }
+                eprintln!("[simard] spawn_engineer reclaim-first for goal '{goal_id}': {detail}");
+                return make_outcome(action, true, detail);
+            }
+        }
+    }
+
     // Allocate a per-engineer git worktree (issue #1197) so concurrent
     // engineers never share the same checkout. The worktree lives under
     // `<state_root>/engineer-worktrees/` and is cleaned up when the
@@ -496,6 +769,27 @@ fn engineer_worktree_state_root() -> std::path::PathBuf {
         .unwrap_or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/home/azureuser".to_string());
             std::path::PathBuf::from(home).join(".simard")
+        })
+}
+
+/// Resolve the typed-OODA ledger state root.
+///
+/// Single source of truth for the directory that contains the typed-OODA
+/// SQLite ledger. Both the spawn-admission path (`typed_goal_session::run`,
+/// which opens the ledger for `record_action`) and the engineer-termination
+/// release path (`subordinate::cleanup_engineer_worktree_for_goal`) resolve the
+/// ledger through this helper, so a released claim always targets the exact
+/// ledger the admission gate inserted it into. Lives in `spawn` (compiled in
+/// both test and non-test builds) because `typed_goal_session` is
+/// `#[cfg(not(test))]`.
+pub(crate) fn typed_ooda_state_root() -> std::path::PathBuf {
+    std::env::var_os("SIMARD_STATE_ROOT")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("SIMARD_HOME").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".simard")
         })
 }
 
@@ -863,5 +1157,222 @@ mod tests {
         let tmp2 = tempfile::tempdir().unwrap();
         write_claim(tmp2.path(), "not-a-pid\n0\n");
         assert_eq!(read_sentinel_pid(tmp2.path()), None);
+    }
+
+    // ── observe_only_dispatch_refusal (issue #1, Crocutus) ──────────────────
+    // These tests mutate the process-global OBSERVE_ONLY_ENV var; they carry the
+    // `cognitive_memory` serial key so env mutation is never concurrent with an
+    // env read (enforced by test_support::serial_guard).
+
+    fn advance_action(goal_id: &str) -> PlannedAction {
+        PlannedAction {
+            kind: crate::ooda_loop::ActionKind::AdvanceGoal,
+            goal_id: Some(goal_id.to_string()),
+            description: format!("advance {goal_id}"),
+        }
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn observe_only_refuses_engineer_dispatch_when_enabled() {
+        unsafe {
+            std::env::set_var(crate::read_only_guard::OBSERVE_ONLY_ENV, "1");
+        }
+        let action = advance_action("tidy-stale-branches");
+        let refusal = observe_only_dispatch_refusal(&action, "tidy-stale-branches");
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        let outcome = refusal.expect("read-only identity must refuse engineer dispatch");
+        // Declining to act is correct behaviour, not a failure.
+        assert!(
+            outcome.success,
+            "observer refusal must not count as a failure"
+        );
+        assert!(
+            outcome.detail.contains("observe-only")
+                && outcome.detail.contains("0 write")
+                && outcome.detail.contains("SIMARD_OBSERVE_ONLY"),
+            "refusal detail must be explicit and auditable, got: {}",
+            outcome.detail
+        );
+    }
+
+    #[serial_test::serial(cognitive_memory)]
+    #[test]
+    fn engineer_identity_dispatches_normally_when_env_unset() {
+        unsafe {
+            std::env::remove_var(crate::read_only_guard::OBSERVE_ONLY_ENV);
+        }
+        let action = advance_action("ship-feature");
+        assert!(
+            observe_only_dispatch_refusal(&action, "ship-feature").is_none(),
+            "engineer identity (env unset) must not be short-circuited"
+        );
+    }
+
+    // ── #3125: cognition-level observe-only rail (posture_permits_spawn) ──────
+    // Pure-function coverage plus an end-to-end proof that dispatch_spawn_engineer
+    // takes the observe-only branch under a read-only posture WITHOUT ever
+    // consulting the brain or spawning a worktree. These are hermetic (no env, no
+    // subprocess) — the read-only rail returns before any of that.
+
+    use crate::identity::{IdentityAuthority, WritePosture};
+
+    fn authority(posture: WritePosture) -> IdentityAuthority {
+        IdentityAuthority {
+            posture,
+            ..IdentityAuthority::default()
+        }
+    }
+
+    #[test]
+    fn posture_permits_spawn_default_deny_matrix() {
+        // No identity resolves deterministically to `full` => Simard spawns.
+        assert!(posture_permits_spawn(None));
+        // A writing posture permits spawn.
+        assert!(posture_permits_spawn(Some(&authority(WritePosture::Full))));
+        assert!(posture_permits_spawn(Some(&authority(
+            WritePosture::ScopedWrite
+        ))));
+        // A read-only posture NEVER permits spawn (fail-closed cognition rail).
+        assert!(!posture_permits_spawn(
+            Some(&IdentityAuthority::read_only())
+        ));
+        assert!(!posture_permits_spawn(Some(&authority(
+            WritePosture::ReadOnly
+        ))));
+    }
+
+    #[test]
+    fn posture_observe_only_refusal_none_for_writing_postures() {
+        let action = advance_action("observe-hyenas");
+        assert!(
+            posture_observe_only_refusal(&action, "observe-hyenas", None, None).is_none(),
+            "no identity (full) must not take the observe-only branch"
+        );
+        assert!(
+            posture_observe_only_refusal(
+                &action,
+                "observe-hyenas",
+                Some(&authority(WritePosture::Full)),
+                Some("simard-engineer"),
+            )
+            .is_none(),
+            "a full identity must not take the observe-only branch"
+        );
+    }
+
+    #[test]
+    fn posture_observe_only_refusal_records_read_only_branch() {
+        let action = advance_action("observe-hyenas");
+        let outcome = posture_observe_only_refusal(
+            &action,
+            "observe-hyenas",
+            Some(&IdentityAuthority::read_only()),
+            Some("crocutus"),
+        )
+        .expect("read-only posture must take the observe-only branch");
+        // Declining to dispatch is correct behaviour, not a failure.
+        assert!(
+            outcome.success,
+            "observer refusal must not count as failure"
+        );
+        assert!(
+            outcome.detail.contains("observe-only (cognition)")
+                && outcome.detail.contains("crocutus")
+                && outcome.detail.contains("read-only")
+                && outcome.detail.contains("0 engineer")
+                && outcome.detail.contains("posture_permits_spawn"),
+            "refusal detail must name the identity, posture, and rail; got: {}",
+            outcome.detail
+        );
+    }
+
+    /// A brain that panics on any decision — proves the read-only rail
+    /// short-circuits BEFORE any (credit-spending) brain reasoning.
+    struct PanicBrain;
+
+    impl crate::ooda_brain::OodaBrain for PanicBrain {
+        fn decide_engineer_lifecycle(
+            &self,
+            _ctx: &crate::ooda_brain::EngineerLifecycleCtx,
+        ) -> crate::error::SimardResult<crate::ooda_brain::EngineerLifecycleDecision> {
+            panic!("read-only cognition rail must not consult the brain");
+        }
+
+        fn decide_per_goal_cycle(
+            &self,
+            _ctx: &crate::ooda_brain::PerGoalCycleCtx,
+        ) -> crate::error::SimardResult<crate::ooda_brain::PerGoalAction> {
+            panic!("read-only cognition rail must not consult the brain");
+        }
+    }
+
+    #[test]
+    fn dispatch_spawn_engineer_read_only_cognition_never_spawns_or_reasons() {
+        let cognition = crate::ooda_loop::IdentityCognition {
+            identity_name: Some("crocutus".to_string()),
+            seed_goals: Vec::new(),
+            target_repos: vec!["hyenas".to_string()],
+            authority: Some(IdentityAuthority::read_only()),
+        };
+        let mut state = OodaState::new(crate::goal_curation::GoalBoard::new())
+            .with_identity_cognition(cognition);
+        let state_mx = std::sync::Mutex::new(&mut state);
+        let action = advance_action("observe-hyenas-branch-hygiene");
+        let repo_root = tempfile::tempdir().unwrap();
+
+        // If the cognition rail works, PanicBrain is never called and no
+        // worktree/subprocess is launched.
+        let outcome = dispatch_spawn_engineer(
+            &action,
+            &state_mx,
+            "observe-hyenas-branch-hygiene",
+            "propose repo-hygiene goals for hyenas",
+            &PanicBrain,
+            repo_root.path(),
+        );
+
+        assert!(
+            outcome.success,
+            "observe-only dispatch must be a success outcome, got: {}",
+            outcome.detail
+        );
+        assert!(
+            outcome.detail.contains("observe-only (cognition)")
+                && outcome.detail.contains("0 engineer"),
+            "read-only identity must take the observe-only branch; got: {}",
+            outcome.detail
+        );
+        // No engineer was assigned or worktree registered.
+        assert!(state.engineer_worktrees.is_empty());
+        assert!(
+            state
+                .active_goals
+                .active
+                .iter()
+                .all(|g| g.assigned_to.is_none())
+        );
+    }
+
+    #[test]
+    fn identity_cognition_default_permits_spawn_simard_unchanged() {
+        // The default carrier (no identity) must permit spawn so Simard's Act
+        // phase is byte-for-byte unchanged.
+        let cognition = crate::ooda_loop::IdentityCognition::default();
+        assert!(cognition.permits_spawn());
+        assert!(cognition.authority.is_none());
+        let action = advance_action("ship-feature");
+        assert!(
+            posture_observe_only_refusal(
+                &action,
+                "ship-feature",
+                cognition.authority.as_ref(),
+                cognition.identity_name.as_deref(),
+            )
+            .is_none(),
+            "Simard (no identity) must never take the observe-only branch"
+        );
     }
 }

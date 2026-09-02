@@ -85,8 +85,15 @@ Durability now has three layers:
 
 For `SIGKILL`, OOM-kill, or power loss, Simard does not add a current
 `post_write_barrier`. Completed-write durability is the library backend's
-responsibility; in-flight writes remain undefined. The operator recovery point
-is the most recent verified backup under `state_root/backups`.
+responsibility; in-flight writes remain undefined. A committed write reaches the
+backend's **write-through WAL**, so it survives a *process-level* non-graceful
+exit (`SIGKILL`, OOM-kill, or a deploy restart) where the OS and its page cache
+stay up and replay the WAL on the next open. Surviving **power loss or kernel
+panic** additionally requires the backend to `fsync` the WAL to durable media
+before acknowledging the commit — write-through alone does not assert that
+barrier, and Simard does not itself enforce it. For those failure classes the
+operator recovery point is the most recent verified backup under
+`state_root/backups`.
 
 ### Historical incidents
 
@@ -429,6 +436,7 @@ Review them only for migration forensics; current live data is under
 
 - [`docs/memory.md`](../memory.md) — cognitive-memory data model
 - [`docs/daemon-mode.md`](../daemon-mode.md) — OODA daemon overview
+- [Creative Ideas durable read-after-write](../reference/creative-ideas-durable-read-after-write.md) — the dashboard read-after-write (state-root resolver) fix; persisted creative ideas are durable across a non-graceful restart via the engine's write-through WAL (#2798)
 - [Cognitive-Memory WAL Recovery Runbook](cognitive-memory-wal-recovery-runbook.md) — corrupt-WAL recovery, `memory import`, startup auto-restore
 - [Verified Backups of the Live Cognitive Store](verified-backups.md) — verify-before-prune, whole-store export, bounded quarantines
 - [`CONTRIBUTING.md`](https://github.com/rysweet/Simard/blob/main/CONTRIBUTING.md) — contributor durability notes

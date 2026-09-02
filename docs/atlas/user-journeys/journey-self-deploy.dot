@@ -1,0 +1,21 @@
+digraph JourneySelfDeploy {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#f8fbff", fontname="Arial"];
+  edge [fontname="Arial"];
+  trigger [label="merged PR target commit"];
+  prepare [label="GitSourcePreparer: validate, fetch, detached checkout"];
+  build [label="build_self_deploy_candidate"];
+  pretest [label="candidate self-test gate"];
+  baseline [label="capture memory baseline"];
+  backup [label="protective memory + binary backup"];
+  drain [label="drain engineers"];
+  reap [label="reap old-binary orphans"];
+  swap [label="atomic install"];
+  restart [label="systemd restart or exec handover"];
+  health [label="post-deploy health probe"];
+  success [label="SelfDeployOutcome"];
+  rollback [label="rollback on restart/health failure"];
+  trigger -> prepare -> build -> pretest -> baseline -> backup -> drain -> reap -> swap -> restart -> health -> success;
+  restart -> rollback [label="restart fails"];
+  health -> rollback [label="unhealthy"];
+}

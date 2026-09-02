@@ -215,6 +215,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
           <button class="btn" onclick="document.getElementById('add-goal-form').style.display='none'" style="background:#21262d">Cancel</button>
         </div>
       </div>
+      <div id="goals-tag-filter" style="margin:.4rem 0;font-size:.8rem;color:#8b949e"></div>
       <div id="goals-active"><span class="loading">Loading…</span></div>
     </div>
     <div class="card">
@@ -349,7 +350,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div style="display:flex;align-items:center;gap:1.5rem;flex-wrap:wrap">
         <div style="text-align:center;min-width:120px">
           <div id="mem-recent-count" style="font-size:2.5rem;font-weight:700;color:#3fb950;line-height:1">—</div>
-          <div style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br>in the last hour</div>
+          <div style="font-size:.85rem;color:#8b949e;margin-top:.25rem">items remembered<br><span id="mem-recent-window">in the last hour</span></div>
         </div>
         <div style="flex:1;min-width:200px">
           <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:.5rem">
@@ -383,8 +384,25 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
     </div>
 
-    <details id="mem-advanced-toggle">
-      <summary style="cursor:pointer;color:var(--accent);font-size:.85rem;margin-bottom:1rem;user-select:none">▸ Show advanced memory view (graph, search, raw data)</summary>
+    <span class="section-anchor" id="section-costs"></span>
+    <h2 class="subsection">Costs</h2>
+    <div class="grid">
+      <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
+      <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
+      <div class="card"><h2>Budget Settings</h2>
+        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+          <label>Daily $<input id="budget-daily" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
+          <label>Weekly $<input id="budget-weekly" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
+          <button class="btn" onclick="saveBudget()">Save</button>
+          <span id="budget-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-memory">
+    <h1 class="page-h1">Memory</h1>
+    <p class="page-lede">A living map of what Simard knows — an interactive graph of the facts, events, procedures, and plans it holds, colour-coded by memory type and drawn live from what it currently remembers.</p>
 
     <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
       <h2 style="margin:0">Memory Graph</h2>
@@ -406,6 +424,7 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       <div style="display:flex;gap:1rem">
         <div class="card" style="flex:1;padding:0;position:relative;min-height:60vh">
           <canvas id="mem-graph-canvas" style="width:100%;height:60vh;display:block;cursor:grab"></canvas>
+          <div id="mem-graph-error" role="alert" style="display:none;position:absolute;top:0;left:0;right:0;bottom:0;align-items:center;justify-content:center;text-align:center;padding:1.5rem;background:rgba(13,17,23,0.82);z-index:20"></div>
           <div id="mem-graph-tooltip" style="display:none;position:absolute;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.5rem .75rem;font-size:.8rem;max-width:320px;pointer-events:none;z-index:10;word-break:break-word"></div>
         </div>
         <div id="mem-graph-detail" class="card" style="width:280px;display:none">
@@ -413,6 +432,16 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
           <div id="mg-detail-body"></div>
         </div>
       </div>
+    </div>
+
+    <div class="card" id="enrichment-panel-card" data-testid="enrichment-panel-card" style="margin-top:1rem;border:1px solid #238636;background:linear-gradient(135deg,#0d1117,#0f1a12)">
+      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:.5rem">
+        <h2 style="margin:0;color:#3fb950;font-size:1rem">Recall reaching decisions</h2>
+        <span id="enrichment-freshness" style="font-size:.8rem;color:#8b949e"></span>
+        <button class="btn" onclick="fetchEnrichment()" style="font-size:.75rem;margin-left:auto">Refresh</button>
+      </div>
+      <p class="card-lede" style="margin:0 0 .75rem;color:#8b949e;font-size:.8rem;line-height:1.5">Live evidence (issue #2942) that recalled memory is actually injected into Simard's OODA decisions: the share of decisions the memory reader <strong>attached</strong> to, the average facts/procedures/preamble-bytes injected per decision, and any reader degrades — so a silent recall outage is visible at a glance.</p>
+      <div id="enrichment-panel"><span class="loading">Loading…</span></div>
     </div>
 
     <div style="display:flex;gap:1rem;margin-top:1rem">
@@ -426,21 +455,6 @@ pub(crate) const PART_00: &str = r#"<!DOCTYPE html>
       </div>
       <div class="card" style="flex:1"><h2>Memory Overview</h2><div id="mem-overview"><span class="loading">Loading…</span></div></div>
       <div class="card" style="flex:1"><h2>Memory Files</h2><div id="mem-files"><span class="loading">Loading…</span></div></div>
-    </div>
-    </details>
-    <span class="section-anchor" id="section-costs"></span>
-    <h2 class="subsection">Costs</h2>
-    <div class="grid">
-      <div class="card"><h2>Daily Costs <button class="btn" onclick="fetchCosts()">Refresh</button></h2><div id="costs-daily"><span class="loading">Loading…</span></div></div>
-      <div class="card"><h2>Weekly Costs</h2><div id="costs-weekly"><span class="loading">Loading…</span></div></div>
-      <div class="card"><h2>Budget Settings</h2>
-        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
-          <label>Daily $<input id="budget-daily" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
-          <label>Weekly $<input id="budget-weekly" type="number" step="0.01" style="width:8rem;padding:4px;background:#1a1a2e;border:1px solid #333;color:#e0e0e0;border-radius:4px"></label>
-          <button class="btn" onclick="saveBudget()">Save</button>
-          <span id="budget-status"></span>
-        </div>
-      </div>
     </div>
   </div>
 "#;

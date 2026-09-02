@@ -19,6 +19,7 @@ status: draft
 related:
   - overseer.md
   - ../reference/creative-ideas-api.md
+  - ../reference/creative-ideas-trigger-scoped-read.md
   - ../howto/configure-creative-ideas-thread.md
   - ../concepts/operational-autonomy-model.md
   - ../reference/cognitive-thread-scheduling.md
@@ -250,9 +251,16 @@ pub trait CreativeIdeaStore {
 pub struct ProspectiveCreativeIdeaStore<'a> { mem: &'a dyn CognitiveMemoryOps }
 ```
 
-`list` calls `list_all_prospective`, keeps rows whose `trigger_condition ==
-"creative-idea"`, and deserializes the payload. Tests use an in-memory
-`FakeCreativeIdeaStore` **and** a round-trip test through a fake `CognitiveMemoryOps`.
+`list` calls `list_prospective_by_trigger("creative-idea", limit)` — a
+trigger-scoped, priority-ordered read whose `limit` bounds only creative-idea
+nodes — then keeps rows whose `trigger_condition == "creative-idea"` (a cheap
+fail-closed guard) and deserializes the payload. Before issue #122 `list` used
+the unfiltered `list_all_prospective` + post-filter, so on a live store the fixed
+read window filled with unrelated prospective memories and the idea nodes were
+truncated away (see
+[Creative Ideas trigger-scoped read](../reference/creative-ideas-trigger-scoped-read.md)).
+Tests use an in-memory `FakeCreativeIdeaStore` **and** a round-trip test through a
+fake `CognitiveMemoryOps`, plus a `>512`-node regression test.
 
 ## The generator thread
 
@@ -602,9 +610,10 @@ threads, and ticks on its configured cadence — it is not a separate process or
 "Bridge."
 
 **Runtime gate.** The generic cognitive-thread scheduler master switch
-(`SIMARD_COGNITIVE_THREADS_ENABLED`) is default-OFF and owns only the
-maintenance / engineer-log threads. Creative Ideas is **not** behind it: the
-daemon builds the `Mind` runtime when *either* that switch is truthy **or**
+(`SIMARD_COGNITIVE_THREADS_ENABLED`) is default-ON (opt-out) since #4845 and owns
+the maintenance / engineer-log / reflective threads. Creative Ideas is **not**
+behind it: the daemon builds the `Mind` runtime when *either* that switch is not
+opted out **or**
 `CreativeIdeasConfig::from_env().enabled()` is true (default). This keeps the
 existing threads' gating and timing byte-for-byte unchanged while letting the
 default-ON Creative Ideas thread run on a stock deployment.

@@ -1,0 +1,30 @@
+digraph compile_deps_overview {
+    graph [rankdir=LR, labelloc="t", label="Simard compile dependency overview", fontsize=20];
+    node [shape=box, style="rounded,filled", fillcolor="#fbfbff", color="#6f42c1", fontname="Arial"];
+    edge [color="#586069", fontname="Arial"];
+
+    simard [label="simard crate\nCargo package 0.33.1", shape=component, fillcolor="#eef7ff"];
+    cargo [label="Cargo.toml\ndirect dependency contract"];
+    lock [label="Cargo.lock\nresolved graph"];
+    features [label="features\ndefault signal dashboard_audit"];
+    bins [label="binary targets\ndefault simard plus src/bin tools"];
+
+    git_pinned [label="git pinned Rust crates\namplihack-memory rustyclawd amplihack-agent-eval lbug"];
+    crates_io_runtime [label="crates.io runtime deps\nasync web ui telemetry storage crypto"];
+    dev_build [label="dev build target deps\nassert_cmd proptest syn chrono libc"];
+    internal [label="internal Rust modules\nlarge src module dependency layer"];
+    graph_store [label="embedded graph store\namplihack-memory persistent to lbug"];
+    subprocesses [label="external subprocess tools\nrecipe-runner-rs signal-cli gh git systemctl cargo"];
+
+    simard -> cargo;
+    cargo -> lock;
+    cargo -> features;
+    cargo -> bins;
+    cargo -> git_pinned;
+    cargo -> crates_io_runtime;
+    cargo -> dev_build;
+    simard -> internal;
+    git_pinned -> graph_store;
+    internal -> graph_store;
+    internal -> subprocesses;
+}

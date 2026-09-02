@@ -257,6 +257,8 @@ Semantic, procedural, and prospective memory survive process restarts and are qu
 
 **Durability guarantee.** The library backend (`state_root/cognitive`) makes every acknowledged write durable on its own: each store operation issues a per-write `fsync` barrier into the write-ahead log, so a write that returned `Ok` survives even an *un-checkpointed* crash. A graceful `checkpoint()` (which the OODA loop runs at consolidation) folds the WAL into the main database file; a subsequent clean reopen then needs no replay. If a process is killed mid-write, the next `LibraryCognitiveMemory::open` routes through the library's `open_with_recovery` ladder (corrupt-WAL tail quarantine + good-prefix replay, and corrupt-catalog quarantine as a last resort — memory-lib #92–#97), so a later session never crash-loops on a damaged store.
 
+**Crash-consistency contract (#4687).** Checkpointing is now **single-owner** — the `lbug` engine's own background auto-checkpoint is disabled on the read-write path, so it can no longer race the wrapper on the `cognitive.wal → cognitive.wal.checkpoint` rename (the `No such file or directory` fault and the concurrent-writer checksum corruption are eliminated at the source). A clean shutdown runs a **fsync-durable** checkpoint (the WAL is folded into the main DB and both the file and its parent directory are fsync'd on `Drop`), so a cleanly-closed store leaves no WAL tail to replay and reopens with **zero loss** — the `Checksum verification failed` on every clean start is gone. The previously *silent* "recovered from corrupt WAL (good prefix)" tail truncation is now an explicit `error!`-level, OTel-scrapable event (`cognitive_memory_wal_recovery_total`, exposed in-process as `amplihack_memory::graph::wal_recovery_event_count()`) — never a silent discard of committed writes; the #2550 crash-provenance salvage path is preserved but is now loud and metered. The fix is additive (store format stays **v42**, no migration, no existing API changed). See [Cognitive-memory WAL crash-consistency (#4687)](reference/cognitive-memory-wal-crash-consistency.md) and the operator [how-to](howto/recover-from-a-corrupt-cognitive-wal.md).
+
 Because the store persists at a per-`state_root` path with no shared global state, recall is *cross-process*, not just cross-handle: a `simard` process started later (or a separate operator reading via `simard memory stats`) opens the same on-disk store through the tier-2 "direct open" path and observes every committed write — counts, the provenance / dedup graph edges, and literal fact content. This contract is gated end-to-end by `tests/cognitive_memory_cross_session_recall.rs` (driven by `tests/gadugi/cross-session-recall.yaml`): Session A writes through `LibraryCognitiveMemory` and a **separate real `simard` process** recalls via `simard memory stats --json` / `simard memory dump --type=facts --json`, including a crash-recovery step that reopens an un-checkpointed store.
 
 ## On-disk layout
@@ -274,9 +276,11 @@ The library owns its own durability (WAL + CHECKPOINT). The old native store at 
 
 Inspect with `simard memory stats` / `simard memory dump` (see
 [Memory introspection CLI](reference/simard-memory-cli.md)), or with the
-dashboard's **Memory** tab ([Dashboard](dashboard.md)) — the graph view
-supports per-type filters and full-text search across the persistent
-layers.
+dashboard's dedicated **Memory** tab
+([Memory tab — cognitive-memory graph](reference/dashboard-memory-tab.md)) —
+an interactive, force-directed graph of the persistent layers, rendered **live**
+from the cognitive store, with per-type filters, live counts, and node
+inspection.
 
 ![Memory tab](assets/dashboard-memory.png)
 
@@ -312,4 +316,5 @@ For multi-host coordination see [Distributed operations](distributed-operations.
 - [Phase-weighted ranked fact recall & snapshot retention](reference/cognitive-memory-ranked-recall.md) — multi-signal ranked recall with per-OODA-phase weights, plus CallerKey dedup/SUPERSEDES and pruning for snapshot/goal records (#2329)
 - [Ranked episodic recall & memory reinforcement](reference/cognitive-memory-ranked-episodic-recall.md) — extends ranked recall to episodes (with a UNION backfill that keeps compressed consolidation sources recallable) and adds a usage/recency reinforcement seam plus `CognitiveFact` observability, recording accesses at the point recalled memories are surfaced into a cycle (per-action attribution is a future refinement) (#2395)
 - [Dashboard](dashboard.md) — Memory tab
+- [Dashboard Memory tab — dedicated cognitive-memory graph](reference/dashboard-memory-tab.md) — the live `GET /api/memory/graph` visualization (nodes/edges, per-type filters, node inspection)
 - [Daemon mode](daemon-mode.md) — when consolidation runs

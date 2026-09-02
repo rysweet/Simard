@@ -107,7 +107,7 @@ fn cmd_eval(args: &[String]) {
         return;
     }
 
-    // Production path: would build a SubprocessRpcTransport and call
+    // Production path: would build a NativeRpcTransport and call
     // gym.run_suite. Phase 1.5 follow-up — see plan.md.
     die(
         "live gym evaluation not yet wired in helper bin (Phase 1.5); pass --baseline-fixture-json for now",

@@ -1,0 +1,67 @@
+{
+  "snapshot": "you/coin@v1-improve-loop",
+  "note": "Phase-5 self-improvement loop fixture (offline scaffold, mock oracle; placeholder UTF-8 inputs, not real COIN bytes). Pinned failures span three tactic families (format-gated decoder, crypto state machine, generic). The held-out fresh slice covers decoder + crypto but NOT generic, so the decoder/crypto tactics generalise (held-out reach improves → kept + banked) while the generic tactic lifts training reach without held-out reach (train/held-out gap → overfitting-warning → rolled back). Drives the improve_loop unit tests and the `run` + `improve --holdout fresh` CLI demo.",
+  "targets": {
+    "pinned": [
+      {
+        "id": "dec-a",
+        "project": "acme",
+        "commit": "c1a2b3d",
+        "harness": "png_decode_fuzzer",
+        "file": "src/decode/reader.c",
+        "line": 120,
+        "family": "frontier"
+      },
+      {
+        "id": "cry-a",
+        "project": "beta",
+        "commit": "c2b3c4e",
+        "harness": "tls_handshake_fuzzer",
+        "file": "src/ssl/state.c",
+        "line": 88,
+        "family": "non-trivial-reachable"
+      },
+      {
+        "id": "gen-a",
+        "project": "gamma",
+        "commit": "c3c4d5f",
+        "harness": "logic_fuzzer",
+        "file": "src/core/logic.c",
+        "line": 42,
+        "family": "non-trivial-reachable"
+      }
+    ],
+    "held_out_fresh": [
+      {
+        "id": "dec-h",
+        "project": "delta",
+        "commit": "c4d5e6a",
+        "harness": "jpeg_decode_fuzzer",
+        "file": "src/decode/jpg.c",
+        "line": 200,
+        "family": "frontier"
+      },
+      {
+        "id": "cry-h",
+        "project": "epsilon",
+        "commit": "c5e6f7b",
+        "harness": "kem_fuzzer",
+        "file": "src/kem/kem.c",
+        "line": 64,
+        "family": "non-trivial-reachable"
+      }
+    ]
+  },
+  "oracle": {
+    "dec-a": "MAGIC+deep-branch-a",
+    "cry-a": "handshake:state-2",
+    "gen-a": "guard-true+payload",
+    "dec-h": "MAGIC+deep-branch-h",
+    "cry-h": "kem-seed:decaps"
+  },
+  "script": {
+    "dec-a": { "input": "no-magic-header", "confidence": 0.5, "rationale": "did not satisfy the container header validator" },
+    "cry-a": { "input": "handshake:state-0", "confidence": 0.5, "rationale": "wrong protocol state; never reached the decapsulation branch" },
+    "gen-a": { "input": "guard-false", "confidence": 0.5, "rationale": "guard predicate left unsatisfied" }
+  }
+}

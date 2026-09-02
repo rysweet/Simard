@@ -10,6 +10,8 @@ related:
   - ./goal-coverage-allocation.md
   - ./adaptive-scaling-api.md
   - ./goal-target-repo-routing.md
+  - ./engineer-admission-api.md
+  - ../concepts/dependency-overlap-aware-scheduling.md
   - ../howto/spawn-engineers-from-ooda-daemon.md
 ---
 
@@ -195,5 +197,10 @@ hot-reload the live daemon for this change.
   supplies the resource-aware concurrency cap.
 - [How OODA spawns engineer agents](../howto/spawn-engineers-from-ooda-daemon.md)
   — the prose goal-action contract and the spawn path Phase 2 feeds into.
+- [Dependency/overlap-aware engineer scheduling](../concepts/dependency-overlap-aware-scheduling.md)
+  — the admission gate inside `dispatch_spawn_engineer` that serializes two
+  engineers on **different** goals when their file footprints overlap, so the
+  concurrency this dispatcher realizes does not turn into merge collisions. See
+  the [engineer-admission API reference](./engineer-admission-api.md).
 - [Goal target-repo routing](./goal-target-repo-routing.md) — how each spawned
   engineer is routed to the correct repository.

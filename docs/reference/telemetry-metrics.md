@@ -13,6 +13,8 @@ related:
   - ./daily-budget-display-guard.md
   - ../architecture/distillation-semantic-handoff.md
   - ./distill-write-boundary-gate.md
+  - ./disk-reclaim-telemetry.md
+  - ./cognitive-thread-observability.md
 ---
 
 # Telemetry metrics reference
@@ -122,6 +124,16 @@ Migrated from the human line
 `[simard] distill: N episodes -> F facts, P procedures, M marked`, which is
 still emitted verbatim.
 
+**Consumed by the Status snapshot.** `simard.distill.runs{result="ok"}` also
+feeds the unified Status snapshot's MEMORY / BRAIN **cognitive** line
+(`GET /api/status/snapshot` → `data.memory.data.cognitive_processes.distillation`,
+Overview "System Status", `simard status`, TUI Status tab). It renders `idle`
+for a flushed-but-zero counter, `N runs` once runs have completed, and stays
+honestly `absent` until the daemon first flushes the counter — the same
+counter the Telemetry section already derives `distill_fail_pct` from, so the
+two never contradict each other. (`consolidation` and `introspection` on that
+line have no published counter yet and remain `absent`.)
+
 ### Brain — `simard.brain.*`
 
 | Metric | Type | Attributes | Meaning |
@@ -168,6 +180,13 @@ node/edge counts **from these snapshot gauges** — process-agnostic and requiri
 no LadybugDB open from the CLI. When the daemon has not yet flushed memory
 gauges the section renders `absent`, never a fabricated zero.
 
+> **Grounding coverage.** The raw `simard.memory.edges{type=DERIVES_FROM}` gauge
+> is complemented by a durable **`fact_provenance_coverage`** self-metric — the
+> grounded *fraction* (`facts_with_provenance / facts_total`) emitted per cycle
+> to the `metrics.jsonl` series so a graph-memory grounding regression is
+> comparable and regressable, not just a raw count. See
+> [Cognitive-memory provenance § Observability](./cognitive-memory-provenance.md#observability-grounding-coverage-self-metric).
+
 ### LLM usage — `simard.llm.*`
 
 Mirrored from `cost_tracking` (the ledger format is unchanged; these are
@@ -191,6 +210,47 @@ Like the memory gauges, `simard.goal.active` is **daemon-sampled** from the goal
 board each OODA cycle. `simard.goal.completed` / `.progress` are reserved (see
 **Emission status**). The status `GOAL BOARD` list is rendered from the goal
 board itself in the daemon-hosted surfaces (dashboard / TUI goal tabs).
+
+### Disk reclaim — `simard.disk.reclaim.*`
+
+Emitted once per agentic disk-reclamation run (the daemon self-heal path and
+`simard disk-reclaim`). Full details and dashboard suggestions live in the
+dedicated [disk reclaim telemetry reference](./disk-reclaim-telemetry.md).
+
+| Metric | Type | Attributes | Meaning |
+|---|---|---|---|
+| `simard.disk.reclaim.bytes_freed` | counter | — | bytes actually reclaimed this run (0 on dry-run / no-op) |
+| `simard.disk.reclaim.paths_removed` | counter | `kind` = `tracked_worktree` \| `orphan_dir` \| `stale_build_cache` | paths removed, by reclamation primitive |
+| `simard.disk.reclaim.candidates_skipped` | counter | `reason` = `protected_path` \| `live_process` \| `uncommitted_or_unpushed` \| `active_worktree` \| `outside_allow_root` \| `unknown_pr_state` \| `other` | candidates a hard rail refused (the human-review list) — every increment is a path that was **not** deleted |
+| `simard.disk.reclaim.used_pct_before` | gauge | — | home-partition `%-used` at run start (0–100) |
+| `simard.disk.reclaim.used_pct_after` | gauge | — | home-partition `%-used` after the run (0–100) |
+
+The agent's free-text candidate `reason` is **never** used as an attribute; only
+the enum `RejectReason` (`reason=`) is. See
+[Agentic disk reclamation](../concepts/agentic-disk-reclamation.md).
+
+### Cognitive threads — `simard.thread.*`
+
+Emitted per cognitive-thread run through the thread telemetry seam
+(`src/cognitive_threads/telemetry.rs`). Thread identity is embedded in the
+**metric name** (`simard.thread.<id>.<suffix>`), never as an attribute, so these
+series carry no attributes. Full details, the Overseer oversight rail, and the
+durable error path live in the dedicated
+[cognitive-thread observability reference](./cognitive-thread-observability.md).
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `simard.thread.<id>.runs` | counter | one run the thread actually performed |
+| `simard.thread.<id>.successes` | counter | runs that succeeded |
+| `simard.thread.<id>.failures` | counter | runs that failed/panicked (mirrored to a durable `FailureDiagnosis` the Overseer drains) |
+| `simard.thread.<id>.duration_seconds` | histogram | per-run wall-clock seconds (shared cycle buckets) |
+| `simard.thread.<id>.last_run_epoch` | gauge | epoch of the last completed run (last-run age is derived) |
+| `simard.thread.<id>.next_run_epoch` | gauge | epoch of the next scheduled run (stall signal) |
+| `simard.thread.<id>.active` | gauge | `1` while mid-tick, `0` otherwise |
+
+`<id>` is the stable `snake_case` [`CognitiveThread::id`](./cognitive-threads-catalog.md)
+(e.g. `ooda`, `metacognition`, `reflection`); `runs = successes + failures`, so
+success/failure rate is derivable at zero attribute cardinality.
 
 ## In-process registry and the on-disk snapshot
 

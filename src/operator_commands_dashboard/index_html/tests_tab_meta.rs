@@ -1,7 +1,8 @@
 //! Tests for [`super::tab_meta`] and the cross-check between
 //! `TAB_METADATA` and the rendered `INDEX_HTML`. These tests are the
-//! Rust half of the Tab-Identity Contract (#1993 / #1994 / #1995); the
-//! other half is `tests/e2e-dashboard/smoke_python/test_tab_clarity.py`.
+//! Rust cover for the Tab-Identity Contract (#1993 / #1994 / #1995); the
+//! former Python `smoke_python` half was removed when Simard became a
+//! pure-Rust daemon (#3181), so this Rust suite carries the contract.
 
 #![cfg(test)]
 
@@ -21,7 +22,7 @@ fn tab_meta_slugs_unique() {
             t.slug
         );
     }
-    assert_eq!(TAB_METADATA.len(), 10, "expected 10 tabs");
+    assert_eq!(TAB_METADATA.len(), 11, "expected 11 tabs");
 }
 
 #[test]
@@ -767,15 +768,22 @@ fn feedback_widget_posts_report_and_context_to_authed_endpoint() {
 // of this taxonomy lives in `docs/dashboard.md#canonical-tab-taxonomy`; these
 // tests pin the source-of-truth table and the rendered HTML to it.
 
-/// The nine canonical dashboard tabs, in nav-render order, paired with the
+/// The canonical dashboard tabs, in nav-render order, paired with the
 /// label each must expose. This is the single in-test statement of the
-/// consolidated taxonomy that `docs/dashboard.md` documents.
+/// consolidated taxonomy that `docs/dashboard.md` documents. The trailing
+/// `memory` entry is the #2627 regression fix (its viz was dropped by the
+/// 17->9 consolidation and is restored as a dedicated tab).
 const CANONICAL_TABS: &[(&str, &str)] = &[
     ("overview", "Overview"),
     ("goals", "Goals"),
     ("activity", "Activity"),
     ("workers", "Workers"),
     ("pull-requests", "Pull Requests"),
+    // #2627 regression fix: the memory-graph visualization dropped during the
+    // 17->9 consolidation is restored as its OWN dedicated top-level tab
+    // (previously folded into Resources as a sub-section / deep-link alias),
+    // sitting alongside Resources.
+    ("memory", "Memory"),
     ("resources", "Resources"),
     ("chat", "Chat"),
     ("overseer", "Overseer"),
@@ -786,11 +794,13 @@ const CANONICAL_TABS: &[(&str, &str)] = &[
 /// Slugs that were real top-level tabs in the 17-tab set and must NOT survive
 /// as nav tabs after consolidation — each is now a sub-section reachable via
 /// its deep-link alias.
+///
+/// `memory` is deliberately absent: issue #2627 promotes it back to a
+/// first-class top-level tab, so it now lives in [`CANONICAL_TABS`] instead.
 const RETIRED_SLUGS: &[&str] = &[
     "traces",
     "logs",
     "processes",
-    "memory",
     "costs",
     "workboard",
     "thinking",
@@ -877,14 +887,16 @@ fn js_canonical_tabs_allowlist_includes_every_tab() {
 }
 
 #[test]
-fn rendered_html_has_exactly_ten_page_h1s() {
-    // Invariant 2 across the consolidated set plus the Creative Ideas tab: each
-    // tab panel owns exactly one `<h1 class="page-h1">`, so the rendered HTML has
-    // exactly ten of them. Sub-sections must use `<h2>`, never a second page-h1.
+fn rendered_html_has_exactly_eleven_page_h1s() {
+    // Invariant 2 across the consolidated set plus Creative Ideas and the
+    // restored Memory tab (#2627): each tab panel owns exactly one
+    // `<h1 class="page-h1">`, so the rendered HTML has exactly eleven of them.
+    // Sub-sections must use `<h2>`, never a second page-h1. (Resources keeps a
+    // `<h2 class="subsection">Memory</h2>` recall summary — an h2, not counted.)
     let count = INDEX_HTML.matches(r#"<h1 class="page-h1">"#).count();
     assert_eq!(
-        count, 10,
-        "expected exactly 10 page-h1 headings (one per tab), found {count}; \
+        count, 11,
+        "expected exactly 11 page-h1 headings (one per tab), found {count}; \
          a stray page-h1 usually means an absorbed panel kept its old <h1> instead of \
          being demoted to an <h2 class=\"subsection\">"
     );
@@ -952,7 +964,6 @@ fn rendered_html_wires_tab_alias_allowlist() {
         ("terminal", "workers"),
         ("merge-decisions", "pull-requests"),
         ("pr-readiness", "pull-requests"),
-        ("memory", "resources"),
         ("costs", "resources"),
     ];
     for (retired, parent) in alias_pairs {
@@ -963,6 +974,15 @@ fn rendered_html_wires_tab_alias_allowlist() {
              expected to find: {needle}"
         );
     }
+    // #2627: `memory` is now a canonical top-level tab, so its old
+    // `"memory":"resources"` deep-link alias MUST be removed. The resolver
+    // checks CANONICAL_TABS before TAB_ALIASES, so a stale alias would be dead
+    // code that silently misroutes a `#memory` bookmark into Resources.
+    assert!(
+        !INDEX_HTML.contains(r#""memory":"resources""#),
+        "the retired-slug alias \"memory\":\"resources\" must be removed once \
+         Memory is a canonical tab (issue #2627); it would shadow the real tab"
+    );
     // The untrusted-hash validator must be present so a crafted hash can never
     // reach a DOM selector.
     assert!(
@@ -1168,5 +1188,107 @@ fn rendered_html_goals_render_parent_child_hierarchy() {
         INDEX_HTML.contains("function groupGoalsByParent("),
         "the Goals tab must define groupGoalsByParent(...) so decomposed children are \
          grouped/nested under their active parent (orphans/backlog-parent children at root)"
+    );
+}
+
+#[test]
+fn rendered_html_goals_render_label_chips_and_tag_filter() {
+    // Issue #2743: the Goals tab renders each goal's labels as chips and offers
+    // a client-side tag filter over the already-fetched live goal data.
+    assert!(
+        INDEX_HTML.contains("goalLabelChips(g.labels)"),
+        "each goal row must render its labels as chips via goalLabelChips(g.labels)"
+    );
+    assert!(
+        INDEX_HTML.contains("goal-label-chip"),
+        "label chips must carry the goal-label-chip class for styling/testing"
+    );
+    // The tag filter is client-side: a filter control + a predicate over the
+    // fetched goals. No new route is added.
+    assert!(
+        INDEX_HTML.contains("id=\"goals-tag-filter\""),
+        "the Goals tab must host a tag-filter control container"
+    );
+    assert!(
+        INDEX_HTML.contains("function goalMatchesTagFilter(")
+            && INDEX_HTML.contains("window.setGoalTagFilter"),
+        "the Goals tab must filter goals client-side by the selected tag"
+    );
+    // Filtering runs over the fetched goal data, not a server round-trip, and
+    // is applied at the GROUP level (#2743 review Finding #2): the full active
+    // list is grouped first, then whole entries are kept when the root or any
+    // child matches, so a child-only tag can never orphan children from their
+    // parent/umbrella header.
+    assert!(
+        INDEX_HTML.contains("function entryMatchesTagFilter(")
+            && INDEX_HTML.contains(
+                "groupGoalsByParent(d.active||[],d.backlog).filter(entryMatchesTagFilter)"
+            ),
+        "the render must group the full active list and filter at the group level"
+    );
+    // Review hardening (#2743): a tag is user-influenced text emitted into the
+    // `value="…"` attribute of each <option>. It must be attribute-escaped with
+    // escAttr() (which also neutralises the `\"` that closes the attribute), not
+    // plain esc() — otherwise a tag containing a double-quote could break out of
+    // the attribute and inject markup.
+    assert!(
+        INDEX_HTML.contains("'<option value=\"'+escAttr(t)+'\"'"),
+        "the tag-filter <option> value must be attribute-hardened with escAttr(t)"
+    );
+    assert!(
+        !INDEX_HTML.contains("'<option value=\"'+esc(t)+'\"'"),
+        "the tag-filter <option> value must not use plain esc(t) in the \
+         attribute context (attribute-injection risk)"
+    );
+}
+
+// ===========================================================================
+// Issue #4178 — Workboard 'Blocked' column: blocked != failed + surface WHY.
+//
+// BUG: the Workboard kanban card (`wbGoalCard`) colored a lifecycle-BLOCKED
+// goal's progress bar with `var(--red)` (#f85149) — the SAME activity-failure
+// red that issue #20 deliberately reserved for failures — so a blocked goal on
+// the Workboard read as *failed*. The card also never surfaced WHY a goal was
+// blocked (the reason is carried in the additive `block_reason` field and, for
+// back-compat, jammed into the legacy `status` Display string).
+//
+// FIX: the blocked bar uses amber `var(--yellow)` (#d29922), matching the
+// Goals-tab GOAL_STATUS_COLORS decision, and the card renders
+// `Blocked — <reason>` from `g.block_reason` (falling back to the legacy
+// prefix-stripped `status`). The behavioral half is
+// tests/gadugi/dashboard-workboard-blocked-reason.sh.
+
+#[test]
+fn rendered_html_workboard_blocked_bar_is_amber_not_failure_red() {
+    // The blocked branch of the workboard card's bar color must NOT use the
+    // activity-failure red — that is the exact confusion issue #20 forbade.
+    assert!(
+        !INDEX_HTML.contains("g.status.startsWith('blocked')?'var(--red)'"),
+        "the Workboard blocked progress bar must not reuse the activity-failure \
+         red var(--red); a blocked goal must be visually distinct from a failed one"
+    );
+    // The blocked bar must use amber var(--yellow) (== #d29922), consistent with
+    // the Goals-tab lifecycle badge, keyed off the isBlocked classifier.
+    assert!(
+        INDEX_HTML.contains("isBlocked?'var(--yellow)'"),
+        "the Workboard blocked progress bar must use amber var(--yellow) so \
+         blocked != failed across the whole dashboard"
+    );
+}
+
+#[test]
+fn rendered_html_workboard_card_surfaces_block_reason() {
+    // The card must render WHY a goal is blocked, preferring the additive clean
+    // `block_reason` field over re-parsing the legacy Display string.
+    assert!(
+        INDEX_HTML.contains("g.block_reason"),
+        "the Workboard card must surface a blocked goal's reason from the additive \
+         g.block_reason field"
+    );
+    // The reason must be labeled and escaped (escape-last: esc() the raw reason).
+    assert!(
+        INDEX_HTML.contains("<strong>Blocked — </strong>${esc(reason)}"),
+        "the Workboard blocked card must render an escaped 'Blocked — <reason>' row \
+         so the operator can see WHY a goal is blocked"
     );
 }

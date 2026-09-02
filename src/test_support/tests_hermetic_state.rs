@@ -10,7 +10,7 @@
 //!   `$HOME/.simard`.
 //! - (H3) `socket_path()` is `<state_root>/memory.sock` when
 //!   `SIMARD_MEMORY_SOCKET` is unset.
-//! - (H4) `TempDir` outlives every bridge handle the test opens
+//! - (H4) `TempDir` outlives every memory handle the test opens
 //!   (covered by RAII drop order — the helper's destructor must reap
 //!   the temp dir AFTER releasing the env vars, not before).
 //! - Drop must restore the previous values of `SIMARD_STATE_ROOT` and

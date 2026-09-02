@@ -6,18 +6,21 @@ description: >
   and flags BACKLOG-COVERAGE GAPS: high-priority goals, high-signal GitHub
   issues, and live anomalies that SHOULD have an active workstream but do not.
   Covers the Signal::WorkstreamGap / ProblemKind::WorkstreamCoverage data model,
-  the coverage-set detection contract, the deduped NotifyOperator + FileIssue act
+  the coverage-set detection contract, the deduped NotifyOperator act
   path, the SIMARD_OVERSEER_GAP_SCAN configuration, the additive
   OverseerTickReport / ObservedState fields, and how gaps render on the Overseer
   activity surfaces.
-last_updated: 2026-07-06
+last_updated: 2026-07-26
 review_schedule: as-needed
 owner: simard
 doc_type: reference
 related:
   - ./overseer-activity-feed.md
+  - ./overseer-gap-scan-durable-dedup.md
+  - ./overseer-self-observation-stability.md
   - ../design/overseer.md
   - ../howto/review-overseer-workstream-gaps.md
+  - ../howto/diagnose-recurring-cognitive-memory-signature.md
   - ../howto/watch-overseer-activity.md
   - ./stewardship-api.md
   - ./no-progress-breaker-api.md
@@ -26,6 +29,17 @@ related:
 ---
 
 # Overseer workstream gap-scan reference
+
+> **Retired as the observation SOURCE (#2419).** The single-repo Rust
+> survey-and-parse described here (`OVERSEER_SURVEY_REPO`,
+> `survey_high_signal_open_issues`, `issue_coverage_from_open_prs`,
+> `detect_workstream_gaps → Vec<GapItem> → FlagWorkstreamGaps`) has been replaced
+> as the way the Overseer discovers work. Observation is now the agentic,
+> multi-repo [ecosystem-observe chain](../design/ecosystem-observe.md): an agent
+> runs `gh` across the stewarded roster and reasons to a deduped Problem list, with
+> Rust reduced to a thin cadence/routing rail. The `SIMARD_OVERSEER_GAP_SCAN` /
+> `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` cadence knobs are preserved and now gate the
+> ecosystem-observe pass. This page is retained for historical context.
 
 The acting **Overseer** already runs its own Observe/Orient/Decide/Act loop
 alongside Simard's engineer OODA — filing stewardship issues, launching fix
@@ -42,14 +56,13 @@ Overseer's normal loop. On each (or every *Nth*) tick, the Overseer surveys the
 anomalies — correlates it against everything already **in flight**, and flags the
 **backlog-coverage gaps**: important work that *should* have an active workstream
 but does not. It then acts on those gaps through the Overseer's **existing**
-escalation plumbing: it notifies the operator (email + Signal) and files a
-deduped stewardship issue, so a genuine gap actually reaches a person exactly
-once.
+escalation plumbing: it notifies the operator (email + Signal), so a genuine
+gap reaches a person exactly once without creating recursive tracking work.
 
 > **This is additive.** The gap-scan adds one Observe→Orient→Act step to the
 > Overseer loop. It does not change how existing interventions decide or act, and
-> it reuses the same notify/file/dedup machinery as `goal_health` and M1
-> issue-filing. Every new field on `ObservedState` and `OverseerTickReport` is
+> it reuses the same notification and dedup machinery as `goal_health`. Every
+> new field on `ObservedState` and `OverseerTickReport` is
 > additive and `#[serde(default)]`, so older readers tolerate a newer file.
 
 > **Modules:** detector `src/overseer/sensor.rs`
@@ -72,6 +85,7 @@ once.
 | Read the gaps as JSON | `GET /api/overseer` → `data.recent[].report.workstream_gaps_detected` / `…_suppressed` |
 | Get told when a genuine gap appears | The deduped operator notification (email + Signal), kind `workstream-gap` |
 | Find the filed gap issues | GitHub issues in `rysweet/Simard` opened by the Overseer's identity (`simard-overseer[bot]`) with the `workstream-gap` signature |
+| Stop a restart re-filing an already-open gap issue | The durable, GitHub-side open-issue check (#4717) — see [durable dedup reference](./overseer-gap-scan-durable-dedup.md) |
 | Turn the scan up, down, or off | `SIMARD_OVERSEER_GAP_SCAN` + `SIMARD_OVERSEER_GAP_SCAN_EVERY_N` (see [Configuration](#configuration)) |
 
 ## What counts as a gap
@@ -196,7 +210,7 @@ pub enum ProblemKind {
     // … existing variants …
     /// One or more backlog-coverage gaps — uncovered high-priority goals,
     /// high-signal issues, or unaddressed anomalies. Acted on by
-    /// `act_flag_workstream_gaps`: notify the operator + file a deduped issue.
+    /// `act_flag_workstream_gaps`: notify the operator without filing an issue.
     WorkstreamCoverage,
 }
 ```
@@ -271,15 +285,45 @@ operator:
    window it records a *suppressed* outcome and skips. On success it **commits**
    the key. The gate **fails closed** on an identity/read error (guardrail
    **A2**) — an indeterminate gate suppresses rather than risks a duplicate.
-2. **Stewardship layer.** The filed issue still goes through
-   `stewardship::{failure_signature, find_existing}`, so even across gate resets a
-   matching open issue is updated, not duplicated.
+2. **Stewardship layer (durable, GitHub-side — #4717).** The filed issue goes
+   through the durable open-issue dedup check: before creating, the act path
+   queries GitHub (via the injected `GhClient`, keyed by
+   `GapItem::dedup_key()` = `workstream-gap:<signature>`) for an already-open
+   equivalent issue, reusing it if present. Because the check hits GitHub — not
+   in-memory state — a matching open issue is reused **even after a daemon
+   restart** clears the gate, closing the seam that produced the repeated
+   `[stewardship] workstream_gap:*` bursts. See the
+   [durable dedup reference](./overseer-gap-scan-durable-dedup.md).
 
 The result: **one deduped item per recurring gap signature**, not one per tick.
 
-## Act path — notify + file (reuse existing plumbing)
+## Act path — the coverage closing edge (issue #4128, D3b)
 
-When Orient produces a `WorkstreamCoverage` problem, `act_flag_workstream_gaps`
+> **Update (issue #4128).** A `WorkstreamCoverage` problem now `decide`s to a
+> **closing edge that actually covers the gap** — an
+> `Intervention::LaunchRecipe` tagged with the `WORKSTREAM_COVERAGE_GROUP`
+> sequence group — instead of the old **notify-only** `FlagWorkstreamGaps`
+> routing. The notify-only path left the gap **uncovered**, so it re-surfaced
+> every window as the recurring `workstream-gap` signature (the exact incident in
+> #4128, A2). The launch is routed through the **same gate** as every other
+> launch and additionally **fails closed** without a distinct steward identity
+> (anti-recursion), is **held** while a coverage launch for the same gap set is
+> already in flight (the `inflight_investigations` dedup guard, keyed by the
+> per-gap `workstream-gap:<sorted sigs>` brief), is held when the gap-scan is
+> disabled (the `SIMARD_OVERSEER_GAP_SCAN` opt-out now matches the coverage
+> `sequence_group`), and carries a `task_description` **templated from structured
+> data only** (gap category + restricted-slug signature), never raw issue text.
+> The `Problem` `dedup_key` is keyed **per-gap** (`workstream-gap:<sig>`) rather
+> than the bare `workstream-gap` constant, so distinct gap sets no longer collapse
+> onto one key (which had starved the closing edge to a single gap).
+>
+> The `FlagWorkstreamGaps` intervention, its `act_flag_workstream_gaps` handler,
+> and the `WorkstreamGapsFlagged` outcome **still exist** and are still admitted by
+> the gate — only the `decide` **routing** for `WorkstreamCoverage` changed. The
+> notify-centric description below documents that retained machinery; it is no
+> longer the path a coverage gap takes by default.
+
+When it is invoked directly, `act_flag_workstream_gaps`
 (`src/overseer/mod.rs`) acts through the Overseer's **existing** escalation
 machinery — the same paths `goal_health` and M1 use — with no new bypass:
 
@@ -291,7 +335,19 @@ machinery — the same paths `goal_health` and M1 use — with no new bypass:
    silently dropped; an unconfigured channel is `Queued` and logged.
 3. **FileIssue.** File a **deduped** stewardship issue per gap signature through
    the same `IssueFiler` path M1 uses
-   (`stewardship::process_orchestrator_run` + `find_existing`).
+   (`stewardship::process_orchestrator_run` + `find_existing`). The gap briefs
+   carry `source_module = "overseer"`, which matches no routing keyword; the
+   stewardship router's **default-repo fallback** therefore routes them to
+   `rysweet/Simard` (the `DEFAULT_TARGET_REPO` constant) and logs the fallback
+   with `tracing::warn!`. This is what lets the gap-scan actually file/upsert one
+   rolling tracking issue per gap signature every tick, rather than failing with
+   `overseer intervention failed … flag_workstream_gaps … cannot route
+   source-module 'overseer'`. When a durable `GhClient` is injected via
+   `Overseer::with_gap_issue_client(..)`, this file step first consults the
+   **durable GitHub open-issue check (#4717)**: a matching open issue is reused
+   (counted as `reused_existing`) instead of re-filed, and a `gh` error
+   **fails loud** — the cycle files and notifies nothing. See the
+   [durable dedup reference](./overseer-gap-scan-durable-dedup.md).
 
 Both the notify and the file happen as **side effects of this one act** — exactly
 as `goal_health`'s escalate notifies both channels from a single intervention.
@@ -300,15 +356,18 @@ The act then returns **one** summarising `ActOutcome` (see
 separate `Escalated` / `IssueFiled` outcome, so gap activity is counted only on
 the gap-scan's own dedicated counters, never on the generic ones.
 
-**The gap-scan does not launch its own fix workstreams.** Surfacing (notify +
-file) is its whole job, mirroring `goal_health`, which self-heals/escalates but
-never launches. When an underlying anomaly warrants a fix, that fix is launched —
-if and only if the Overseer's existing guardrails permit — through the Overseer's
-**existing** anomaly→`LaunchRecipe` path (counted normally under
-`recipes_launched`), not through the gap act. The gap-scan opens **no** new
-auto-launch path and **no** new bypass. Any `task_description` on that existing
-path stays **Simard-templated from structured data**, never raw external issue
-text (guideline **C2**).
+**Since issue #4128 (D3b) the gap-scan closes the gap with a gated launch.** A
+`WorkstreamCoverage` problem decides to a `LaunchRecipe` tagged
+`WORKSTREAM_COVERAGE_GROUP` that launches a workstream to **cover** the uncovered
+work, so the gap stops recurring. This launch is **not** a new bypass: it is
+admitted through the **same gate** as every other launch (autonomy, per-cycle
+launch cap, budget, and the conflict sequencer), it **fails closed** without a
+distinct steward identity (the same anti-recursion guard the notify path
+enforced), it is **held** while an identical coverage launch is already in flight,
+and its `task_description` stays **Simard-templated from structured data** (gap
+category + restricted-slug signature), never raw external issue text (guideline
+**C2**). Underlying anomaly fixes still ride the Overseer's pre-existing
+anomaly→`LaunchRecipe` path, counted normally under `recipes_launched`.
 
 ### `OperatorNotification::workstream_gap`
 
@@ -358,16 +417,17 @@ lockstep — see
 ## Tick counters and totals
 
 `OverseerTickReport` (`src/overseer/wiring.rs`) and `OverseerTotals`
-(`src/overseer/activity.rs`) each gain **two** additive, `#[serde(default)]`
+(`src/overseer/activity.rs`) each gain **three** additive, `#[serde(default)]`
 counters — mirroring the dedicated `goals_escalated` / `goals_health_suppressed`
 pair `goal_health` already added. Because they default, the activity-feed
 `SCHEMA_VERSION` **stays 1** (additive change, forward/backward tolerant):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `OverseerTickReport.workstream_gaps_detected` | `usize` | Genuine, deduped backlog-coverage gaps **flagged** this tick — operator notified + issue filed (after coverage-set dedupe and gate suppression). |
-| `OverseerTickReport.workstream_gaps_suppressed` | `usize` | Gaps whose signature was already committed within the dedup window this tick — **not** re-notified, **not** re-filed. |
-| `OverseerTotals.workstream_gaps_detected` / `…_suppressed` | `u64` | The same two, summed over the retained activity window. |
+| `OverseerTickReport.workstream_gaps_detected` | `usize` | Genuine, deduped backlog-coverage gaps **flagged** this tick — operator notified after coverage-set dedupe and gate suppression. |
+| `OverseerTickReport.workstream_gaps_suppressed` | `usize` | Gaps whose signature was already committed within the dedup window this tick — not re-notified. |
+| `OverseerTickReport.workstream_gaps_reused_existing` | `usize` | Gaps that matched an **already-open GitHub issue** via the durable check (#4717) and reused it instead of filing a duplicate (e.g. after a restart / search-index lag). |
+| `OverseerTotals.workstream_gaps_detected` / `…_suppressed` / `…_reused_existing` | `u64` | The same three, summed over the retained activity window. |
 
 Here is the part the counter flow **must** get right. In the Overseer,
 `overseer_tick` calls `act` **once per admitted intervention**, each `act`
@@ -379,8 +439,8 @@ behaves: `act_escalate_blocked_goal` notifies **both** channels yet returns a
 single `GoalEscalated`, bumping the dedicated `goals_escalated`, never the
 generic `escalations`.
 
-The consolidated gap act does the same. It performs its notify + file **side
-effects** (above) and returns **one** summarising outcome carrying the batch
+The consolidated gap act does the same. It performs its notification side
+effect and returns **one** summarising outcome carrying the batch
 counts, which a **new** `tally_outcome` arm sums into the two dedicated counters.
 `tally_outcome`'s `match` is **exhaustive** (no wildcard arm), so the compiler
 **forces** that new arm — nothing rides an existing counter "for free":
@@ -389,12 +449,18 @@ counts, which a **new** `tally_outcome` arm sums into the two dedicated counters
 pub enum ActOutcome {
     // … existing variants …
     /// The consolidated result of one gap-scan act: `flagged` genuine gaps were
-    /// surfaced (operator notified on both channels + a deduped issue filed per
-    /// gap), and `suppressed` gaps matched an already-committed signature within
-    /// the dedup window (not re-notified, not re-filed). Mirrors how the
+    /// surfaced (operator notified on both channels), `suppressed` gaps
+    /// matched an already-committed signature within the in-process dedup window
+    /// (not re-notified), and `reused_existing` gaps matched an already-open
+    /// GitHub issue via the durable check (#4717) and reused it instead of
+    /// filing a duplicate. Mirrors how the
     /// per-goal `GoalEscalated` / `GoalHealthSuppressed` feed dedicated goal
     /// counters — here batched, because one gap act handles the whole pass.
-    WorkstreamGapsFlagged { flagged: usize, suppressed: usize },
+    WorkstreamGapsFlagged {
+        flagged: usize,
+        suppressed: usize,
+        reused_existing: usize,
+    },
 }
 ```
 
@@ -407,7 +473,7 @@ ActOutcome::WorkstreamGapsFlagged { flagged, suppressed } => {
 ```
 
 A tick whose gaps were **all** duplicates returns
-`WorkstreamGapsFlagged { flagged: 0, suppressed: N }` — no notification, no issue,
+`WorkstreamGapsFlagged { flagged: 0, suppressed: N }` — no notification,
 only `workstream_gaps_suppressed` moves.
 
 ## Rendering on the Overseer surfaces
@@ -515,9 +581,13 @@ It never blocks a tick and never writes.
   notification and **one** issue per recurring gap signature — never a flood.
 - **Reuses existing plumbing.** Notify and file go through the same
   `DualChannelNotifier` / `IssueFiler` paths `goal_health` / M1 use — same
-  escalation, same gates, no `--admin`, no `--no-verify`, no new bypass. The
-  gap-scan launches nothing itself; any anomaly fix rides the Overseer's existing
-  `LaunchRecipe` path and its counter, unchanged.
+  escalation, same gates, no `--admin`, no `--no-verify`, no new bypass. Since
+  issue #4128 a coverage gap decides to a **gated closing-edge** `LaunchRecipe`
+  (tagged `WORKSTREAM_COVERAGE_GROUP`): it is admitted only through the existing
+  launch gate, **fails closed** without a distinct steward identity, and is
+  in-flight-deduped — it opens no unguarded auto-launch path. Any other anomaly
+  fix still rides the Overseer's pre-existing `LaunchRecipe` path and its counter,
+  unchanged.
 - **Fails closed and never panics.** The gate fails closed on identity errors;
   the detector degrades every unreadable source to empty; a panicking tick is
   isolated and recorded, never swallowed.
@@ -548,9 +618,11 @@ notifications, filed-issue bodies, and `gh` reads. The gap-scan therefore:
 - **D1/D2:** never emits tokens, `SIMARD_DASHBOARD_TOKEN`, internal paths, or
   stack traces into notifications, issues, or logs; keeps `gh` credentials
   ambient.
-- **S1/S2/S3:** adds no new auto-launch path (launch stays behind existing
-  gates); two-layer dedup prevents notify/issue floods; the
-  `SIMARD_OVERSEER_GAP_SCAN` kill-switch is honoured.
+- **S1/S2/S3:** the only launch the gap-scan adds — the issue #4128 coverage
+  closing edge — stays **behind the existing launch gate** plus a fail-closed
+  steward-identity guard and in-flight dedup (no unguarded auto-launch path);
+  two-layer dedup prevents notify/issue floods; the `SIMARD_OVERSEER_GAP_SCAN`
+  kill-switch is honoured (its opt-out holds the coverage launch too).
 
 ## Testing
 
@@ -563,8 +635,8 @@ built on synthetic pictures — no network, no real `gh`, no clock dependence:
   titles, and `why_it_matters`, classified into a `WorkstreamCoverage` problem.
 - **Dedupes on repeat.** Re-running the scan on the same picture suppresses both
   gaps (gate hit) — no second notification, no second issue — the act returns
-  `WorkstreamGapsFlagged { flagged: 0, suppressed: 2 }`, so only
-  `workstream_gaps_suppressed` moves.
+  `WorkstreamGapsFlagged { flagged: 0, suppressed: 2, reused_existing: 0 }`, so
+  only `workstream_gaps_suppressed` moves.
 - **Ignores covered work.** A p1 goal that *has* an open PR, or an issue with an
   in-flight workstream, produces **no** gap.
 - **Delegates blocked goals.** A `Blocked` / "needs human review" goal is left to
@@ -585,5 +657,8 @@ built on synthetic pictures — no network, no real `gh`, no clock dependence:
   capability/guardrail model, and the `goal_health` pattern this scan mirrors.
 - [Stewardship API](./stewardship-api.md) — the deduped issue-filing path
   (`failure_signature` / `find_existing`) reused here.
+- [Overseer gap-scan durable open-issue dedup reference](./overseer-gap-scan-durable-dedup.md)
+  — the durable, GitHub-side cross-process dedup check (#4717) layered on this
+  act path.
 - [No-progress breaker API](./no-progress-breaker-api.md) — the "needs human
   review" marker delegated to `goal_health` rather than re-flagged as a gap.

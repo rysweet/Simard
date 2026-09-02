@@ -100,8 +100,8 @@ pub fn run_goal_curation_read_probe(
     // Goals live in cognitive memory (issue #1590) and the canonical
     // store is the daemon's `default_state_root()` — same path the
     // greeting banner reads (issue #1744).
-    let bridge = crate::memory_ipc::launch_writer_client(&state_root)?;
-    let board = crate::goal_curation::load_goal_board(bridge.ops())?;
+    let memory = crate::memory_ipc::launch_writer_client(&state_root)?;
+    let board = crate::goal_curation::load_goal_board(memory.ops())?;
     let goal_records = crate::goal_curation::active_goals_as_records(&board);
     let register = GoalRegisterView::from_records(goal_records);
 
@@ -140,7 +140,7 @@ mod tests {
         let missing = dir.path().join("nonexistent");
         let result = run_goal_curation_read_probe("local-harness", "single-process", Some(missing));
         // The launcher creates the directory if missing and the cognitive
-        // memory bridge handles an empty board gracefully, so this should
+        // memory memory handles an empty board gracefully, so this should
         // succeed in most cases. The test only asserts no panic.
         let _ = result;
     }
@@ -150,19 +150,19 @@ mod tests {
     fn goal_curation_read_probe_with_seeded_cognitive_memory() {
         // HermeticState pins SIMARD_STATE_ROOT and unsets
         // SIMARD_MEMORY_SOCKET so save_goal_board's hermetic guard sees a
-        // TempDir-rooted state and the bridge socket follows that root
+        // TempDir-rooted state and the memory socket follows that root
         // (issues #1923 / #1925).
         let state = crate::test_support::HermeticState::new();
         // Seed an empty goal board through cognitive memory rather than
         // writing the legacy on-disk goal-records file (issue #1590).
-        let bridge =
-            crate::memory_ipc::launch_writer_client(state.state_root()).expect("writer bridge");
+        let memory =
+            crate::memory_ipc::launch_writer_client(state.state_root()).expect("writer memory");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
-            bridge.ops(),
+            memory.ops(),
         )
         .expect("seed empty board");
-        drop(bridge);
+        drop(memory);
 
         let result = run_goal_curation_read_probe(
             "local-harness",
@@ -180,14 +180,14 @@ mod tests {
     #[serial_test::serial(cognitive_memory)]
     fn goal_curation_read_probe_with_empty_cognitive_memory() {
         let state = crate::test_support::HermeticState::new();
-        let bridge =
-            crate::memory_ipc::launch_writer_client(state.state_root()).expect("writer bridge");
+        let memory =
+            crate::memory_ipc::launch_writer_client(state.state_root()).expect("writer memory");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
-            bridge.ops(),
+            memory.ops(),
         )
         .expect("seed empty board");
-        drop(bridge);
+        drop(memory);
 
         let result = run_goal_curation_read_probe(
             "local-harness",
@@ -222,6 +222,7 @@ mod tests {
         let mut board = crate::goal_curation::GoalBoard::new();
         for i in 1..=n {
             board.active.push(crate::goal_curation::ActiveGoal {
+                labels: Vec::new(),
                 parent_goal_id: None,
                 priority_explicit: false,
                 repo: None,
@@ -248,18 +249,18 @@ mod tests {
         let state_root = state.state_root().to_path_buf();
 
         // Seed 4 active goals into cognitive memory at this state root.
-        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
+        let memory = crate::memory_ipc::launch_writer_client(&state_root).expect("writer memory");
         let board = seeded_board(4);
-        crate::goal_curation::save_goal_board(&board, bridge.ops()).expect("seed board");
+        crate::goal_curation::save_goal_board(&board, memory.ops()).expect("seed board");
 
-        // Path A: greeting banner reads via the same bridge.
-        let banner_lines = build_greeting_banner(Some(bridge.ops()));
+        // Path A: greeting banner reads via the same memory.
+        let banner_lines = build_greeting_banner(Some(memory.ops()));
         let banner_count = banner_active_goal_count(&banner_lines).unwrap_or_else(|| {
             panic!("banner must report 'Active goals (N):' line; got: {banner_lines:#?}")
         });
 
         // Path B: goal-curation read reads from the same explicit state root.
-        let board_via_read = crate::goal_curation::load_goal_board(bridge.ops())
+        let board_via_read = crate::goal_curation::load_goal_board(memory.ops())
             .expect("read board via load_goal_board");
         let records = crate::goal_curation::active_goals_as_records(&board_via_read);
 
@@ -273,7 +274,7 @@ mod tests {
             records.len()
         );
 
-        drop(bridge);
+        drop(memory);
 
         // Sanity: also exercise the public CLI entry point with this state
         // root override — it must succeed and not panic.
@@ -285,23 +286,23 @@ mod tests {
     ///
     /// Tests the same Pillar 11 invariant (banner and goal-curation read agree)
     /// without spawning `gh` subprocesses. Exercises `load_goal_board` directly
-    /// against the same bridge both code paths would use.
+    /// against the same memory both code paths would use.
     #[test]
     #[serial_test::serial(cognitive_memory)]
     fn pillar11_banner_and_read_agree_with_seeded_goals_fast() {
         let state = crate::test_support::HermeticState::new();
         let state_root = state.state_root().to_path_buf();
 
-        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
+        let memory = crate::memory_ipc::launch_writer_client(&state_root).expect("writer memory");
         let board = seeded_board(4);
-        crate::goal_curation::save_goal_board(&board, bridge.ops()).expect("seed board");
+        crate::goal_curation::save_goal_board(&board, memory.ops()).expect("seed board");
 
         // Both banner and read-probe resolve goals via load_goal_board.
-        // The invariant is that reading the same bridge yields the same count.
+        // The invariant is that reading the same memory yields the same count.
         let board_a =
-            crate::goal_curation::load_goal_board(bridge.ops()).expect("load board (banner path)");
+            crate::goal_curation::load_goal_board(memory.ops()).expect("load board (banner path)");
         let board_b =
-            crate::goal_curation::load_goal_board(bridge.ops()).expect("load board (read path)");
+            crate::goal_curation::load_goal_board(memory.ops()).expect("load board (read path)");
         let records = crate::goal_curation::active_goals_as_records(&board_b);
 
         assert_eq!(board_a.active.len(), 4, "banner path should see 4 goals");
@@ -322,14 +323,14 @@ mod tests {
         let state = crate::test_support::HermeticState::new();
         let state_root = state.state_root().to_path_buf();
 
-        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
+        let memory = crate::memory_ipc::launch_writer_client(&state_root).expect("writer memory");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
-            bridge.ops(),
+            memory.ops(),
         )
         .expect("seed empty board");
 
-        let banner_lines = build_greeting_banner(Some(bridge.ops()));
+        let banner_lines = build_greeting_banner(Some(memory.ops()));
         // When zero active goals exist the banner falls through to memory
         // stats, so the "Active goals (N):" line is absent. That is the
         // correct contract — both surfaces report "no goals".
@@ -339,7 +340,7 @@ mod tests {
         );
 
         let board_via_read =
-            crate::goal_curation::load_goal_board(bridge.ops()).expect("read empty board");
+            crate::goal_curation::load_goal_board(memory.ops()).expect("read empty board");
         assert_eq!(
             board_via_read.active.len(),
             0,
@@ -354,14 +355,14 @@ mod tests {
         let state = crate::test_support::HermeticState::new();
         let state_root = state.state_root().to_path_buf();
 
-        let bridge = crate::memory_ipc::launch_writer_client(&state_root).expect("writer bridge");
+        let memory = crate::memory_ipc::launch_writer_client(&state_root).expect("writer memory");
         crate::goal_curation::save_goal_board(
             &crate::goal_curation::GoalBoard::new(),
-            bridge.ops(),
+            memory.ops(),
         )
         .expect("seed empty board");
 
-        let board = crate::goal_curation::load_goal_board(bridge.ops()).expect("load empty board");
+        let board = crate::goal_curation::load_goal_board(memory.ops()).expect("load empty board");
         assert_eq!(board.active.len(), 0, "both paths should see zero goals");
     }
 
@@ -385,7 +386,7 @@ mod tests {
             std::env::set_var("SIMARD_STATE_ROOT", &canonical_path);
         }
 
-        // Both the greeting banner (via meeting_session::launch_real_meeting_bridge)
+        // Both the greeting banner (via meeting_session::launch_real_meeting_client)
         // and goal-curation read (via resolve_goal_curation_read_state_root)
         // must resolve their default state-root to the same path. We assert
         // this by comparing `default_state_root()` against the resolver's

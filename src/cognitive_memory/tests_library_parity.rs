@@ -453,4 +453,270 @@ mod library {
             },
         );
     }
+
+    // ========================================================================
+    // Issue #2798 — creative-idea prospective persistence: engine read-after-write
+    // (Layer A) and engine write-through durability across a non-graceful reopen
+    // (Layer C). Both pass on the pinned engine, proving the always-empty tab is
+    // NOT an engine defect (no `amplihack-memory-lib` change) — it was the
+    // Simard-side state-root resolver divergence (D1). Layer C also refutes the
+    // "prospective writes are buffer-only, lost on SIGKILL" hypothesis, so the
+    // thread adds no per-batch checkpoint. A RED here means engine durability
+    // regressed and the fix escalates to `amplihack-memory-lib` (G2). Layer B is
+    // in `operator_commands_dashboard::tests_state_root_parity`.
+    // ========================================================================
+
+    use crate::cognitive_memory::creative_idea::{
+        CREATIVE_IDEA_TRIGGER, CreativeIdea, CreativeIdeaStore, IdeaContext,
+        ProspectiveCreativeIdeaStore,
+    };
+
+    /// A minimal provenance context for a synthetic creative idea.
+    fn idea_ctx() -> IdeaContext {
+        IdeaContext {
+            source: "creative-ideas-thread".to_string(),
+            goals_snapshot: vec![],
+            observation_digest: "digest".to_string(),
+            rationale: "recall precision plateaued".to_string(),
+        }
+    }
+
+    /// Count creative-idea rows (filtered by the retrieval sentinel) visible to
+    /// a store view over `mem`.
+    fn creative_idea_count(mem: &dyn CognitiveMemoryOps) -> usize {
+        ProspectiveCreativeIdeaStore::new(mem)
+            .list(u32::MAX)
+            .expect("list creative ideas")
+            .len()
+    }
+
+    /// **Layer A — engine read-after-write (G2 boundary).** A creative idea
+    /// persisted through `ProspectiveCreativeIdeaStore::store` (which calls the
+    /// engine's `store_prospective` under the `CREATIVE_IDEA_TRIGGER` sentinel)
+    /// must be immediately observable both on the same handle AND through a
+    /// *separate* on-disk view opened on the same `state_root` — the engine does
+    /// not hide its own un-checkpointed prospective writes from a fresh reader.
+    /// GREEN here means the engine is fine, so the empty-tab bug is a Simard-side
+    /// seam bug, not an `amplihack-memory-lib` defect.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn creative_idea_read_after_write_visible_to_separate_view() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        // Writer handle (the daemon's live writer, in spirit).
+        let writer = LibraryCognitiveMemory::open(&root).expect("open writer");
+        let store = ProspectiveCreativeIdeaStore::new(&writer);
+        let mut idea = CreativeIdea::new("improve recall ranking", idea_ctx(), 1);
+        idea.node_id = store.store(&idea).expect("store creative idea");
+        assert!(!idea.node_id.is_empty(), "store must return a node id");
+
+        // Same-handle read-after-write.
+        assert_eq!(
+            creative_idea_count(&writer),
+            1,
+            "the writer handle must see its own freshly-persisted creative idea"
+        );
+
+        // A SEPARATE on-disk view (the dashboard reader, in spirit) opened while
+        // the writer is still alive must also observe the idea — the engine
+        // serves un-checkpointed prospective writes to a fresh reader, so a
+        // divergent view on the SAME path is never the source of the empty tab.
+        let reader = LibraryCognitiveMemory::open(&root).expect("open separate reader view");
+        assert_eq!(
+            creative_idea_count(&reader),
+            1,
+            "a separate on-disk view on the same state_root must observe the \
+             persisted creative idea (engine read-after-write holds — G2 boundary)"
+        );
+        let raw = reader
+            .list_all_prospective(u32::MAX)
+            .expect("list_all_prospective");
+        assert!(
+            raw.iter()
+                .any(|n| n.trigger_condition == CREATIVE_IDEA_TRIGGER),
+            "the persisted row must carry the CREATIVE_IDEA_TRIGGER retrieval sentinel"
+        );
+    }
+
+    /// **Layer C — engine write-through durability across a non-graceful
+    /// restart (#2798).** Persist a creative idea, then simulate a non-graceful
+    /// exit: `std::mem::forget` the handle so its `Drop` (an implicit graceful
+    /// checkpoint) never fires, clear the tier-2 store cache, and cold-reopen from
+    /// disk. The idea must still be listable with no explicit `checkpoint()`,
+    /// because the engine's WAL is write-through and replayed on open. The
+    /// `forget` is what makes this a real `SIGKILL` simulation rather than a false
+    /// GREEN off a graceful-drop checkpoint. A RED here means engine WAL
+    /// write-through regressed — an `amplihack-memory-lib` fix (G2), not a
+    /// Simard-side checkpoint.
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn creative_idea_survives_nongraceful_restart_without_checkpoint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        {
+            let writer = LibraryCognitiveMemory::open(&root).expect("open writer");
+            let store = ProspectiveCreativeIdeaStore::new(&writer);
+            let idea = CreativeIdea::new("auto-delete stale worktrees", idea_ctx(), 7);
+            store.store(&idea).expect("store creative idea");
+
+            // Simulate a SIGKILL: skip the graceful Drop (and its checkpoint)
+            // entirely. NO explicit checkpoint — durability must come from the
+            // engine's write-through WAL alone.
+            std::mem::forget(writer);
+        }
+
+        // Force a genuine cold reopen from disk (no shared cached handle).
+        crate::memory_ipc::clear_tier2_store_cache();
+        let _ = crate::memory_ipc::reap_stale_open_lock(&root);
+
+        let reopened = LibraryCognitiveMemory::open(&root).expect("cold reopen after restart");
+        assert_eq!(
+            creative_idea_count(&reopened),
+            1,
+            "a persisted creative idea must survive a non-graceful daemon restart \
+             via the engine's write-through WAL with no explicit checkpoint \
+             (persist -> SIGKILL -> reopen -> list is non-empty)"
+        );
+    }
+}
+
+/// Regression: a transient cross-process lock conflict must never be
+/// mis-classified (by the library) as catalog corruption and wipe cognitive
+/// memory. Simard serializes opens at the [`LibraryCognitiveMemory::open`] seam
+/// (`cognitive_memory::open_guard`), so a store that another live process holds
+/// open makes a second opener **fail loud** instead of proceeding into lbug's
+/// lock-conflict-as-corruption rebuild. The winner's records always survive.
+///
+/// The "other process" is simulated with a raw exclusive `flock` on the sidecar
+/// open-lock file: `flock` treats independent open-file-descriptions as
+/// distinct even within one PID, so this reproduces cross-process contention
+/// deterministically in a single test process.
+#[cfg(all(test, unix))]
+mod lock_contention_no_wipe {
+    use crate::cognitive_memory::{CognitiveMemoryOps, LibraryCognitiveMemory};
+    use std::os::unix::io::AsRawFd;
+    use std::path::{Path, PathBuf};
+
+    const BUDGET_ENV: &str = "SIMARD_COGNITIVE_OPEN_LOCK_TIMEOUT_MS";
+
+    fn sidecar_lock_path(root: &Path) -> PathBuf {
+        let base = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        base.join(crate::cognitive_memory::open_guard::OPEN_LOCK_FILE)
+    }
+
+    /// A raw exclusive `flock` standing in for another live process's open.
+    struct ForeignHolder {
+        _file: std::fs::File,
+    }
+
+    impl ForeignHolder {
+        fn hold(lock_path: &Path) -> Self {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .read(true)
+                .open(lock_path)
+                .expect("open sidecar lock file");
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(ret, 0, "foreign holder must acquire the sidecar flock");
+            Self { _file: file }
+        }
+    }
+
+    impl Drop for ForeignHolder {
+        fn drop(&mut self) {
+            unsafe {
+                libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+
+    fn count_quarantines(root: &Path) -> usize {
+        std::fs::read_dir(root)
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .contains("cognitive.corrupt-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    #[serial_test::serial(cognitive_memory)]
+    fn concurrent_open_of_same_path_never_wipes_records() {
+        // Keep the fail-loud path fast and deterministic.
+        // SAFETY: single-threaded test body, and the `cognitive_memory` serial
+        // gate prevents any concurrent cognitive-store open from observing this.
+        unsafe { std::env::set_var(BUDGET_ENV, "300") };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+
+        // 1. Winner writes a durable fact, then releases the store (drop ->
+        //    lbug checkpoint + PID-lock release, and our open-guard release).
+        {
+            let winner = LibraryCognitiveMemory::open(&root).expect("open winner store");
+            let id = winner
+                .store_fact("durable", "must survive contention", 0.95, &[], "test")
+                .expect("store durable fact");
+            assert!(!id.is_empty(), "store_fact must return an id");
+        }
+
+        // Sanity: the fact is on disk before we introduce contention.
+        {
+            let check = LibraryCognitiveMemory::open(&root).expect("reopen for baseline");
+            let hits = check.search_facts("durable", 10, 0.0).expect("search");
+            assert_eq!(hits.len(), 1, "baseline: the fact must be persisted");
+        }
+
+        // 2. Simulate another live process holding the store open.
+        let holder = ForeignHolder::hold(&sidecar_lock_path(&root));
+
+        // 3. A second open MUST fail loud — never quarantine + rebuild empty.
+        let contended = LibraryCognitiveMemory::open(&root);
+        let contended_err = contended
+            .err()
+            .expect("a contended open must fail loud, not silently rebuild an empty store");
+        match contended_err {
+            crate::error::SimardError::PersistentStoreIo { action, reason, .. } => {
+                assert_eq!(action, "acquire_open_lock");
+                assert!(
+                    reason.contains("held open by another process"),
+                    "error must explain the contention, got: {reason}"
+                );
+            }
+            other => panic!("expected a PersistentStoreIo fail-loud, got {other:?}"),
+        }
+
+        // 4. No destructive quarantine artifact was produced.
+        assert_eq!(
+            count_quarantines(&root),
+            0,
+            "a contended open must NOT quarantine the DB (no cognitive.corrupt-* rebuild)"
+        );
+
+        // 5. Release the foreign holder; the store reopens and the record still
+        //    exists — it was never wiped.
+        drop(holder);
+        // SAFETY: see the set_var note above.
+        unsafe { std::env::remove_var(BUDGET_ENV) };
+
+        let survivor = LibraryCognitiveMemory::open(&root).expect("reopen after contention clears");
+        let hits = survivor
+            .search_facts("durable", 10, 0.0)
+            .expect("search after contention");
+        assert_eq!(
+            hits.len(),
+            1,
+            "the winner's record must survive the contention (never wiped)"
+        );
+        assert_eq!(hits[0].content, "must survive contention");
+    }
 }

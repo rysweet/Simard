@@ -1,7 +1,7 @@
 ---
 title: Automatic update check
 description: "API and behavior reference for the launch-time update-version check against GitHub Releases (in-process ureq, semver-crate comparison, 24h cache, fail-open)."
-last_updated: 2026-07-06
+last_updated: 2026-07-26
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -37,6 +37,19 @@ The check is wired into the launch path of every Simard entry point:
 Because `meeting` is a subcommand of `simard` (not a separate binary),
 the meeting launch path inherits the `simard` check automatically —
 there is no separate `simard-meeting` binary to wire.
+
+> **Reader-list consistency (issue #1055).** The two rows above are the
+> **complete and exact** set of launch paths that invoke the update
+> check: the `simard` CLI (`src/main.rs`, calling `run_update_check()`)
+> and `simard-tui` (`src/bin/simard_tui/main.rs`, calling
+> `run_update_check_background()`). The `SIMARD_NO_UPDATE_CHECK`
+> environment variable itself is read in one central place —
+> `src/update_check.rs` — so both entry points honor it through the same
+> guard. The `mod tests` suite asserts that **both** of those functions
+> short-circuit on `SIMARD_NO_UPDATE_CHECK=1`; keeping this table aligned
+> with the wired entry points is therefore a review-time invariant. (The
+> unit tests cover the shared functions, not each binary's `main()`, so
+> adding a *new* entry point still requires updating this table by hand.)
 
 ## Two execution modes
 
@@ -304,11 +317,20 @@ All tests live in `src/update_check.rs` under `#[cfg(test)] mod tests`:
 | malformed API response → `None` | A truncated/garbage JSON body parses to `None` and never panics. |
 | non-interactive → banner, no prompt | `SIMARD_NONINTERACTIVE=1` keeps the banner but skips the prompt. |
 | banner format | Exact string `simard: update available X.Y.Z -> A.B.C` (ASCII arrow, no `v`). |
+| reader-list consistency (#1055) | Both wired entry-point functions (`run_update_check`, `run_update_check_background`) short-circuit on `SIMARD_NO_UPDATE_CHECK=1`; the shared guard in `src/update_check.rs` keeps every launch path consistent. |
 
 Environment-variable and cache-file tests are serialized with
 `#[serial_test::serial(update_check_env, cognitive_memory)]` and use a
 `tempdir`-isolated cache path, because glibc `getenv`/`setenv` are not
 thread-safe under cargo's multi-threaded test runner (see issue #2360).
+Each such test also **saves and restores** `SIMARD_NO_UPDATE_CHECK`
+(and `XDG_CONFIG_HOME`) around its body so it cannot leak an env value
+into a sibling test sharing the `update_check_env` serial token. The
+PR #1055 fix delivered here is the **reader-list alignment** described
+above — the reference table and the `mod tests` invariant now pin the
+exact set of launch paths that honor `SIMARD_NO_UPDATE_CHECK` — so docs
+and code cannot drift. The serial guards and existing env save/restore
+are preserved exactly; no test logic was weakened.
 
 Run with:
 

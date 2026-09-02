@@ -17,8 +17,10 @@ doc_type: reference
 related:
   - ../design/overseer.md
   - ./overseer-activity-feed.md
+  - ./overseer-self-observation-stability.md
   - ../howto/configure-overseer-memory-recall.md
   - ../howto/watch-overseer-activity.md
+  - ../howto/diagnose-recurring-cognitive-memory-signature.md
   - ../memory.md
   - ./status-snapshot-api.md
   - ./stewardship-api.md

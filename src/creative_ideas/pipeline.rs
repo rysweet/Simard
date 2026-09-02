@@ -16,6 +16,7 @@
 
 use std::path::Path;
 
+use crate::cognitive_memory::CognitiveMemoryOps;
 use crate::cognitive_memory::creative_idea::{
     CreativeIdea, CreativeIdeaStore, IdeaStatus, ProspectiveCreativeIdeaStore,
 };
@@ -30,7 +31,7 @@ use crate::creative_ideas::routing::{
 };
 use crate::creative_ideas::synthesis::DefaultSynthesizer;
 use crate::error::SimardResult;
-use crate::goals::{CognitiveMemoryGoalStore, GoalStore};
+use crate::goals::{GoalStore, InProcessGoalStore};
 
 /// Env var overriding the `owner/name` repo slug the routing seam targets.
 pub const REPO_ENV: &str = "SIMARD_REPO";
@@ -75,8 +76,16 @@ pub trait IdeaPipeline: Send {
 /// Opens the production goal store for a given state root. A seam so tests can
 /// inject an in-memory store without touching disk.
 pub trait GoalStoreFactory: Send {
-    /// Open a goal store rooted at `state_root`.
-    fn open(&self, state_root: &Path) -> SimardResult<Box<dyn GoalStore>>;
+    /// Open a goal store, reusing the caller's live in-process cognitive-memory
+    /// handle (`memory` — e.g. the daemon's `ctx.memory` `Arc`) so a routed goal
+    /// lands in the SAME store the daemon serves `goal list` from, visible by
+    /// construction (bug #2896). `state_root` is retained for factories that key
+    /// on it; the production factory reuses `memory` directly.
+    fn open<'a>(
+        &self,
+        memory: &'a dyn CognitiveMemoryOps,
+        state_root: &Path,
+    ) -> SimardResult<Box<dyn GoalStore + 'a>>;
 }
 
 /// Production factory: the cognitive-memory-backed goal store (the same store
@@ -85,10 +94,16 @@ pub trait GoalStoreFactory: Send {
 pub struct CognitiveMemoryGoalStoreFactory;
 
 impl GoalStoreFactory for CognitiveMemoryGoalStoreFactory {
-    fn open(&self, state_root: &Path) -> SimardResult<Box<dyn GoalStore>> {
-        Ok(Box::new(CognitiveMemoryGoalStore::new(
-            state_root.to_path_buf(),
-        )?))
+    fn open<'a>(
+        &self,
+        memory: &'a dyn CognitiveMemoryOps,
+        _state_root: &Path,
+    ) -> SimardResult<Box<dyn GoalStore + 'a>> {
+        // Reuse the daemon's live handle rather than re-deriving one from
+        // `state_root`, so the write is visible on the daemon's own store by
+        // construction — no tier-0 `state_root` mismatch, no divergent tier-2
+        // fallthrough (bug #2896).
+        Ok(Box::new(InProcessGoalStore::new(memory)?))
     }
 }
 
@@ -153,7 +168,7 @@ impl IdeaPipeline for AgenticIdeaPipeline {
         // 3. Route per the synthesized status.
         let outcome = match idea.status {
             IdeaStatus::AcceptedForImplementation => {
-                let goals = self.goals.open(ctx.state_root)?;
+                let goals = self.goals.open(ctx.memory, ctx.state_root)?;
                 route_idea_to_goal(idea, goals.as_ref(), ctx.now_epoch)?;
                 // The idea moves into flight once the goal exists.
                 idea.try_transition(IdeaStatus::ImplementationStarted)?;

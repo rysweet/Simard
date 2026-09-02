@@ -1,4 +1,48 @@
 pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals');
+        // Issue #2743: label (tag) chips + a client-side tag filter for the
+        // Goals tab. Filtering is purely client-side over the already-fetched
+        // live goal data — no new route, no new auth surface.
+        window.goalsTagFilter = window.goalsTagFilter || '';
+        window.setGoalTagFilter = function(tag){ window.goalsTagFilter = tag||''; fetchGoals(); };
+        function goalLabelChips(labels){
+          if(!Array.isArray(labels)||!labels.length) return '';
+          return '<div class="goal-labels" style="margin-top:3px;display:flex;flex-wrap:wrap;gap:3px">'+
+            labels.map(function(l){
+              const isSrc=String(l).indexOf('source:')===0;
+              const bg=isSrc?'#1f6feb':'#30363d';
+              return '<span class="goal-label-chip" style="display:inline-block;padding:0 6px;border-radius:8px;background:'+bg+';color:#fff;font-size:.68rem;white-space:nowrap">'+esc(l)+'</span>';
+            }).join('')+'</div>';
+        }
+        function goalMatchesTagFilter(g){
+          if(!window.goalsTagFilter) return true;
+          return Array.isArray(g.labels)&&g.labels.indexOf(window.goalsTagFilter)>=0;
+        }
+        function renderGoalTagFilter(active){
+          const el=document.getElementById('goals-tag-filter');
+          if(!el) return;
+          const set={};
+          (active||[]).forEach(function(g){ (g.labels||[]).forEach(function(l){ set[l]=1; }); });
+          const tags=Object.keys(set).sort();
+          if(!tags.length){ el.innerHTML=''; return; }
+          const cur=window.goalsTagFilter;
+          const opts='<option value="">All tags ('+tags.length+')</option>'+
+            tags.map(function(t){ return '<option value="'+escAttr(t)+'"'+(t===cur?' selected':'')+'>'+esc(t)+'</option>'; }).join('');
+          el.innerHTML='<label style="margin-right:6px">Filter by tag:</label>'+
+            '<select id="goals-tag-select" onchange="setGoalTagFilter(this.value)" style="padding:.25rem;background:var(--card);color:var(--fg);border:1px solid var(--border);border-radius:4px">'+opts+'</select>'+
+            (cur?' <button class="btn" style="font-size:.7rem;padding:2px 6px;margin-left:6px" onclick="setGoalTagFilter(\'\')">Clear</button>':'');
+        }
+        renderGoalTagFilter(d.active||[]);
+        // Human-readable breakdown of the active board by lifecycle state, so
+        // the count line distinguishes goals actually in progress from ones
+        // that are blocked / paused / not-yet-archived Completed. Only nonzero
+        // buckets are shown, in a fixed, meaningful order.
+        function goalBreakdownText(bd){
+          if(!bd||typeof bd!=='object') return '';
+          const order=[['in_progress','in progress'],['blocked','blocked'],['paused','paused'],['not_started','not started'],['proposed','proposed'],['completed','completed']];
+          const parts=order.filter(function(p){ return (bd[p[0]]||0)>0; }).map(function(p){ return bd[p[0]]+' '+p[1]; });
+          return parts.length?(' \u2014 '+parts.join(' \u00b7 ')):'';
+        }
+        const activeFiltered=(d.active||[]).filter(goalMatchesTagFilter);
         if(d.active?.length){
           // Issue #2695 follow-up: render the active goals as a priority-ordered
           // TREE — decomposed sub-goals nested under their parent (an active
@@ -54,7 +98,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               return `<tr>
               <td style="text-align:center">${prioPill}</td>
               <td style="${indent}">${nestMark}<code>${esc(g.id)}</code></td>
-              <td>${esc(g.description)}</td>
+              <td>${esc(g.description)}${goalLabelChips(g.labels)}</td>
               <td>${statusBadge}</td>
               <td>${wipHtml}</td>
               <td>
@@ -79,21 +123,35 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
               <td><span style="color:#8b949e;font-size:.75rem">tracking node</span></td>
             </tr>`;
           }
-          const rowsHtml=groupGoalsByParent(d.active,d.backlog).map(entry=>{
+          // Issue #2743 review follow-up (Finding #2): group the FULL active
+          // list first, THEN filter at the group level. Grouping the already
+          // goal-filtered list would drop a parent whose only match is a
+          // child-only tag (e.g. source:decomposition), orphaning its children
+          // at depth 0. Here an entry survives when its root OR any child
+          // matches, and within a surviving entry only matching children are
+          // rendered — so children always appear under their real umbrella /
+          // parent header instead of floating to the top level.
+          function entryMatchesTagFilter(entry){
+            if(!window.goalsTagFilter) return true;
+            const rootMatch=entry.kind==='goal'&&goalMatchesTagFilter(entry.goal);
+            return rootMatch||(entry.children||[]).some(goalMatchesTagFilter);
+          }
+          const rowsHtml=groupGoalsByParent(d.active||[],d.backlog).filter(entryMatchesTagFilter).map(entry=>{
+            const kids=window.goalsTagFilter?(entry.children||[]).filter(goalMatchesTagFilter):(entry.children||[]);
             let html;
             if(entry.kind==='umbrella'){
-              html=renderUmbrellaHeader(entry.header,entry.children.length,entry.rep);
+              html=renderUmbrellaHeader(entry.header,kids.length,entry.rep);
             }else{
               html=renderGoalRow(entry.goal,0);
             }
-            for(const child of entry.children){ html+=renderGoalRow(child,1); }
+            for(const child of kids){ html+=renderGoalRow(child,1); }
             return html;
           }).join('');
           document.getElementById('goals-active').innerHTML=`<table class="proc-table">
             <tr><th>Priority</th><th>ID</th><th>Description</th><th>Status</th><th>Current Activity</th><th>Actions</th></tr>
             ${rowsHtml}
           </table>
-          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${d.active_count} active goal(s)</div>`;
+          <div style="margin-top:.5rem;color:#8b949e;font-size:.8rem">${window.goalsTagFilter?(activeFiltered.length+' / '+d.active_count+' active goal(s) (filtered by tag)'):(d.active_count+' active goal(s)'+goalBreakdownText(d.active_status_breakdown))}</div>`;
         }else{document.getElementById('goals-active').innerHTML='<span style="color:#8b949e">No active goals. Use "Seed Default Goals" or run the agent daemon to generate goals from meetings.</span>';}
         if(d.backlog?.length){
           document.getElementById('goals-backlog').innerHTML=`<table class="proc-table">
@@ -310,7 +368,7 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
         if(d.rate_per_hour){
           const r=d.rate_per_hour.long_term_total||0;
           const rDisp=Math.abs(r)<0.1?'0':r.toFixed(1);
-          rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr</div>';
+          rateEl.innerHTML='<div style="font-size:1.5rem;font-weight:700;color:#58a6ff;line-height:1">'+rDisp+'</div><div style="font-size:.75rem;color:#8b949e;margin-top:.15rem">long-term mem/hr (24 h)</div>';
         }
 
         // SVG sparkline from snapshots
@@ -341,21 +399,49 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     }
 
     /* --- Recent Memories (plain-English view, #1997) --- */
+    // Honest caption for the #mem-recent-count headline (#4318). The count is
+    // net long-term growth since the baseline snapshot; that window is ~1h in
+    // steady state but can be arbitrarily LONGER when memory-history snapshots
+    // are sparse (a gap wider than an hour straddling the 1h mark). Label the
+    // TRUE window so the dashboard never claims "in the last hour" for a 2.6h
+    // delta. `null`/near-1h ⇒ keep the plain "in the last hour" copy.
+    function formatWindowCaption(windowSecs){
+      if(windowSecs==null||!isFinite(windowSecs)) return 'in the last hour';
+      // ±15 min tolerance around one hour reads as "the last hour".
+      if(Math.abs(windowSecs-3600)<=900) return 'in the last hour';
+      if(windowSecs<3600){
+        const m=Math.round(windowSecs/60);
+        return m<=1?'in the last minute':('in the last '+m+' min');
+      }
+      return 'in the last '+(windowSecs/3600).toFixed(1)+'h';
+    }
     async function fetchRecentMemories(){
       const countEl=document.getElementById('mem-recent-count');
       const totalEl=document.getElementById('mem-recent-total');
       const listEl=document.getElementById('mem-recent-list');
+      const winEl=document.getElementById('mem-recent-window');
       listEl.innerHTML='<span class="loading">Loading recent memories…</span>';
       try{
         const d=await apiFetch('/api/memory/recent');
         if(d.error){listEl.innerHTML='<span class="err">'+esc(d.error)+'</span>';countEl.textContent='—';return;}
         countEl.textContent=d.last_hour_count;
+        if(winEl) winEl.textContent=formatWindowCaption(d.last_hour_window_secs);
         totalEl.textContent=(d.total||0).toLocaleString()+' total';
         if(!d.items||d.items.length===0){
           const total=d.total||0;
-          listEl.innerHTML=total>0
-            ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
-            :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          const lastHour=d.last_hour_count||0;
+          if(lastHour>0){
+            // Per-item detail is unavailable on the library backend, but memories
+            // WERE recorded this hour — never contradict the big last-hour count
+            // with "no new memories" (that misreports live memory health). Surface
+            // an honest, consistent summary that agrees with the headline number.
+            const noun=lastHour===1?'memory':'memories';
+            listEl.innerHTML='<span style="color:#8b949e">'+lastHour.toLocaleString()+' '+noun+' recorded in the last hour. Per-item detail isn\u2019t available on this backend yet — see the memory graph for the per-type breakdown. '+total.toLocaleString()+' total stored.</span>';
+          }else{
+            listEl.innerHTML=total>0
+              ?'<span style="color:#8b949e">No new memories in the last hour — '+total.toLocaleString()+' total stored.</span>'
+              :'<span style="color:#8b949e">No memories stored yet. Simard will remember things as it works.</span>';
+          }
           return;
         }
         const catColors={'Learned fact':'#58a6ff','Past event':'#3fb950','Current task context':'#f0883e','How-to knowledge':'#a371f7','Planned reminder':'#d29922','Recent observation':'#8b949e'};
@@ -400,6 +486,10 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     let mgNodes=[],mgEdges=[],mgFiltered=[],mgFilteredEdges=[];
     let mgDrag=null,mgPinned=null;
     let mgOffX=0,mgOffY=0,mgScale=1,mgPanX=0,mgPanY=0;
+    // Fail-LOUD state (issue #2627): non-empty => a data-load failure the single
+    // paint path (mgRender) must surface on the #mem-graph-error overlay, never a
+    // silent blank canvas. Empty string => no error.
+    let mgError='';
     const mgColors={WorkingMemory:'#f0883e',SemanticFact:'#58a6ff',EpisodicMemory:'#3fb950',ProceduralMemory:'#a371f7',ProspectiveMemory:'#d29922',SensoryBuffer:'#8b949e'};
 
     function mgApplyFilters(){
@@ -420,13 +510,40 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     async function fetchMemoryGraph(){
       try{
         const d=await apiFetch('/api/memory/graph');
-        if(d.error){document.getElementById('mem-graph-stats').textContent='Error: '+d.error;return;}
         const s=d.stats||{};
-        document.getElementById('mem-graph-stats').textContent=
-          'Thinking:'+(s.working||0)+' Facts:'+(s.semantic||0)+' Events:'+(s.episodic||0)+' Procedures:'+(s.procedural||0)+' Planned:'+(s.prospective||0)+' Observed:'+(s.sensory||0);
+        // Fail-LOUD: a server-side error (reader unreachable, a per-type read
+        // failure, or a stats-vs-nodes discrepancy) is surfaced on the visible
+        // #mem-graph-error overlay via mgError — NOT hidden in the stats line.
         mgNodes=(d.nodes||[]);mgEdges=(d.edges||[]);
+        // Defence in depth: mirror the backend stats-vs-nodes discrepancy guard.
+        // If stats claim an enumerable type holds content but no item node of
+        // that type came back, treat it as a load failure rather than drawing a
+        // misleadingly hub-only graph.
+        const mgEnumTypes={semantic:'SemanticFact',episodic:'EpisodicMemory',procedural:'ProceduralMemory',prospective:'ProspectiveMemory'};
+        let mgDisc='';
+        for(const k in mgEnumTypes){
+          if((s[k]||0)>0 && !mgNodes.some(n=>!n.hub&&n.type===mgEnumTypes[k])){
+            mgDisc='Memory statistics report '+(s[k])+' '+k+' item(s) but none were returned (stats-vs-nodes discrepancy).';
+            break;
+          }
+        }
+        if(d.error||mgDisc){
+          mgError=d.error||mgDisc;
+          document.getElementById('mem-graph-stats').textContent='';
+        }else{
+          mgError='';
+          document.getElementById('mem-graph-stats').textContent=
+            'Thinking:'+(s.working||0)+' Facts:'+(s.semantic||0)+' Events:'+(s.episodic||0)+' Procedures:'+(s.procedural||0)+' Planned:'+(s.prospective||0)+' Observed:'+(s.sensory||0);
+        }
         mgInitLayout();mgApplyFilters();mgSimulate();
-      }catch(e){document.getElementById('mem-graph-stats').textContent='Load failed';}
+      }catch(e){
+        // A fetch throw must also fail loud on the overlay, not vanish into a
+        // blank canvas.
+        mgError='Failed to load memory graph: '+(e&&e.message?e.message:e);
+        mgNodes=[];mgEdges=[];
+        document.getElementById('mem-graph-stats').textContent='';
+        mgApplyFilters();mgRender();
+      }
     }
 
     function mgInitLayout(){
@@ -483,12 +600,32 @@ pub(crate) const PART_03: &str = r#"        const d=await apiFetch('/api/goals')
     function mgRender(){
       const canvas=document.getElementById('mem-graph-canvas');
       if(!canvas)return;
+      // Single paint path owns the fail-loud overlay: show #mem-graph-error
+      // whenever mgError is set (a load failure is NEVER a silent blank), hide
+      // it otherwise.
+      const errEl=document.getElementById('mem-graph-error');
+      if(errEl){
+        if(mgError){
+          errEl.innerHTML='<div style="max-width:520px"><div style="color:#f85149;font-weight:600;margin-bottom:.35rem">Memory graph failed to load</div><div style="color:#c9d1d9;font-size:.85rem;white-space:pre-wrap">'+esc(mgError)+'</div></div>';
+          errEl.style.display='flex';
+        }else{
+          errEl.textContent='';errEl.style.display='none';
+        }
+      }
       canvas.width=canvas.clientWidth*(window.devicePixelRatio||1);
       canvas.height=canvas.clientHeight*(window.devicePixelRatio||1);
       const ctx=canvas.getContext('2d');
       const dpr=window.devicePixelRatio||1;
       ctx.scale(dpr,dpr);
       ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
+      // Neutral empty state (distinct from the error overlay): a genuinely-empty
+      // store renders only the six type hubs and no item nodes — tell the
+      // operator so, rather than presenting an ambiguous near-blank canvas.
+      const hasItems=mgNodes.some(n=>!n.hub);
+      if(!mgError && !hasItems){
+        ctx.fillStyle='#8b949e';ctx.font='14px sans-serif';ctx.textAlign='center';
+        ctx.fillText('Memory graph is empty — nothing remembered yet',canvas.clientWidth/2,24);
+      }
       ctx.save();ctx.translate(mgPanX,mgPanY);ctx.scale(mgScale,mgScale);
       const nodeMap={};mgFiltered.forEach(n=>{nodeMap[n.id]=n;});
       mgFilteredEdges.forEach(e=>{

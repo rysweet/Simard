@@ -4,8 +4,8 @@ description: >
   How to read, act on, and tune the Overseer's recurring "what workstreams are we
   missing?" gap-scan — the backlog-coverage gaps it flags each tick (uncovered
   high-priority goals, high-signal issues, and unaddressed anomalies), where the
-  deduped operator notification and filed issue show up, and how to turn the scan
-  up, down, or off with SIMARD_OVERSEER_GAP_SCAN.
+  deduped operator notification shows up, and how to turn the scan up, down, or
+  off with SIMARD_OVERSEER_GAP_SCAN.
 last_updated: 2026-07-06
 review_schedule: as-needed
 owner: simard
@@ -28,9 +28,9 @@ standup:
 
 It surveys the whole picture — the goal board, open GitHub issues, and live
 telemetry — and flags **backlog-coverage gaps**: important work that *should*
-have an active workstream but does not. Then it tells you (email + Signal) and
-files a deduped issue, **once** per gap. This guide shows how to see those gaps,
-act on them, and dial the scan in.
+have an active workstream but does not. Then it tells you (email + Signal),
+**once** per gap. It does not create tracking issues from routine observations.
+This guide shows how to see those gaps, act on them, and dial the scan in.
 
 For the full data model, config semantics, and guarantees, see the
 [workstream gap-scan reference](../reference/overseer-workstream-gap-scan.md).
@@ -73,22 +73,7 @@ It is **deduped**: the same gap is not re-sent on the next tick. You will only
 hear about it again if it is still uncovered after the dedup window, or if it
 recurs after being resolved.
 
-### 2. The filed issue (durable)
-
-For each gap the Overseer also files (or updates) a **deduped** stewardship issue
-in `rysweet/Simard`, authored by its own identity. Find them with:
-
-```bash
-gh issue list --repo rysweet/Simard \
-  --author 'simard-overseer[bot]' \
-  --search 'workstream-gap in:body' \
-  --state open
-```
-
-Because filing goes through the same dedup path as every other Overseer issue, a
-recurring gap maps to **one** issue that gets updated — not a new issue each tick.
-
-### 3. The Overseer activity surfaces (pull)
+### 2. The Overseer activity surfaces (pull)
 
 Each tick's gap count shows up wherever you already watch the Overseer (see
 [watch what the Overseer is doing](./watch-overseer-activity.md)):
@@ -101,13 +86,13 @@ A tick that found gaps reads in plain language, for example:
 
 > saw 3 problems, flagged 2 workstream gaps
 
-(The gap count is its **own** clause — filing/notifying a gap does not add to the
+(The gap count is its **own** clause — notifying about a gap does not add to the
 generic "filed N issues" or "escalated N to the operator" clauses.)
 
 A clean board adds **no** line — "observing, 0 interventions" is the honest,
 correct state.
 
-### 4. As JSON (scripting)
+### 3. As JSON (scripting)
 
 The gap counter rides the existing auth-gated endpoint — no new route:
 

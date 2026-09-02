@@ -1,50 +1,68 @@
-//! Failing TDD acceptance test (issue #2636, Step 7).
+//! Executable acceptance guard for the operator's absolute rule (issue #2951):
+//! *nothing may be named "bridge"*. "Bridge" conveys no meaning; every use must
+//! be renamed to an intent-revealing term from the RPC / client / reader /
+//! source / transport / handoff vocabulary.
 //!
-//! Encodes the operator's absolute rule — *nothing may be named `Bridge`* — as
-//! an executable, shell-grep-shaped acceptance check that mirrors the STEP 0
-//! authoritative inventory:
+//! The guard enforces the rule at TWO levels, both shaped like the operator's
+//! own `git grep` so a human running the same command gets the same answer:
 //!
-//! > `git grep -E 'Bridge' -- 'src/**/*.rs'` (case-sensitive, CamelCase)
-//! > returns matches ONLY in the two Overseer files that *are* the no-`Bridge`
-//! > linter and its fixtures (`pr_verify.rs`, `merge_ops.rs`). Zero matches
-//! > elsewhere — including doc comments and tracing strings.
+//!  1. `no_camelcase_bridge_naming_in_src` — case-sensitive CamelCase `Bridge`
+//!     substring: every type / trait / variant identifier (`BridgeRequest`,
+//!     `CognitiveMemoryBridge`, `OodaBridges`, ...).
 //!
-//! Plus the structural criterion: every misnamed module named in the rename
-//! map no longer exists on disk, and its accurate RPC / client / handoff
-//! replacement does.
+//!  2. `no_lowercase_bridge_word_in_src` — the *strengthened* check this issue
+//!     adds: the lowercase stem `bridge` as a standalone COMPONENT — in string
+//!     literals (operator log lines, telemetry identities), comments/docs,
+//!     snake_case identifiers (`launch_enrichment_bridges`, a local `bridge`
+//!     binding) and module-internal names. This is what makes an operator log
+//!     line like `bridge 'memory-ipc' transport error: ...` impossible to
+//!     reintroduce.
 //!
-//! ## Why case-sensitive `Bridge` (not the task's `-i` grep)?
+//!  3. `misnamed_bridge_modules_are_renamed_on_disk` — structural: every
+//!     misnamed module is gone and its accurate replacement exists.
 //!
-//! A case-INSENSITIVE `\w*bridge\w*` can never reach zero without breaking the
-//! frozen wire contract and on-disk formats: it matches the JSON-RPC method
-//! name `"bridge.health"`, the ~100 preserved on-disk / telemetry / log string
-//! literals (`"cognitive-bridge"`, `"bridge_timeout"`, `"bridge::native::{}"`),
-//! and even the English word `abridged`. The operator rule targets *names*
-//! (Rust identifiers), and every `Bridge`-derived identifier is either
-//! CamelCase (types — the authoritative 34-identifier / 104-file STEP 0 set,
-//! exactly what the `pr_verify` scanner keys on via `content.contains("Bridge")`)
-//! or lowercase snake_case. The lowercase snake_case identifier renames (e.g.
-//! `launch_writer_bridge` -> `launch_writer_client`) are enforced by the
-//! compiler and the existing test suite — the crate will not build with
-//! inconsistent identifiers — rather than by this grep, because a lowercase
-//! `bridge` substring is indistinguishable from the preserved wire / on-disk /
-//! log string literals.
+//! ## Component-boundary matching (why not a naive `-i` substring)
 //!
-//! ## The allowlisted files
+//! A match is the case-insensitive stem `bridge` whose immediately-preceding
+//! character is NOT an ASCII letter. This flags real components — `bridge`,
+//! `bridges`, `_bridge`, `bridge_name`, `"bridge '{}'..."` — while never
+//! flagging the stem when it is buried inside an unrelated English / proper
+//! word: `abridged`, `Cambridge`, `Bainbridge` (a real citation in
+//! `src/overseer/deploy.rs`). The right side is unrestricted, so plurals and
+//! suffixes still match. The classifier is a pure function so its boundary
+//! logic is unit-tested (`guard_classifier_*`) independent of the tree.
 //!
-//! `src/overseer/pr_verify.rs` and `src/overseer/merge_ops.rs` *are* the
-//! no-`Bridge` linter and its unit tests. They must keep the literal `"Bridge"`
-//! (the detection substring and CamelCase fixtures like `PaymentBridge`,
-//! `HttpBridge`) or the linter that enforces this very rule would no longer
-//! detect anything. They are Overseer-internal (invoked from the merge flow and
-//! exercised under `cargo test`), NOT part of GitHub Actions CI.
+//! ## The allowlist is minimal and fully documented (by design)
 //!
-//! `src/operator_commands_dashboard/index_html/tests_tab_meta.rs` is the same
-//! category: a guard test that asserts no consolidated dashboard tab is named
-//! `"Bridge"`. It must retain the literal `"Bridge"` as its detection substring
-//! for the same reason.
+//! Exactly three frozen runtime survivors, each a value some system OUTSIDE
+//! this repo depends on (renaming would break an external contract, not one of
+//! our own names):
 //!
-//! These tests fail until the mechanical rename is complete. They are
+//!  1. `bridge.health` — the JSON-RPC method NAME the EXTERNAL memory / knowledge
+//!     server (`amplihack-memory-lib`'s `simard_memory_bridge.py`) answers to.
+//!  2. `bridge_timeout` — the stable, machine-parseable wire value emitted to
+//!     operator logs / scrapers by `PartialReason::as_wire_str()`.
+//!  3. `--terminal-bridge-json` — the published CLI flag other tooling invokes
+//!     (`src/bin/simard_engineer_step.rs`).
+//!
+//! Each is exempted per-occurrence (not per-line) and only as the exact frozen
+//! token — so a local variable named `bridge` that merely calls `.health()`, and
+//! a renameable "a bridge server" comment sharing a line with `bridge.health`,
+//! are BOTH still flagged. Everything else — log strings, telemetry / descriptor
+//! identities, config keys, comments, identifiers, module-internal names — is
+//! in-repo and renameable, so the guard flags it until the mechanical rename
+//! lands.
+//!
+//! The only excluded files are the no-`Bridge` linter and its own fixtures —
+//! `src/overseer/pr_verify.rs`, `src/overseer/merge_ops.rs`,
+//! `src/operator_commands_dashboard/index_html/tests_tab_meta.rs` — which must
+//! keep the literal `"Bridge"` / `"bridge"` as their detection substrings, plus
+//! this test file itself.
+//!
+//! ## TDD status
+//!
+//! `no_lowercase_bridge_word_in_src` FAILS until the mechanical rename is
+//! complete (RED). The CamelCase and module tests already pass. These tests are
 //! intentionally shell-grep-shaped so operators running the same command get
 //! the same answer.
 
@@ -100,6 +118,68 @@ fn grep_recursive(root: &Path, needle: &str, exclude_basenames: &[&str]) -> Vec<
         }
     }
     matches
+}
+
+/// Byte offsets of every lowercase `bridge`-stem COMPONENT on `line`.
+///
+/// A component is the case-insensitive stem `bridge` whose immediately-preceding
+/// byte is not an ASCII letter, so embedded stems (`abridged`, `Cambridge`,
+/// `Bainbridge`) are ignored while real components (`bridge`, `bridges`,
+/// `_bridge`, `bridge_name`, `"bridge.health"`) are reported. The right side is
+/// unrestricted. Pure function → the boundary logic is unit-testable without the
+/// source tree.
+fn lowercase_bridge_components(line: &str) -> Vec<usize> {
+    const STEM: &[u8] = b"bridge";
+    let raw = line.as_bytes();
+    let lower = line.to_ascii_lowercase();
+    let low = lower.as_bytes();
+    let mut hits = Vec::new();
+    let mut i = 0usize;
+    while i + STEM.len() <= low.len() {
+        if &low[i..i + STEM.len()] == STEM {
+            let prev_is_letter = i > 0 && raw[i - 1].is_ascii_alphabetic();
+            if !prev_is_letter {
+                hits.push(i);
+            }
+            i += STEM.len();
+        } else {
+            i += 1;
+        }
+    }
+    hits
+}
+
+/// The documented, minimal allowlist of frozen external-contract `bridge`
+/// values (issue #2951). A stem occurrence at byte `at` on `lower_line` (the
+/// already-lowercased line) is exempt ONLY when it begins one of these frozen
+/// tokens — every OTHER `bridge` on the same line still flags (per-occurrence,
+/// not per-line). Each entry is a value some system OUTSIDE this repo depends
+/// on, so renaming it would break an external contract, not one of our names:
+///
+///  * `bridge.health` — JSON-RPC method NAME answered by the external
+///    `amplihack-memory-lib` server. Exempt only as the method name; a
+///    `bridge.health()` call on a local variable named `bridge` is NOT the
+///    method name (it is followed by `(`) and still flags.
+///  * `bridge_timeout` — stable wire value emitted to operator logs / scrapers
+///    (`PartialReason::as_wire_str`).
+///  * `--terminal-bridge-json` — published CLI flag other tooling invokes; the
+///    `bridge` component sits inside `terminal-bridge-json`.
+fn is_allowlisted_frozen(lower_line: &str, at: usize) -> bool {
+    let tail = &lower_line[at..];
+    // 1. External JSON-RPC method NAME (not a `.health()` call).
+    const HEALTH: &str = "bridge.health";
+    if tail.starts_with(HEALTH) && !tail[HEALTH.len()..].starts_with('(') {
+        return true;
+    }
+    // 2. Frozen wire value for a meeting-close reason.
+    if tail.starts_with("bridge_timeout") {
+        return true;
+    }
+    // 3. Published CLI flag `--terminal-bridge-json` (stem inside `terminal-bridge-json`).
+    if tail.starts_with("bridge-json") && lower_line[..at].ends_with("terminal-") {
+        return true;
+    }
+    false
 }
 
 #[test]
@@ -172,5 +252,187 @@ fn misnamed_bridge_modules_are_renamed_on_disk() {
         "Rename incomplete: {} module-path issue(s).\n{}",
         problems.len(),
         problems.join("\n")
+    );
+}
+
+#[test]
+fn no_lowercase_bridge_word_in_src() {
+    let src = repo_src_dir();
+    // The no-`Bridge` linter and its own fixtures must retain the detection
+    // substring; this test file necessarily discusses "bridge" throughout.
+    let exclude = [
+        "no_bridge_naming.rs",
+        "pr_verify.rs",
+        "merge_ops.rs",
+        "tests_tab_meta.rs",
+    ];
+
+    let mut files = Vec::new();
+    collect_rs_files(&src, &mut files);
+    files.sort();
+
+    let mut stragglers: Vec<String> = Vec::new();
+    for file in files {
+        let basename = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if exclude.contains(&basename) {
+            continue;
+        }
+        let contents = match fs::read_to_string(&file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for (idx, line) in contents.lines().enumerate() {
+            let low = line.to_ascii_lowercase();
+            let has_straggler = lowercase_bridge_components(line)
+                .into_iter()
+                .any(|at| !is_allowlisted_frozen(&low, at));
+            if has_straggler {
+                stragglers.push(format!("{}:{}:{}", file.display(), idx + 1, line.trim()));
+            }
+        }
+    }
+
+    const SAMPLE: usize = 40;
+    let sample = stragglers
+        .iter()
+        .take(SAMPLE)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        stragglers.is_empty(),
+        "Rename incomplete: {} line(s) in `src/` still contain the meaningless \
+         lowercase `bridge` component.\n\
+         The operator rule is absolute — nothing may be named `bridge`, including \
+         runtime log strings, telemetry identities, comments, snake_case \
+         identifiers and module-internal names. Rename each to an intent-revealing \
+         term (memory-ipc client/transport, memory recall reader/source, \
+         knowledge-pack reader/source, rpc client/transport, engineer handoff, \
+         ...). The only permitted survivors are the three documented frozen \
+         external values: `bridge.health`, `bridge_timeout`, `--terminal-bridge-json`.\n\
+         Showing first {} of {} straggler line(s):\n{}",
+        stragglers.len(),
+        sample.lines().count(),
+        stragglers.len(),
+        sample
+    );
+}
+
+#[test]
+fn guard_classifier_flags_real_components() {
+    // Every shape the strengthened rule must eliminate: log string, snake_case
+    // identifier, comment, on-disk/telemetry identity, module name, quoted word.
+    for line in [
+        "let bridge = connect();",
+        "fn launch_enrichment_bridges() {}",
+        "// Both bridges are optional",
+        "message: format!(\"bridge '{name}' transport error: {reason}\")",
+        "const STORE: &str = \"cognitive-bridge-memory\";",
+        "mod memory_bridge;",
+        "tab.title == \"bridge\"",
+    ] {
+        assert!(
+            !lowercase_bridge_components(line).is_empty(),
+            "classifier failed to flag a real `bridge` component in: {line}"
+        );
+    }
+}
+
+#[test]
+fn guard_classifier_ignores_embedded_stems() {
+    // Stem buried inside an unrelated English / proper word → never flagged.
+    for line in [
+        "the log was abridged for brevity",
+        "shipped from Cambridge, MA",
+        "deploying into an unstable process (Bainbridge's irony)",
+    ] {
+        assert!(
+            lowercase_bridge_components(line).is_empty(),
+            "classifier wrongly flagged an embedded stem in: {line}"
+        );
+    }
+}
+
+#[test]
+fn guard_planted_lowercase_bridge_is_detected() {
+    // A planted straggler of each shape the rename must eliminate — proving the
+    // guard's RED signal fires on lowercase `bridge`, not only CamelCase.
+    let planted = "\
+        eprintln!(\"[simard] bridge 'memory-ipc' transport error\");\n\
+        pub fn launch_enrichment_bridges() {}\n\
+        /// degrade the knowledge bridge to None\n";
+    let flagged = planted
+        .lines()
+        .filter(|l| !lowercase_bridge_components(l).is_empty())
+        .count();
+    assert_eq!(
+        flagged, 3,
+        "guard must flag every planted lowercase straggler"
+    );
+}
+
+#[test]
+fn guard_allowlists_only_documented_frozen_values() {
+    // Each of the three frozen external values is exempt as its exact token.
+    for (literal, why) in [
+        (
+            "method: \"bridge.health\".to_string(),",
+            "the external JSON-RPC method name",
+        ),
+        (
+            "PartialReason::RpcTimeout => \"bridge_timeout\",",
+            "the frozen meeting-close wire value",
+        ),
+        (
+            "let ctx = arg(args, \"--terminal-bridge-json\");",
+            "the published CLI flag",
+        ),
+    ] {
+        let low = literal.to_ascii_lowercase();
+        let hits = lowercase_bridge_components(literal);
+        assert_eq!(hits.len(), 1, "{why}: exactly one bridge component");
+        assert!(
+            hits.iter().all(|&at| is_allowlisted_frozen(&low, at)),
+            "{why} must be allowlisted: {literal}"
+        );
+    }
+
+    // A LOCAL VARIABLE named `bridge` invoking `.health()` is NOT the external
+    // method name — it must still be flagged for rename.
+    let call = "let h = bridge.health().unwrap();";
+    let low_call = call.to_ascii_lowercase();
+    assert!(
+        lowercase_bridge_components(call)
+            .into_iter()
+            .any(|at| !is_allowlisted_frozen(&low_call, at)),
+        "a `bridge`-named variable calling .health() must still be flagged"
+    );
+
+    // A non-frozen `bridge` component is never allowlisted, even when it looks
+    // superficially similar to a frozen token (`bridge_name`, not `bridge_timeout`).
+    let nonfrozen = "let bridge_name = endpoint;";
+    let low_nf = nonfrozen.to_ascii_lowercase();
+    assert!(
+        lowercase_bridge_components(nonfrozen)
+            .into_iter()
+            .any(|at| !is_allowlisted_frozen(&low_nf, at)),
+        "a non-frozen `bridge` component must still be flagged"
+    );
+
+    // A line MIXING the allowlisted method name with a renameable "a bridge
+    // server" comment is still a straggler (per-occurrence, not per-line).
+    let mixed = "/// Health reported by a bridge server via `bridge.health`.";
+    let low_mixed = mixed.to_ascii_lowercase();
+    let non_allowlisted = lowercase_bridge_components(mixed)
+        .into_iter()
+        .filter(|&at| !is_allowlisted_frozen(&low_mixed, at))
+        .count();
+    assert_eq!(
+        non_allowlisted, 1,
+        "the `a bridge server` component on a bridge.health line must still flag"
     );
 }

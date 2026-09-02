@@ -60,6 +60,9 @@ pub(crate) fn take_protective_backup_in(
 
     // 2) Binary backup via the existing safe-update snapshot phase. On failure,
     //    roll back the memory snapshot so a retry starts from a clean slate.
+    //    `take_snapshot_of` degrades to the live running image (`/proc/self/exe`)
+    //    when `install_path` is an unlinked `<path> (deleted)` running image, so
+    //    the mandatory backup no longer deadlocks the deploy (issue #4857 / #4836).
     let snapshot = match take_snapshot_of(
         install_path,
         state_dir,
@@ -166,5 +169,58 @@ mod tests {
         // No binary backup should have been written.
         let entries: Vec<_> = std::fs::read_dir(bin_dir.path()).unwrap().collect();
         assert!(entries.is_empty(), "no binary backup on memory failure");
+    }
+
+    /// TDD (Step 7) — FAILING test pinning the issue #4857 self-deploy-deadlock
+    /// fix at the dual-backup seam.
+    ///
+    /// Reproduces the observed wedge end-to-end: the deploy trigger derives
+    /// `install_path` from `std::env::current_exe()`, which on a still-running
+    /// old image resolves to `<path> (deleted)` after a prior swap unlinked the
+    /// on-disk binary. The binary half of the protective backup then failed with
+    /// `snapshot read on /home/azureuser/.simard/bin/simard (deleted): No such
+    /// file`, aborting every deploy (`56755c8e8454`) and stranding the running
+    /// binary behind merged main (DeployDrift). The dual backup MUST degrade to
+    /// the live running image so merged self-improvements can still ship.
+    ///
+    /// Compiles against the current symbols; fails today because the underlying
+    /// `take_snapshot_of` hard-fails on the missing on-disk path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_install_path_still_yields_a_protective_binary_backup() {
+        let state = tempdir().unwrap();
+        let bin_dir = tempdir().unwrap();
+        // The install path current_exe() hands back post-swap: "(deleted)", gone.
+        let deleted = bin_dir.path().join("simard (deleted)");
+        assert!(
+            !deleted.exists(),
+            "precondition: the on-disk binary is gone"
+        );
+        let mem = LibraryCognitiveMemory::in_memory().expect("in-memory store");
+
+        let backup = take_protective_backup_in(&mem, &deleted, state.path(), bin_dir.path())
+            .expect(
+                "a deleted running-image install path must not deadlock the mandatory \
+                 protective backup — it must snapshot the live running image (issue #4857)",
+            );
+
+        assert!(
+            backup.memory_snapshot.exists(),
+            "the cognitive-memory snapshot must still be written"
+        );
+        assert!(
+            backup.binary_backup.exists(),
+            "a binary backup of the running image must be written"
+        );
+        let bytes = std::fs::read(&backup.binary_backup).unwrap();
+        assert!(
+            !bytes.is_empty(),
+            "the running-image backup must be non-empty"
+        );
+        assert_eq!(
+            bytes,
+            std::fs::read("/proc/self/exe").unwrap(),
+            "the binary backup must capture the LIVE running image so rollback works",
+        );
     }
 }

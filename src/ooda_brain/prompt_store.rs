@@ -71,6 +71,15 @@ const EMBEDDED_GOAL_DECOMPOSITION: &str =
     include_str!("../../prompt_assets/simard/goal_decomposition.md");
 const EMBEDDED_BRAIN_INTROSPECTION: &str =
     include_str!("../../prompt_assets/simard/brain_introspection.md");
+/// Issue #2690: dependency/overlap-aware engineer-admission reasoning prompt.
+const EMBEDDED_ENGINEER_ADMISSION: &str =
+    include_str!("../../prompt_assets/simard/ooda_engineer_admission.md");
+/// Issue #2706: resource-aware engineer-admission reasoning prompt.
+const EMBEDDED_RESOURCE_ADMISSION: &str =
+    include_str!("../../prompt_assets/simard/ooda_resource_admission.md");
+/// Issue #2925: creative-ideas semantic dedup + enhance reasoning prompt.
+const EMBEDDED_CREATIVE_IDEA_DEDUP: &str =
+    include_str!("../../prompt_assets/simard/creative_idea_dedup.md");
 
 /// Look up the embedded fallback for a known prompt name. Returns `None` for
 /// unknown names so callers can surface a configuration error rather than
@@ -85,6 +94,9 @@ pub fn embedded_fallback(name: &str) -> Option<&'static str> {
         "goal_session_objective.md" => Some(EMBEDDED_GOAL_SESSION_OBJECTIVE),
         "goal_decomposition.md" => Some(EMBEDDED_GOAL_DECOMPOSITION),
         "brain_introspection.md" => Some(EMBEDDED_BRAIN_INTROSPECTION),
+        "ooda_engineer_admission.md" => Some(EMBEDDED_ENGINEER_ADMISSION),
+        "ooda_resource_admission.md" => Some(EMBEDDED_RESOURCE_ADMISSION),
+        "creative_idea_dedup.md" => Some(EMBEDDED_CREATIVE_IDEA_DEDUP),
         _ => None,
     }
 }

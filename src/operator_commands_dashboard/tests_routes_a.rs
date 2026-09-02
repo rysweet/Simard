@@ -278,26 +278,30 @@ mod tests {
     // shared formatter.
     // -------------------------------------------------------------------
 
-    /// Every one of the nine consolidated SPA tabs (#2627) must carry a
-    /// non-empty `title="…"` hover-tooltip. Iterates the canonical tab list so
-    /// that adding/removing a tab immediately surfaces a missing tooltip via
-    /// this test rather than a silent UX regression.
+    /// Every one of the eleven consolidated SPA tabs (#2627, incl. the restored
+    /// Memory tab) must carry a non-empty `title="…"` hover-tooltip. Iterates
+    /// the canonical tab list so that adding/removing a tab immediately surfaces
+    /// a missing tooltip via this test rather than a silent UX regression.
     #[test]
     fn index_html_all_eleven_tabs_have_tooltips() {
         // Canonical consolidated SPA tab set (#2627). This list is the
-        // contract — keep in sync if tabs are added or removed.
+        // contract — keep in sync if tabs are added or removed. The `memory`
+        // entry (after Pull Requests) is the #2627 regression fix: its viz was
+        // dropped by the 17->9 consolidation and is restored as a dedicated tab.
         let tabs = [
             "overview",
             "goals",
             "activity",
             "workers",
             "pull-requests",
+            "memory",
             "resources",
             "chat",
             "overseer",
             "journal",
+            "creative-ideas",
         ];
-        assert_eq!(tabs.len(), 9, "expected exactly 9 top-level tabs");
+        assert_eq!(tabs.len(), 11, "expected exactly 11 top-level tabs");
 
         for tab in &tabs {
             let needle = format!(r#"data-tab="{tab}" title=""#);
@@ -720,22 +724,22 @@ mod tests {
         );
     }
 
-    /// Sanity-check on the page-lede count: after the #2627 consolidation
-    /// there must be exactly 9 (one per top-level tab). If a refactor
-    /// accidentally adds a 10th, we want to know immediately so we can decide
-    /// whether the new container is actually a new tab or a misuse of the
-    /// class (an absorbed panel should be an `<h2 class="subsection">`).
+    /// Sanity-check on the page-lede count: after the #2627 consolidation and
+    /// the restored Memory tab there must be exactly 11 (one per top-level tab).
+    /// If a refactor accidentally adds a 12th, we want to know immediately so we
+    /// can decide whether the new container is actually a new tab or a misuse of
+    /// the class (an absorbed panel should be an `<h2 class="subsection">`).
     #[test]
     fn index_html_has_exactly_eleven_page_intros() {
         let count = INDEX_HTML.matches(r#"class="page-lede""#).count();
         assert_eq!(
-            count, 10,
-            "expected exactly 10 page-lede paragraphs (one per top-level tab), got {count}"
+            count, 11,
+            "expected exactly 11 page-lede paragraphs (one per top-level tab), got {count}"
         );
         let h1_count = INDEX_HTML.matches(r#"class="page-h1""#).count();
         assert_eq!(
-            h1_count, 10,
-            "expected exactly 10 page-h1 headings (one per top-level tab), got {h1_count}"
+            h1_count, 11,
+            "expected exactly 11 page-h1 headings (one per top-level tab), got {h1_count}"
         );
     }
 

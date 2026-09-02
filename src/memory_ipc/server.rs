@@ -51,7 +51,7 @@ pub fn spawn_server(
     // without an IPC server while meetings kept falling back to direct open.
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).map_err(|e| SimardError::RpcSpawnFailed {
-        bridge: "memory-ipc".into(),
+        endpoint: "memory-ipc".into(),
         reason: format!("bind {}: {e}", socket_path.display()),
     })?;
     // Restrict the socket file to owner read/write (0600) so only this user's
@@ -76,7 +76,18 @@ pub fn spawn_server(
                                 .name("memory-ipc-conn".into())
                                 .spawn(move || {
                                     if let Err(e) = serve_connection(stream, m) {
-                                        eprintln!("[simard] memory-ipc: connection error: {e}");
+                                        // Structured, single-shot per failed
+                                        // connection (issue #4929): a severed
+                                        // peer used to flood the journal with
+                                        // `eprintln!` broken-pipe lines. Route
+                                        // through tracing so it is filterable
+                                        // and rate-observable, never a stray
+                                        // stderr write.
+                                        tracing::warn!(
+                                            endpoint = "memory-ipc",
+                                            error = %e,
+                                            "memory-ipc connection error"
+                                        );
                                     }
                                 })
                         {
@@ -84,18 +95,26 @@ pub fn spawn_server(
                                 "ipc_spawn_failed",
                                 "spawn_server:per_conn",
                             );
-                            eprintln!("[simard] memory-ipc: failed to spawn handler thread: {e}");
+                            tracing::error!(
+                                endpoint = "memory-ipc",
+                                error = %e,
+                                "memory-ipc failed to spawn handler thread"
+                            );
                         }
                     }
                     Err(e) => {
-                        eprintln!("[simard] memory-ipc: accept failed: {e}");
+                        tracing::error!(
+                            endpoint = "memory-ipc",
+                            error = %e,
+                            "memory-ipc accept failed; listener loop exiting"
+                        );
                         break;
                     }
                 }
             }
         })
         .map_err(|e| SimardError::RpcSpawnFailed {
-            bridge: "memory-ipc".into(),
+            endpoint: "memory-ipc".into(),
             reason: format!("spawn server thread: {e}"),
         })?;
 
@@ -223,6 +242,15 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
             Ok(v) => MemoryResponse::Facts(v),
             Err(e) => MemoryResponse::Error(e.to_string()),
         },
+        MemoryRequest::RecallFactsRanked {
+            query,
+            limit,
+            min_confidence,
+            weights,
+        } => match memory.recall_facts_ranked(&query, limit, min_confidence, weights) {
+            Ok(v) => MemoryResponse::Facts(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
         MemoryRequest::StoreProcedure {
             name,
             steps,
@@ -298,12 +326,26 @@ fn dispatch(memory: &dyn CognitiveMemoryOps, req: MemoryRequest) -> MemoryRespon
                 Err(e) => MemoryResponse::Error(e.to_string()),
             }
         }
+        MemoryRequest::ListProspectiveByTrigger { trigger, limit } => {
+            match memory.list_prospective_by_trigger(&trigger, limit) {
+                Ok(v) => MemoryResponse::Prospectives(v),
+                Err(e) => MemoryResponse::Error(e.to_string()),
+            }
+        }
         MemoryRequest::SearchEpisodesByKeywords { keywords, limit } => {
             match memory.search_episodes_by_keywords(&keywords, limit) {
                 Ok(v) => MemoryResponse::Episodes(v),
                 Err(e) => MemoryResponse::Error(e.to_string()),
             }
         }
+        MemoryRequest::ListAllEpisodes { limit } => match memory.list_all_episodes(limit) {
+            Ok(v) => MemoryResponse::Episodes(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
+        MemoryRequest::ListAllProspective { limit } => match memory.list_all_prospective(limit) {
+            Ok(v) => MemoryResponse::Prospectives(v),
+            Err(e) => MemoryResponse::Error(e.to_string()),
+        },
         MemoryRequest::DrainPassLedger { pass_id } => {
             MemoryResponse::Count(drain_pass_ledger(&pass_id))
         }
@@ -409,12 +451,25 @@ fn gated_fact_write(
     }
 
     // (1) Grounding — the fact is grounded iff at least one cited episode id
-    // resolves to a real node in this store. The batch `any_episode_exists`
-    // materializes the episode set once for all cited ids (rather than once per
-    // id). A lookup error is treated as "does not resolve" (fail-closed), so a
-    // backend hiccup can never accidentally promote an ungrounded fact.
+    // resolves to a real node in this store. Normalize each cited id once (trim
+    // surrounding whitespace, drop empties) via the shared
+    // `normalize_source_episode_id`, then reuse that normalized set for BOTH
+    // grounding and the persisted provenance edges. `any_episode_exists` trims
+    // internally too, but the provenance ids handed to `commit_gated_fact` must
+    // be normalized here or a grounded fact whose id carried stray whitespace
+    // would thread a padded key whose `DERIVES_FROM` edge dangles. Episode ids
+    // never carry whitespace, so this is a no-op for well-formed ids. The batch
+    // `any_episode_exists` materializes the episode set once for all cited ids. A
+    // lookup error is treated as "does not resolve" (fail-closed), so a backend
+    // hiccup can never accidentally promote an ungrounded fact.
+    let normalized_episode_ids: Vec<String> = source_episode_ids
+        .iter()
+        .map(|s| crate::fact_reliability::normalize_source_episode_id(s))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
     let grounded = memory
-        .any_episode_exists(source_episode_ids)
+        .any_episode_exists(&normalized_episode_ids)
         .unwrap_or(false);
 
     // (2–5) Score → threshold → dedup → persist through the single shared gate,
@@ -428,7 +483,7 @@ fn gated_fact_write(
         grounded,
         source_id,
         tags,
-        source_episode_ids,
+        &normalized_episode_ids,
     ) {
         Ok(FactGateDecision::Stored {
             confidence,

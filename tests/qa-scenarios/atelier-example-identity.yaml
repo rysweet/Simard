@@ -1,0 +1,46 @@
+name: atelier-example-identity
+app_type: cli
+description: |
+  Outside-in coverage for the DATA-ONLY `atelier` EXAMPLE identity package under
+  `examples/identities/atelier/` (industrial & furniture / product design). This
+  is a demonstration of Simard's pluggable-identity framework — distinct from
+  Simard's own compiled-in `simard-atelier` identity — and it must carry a
+  ZERO-line `src/` footprint: it is defined entirely as data (identity.toml +
+  prompts + recipes) and loaded by the data-driven `load_example_identity`.
+
+  Verified end to end via `tests/atelier_example_identity_valid.rs`:
+  - the `examples/identities/atelier` package loads through the real
+    data-driven loader in engineer mode with its system + five phase prompts
+    (NOT via `BuiltinIdentityLoader`);
+  - every prompt asset the manifest references is a real, non-empty file that
+    resolves as a contained `prompts/*.md` path;
+  - the system prompt states the identity contract (untrusted-input handling,
+    the inspect -> act -> verify -> persist loop, the OpenSCAD/FreeCAD/Blender
+    toolkit, and durable persistence);
+  - the `atelier-parametric-modeling` recipe drives brief -> model -> render
+    through real domain tooling and verifies the geometry is manifold;
+  - the `atelier-fabrication-export` recipe drives fabricate -> handoff and
+    produces the buildable exports (STL/STEP), a cut list, and a BOM, persisted
+    durably;
+  - a missing example package fails visibly (no silent builtin fallback).
+
+  Schema note: the pinned `@gadugi/agentic-test` CLI runner gates only on
+  `run`-step exit codes and reads the command from `params.command`, so the
+  assertion is encoded in the exit code of a `bash -lc` wrapper that exits zero
+  only when the integration suite reports `test result: ok`.
+metadata:
+  tags:
+    - cli
+    - atelier
+    - identity
+    - example
+    - pluggable-identity
+agents:
+  - name: cli-agent
+    type: cli
+    command: bash
+steps:
+  - action: run
+    params:
+      command: "bash -lc 'set -euo pipefail; cargo test --test atelier_example_identity_valid 2>&1 | tee /tmp/atelier-example-qa.log | grep -q \"test result: ok\"'"
+    timeout: 600000

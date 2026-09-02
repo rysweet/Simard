@@ -85,6 +85,7 @@ fn init_board_with_goals(state: &HermeticState) -> SharedMemoryGuard {
     // Save the actual board through the dashboard helpers (tier-0 shared writer).
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -255,6 +256,7 @@ async fn add_goal_rejects_when_at_max_active() {
     let mut board = GoalBoard::new();
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -469,6 +471,7 @@ async fn promote_backlog_item_rejects_when_at_max_active() {
     let mut board = GoalBoard::new();
     for i in 0..crate::goal_curation::MAX_ACTIVE_GOALS {
         board.active.push(crate::goal_curation::ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
@@ -581,6 +584,7 @@ async fn goals_includes_status_chip_for_active_goals() {
     save_goal_board(&GoalBoard::new(), mem.ops()).expect("init");
     let mut board = GoalBoard::new();
     board.active.push(crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,
@@ -603,6 +607,48 @@ async fn goals_includes_status_chip_for_active_goals() {
             .as_str()
             .unwrap()
             .contains("opened PR #42")
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial(cognitive_memory)]
+async fn goals_api_exposes_labels_and_omits_them_when_empty() {
+    // Issue #2743: /api/goals additively exposes each goal's labels array, and
+    // omits the key for an unlabelled goal (mirrors the serde skip contract).
+    let state = HermeticState::new();
+    let mem = SharedMemoryGuard::register(&state);
+    save_goal_board(&GoalBoard::new(), mem.ops()).expect("init");
+    let mut board = GoalBoard::new();
+    board.active.push(
+        crate::goal_curation::ActiveGoal::new("tagged", "A labelled goal", 1)
+            .with_label("source:creative-ideas")
+            .with_label("area:dashboard"),
+    );
+    board.active.push(crate::goal_curation::ActiveGoal::new(
+        "bare",
+        "An unlabelled goal",
+        2,
+    ));
+    dashboard_save_goal_board(state.state_root(), &board).expect("save");
+
+    let result = goals().await;
+    let active = result.0["active"].as_array().unwrap();
+    // Goals are sorted by priority asc: "tagged" (p1) then "bare" (p2).
+    let tagged = active
+        .iter()
+        .find(|g| g["id"] == "tagged")
+        .expect("tagged goal present");
+    let labels = tagged["labels"].as_array().expect("labels array present");
+    let labels: Vec<&str> = labels.iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(labels, vec!["source:creative-ideas", "area:dashboard"]);
+
+    let bare = active
+        .iter()
+        .find(|g| g["id"] == "bare")
+        .expect("bare goal present");
+    assert!(
+        bare.get("labels").is_none(),
+        "an unlabelled goal omits the labels key: {bare}",
     );
 }
 
@@ -1046,6 +1092,7 @@ const OODA_BLOCK_REASON: &str =
 /// signal under test).
 fn goal_in_status(id: &str, status: GoalProgress) -> crate::goal_curation::ActiveGoal {
     crate::goal_curation::ActiveGoal {
+        labels: Vec::new(),
         parent_goal_id: None,
         priority_explicit: false,
         repo: None,

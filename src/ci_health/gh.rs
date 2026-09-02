@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::error::{SimardError, SimardResult};
 
+use super::cache::GreenShaCache;
 use super::types::{
     FleetSnapshot, RepoSnapshot, RunConclusion, WorkflowRun, WorkflowSnapshot, WorkflowState,
 };
@@ -75,6 +76,8 @@ struct RawFixtureWorkflow {
 struct RawFixtureRepo {
     slug: String,
     default_branch: String,
+    #[serde(default)]
+    head_sha: String,
     #[serde(default)]
     workflows: Vec<RawFixtureWorkflow>,
 }
@@ -139,6 +142,7 @@ pub fn latest_run_by_workflow(rows: &[RawRunRow]) -> HashMap<u64, RawRunRow> {
 pub fn build_repo_snapshot(
     slug: &str,
     default_branch: &str,
+    head_sha: &str,
     workflows: &[RawWorkflowRow],
     runs: &[RawRunRow],
 ) -> RepoSnapshot {
@@ -154,6 +158,8 @@ pub fn build_repo_snapshot(
     RepoSnapshot {
         slug: slug.to_string(),
         default_branch: default_branch.to_string(),
+        head_sha: head_sha.to_string(),
+        green_from_cache: false,
         workflows,
     }
 }
@@ -172,6 +178,8 @@ pub fn snapshot_from_fixture(json: &[u8]) -> SimardResult<FleetSnapshot> {
         .map(|r| RepoSnapshot {
             slug: r.slug,
             default_branch: r.default_branch,
+            head_sha: r.head_sha,
+            green_from_cache: false,
             workflows: r
                 .workflows
                 .into_iter()
@@ -196,6 +204,10 @@ pub fn snapshot_from_fixture(json: &[u8]) -> SimardResult<FleetSnapshot> {
 /// with a fake client.
 pub trait GhWorkflowClient {
     fn default_branch(&self, repo: &str) -> SimardResult<String>;
+    /// The current head commit SHA of `branch` (`gh api
+    /// repos/<owner>/<repo>/commits/<branch> --jq .sha`). This is the key the
+    /// last-known-green cache uses to decide whether a repo can be skipped.
+    fn head_sha(&self, repo: &str, branch: &str) -> SimardResult<String>;
     fn list_workflows(&self, repo: &str) -> SimardResult<Vec<RawWorkflowRow>>;
     fn list_runs(&self, repo: &str, branch: &str) -> SimardResult<Vec<RawRunRow>>;
     /// The single latest run of one workflow (by id) on `branch`, or `None`
@@ -212,6 +224,18 @@ pub trait GhWorkflowClient {
 /// Collect a live snapshot of every governed repo. Fail-loud: any `gh` error
 /// aborts the sweep rather than silently reporting a partial fleet as green.
 ///
+/// ## Last-known-green short-circuit
+///
+/// For each repo the collector first resolves the default branch and its head
+/// SHA (two cheap `gh` calls). If `cache` records that repo as green at exactly
+/// this head SHA, the expensive per-workflow collection (workflow list + run
+/// window + per-workflow fallbacks) is **skipped** and the repo is emitted as
+/// [`RepoSnapshot::green_from_cache`] with no workflows. Because a repo is only
+/// ever *recorded* green when all its active workflows are commit-driven (see
+/// [`super::classify::repo_cacheable`]), an unchanged head SHA proves no active
+/// workflow has run since the green verdict, so skipping is sound. Pass an empty
+/// cache to force a full sweep of every repo.
+///
 /// `list_runs` fetches a branch-wide window (the N most-recent runs across all
 /// workflows). If a workflow appears in that window at all, the newest row for
 /// it is necessarily its true latest run. The only gap is an **active**
@@ -219,13 +243,28 @@ pub trait GhWorkflowClient {
 /// window) — that would otherwise look like `NoRun` and be silently ignored,
 /// hiding a stale failing run. For exactly those workflows we query the latest
 /// run directly so a truncated window can never be reported as green.
-pub fn collect_fleet(gh: &dyn GhWorkflowClient, repos: &[&str]) -> SimardResult<FleetSnapshot> {
+pub fn collect_fleet(
+    gh: &dyn GhWorkflowClient,
+    repos: &[&str],
+    cache: &GreenShaCache,
+) -> SimardResult<FleetSnapshot> {
     let mut out = Vec::with_capacity(repos.len());
     for &repo in repos {
         let branch = gh.default_branch(repo)?;
+        let head_sha = gh.head_sha(repo, &branch)?;
+        if cache.is_green(repo, &head_sha) {
+            out.push(RepoSnapshot {
+                slug: repo.to_string(),
+                default_branch: branch,
+                head_sha,
+                green_from_cache: true,
+                workflows: Vec::new(),
+            });
+            continue;
+        }
         let workflows = gh.list_workflows(repo)?;
         let runs = gh.list_runs(repo, &branch)?;
-        let mut snapshot = build_repo_snapshot(repo, &branch, &workflows, &runs);
+        let mut snapshot = build_repo_snapshot(repo, &branch, &head_sha, &workflows, &runs);
         for (row, wf) in workflows.iter().zip(snapshot.workflows.iter_mut()) {
             let disabled = WorkflowState::parse(&row.state).is_disabled();
             if !disabled
@@ -288,6 +327,22 @@ impl GhWorkflowClient for RealGhWorkflowClient {
             });
         }
         Ok(branch)
+    }
+
+    fn head_sha(&self, repo: &str, branch: &str) -> SimardResult<String> {
+        // `gh repo view --json defaultBranchRef` does not expose the target OID,
+        // so read the branch head commit SHA via the REST API instead.
+        let endpoint = format!("repos/{repo}/commits/{branch}");
+        let out = Self::run_gh(&["api", &endpoint, "--jq", ".sha"])?;
+        let sha = String::from_utf8_lossy(&out).trim().to_string();
+        if sha.is_empty() {
+            return Err(SimardError::CiHealthGhCommandFailed {
+                reason: format!(
+                    "`gh api {endpoint}` returned an empty head SHA for {repo}@{branch}"
+                ),
+            });
+        }
+        Ok(sha)
     }
 
     fn list_workflows(&self, repo: &str) -> SimardResult<Vec<RawWorkflowRow>> {

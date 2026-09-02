@@ -12,6 +12,12 @@
 
 use crate::stewardship::{MergeOutcome, PrGhClient, RealPrGhClient, merge_pr_if_merge_ready};
 
+use crate::state_root::simard_state_root;
+use crate::stewardship::merge_verdict_store::{
+    MergeVerdictRecord, VerdictKind, validate_repo_slug, write_record,
+};
+use std::path::PathBuf;
+
 /// Repo Simard ships from — the default target when `--repo` is omitted.
 const DEFAULT_REPO: &str = "rysweet/Simard";
 
@@ -41,18 +47,14 @@ pub(crate) enum MergePrCommand {
     Merge(MergePrArgs),
 }
 
-/// Validate an `owner/repo` slug: exactly one `/`, non-empty halves, no
-/// whitespace. Keeps a malformed value from reaching the `gh --repo` argument.
+/// Validate an `owner/repo` slug before it reaches the `gh --repo` argument.
+/// Delegates to the store's single traversal-safe guard ([`validate_repo_slug`])
+/// so `merge-pr` and `record-verdict` enforce the *same* well-formedness rule,
+/// while preserving this subcommand's `invalid --repo '<repo>'` error contract.
 fn validate_repo(repo: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = repo.split('/').collect();
-    let well_formed = parts.len() == 2
-        && parts.iter().all(|p| !p.is_empty())
-        && !repo.chars().any(char::is_whitespace);
-    if well_formed {
-        Ok(())
-    } else {
-        Err(format!("invalid --repo '{repo}' (expected <owner/repo>)").into())
-    }
+    validate_repo_slug(repo)
+        .map(|_| ())
+        .map_err(|_| format!("invalid --repo '{repo}' (expected <owner/repo>)").into())
 }
 
 /// Parse `merge-pr` arguments. Accepts the PR number as the single positional
@@ -140,6 +142,286 @@ pub(crate) fn dispatch_merge_pr_command(
             let gh = RealPrGhClient::new();
             run_merge(pr_number, &repo, &gh)
         }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// `simard merge record-verdict` — the agent-facing gated WRITE tool (#4721)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The merge-readiness recipe reasons over a PR and RECORDS its typed verdict by
+// calling this tool (act-via-tool, like `simard memory remember`), printing no
+// JSON envelope for the daemon to scrape. The thin deterministic rail
+// (`stewardship::recipe_merge_judge`) reads the freshness-checked record and
+// INDEPENDENTLY re-verifies the hard safety gates before authorizing any merge.
+// All validation lives in this tool.
+
+/// The verdict cleared validation and was durably recorded.
+const EXIT_RECORDED: i32 = 0;
+/// A required flag was missing or malformed (bad verdict word, non-numeric
+/// `--pr`, empty `--reason`, malformed `--repo`, …).
+const EXIT_USAGE: i32 = 2;
+/// The record could not be written (state-root / IO / serialize error).
+const EXIT_IO: i32 = 3;
+
+pub(super) const MERGE_HELP: &str = "\
+Simard merge subcommand
+
+Usage:
+  simard merge record-verdict --pr <N> --repo <owner/name> \\
+        --verdict merge|hold --reason \"<text>\" --run-token <token> \\
+        [--state-root <path>]
+
+record-verdict durably records the merge-readiness judge's typed verdict so the
+deterministic rail can read it back and INDEPENDENTLY re-verify the hard safety
+gates (mergeable, not draft, CI green, allow-listed base) before authorizing a
+squash-merge. It NEVER merges and NEVER weakens a gate. The verdict is advisory:
+a `merge` against a red/draft/non-mergeable PR is refused by the rail.
+
+Both `--flag value` and `--flag=value` forms are accepted.
+
+Exit codes:
+  0  recorded       the verdict cleared validation and was written
+  2  usage error    a required flag was missing or malformed
+  3  io error       the record could not be written (state-root/IO)
+";
+
+/// Parsed `simard merge record-verdict` invocation. Scalar flags only — a large
+/// rationale would ride a file, never argv (the acceptance criteria keep
+/// `--reason` bounded).
+#[derive(Debug)]
+pub(crate) struct RecordVerdictArgs {
+    pub pr: u32,
+    pub repo: String,
+    pub verdict: VerdictKind,
+    pub reason: String,
+    pub run_token: String,
+    pub state_root: Option<PathBuf>,
+    /// Whether the judge marked this hold autonomously fixable (rework loop,
+    /// issue #4911). Only ever true for a `hold`.
+    pub reworkable: bool,
+    /// The plain-English concern the rework agent must address. Present iff
+    /// `reworkable`. `--concern @FILE` reads the text from disk.
+    pub concern: Option<String>,
+}
+
+/// Take a flag's value: inline (`--flag=value`) if present, else the next argv
+/// token (`--flag value`). Errors if neither is available.
+fn record_flag_value(
+    flag: &str,
+    inline: Option<String>,
+    next: &mut dyn Iterator<Item = String>,
+) -> Result<String, String> {
+    match inline {
+        Some(v) => Ok(v),
+        None => next
+            .next()
+            .ok_or_else(|| format!("--{flag} requires a value")),
+    }
+}
+
+/// Parse + validate `record-verdict` argv into typed [`RecordVerdictArgs`]. All
+/// enforcement lives here: unknown/missing flags, an invalid verdict word, a
+/// non-numeric `--pr`, an empty `--reason`, and a malformed `--repo` all fail.
+pub(crate) fn parse_record_verdict_args(args: Vec<String>) -> Result<RecordVerdictArgs, String> {
+    let mut pr: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut verdict: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut run_token: Option<String> = None;
+    let mut state_root: Option<PathBuf> = None;
+    let mut reworkable = false;
+    let mut concern: Option<String> = None;
+
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let Some(rest) = arg.strip_prefix("--") else {
+            return Err(format!("unexpected positional argument {arg:?}"));
+        };
+        let (key, inline) = match rest.split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (rest.to_string(), None),
+        };
+        match key.as_str() {
+            "pr" => pr = Some(record_flag_value("pr", inline, &mut iter)?),
+            "repo" => repo = Some(record_flag_value("repo", inline, &mut iter)?),
+            "verdict" => verdict = Some(record_flag_value("verdict", inline, &mut iter)?),
+            "reason" => reason = Some(record_flag_value("reason", inline, &mut iter)?),
+            "run-token" => run_token = Some(record_flag_value("run-token", inline, &mut iter)?),
+            "reworkable" => {
+                // A pure boolean switch: reject an accidental `--reworkable=…`.
+                if inline.is_some() {
+                    return Err("--reworkable is a switch and takes no value".to_string());
+                }
+                reworkable = true;
+            }
+            "concern" => {
+                let raw = record_flag_value("concern", inline, &mut iter)?;
+                concern = Some(resolve_concern_value(&raw)?);
+            }
+            "state-root" => {
+                state_root = Some(PathBuf::from(record_flag_value(
+                    "state-root",
+                    inline,
+                    &mut iter,
+                )?))
+            }
+            other => return Err(format!("unknown flag --{other}")),
+        }
+    }
+
+    let pr = pr.ok_or_else(|| "missing required --pr".to_string())?;
+    let pr: u32 = pr
+        .parse()
+        .map_err(|_| format!("--pr must be a non-negative integer, got {pr:?}"))?;
+
+    let repo = repo.ok_or_else(|| "missing required --repo".to_string())?;
+    // Reuse the store's traversal-safe slug guard so a malformed/unsafe repo is
+    // rejected at parse time, before any path is derived.
+    validate_repo_slug(&repo)?;
+
+    let verdict = verdict.ok_or_else(|| "missing required --verdict".to_string())?;
+    let verdict = match verdict.as_str() {
+        "merge" => VerdictKind::Merge,
+        "hold" => VerdictKind::Hold,
+        other => {
+            return Err(format!(
+                "--verdict must be exactly `merge` or `hold` (lowercase), got {other:?}"
+            ));
+        }
+    };
+
+    let reason = reason.ok_or_else(|| "missing required --reason".to_string())?;
+    if reason.trim().is_empty() {
+        return Err("--reason must be non-empty".to_string());
+    }
+
+    let run_token = run_token.ok_or_else(|| "missing required --run-token".to_string())?;
+    if run_token.trim().is_empty() {
+        return Err("--run-token must be non-empty".to_string());
+    }
+
+    // Rework-loop contradiction guards (issue #4911). A reworkable hold is the
+    // ONLY shape that carries a concern; anything else is rejected loudly rather
+    // than writing a contradictory record.
+    if reworkable && verdict != VerdictKind::Hold {
+        return Err(
+            "--reworkable is only valid with `--verdict hold` (a merge cannot be reworked)"
+                .to_string(),
+        );
+    }
+    if concern.is_some() && !reworkable {
+        return Err("--concern requires --reworkable (it is the rework agent's brief)".to_string());
+    }
+    if reworkable {
+        match concern.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => {}
+            _ => {
+                return Err(
+                    "--reworkable requires a non-empty --concern for the rework agent to act on"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok(RecordVerdictArgs {
+        pr,
+        repo,
+        verdict,
+        reason,
+        run_token,
+        state_root,
+        reworkable,
+        concern,
+    })
+}
+
+/// Resolve a `--concern` value: a literal string, or `@FILE` read from disk
+/// (keeping large concerns off argv → no E2BIG). A leading literal `@` can be
+/// escaped as `@@`.
+fn resolve_concern_value(raw: &str) -> Result<String, String> {
+    if let Some(path) = raw.strip_prefix('@') {
+        if let Some(literal) = path.strip_prefix('@') {
+            // `@@…` is an escaped literal that itself starts with `@`.
+            return Ok(format!("@{literal}"));
+        }
+        if path.is_empty() {
+            return Err("--concern @FILE requires a file path after '@'".to_string());
+        }
+        return std::fs::read_to_string(path)
+            .map_err(|e| format!("--concern @{path}: could not read file: {e}"));
+    }
+    Ok(raw.to_string())
+}
+
+/// Run `simard merge record-verdict`, returning the process exit code
+/// ([`EXIT_RECORDED`] / [`EXIT_USAGE`] / [`EXIT_IO`]). Emits `[simard]`-prefixed
+/// diagnostics to stderr.
+pub(crate) fn run_record_verdict(args: Vec<String>) -> i32 {
+    let parsed = match parse_record_verdict_args(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[simard] merge record-verdict: usage error: {e}");
+            return EXIT_USAGE;
+        }
+    };
+
+    let state_root = parsed.state_root.clone().unwrap_or_else(simard_state_root);
+    let mut record = MergeVerdictRecord::new(
+        parsed.pr,
+        &parsed.repo,
+        parsed.verdict,
+        &parsed.reason,
+        &parsed.run_token,
+    );
+    if parsed.reworkable {
+        record.reworkable = Some(true);
+        record.concern = parsed.concern.clone();
+    }
+    match write_record(&state_root, &record) {
+        Ok(()) => {
+            eprintln!(
+                "[simard] merge record-verdict: recorded `{:?}` for {}#{} (token {}).",
+                parsed.verdict, parsed.repo, parsed.pr, parsed.run_token
+            );
+            EXIT_RECORDED
+        }
+        Err(e) => {
+            eprintln!("[simard] merge record-verdict: could not write record: {e}");
+            EXIT_IO
+        }
+    }
+}
+
+/// Dispatch `simard merge <subcommand>`. Currently only `record-verdict`.
+pub(crate) fn dispatch_merge_command(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let subcommand = match args.next() {
+        Some(s) => s,
+        None => {
+            print!("{MERGE_HELP}");
+            return Ok(());
+        }
+    };
+    match subcommand.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{MERGE_HELP}");
+            Ok(())
+        }
+        "record-verdict" => {
+            let argv: Vec<String> = args.collect();
+            if argv
+                .iter()
+                .any(|a| a == "--help" || a == "-h" || a == "help")
+            {
+                print!("{MERGE_HELP}");
+                return Ok(());
+            }
+            std::process::exit(run_record_verdict(argv));
+        }
+        other => Err(format!("unsupported command 'merge {other}'").into()),
     }
 }
 

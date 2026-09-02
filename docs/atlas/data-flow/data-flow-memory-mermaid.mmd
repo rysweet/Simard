@@ -1,0 +1,23 @@
+flowchart LR
+  Goals["Active goals"] --> Probe["build_objective_probe"] --> Prep["prepare-context"]
+  Prep --> Facts["ranked fact recall"]
+  Prep --> GoalRecords["goal-store record search"]
+  Prep --> Triggers["prospective trigger check"]
+  Prep --> Procedures["tokenized procedure recall"]
+  Prep --> Episodes["ranked episodic recall"]
+  Facts --> Ops["CognitiveMemoryOps"]
+  GoalRecords --> Ops
+  Triggers --> Ops
+  Procedures --> Ops
+  Episodes --> Ops
+  Ops --> Remote["RemoteCognitiveMemory"] --> Server["memory_ipc server"] --> Store["lbug store\nstate_root/cognitive"]
+  Prep --> Summary["push working context summary"] --> Ops
+  Prep --> Context["PreparedContext"] --> Prompt["OODA prompt"]
+  Outcomes["Act outcomes"] --> Exec["execution_memory_operations"]
+  Exec --> Sensory["record_sensory"] --> Ops
+  Exec --> Working["push_working execution-output"] --> Ops
+  Outcomes --> ProcStore["store_procedure"] --> Ops
+  Outcomes --> Reflection["reflection_memory_operations"]
+  Reflection --> EpisodeStore["store_episode"] --> Ops
+  Reflection --> FactStore["store_fact"] --> Ops
+  Store --> Maintenance["consolidate episodes\nprune sensory"]

@@ -18,7 +18,7 @@
 //! ## How these compile against pre-PR-A code
 //!
 //! The tests must compile against the current 3-argument
-//! `preparation_memory_operations(objective, session_id, bridge)`
+//! `preparation_memory_operations(objective, session_id, memory)`
 //! signature. They route through a thin shim
 //! [`prep_with_active_slugs`] that today simply calls the 3-arg
 //! function and ignores the extra argument. When PR-A switches the
@@ -49,13 +49,13 @@ fn test_session_id() -> SessionId {
 fn prep_with_active_slugs(
     objective: &str,
     session_id: &SessionId,
-    bridge: &dyn crate::cognitive_memory::CognitiveMemoryOps,
+    memory: &dyn crate::cognitive_memory::CognitiveMemoryOps,
     active_slugs: &HashSet<&str>,
 ) -> crate::error::SimardResult<PreparedContext> {
     preparation_memory_operations_with_active_slugs(
         objective,
         session_id,
-        bridge,
+        memory,
         Some(active_slugs),
     )
 }
@@ -68,7 +68,7 @@ fn prep_with_active_slugs(
 /// unrelated `bug-pattern` fact when queried by the objective text or
 /// by the goal-store concept. PR-A filter 1 should drop all five
 /// snapshots.
-fn snapshot_revisions_bridge() -> CognitiveMemoryClient {
+fn snapshot_revisions_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("snapshot-revs", |method, params| match method {
         "memory.search_facts" => {
             let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
@@ -117,11 +117,12 @@ fn snapshot_revisions_bridge() -> CognitiveMemoryClient {
 /// Client that returns three `goal-store:record` facts: two with slugs
 /// the caller will pass in `active_slugs` ("alpha", "beta") and one
 /// with a stale slug ("ghost-of-tdd") that should be filtered out.
-fn mixed_goal_store_bridge() -> CognitiveMemoryClient {
+fn mixed_goal_store_memory() -> CognitiveMemoryClient {
     use crate::goals::{GoalRecord, GoalStatus};
     use crate::session::SessionPhase;
 
     let make_record = |slug: &str, title: &str| GoalRecord {
+        labels: Vec::new(),
         slug: slug.to_string(),
         title: title.to_string(),
         rationale: "rationale".to_string(),
@@ -190,7 +191,7 @@ fn mixed_goal_store_bridge() -> CognitiveMemoryClient {
 /// Client that returns a `lesson-learned` and a `pr-pattern` fact —
 /// neither of which is a `goal-store:record` or `goal-board:snapshot`.
 /// Both filters should leave these untouched.
-fn diverse_concepts_bridge() -> CognitiveMemoryClient {
+fn diverse_concepts_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("diverse", |method, _params| match method {
         "memory.search_facts" => Ok(json!({
             "facts": [
@@ -235,9 +236,9 @@ fn diverse_concepts_bridge() -> CognitiveMemoryClient {
 /// returns all 5 snapshot revisions in the prepared context.
 #[test]
 fn preparation_drops_goal_board_snapshot_revisions() {
-    let bridge = snapshot_revisions_bridge();
+    let memory = snapshot_revisions_memory();
     let active: HashSet<&str> = HashSet::new();
-    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &memory, &active)
         .unwrap();
 
     let snapshots: Vec<_> = ctx
@@ -280,12 +281,12 @@ fn preparation_drops_goal_board_snapshot_revisions() {
 /// `ghost-of-tdd` because it is the only revision of its slug.
 #[test]
 fn preparation_drops_stale_goal_store_records() {
-    let bridge = mixed_goal_store_bridge();
+    let memory = mixed_goal_store_memory();
     let mut active: HashSet<&str> = HashSet::new();
     active.insert("alpha");
     active.insert("beta");
 
-    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &memory, &active)
         .unwrap();
 
     let slugs: Vec<String> = ctx
@@ -314,12 +315,12 @@ fn preparation_drops_stale_goal_store_records() {
 /// asserts the absence of the stale slug, which is not yet enforced.
 #[test]
 fn preparation_keeps_active_goal_store_records() {
-    let bridge = mixed_goal_store_bridge();
+    let memory = mixed_goal_store_memory();
     let mut active: HashSet<&str> = HashSet::new();
     active.insert("alpha");
     active.insert("beta");
 
-    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("unrelated objective", &test_session_id(), &memory, &active)
         .unwrap();
 
     let slugs: std::collections::HashSet<String> = ctx
@@ -357,9 +358,9 @@ fn preparation_keeps_active_goal_store_records() {
 /// PR-A author cannot accidentally widen the filter.
 #[test]
 fn preparation_does_not_filter_other_concepts() {
-    let bridge = diverse_concepts_bridge();
+    let memory = diverse_concepts_memory();
     let active: HashSet<&str> = HashSet::new();
-    let ctx = prep_with_active_slugs("any objective at all", &test_session_id(), &bridge, &active)
+    let ctx = prep_with_active_slugs("any objective at all", &test_session_id(), &memory, &active)
         .unwrap();
 
     let concepts: std::collections::HashSet<String> = ctx
@@ -381,7 +382,7 @@ fn preparation_does_not_filter_other_concepts() {
 /// **TDD red → green (issue #2302): the "facts always zero" defect.**
 ///
 /// End-to-end through the real `LibraryCognitiveMemory` (not a mock
-/// bridge) so the actual `search_facts` body is exercised. Stores a
+/// memory) so the actual `search_facts` body is exercised. Stores a
 /// keyword-bearing learned fact and a valid `goal-store:record` fact,
 /// then prepares with a realistic multi-word objective and the live
 /// active slug set. Both facts must surface in `PreparedContext`.
@@ -418,6 +419,7 @@ fn preparation_recalls_keyword_and_goal_facts() {
     // A goal record filed under the goal-store:record concept. Its slug
     // is in the live active set, so the stale-slug filter keeps it.
     let goal = GoalRecord {
+        labels: Vec::new(),
         slug: "fix-auth".to_string(),
         title: "Stabilize auth module tests".to_string(),
         rationale: "flaky CI blocks merges".to_string(),

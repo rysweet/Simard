@@ -18,7 +18,7 @@ use super::types::{ImprovementConfig, ImprovementCycle, ImprovementDecision, Imp
 /// If no changes are proposed, the cycle stops after Analyze and returns a
 /// Revert decision.
 ///
-/// The gym bridge is called twice: once for baseline and once for re-evaluation.
+/// The gym memory is called twice: once for baseline and once for re-evaluation.
 /// If either call fails, the error propagates immediately (Pillar 11).
 pub fn run_improvement_cycle(
     gym: &GymClient,

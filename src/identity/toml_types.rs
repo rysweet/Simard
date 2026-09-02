@@ -43,6 +43,63 @@ pub(crate) struct TomlIdentity {
     pub components: Vec<String>,
     #[serde(default)]
     pub memory_policy: Option<TomlMemoryPolicy>,
+    /// Identity seed goals (#3125). When non-empty they OVERRIDE
+    /// `DEFAULT_SEED_GOALS` at the OODA cold-start seeding site.
+    #[serde(default)]
+    pub seed_goals: Vec<TomlSeedGoal>,
+    /// Target repo set for goals/observations (#3125). Empty => union of
+    /// `seed_goals[].repo`.
+    #[serde(default)]
+    pub target_repos: Vec<String>,
+    /// Write-authority posture (#3125 / #3067). Absent => `full` (default).
+    #[serde(default)]
+    pub authority: Option<TomlAuthority>,
+}
+
+/// A `[[identities.seed_goals]]` entry (#3125). Mirrors the shape of a
+/// `DEFAULT_SEED_GOALS` tuple `(priority, title, description, Option<repo>)`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TomlSeedGoal {
+    pub priority: u32,
+    pub title: String,
+    pub description: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Declares a standing/perpetual seed goal (issue #4927). Modelled as
+    /// `Option<bool>` so an omitted flag (`None`) is preserved as *distinct*
+    /// from an explicit `standing = false` (`Some(false)`): only the latter
+    /// authorizes the standing reconciler to reverse a previously-added marker,
+    /// while an omitted seed stays inert. `#[serde(default)]` keeps every
+    /// existing `seed_goals` entry (which omits it) valid as a non-standing
+    /// goal, while `deny_unknown_fields` still fails loud on a typo'd flag
+    /// rather than silently leaving a safety goal non-perpetual.
+    #[serde(default)]
+    pub standing: Option<bool>,
+}
+
+/// An optional `[identities.authority]` table (#3125 / #3067). The read-only
+/// switch for the observe-only Act phase. `allow_*` are `Option<bool>` so an
+/// explicit `true` under `posture = "read-only"` can be rejected as a
+/// contradiction (rather than silently coerced) while an omitted field takes a
+/// posture-dependent default.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TomlAuthority {
+    #[serde(default = "default_posture")]
+    pub posture: String,
+    #[serde(default)]
+    pub allowed_write_repos: Vec<String>,
+    #[serde(default)]
+    pub allow_git_push: Option<bool>,
+    #[serde(default)]
+    pub allow_ado_writes: Option<bool>,
+    #[serde(default)]
+    pub allow_github_writes: Option<bool>,
+}
+
+fn default_posture() -> String {
+    "full".to_string()
 }
 
 /// A `[[identities.prompt_assets]]` entry.
@@ -391,5 +448,116 @@ path = "b.md"
         assert_eq!(file.identities[0].prompt_assets.len(), 2);
         assert_eq!(file.identities[0].prompt_assets[0].id, "system-a");
         assert_eq!(file.identities[0].prompt_assets[1].id, "system-b");
+    }
+
+    // --- #3125: seed_goals / target_repos / authority ---
+
+    #[test]
+    fn parse_identity_scoped_cognition_fields() {
+        let toml_str = r#"
+[package]
+name = "crocutus"
+version = "0.1.0"
+
+[[identities]]
+name = "crocutus"
+default_mode = "engineer"
+target_repos = ["hyenas"]
+
+[[identities.seed_goals]]
+priority = 1
+title = "Observe hyenas repo health"
+description = "OBSERVE ONLY"
+repo = "hyenas"
+
+[identities.authority]
+posture = "read-only"
+"#;
+        let file: TomlIdentityFile = toml::from_str(toml_str).unwrap();
+        let identity = &file.identities[0];
+        assert_eq!(identity.target_repos, vec!["hyenas".to_string()]);
+        assert_eq!(identity.seed_goals.len(), 1);
+        assert_eq!(identity.seed_goals[0].priority, 1);
+        assert_eq!(identity.seed_goals[0].title, "Observe hyenas repo health");
+        assert_eq!(identity.seed_goals[0].repo.as_deref(), Some("hyenas"));
+        let authority = identity.authority.as_ref().unwrap();
+        assert_eq!(authority.posture, "read-only");
+        assert!(authority.allowed_write_repos.is_empty());
+        assert_eq!(authority.allow_git_push, None);
+    }
+
+    #[test]
+    fn cognition_fields_default_empty_and_absent() {
+        // Simard-equivalent identity: no seed goals, no targets, no authority.
+        let file: TomlIdentityFile = toml::from_str(MINIMAL_TOML).unwrap();
+        assert!(file.identities[0].seed_goals.is_empty());
+        assert!(file.identities[0].target_repos.is_empty());
+        assert!(file.identities[0].authority.is_none());
+    }
+
+    #[test]
+    fn authority_posture_defaults_to_full_when_block_present() {
+        let toml_str = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[[identities]]
+name = "test"
+default_mode = "engineer"
+
+[identities.authority]
+"#;
+        let file: TomlIdentityFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            file.identities[0].authority.as_ref().unwrap().posture,
+            "full"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown_seed_goal_field() {
+        let toml_str = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[[identities]]
+name = "test"
+default_mode = "engineer"
+
+[[identities.seed_goals]]
+priority = 1
+title = "g"
+description = "d"
+weight = 5
+"#;
+        let result: Result<TomlIdentityFile, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown field in seed_goals should be rejected by deny_unknown_fields"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_unknown_authority_field() {
+        let toml_str = r#"
+[package]
+name = "test"
+version = "0.1.0"
+
+[[identities]]
+name = "test"
+default_mode = "engineer"
+
+[identities.authority]
+posture = "full"
+mystery = true
+"#;
+        let result: Result<TomlIdentityFile, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown field in authority should be rejected by deny_unknown_fields"
+        );
     }
 }

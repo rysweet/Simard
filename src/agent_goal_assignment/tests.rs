@@ -3,9 +3,9 @@ use crate::memory_client::CognitiveMemoryClient;
 use crate::rpc::RpcErrorPayload;
 use crate::rpc_transport::InMemoryRpcTransport;
 
-// ── helper: mock bridges ────────────────────────────────────────────
+// ── helper: mock memories ────────────────────────────────────────────
 
-fn empty_bridge() -> CognitiveMemoryClient {
+fn empty_memory() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-empty", |method, _params| match method {
         "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
         "memory.search_facts" => Ok(serde_json::json!({"facts": []})),
@@ -17,7 +17,7 @@ fn empty_bridge() -> CognitiveMemoryClient {
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-fn bridge_with_goal_fact() -> CognitiveMemoryClient {
+fn memory_with_goal_fact() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-goals", |method, _params| match method {
         "memory.store_fact" => Ok(serde_json::json!({"id": "fact_1"})),
         "memory.search_facts" => Ok(serde_json::json!({
@@ -38,7 +38,7 @@ fn bridge_with_goal_fact() -> CognitiveMemoryClient {
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-fn bridge_with_progress_fact() -> CognitiveMemoryClient {
+fn memory_with_progress_fact() -> CognitiveMemoryClient {
     let progress = SubordinateProgress {
         sub_id: "agent-1".to_string(),
         phase: "execution".to_string(),
@@ -72,7 +72,7 @@ fn bridge_with_progress_fact() -> CognitiveMemoryClient {
     CognitiveMemoryClient::new(Box::new(transport))
 }
 
-fn bridge_with_bad_progress() -> CognitiveMemoryClient {
+fn memory_with_bad_progress() -> CognitiveMemoryClient {
     let transport = InMemoryRpcTransport::new("test-bad", |method, _params| match method {
         "memory.search_facts" => Ok(serde_json::json!({
             "facts": [{
@@ -276,9 +276,9 @@ fn progress_with_outcome_overwrites_existing_outcome() {
 // ── assign_goal ─────────────────────────────────────────────────────
 
 #[test]
-fn assign_goal_succeeds_with_mock_bridge() {
-    let bridge = empty_bridge();
-    let result = assign_goal("agent-1", "build feature X", &bridge);
+fn assign_goal_succeeds_with_mock_memory() {
+    let memory = empty_memory();
+    let result = assign_goal("agent-1", "build feature X", &memory);
     assert!(result.is_ok());
 }
 
@@ -286,23 +286,23 @@ fn assign_goal_succeeds_with_mock_bridge() {
 
 #[test]
 fn read_assigned_goal_returns_none_when_empty() {
-    let bridge = empty_bridge();
-    let result = read_assigned_goal("agent-1", &bridge).unwrap();
+    let memory = empty_memory();
+    let result = read_assigned_goal("agent-1", &memory).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
 fn read_assigned_goal_returns_content_when_present() {
-    let bridge = bridge_with_goal_fact();
-    let result = read_assigned_goal("agent-1", &bridge).unwrap();
+    let memory = memory_with_goal_fact();
+    let result = read_assigned_goal("agent-1", &memory).unwrap();
     assert_eq!(result, Some("build feature X".to_string()));
 }
 
 // ── report_progress ─────────────────────────────────────────────────
 
 #[test]
-fn report_progress_succeeds_with_mock_bridge() {
-    let bridge = empty_bridge();
+fn report_progress_succeeds_with_mock_memory() {
+    let memory = empty_memory();
     let progress = SubordinateProgress {
         sub_id: "agent-1".to_string(),
         phase: "execution".to_string(),
@@ -315,7 +315,7 @@ fn report_progress_succeeds_with_mock_bridge() {
         prs_produced: 0,
         exit_status: None,
     };
-    let result = report_progress("agent-1", &progress, &bridge);
+    let result = report_progress("agent-1", &progress, &memory);
     assert!(result.is_ok());
 }
 
@@ -323,15 +323,15 @@ fn report_progress_succeeds_with_mock_bridge() {
 
 #[test]
 fn poll_progress_returns_none_when_empty() {
-    let bridge = empty_bridge();
-    let result = poll_progress("agent-1", &bridge).unwrap();
+    let memory = empty_memory();
+    let result = poll_progress("agent-1", &memory).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
 fn poll_progress_returns_deserialized_progress() {
-    let bridge = bridge_with_progress_fact();
-    let result = poll_progress("agent-1", &bridge).unwrap();
+    let memory = memory_with_progress_fact();
+    let result = poll_progress("agent-1", &memory).unwrap();
     assert!(result.is_some());
     let p = result.unwrap();
     assert_eq!(p.sub_id, "agent-1");
@@ -341,8 +341,8 @@ fn poll_progress_returns_deserialized_progress() {
 
 #[test]
 fn poll_progress_returns_error_on_bad_json() {
-    let bridge = bridge_with_bad_progress();
-    let result = poll_progress("agent-1", &bridge);
+    let memory = memory_with_bad_progress();
+    let result = poll_progress("agent-1", &memory);
     assert!(result.is_err());
 }
 

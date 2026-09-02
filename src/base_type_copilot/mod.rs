@@ -1,6 +1,6 @@
 //! Real CopilotSdkAdapter — a base type that drives `amplihack copilot` via
 //! the existing PTY terminal infrastructure and integrates with the memory
-//! and knowledge bridges to enrich turn input with relevant context.
+//! and knowledge readers to enrich turn input with relevant context.
 //!
 //! The adapter launches a copilot subprocess through the PTY `script` wrapper
 //! (reusing `terminal_session::execute_terminal_turn`), formats each turn's
@@ -68,12 +68,18 @@ impl Default for CopilotAdapterConfig {
 /// lightweight callers and unit tests incur no filesystem side effects, and
 /// [`EnrichmentSource::Native`] (opted into via [`CopilotSdkAdapter::with_enrichment`])
 /// for the live production path, wiring the same cognitive-memory store and
-/// native knowledge bridge the rest of the runtime uses (issue #1664).
+/// native knowledge reader the rest of the runtime uses (issue #1664).
 #[derive(Debug)]
 pub struct CopilotSdkAdapter {
     descriptor: BaseTypeDescriptor,
     config: CopilotAdapterConfig,
     enrichment: EnrichmentSource,
+    /// Test-only seam: override the meeting-mode copilot binary
+    /// ([`MEETING_COPILOT_BINARY`]) with an explicit program — typically an
+    /// absolute path to a fake `copilot` used by hermetic meeting-turn tests
+    /// (issue #2732). `None` in production, so live meeting turns always exec
+    /// the real `copilot` binary; there is no production behavior change.
+    meeting_binary_override: Option<String>,
 }
 
 impl CopilotSdkAdapter {
@@ -109,7 +115,20 @@ impl CopilotSdkAdapter {
             },
             config,
             enrichment: EnrichmentSource::default(),
+            meeting_binary_override: None,
         })
+    }
+
+    /// Test-only seam: override the meeting-mode copilot binary with `binary`
+    /// (typically an absolute path to a fake `copilot`) so meeting-turn tests
+    /// exercise the real `run_meeting_turn` path hermetically, without spawning
+    /// the real `copilot` subprocess or depending on its auth/network state
+    /// (issue #2732). Not used on any production path.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_meeting_binary_override(mut self, binary: impl Into<String>) -> Self {
+        self.meeting_binary_override = Some(binary.into());
+        self
     }
 
     /// Access the adapter configuration.
@@ -120,7 +139,7 @@ impl CopilotSdkAdapter {
     /// Enable per-turn memory + knowledge enrichment for sessions opened by
     /// this adapter, reading cognitive memory from `state_root`.
     ///
-    /// Without this, sessions are created with both bridges set to `None` and
+    /// Without this, sessions are created with both readers set to `None` and
     /// every turn runs `prepare_turn_context(objective, None, None)` — the
     /// hardcoded-`None` regression of issue #1664 that silently dropped all
     /// memory and knowledge enrichment in the primary production adapter.
@@ -128,17 +147,17 @@ impl CopilotSdkAdapter {
     /// Clients are launched lazily in [`BaseTypeFactory::open_session`]; a
     /// launch failure logs and degrades to `None` so a missing knowledge pack
     /// or an unavailable memory store never breaks turn dispatch (see
-    /// [`crate::base_type_turn::launch_enrichment_bridges`]).
+    /// [`crate::base_type_turn::launch_enrichment_clients`]).
     #[must_use]
     pub fn with_enrichment(mut self, state_root: PathBuf) -> Self {
         self.enrichment = EnrichmentSource::Native { state_root };
         self
     }
 
-    /// Build a concrete [`CopilotSdkSession`], resolving enrichment bridges.
+    /// Build a concrete [`CopilotSdkSession`], resolving enrichment readers.
     ///
     /// Shared by [`BaseTypeFactory::open_session`] (which boxes the result)
-    /// and unit tests that need to inspect the wired bridges directly.
+    /// and unit tests that need to inspect the wired readers directly.
     fn build_session(&self, request: BaseTypeSessionRequest) -> SimardResult<CopilotSdkSession> {
         if !self.descriptor.supports_topology(request.topology) {
             return Err(SimardError::UnsupportedTopology {
@@ -147,9 +166,9 @@ impl CopilotSdkAdapter {
             });
         }
 
-        // Issue #1664: wire real memory + knowledge bridges instead of the
+        // Issue #1664: wire real memory + knowledge readers instead of the
         // previously-hardcoded `None`/`None`. When enrichment is configured
-        // the bridges are launched here (with graceful degradation) via the
+        // the readers are launched here (with graceful degradation) via the
         // shared [`EnrichmentSource::resolve`] and stored in the normalized
         // `EnrichmentClients` bundle (issue #1665) so that the shared
         // `enrich_input` entry point actually injects memory facts, procedures,
@@ -165,6 +184,7 @@ impl CopilotSdkAdapter {
             is_closed: false,
             turn_count: 0,
             session_uuid: None,
+            meeting_binary_override: self.meeting_binary_override.clone(),
         })
     }
 }
@@ -198,6 +218,9 @@ struct CopilotSdkSession {
     /// `copilot` invocation so that copilot maintains conversation context
     /// across turns without needing a persistent interactive process.
     session_uuid: Option<String>,
+    /// Test-only seam inherited from the adapter (issue #2732). `None` in
+    /// production → meeting turns exec the real [`MEETING_COPILOT_BINARY`].
+    meeting_binary_override: Option<String>,
 }
 
 impl std::fmt::Debug for CopilotSdkSession {
@@ -247,13 +270,14 @@ impl CopilotSdkSession {
             is_closed: false,
             turn_count: 0,
             session_uuid: None,
+            meeting_binary_override: None,
         }
     }
 
-    /// Test-only builder that injects pre-constructed enrichment bridges so a
+    /// Test-only builder that injects pre-constructed enrichment readers so a
     /// test can assert that `enrich_input` consumes them (issues #1664/#1665).
     #[cfg(test)]
-    fn with_test_bridges(
+    fn with_test_readers(
         mut self,
         memory_client: Option<Box<dyn CognitiveMemoryOps>>,
         knowledge_client: Option<KnowledgeClient>,
@@ -261,6 +285,8 @@ impl CopilotSdkSession {
         self.enrichment = EnrichmentClients {
             memory: memory_client,
             knowledge: knowledge_client,
+            // Test-injected readers represent configured enrichment (#2942).
+            expected: true,
         };
         self
     }
@@ -300,7 +326,7 @@ impl CopilotSdkSession {
     /// objective into a single prompt body and wraps it with the standard
     /// objective/instructions scaffold via [`format_turn_input`].
     ///
-    /// With no bridges configured (the production default until #1664 wires
+    /// With no readers configured (the production default until #1664 wires
     /// them through), `enrich_input` returns the input unchanged, so the output
     /// is byte-identical to the pre-#1665 Copilot prompt.
     ///
@@ -372,10 +398,20 @@ impl CopilotSdkSession {
         // Render the enriched prompt once; it is streamed on stdin below.
         let formatted = self.render_enriched_prompt(&input)?;
 
+        // Resolve the meeting binary. Production always uses the const
+        // `MEETING_COPILOT_BINARY` ("copilot"); hermetic tests inject a fake
+        // via `with_meeting_binary_override` so no real `copilot` subprocess
+        // (and no auth/network dependency) is spawned in the default test run
+        // (#2732).
+        let meeting_binary = self
+            .meeting_binary_override
+            .as_deref()
+            .unwrap_or(MEETING_COPILOT_BINARY);
+
         // Direct exec of the copilot binary with only bounded flags — the prompt
         // is NOT on the command line (issue #2640).
         let mut command = build_meeting_command(
-            MEETING_COPILOT_BINARY,
+            meeting_binary,
             &session_id,
             self.config.working_directory.as_deref(),
         );
@@ -460,8 +496,15 @@ impl CopilotSdkSession {
             });
         }
 
-        // Record cost estimate.
-        let prompt_chars = input.objective.len();
+        // Record cost estimate. `formatted` is the exact prompt streamed to
+        // copilot on stdin above (the enriched preamble + identity context +
+        // objective wrapped in the `## Objective` / `## Instructions` scaffold),
+        // so it — not the bare `input.objective` — is the true prompt size.
+        // Recording `input.objective.len()` here undercounted meeting prompt
+        // tokens (often by tens of KB), inverting the Cost tab's prompt/
+        // completion ratio and understating spend (issue #4164). Matches the
+        // PTY path, which already records the enriched objective's length.
+        let prompt_chars = formatted.len();
         let completion_chars = response_text.len();
         if let Err(e) = crate::cost_tracking::record_cost(
             self.request.session_id.as_str(),
@@ -478,7 +521,7 @@ impl CopilotSdkSession {
 
         let objective_summary = objective_metadata(&input.objective);
         let evidence = vec![
-            format!("copilot-adapter-mode=meeting"),
+            "copilot-adapter-mode=meeting".to_string(),
             format!("copilot-meeting-session-id={session_id}"),
             format!("copilot-adapter-command={MEETING_COPILOT_BINARY}"),
             format!("copilot-adapter-turn={}", self.turn_count),

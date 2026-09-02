@@ -41,3 +41,20 @@ pub fn flush_snapshot(state_root: impl AsRef<Path>) -> std::io::Result<()> {
     let snap = registry::capture();
     snapshot::write_atomic(&snapshot::snapshot_path(state_root.as_ref()), &snap)
 }
+
+/// Capture the registry and flush it with an additive `enrichment` rollup section
+/// attached (issue #2942).
+///
+/// Identical to [`flush_snapshot`] but sets [`MetricsSnapshot::enrichment`] to
+/// `enrichment` before the atomic write, so the dashboard's `GET /api/enrichment`
+/// live-read sees the per-cycle enrichment attach-rate/averages without a
+/// separate store. `enrichment` is generic JSON so this module stays decoupled
+/// from the emit-side `enrichment_observability` module.
+pub fn flush_snapshot_with(
+    state_root: impl AsRef<Path>,
+    enrichment: Option<serde_json::Value>,
+) -> std::io::Result<()> {
+    let mut snap = registry::capture();
+    snap.enrichment = enrichment;
+    snapshot::write_atomic(&snapshot::snapshot_path(state_root.as_ref()), &snap)
+}

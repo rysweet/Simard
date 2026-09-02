@@ -56,7 +56,7 @@ pub trait ProgressEvidenceChecker: Send + Sync {
 /// Always returns `Accept { reason: "noop checker (no evidence enforced)" }`.
 ///
 /// Used:
-/// 1. By tests' default bridges constructors so existing tests don't
+/// 1. By tests' default memories constructors so existing tests don't
 ///    need to provide an `LlmSubmitter` implementation.
 /// 2. As the operator escape hatch via `SIMARD_PROGRESS_EVIDENCE=off` at
 ///    daemon boot.
@@ -98,6 +98,7 @@ mod tests {
     #[test]
     fn noop_checker_always_accepts() {
         let g = ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,

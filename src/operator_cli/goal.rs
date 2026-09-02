@@ -36,7 +36,9 @@
 
 use std::error::Error;
 
-use crate::goal_curation::{GoalDecomposer, GoalProgress, simard_state_root};
+use crate::goal_curation::{
+    GoalDecomposer, GoalProgress, is_quarantine_ref, labels, simard_state_root,
+};
 use crate::memory_ipc::launch_writer_client;
 use crate::ooda_actions::advance_goal::spawn::is_brain_failure_marker;
 
@@ -48,7 +50,10 @@ Simard goal subcommand
 Usage: simard goal <command> [args]
 
 Commands:
-  list                        Print active + backlog goal snapshot.
+  list [--tag <tag>]...        Print active + backlog goal snapshot. `--tag`
+                               is repeatable and filters to goals carrying ALL
+                               given tags (AND). A trailing LABELS column shows
+                               each goal's tags.
   add <priority> [--repo <slug>] [--standing] <description>
                               Add a new active goal at given priority (1-7).
                               `--repo <slug>` routes the goal's engineer to
@@ -64,6 +69,14 @@ Commands:
   demote <goal-id>            Move an active goal to the backlog.
   set-priority <goal-id> <p>  Change an active goal's priority.
   unblock <goal-id>           Clear Blocked status (unconditional).
+  set-done-gate <goal-id> [--pr <n>] [--issue <n>] [--criteria <text>]
+                              Bind a machine-checkable finish line to a goal so
+                              the completion gate can certify it automatically.
+                              --pr/--issue link a PR (checked MERGED) and/or an
+                              issue (checked CLOSED); --criteria replaces the
+                              plain-English finish line. Requires at least one of
+                              --pr/--issue. Clears the no-progress breaker and
+                              restores the goal to NotStarted.
   unblock-all                 Bulk-clear brain-failure-marker blocks only.
   remove <id>...              Drop one or more goal ids (variadic, idempotent).
   decompose <goal-id> [--max-children <N>] [--dry-run]
@@ -73,6 +86,9 @@ Commands:
                               --dry-run prints the proposed sub-goals without
                               writing anything.
   cleanup --placeholders      Sweep placeholder goals (description = 'Goal <id>').
+  label <goal-id> add <tag>   Add a free-form tag to a goal (idempotent).
+  label <goal-id> remove <tag>  Remove a tag from a goal (no-op if absent).
+  label <goal-id> list        Print a goal's tags, one per line ('(none)' if bare).
   help, -h, --help            Show this help message and exit.
 ";
 
@@ -89,13 +105,18 @@ pub(super) fn dispatch_goal_command(
             Ok(())
         }
         "list" => {
-            reject_extra_args(args)?;
-            handle_list()
+            let tags = parse_list_tags(args)?;
+            handle_list(&tags)
         }
         "unblock" => {
             let goal_id = next_required(&mut args, "goal id")?;
             reject_extra_args(args)?;
             handle_unblock(&goal_id)
+        }
+        "set-done-gate" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let flags: Vec<String> = args.collect();
+            handle_set_done_gate(&goal_id, &flags)
         }
         "unblock-all" => {
             reject_extra_args(args)?;
@@ -149,6 +170,11 @@ pub(super) fn dispatch_goal_command(
             let flags: Vec<String> = args.collect();
             handle_cleanup(&flags)
         }
+        "label" => {
+            let goal_id = next_required(&mut args, "goal id")?;
+            let sub = next_required(&mut args, "label subcommand (add|remove|list)")?;
+            handle_label(&goal_id, &sub, args)
+        }
         other => Err(format!("unsupported command 'goal {other}'").into()),
     }
 }
@@ -161,9 +187,9 @@ pub(super) fn dispatch_goal_command(
 /// live board. Surfaces I/O / parse failures as `Err` so the CLI exits non-zero.
 fn load_board() -> Result<crate::goal_curation::GoalBoard, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let persistent = crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    let persistent = crate::goal_board_store::load_or_migrate(&state_root, memory.ops())
         .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
     Ok(persistent.board)
 }
@@ -182,9 +208,9 @@ fn with_board<R>(
     f: impl FnOnce(&mut crate::goal_curation::GoalBoard) -> Result<R, Box<dyn Error>>,
 ) -> Result<R, Box<dyn Error>> {
     let state_root = simard_state_root();
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    crate::goal_board_store::load_or_migrate(&state_root, bridge.ops())
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    crate::goal_board_store::load_or_migrate(&state_root, memory.ops())
         .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
     let out = crate::goal_board_store::mutate(&state_root, move |s| {
         let snapshot = s.board.clone();
@@ -200,7 +226,44 @@ fn with_board<R>(
         format!("failed to persist authoritative goal store: {e}").into()
     })??;
     let committed = crate::goal_board_store::load(&state_root).board;
-    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, bridge.ops()) {
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, memory.ops()) {
+        eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
+    }
+    Ok(out)
+}
+
+/// Atomically apply `f` to the whole authoritative [`PersistentGoalState`] —
+/// board **and** the no-progress breaker counters — under the shared store
+/// flock, then mirror the committed board to the cognitive-memory cache.
+///
+/// Identical anti-clobber semantics to [`with_board`], but `f` receives the full
+/// persistent state so a mutation can both edit a goal and reset its breaker
+/// bookkeeping (`no_progress`) in one atomic window. On `Err`, the pre-image is
+/// restored and the error surfaced so a rejected command never leaves a partial
+/// write.
+fn with_state<R>(
+    f: impl FnOnce(&mut crate::goal_board_store::PersistentGoalState) -> Result<R, Box<dyn Error>>,
+) -> Result<R, Box<dyn Error>> {
+    let state_root = simard_state_root();
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    crate::goal_board_store::load_or_migrate(&state_root, memory.ops())
+        .map_err(|e| format!("failed to load authoritative goal store: {e}"))?;
+    let out = crate::goal_board_store::mutate(&state_root, move |s| {
+        let snapshot = s.clone();
+        match f(s) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                *s = snapshot;
+                Err(e)
+            }
+        }
+    })
+    .map_err(|e| -> Box<dyn Error> {
+        format!("failed to persist authoritative goal store: {e}").into()
+    })??;
+    let committed = crate::goal_board_store::load(&state_root).board;
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(&committed, memory.ops()) {
         eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
     }
     Ok(out)
@@ -217,9 +280,9 @@ fn commit_board_blind(board: &crate::goal_curation::GoalBoard) -> Result<(), Box
         s.board = b;
     })
     .map_err(|e| format!("failed to persist goal board: {e}"))?;
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    if let Err(e) = crate::goal_curation::overwrite_memory_cache(board, bridge.ops()) {
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    if let Err(e) = crate::goal_curation::overwrite_memory_cache(board, memory.ops()) {
         eprintln!("[simard] goal: warning: memory cache refresh failed: {e}");
     }
     Ok(())
@@ -235,38 +298,206 @@ fn tombstone(ids: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn handle_list() -> Result<(), Box<dyn Error>> {
-    let board = load_board()?;
-    println!(
-        "active goals: {} / {}",
-        board.active.len(),
-        crate::goal_curation::MAX_ACTIVE_GOALS
-    );
-    if board.active.is_empty() {
-        println!("  (none)");
+/// Parse the repeatable `--tag <tag>` / `--tag=<tag>` flags for `goal list`.
+/// Each tag is trimmed (empty-after-trim rejected). Any other token is a usage
+/// error. Repeated tags combine with AND at filter time.
+fn parse_list_tags(args: impl Iterator<Item = String>) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut tags = Vec::new();
+    let mut iter = args;
+    while let Some(tok) = iter.next() {
+        let raw = if tok == "--tag" {
+            iter.next()
+                .ok_or_else(|| -> Box<dyn Error> { "usage: --tag requires a <tag>".into() })?
+        } else if let Some(v) = tok.strip_prefix("--tag=") {
+            v.to_string()
+        } else {
+            return Err(format!(
+                "unexpected argument '{tok}' (usage: simard goal list [--tag <tag>]...)"
+            )
+            .into());
+        };
+        let tag = labels::validate_tag(&raw)?;
+        tags.push(tag);
+    }
+    Ok(tags)
+}
+
+/// Pure formatter for the active-goals section of `goal list`, filtered to
+/// goals carrying ALL of `tags` (AND; empty `tags` matches everything). Returns
+/// the lines to print — a count line (annotated `(filtered by tag)` when a
+/// filter is active), then a TSV header with a trailing `LABELS` column and one
+/// row per goal. Kept pure so it is unit-testable without a live state root.
+fn format_active_goal_lines(
+    board: &crate::goal_curation::GoalBoard,
+    tags: &[String],
+) -> Vec<String> {
+    let filtered: Vec<&crate::goal_curation::ActiveGoal> = board
+        .active
+        .iter()
+        .filter(|g| labels::matches_all_tags(&g.labels, tags))
+        .collect();
+    let note = if tags.is_empty() {
+        ""
     } else {
-        // TSV-ish header so operators can pipe into awk / cut.
-        println!("ID\tPRIORITY\tSTATUS\tASSIGNED\tDESCRIPTION");
-        for g in &board.active {
+        " (filtered by tag)"
+    };
+    let mut out = vec![format!(
+        "active goals: {} / {}{}",
+        filtered.len(),
+        crate::goal_curation::MAX_ACTIVE_GOALS,
+        note,
+    )];
+    if filtered.is_empty() {
+        out.push("  (none)".to_string());
+    } else {
+        // TSV-ish header so operators can pipe into awk / cut. `LABELS` is
+        // appended AFTER the existing columns, so scripts that read the first
+        // five fields keep working.
+        out.push("ID\tPRIORITY\tSTATUS\tASSIGNED\tDESCRIPTION\tLABELS".to_string());
+        for g in &filtered {
             let assigned = g.assigned_to.as_deref().unwrap_or("-");
-            println!(
-                "{}\tp{}\t{}\t{}\t{}",
-                g.id, g.priority, g.status, assigned, g.description,
-            );
+            out.push(format!(
+                "{}\tp{}\t{}\t{}\t{}\t{}",
+                g.id,
+                g.priority,
+                g.status,
+                assigned,
+                g.description,
+                g.labels.join(","),
+            ));
         }
     }
-    println!("backlog: {} item(s)", board.backlog.len());
-    if !board.backlog.is_empty() {
-        println!("ID\tSCORE\tSOURCE\tDESCRIPTION");
-        for b in &board.backlog {
-            println!("{}\t{:.2}\t{}\t{}", b.id, b.score, b.source, b.description);
+    out
+}
+
+/// Pure formatter for `goal label <id> list`: one tag per line, or `(none)`.
+fn format_label_list(goal_labels: &[String]) -> Vec<String> {
+    if goal_labels.is_empty() {
+        vec!["(none)".to_string()]
+    } else {
+        goal_labels.to_vec()
+    }
+}
+
+fn handle_list(tags: &[String]) -> Result<(), Box<dyn Error>> {
+    let board = load_board()?;
+    for line in format_active_goal_lines(&board, tags) {
+        println!("{line}");
+    }
+    // A tag filter is an active-goal query; the backlog carries no labels, so
+    // suppress it when filtering to keep the filtered view focused.
+    if tags.is_empty() {
+        println!("backlog: {} item(s)", board.backlog.len());
+        if !board.backlog.is_empty() {
+            println!("ID\tSCORE\tSOURCE\tDESCRIPTION");
+            for b in &board.backlog {
+                println!("{}\t{:.2}\t{}\t{}", b.id, b.score, b.source, b.description);
+            }
         }
     }
     Ok(())
 }
 
+/// `simard goal label <goal-id> <add|remove|list> [<tag>]` — deterministic
+/// label CRUD on an active goal. Mutations persist through the same
+/// flock-guarded read-modify-write path as `goal add`/`remove`.
+fn handle_label(
+    goal_id: &str,
+    sub: &str,
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    match sub {
+        "add" => {
+            let tag = next_required(&mut args, "tag")?;
+            reject_extra_args(args)?;
+            handle_label_add(goal_id, &tag)
+        }
+        "remove" => {
+            let tag = next_required(&mut args, "tag")?;
+            reject_extra_args(args)?;
+            handle_label_remove(goal_id, &tag)
+        }
+        "list" => {
+            reject_extra_args(args)?;
+            handle_label_list(goal_id)
+        }
+        other => Err(format!(
+            "unsupported label subcommand '{other}' (expected: add, remove, list)"
+        )
+        .into()),
+    }
+}
+
+fn handle_label_add(goal_id: &str, raw_tag: &str) -> Result<(), Box<dyn Error>> {
+    let tag = labels::validate_tag(raw_tag)?;
+    if labels::is_source_tag(&tag) {
+        return Err(format!(
+            "tag '{tag}' is in the reserved 'source:*' provenance namespace, \
+             which is stamped automatically at goal creation and cannot be added by hand"
+        )
+        .into());
+    }
+    let added = with_board(|board| {
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board").into()
+            })?;
+        Ok(labels::add_label(&mut goal.labels, &tag))
+    })?;
+    if added {
+        eprintln!("[simard] goal label: added '{tag}' to '{goal_id}'");
+    } else {
+        eprintln!("[simard] goal label: '{goal_id}' already has '{tag}' (no-op)");
+    }
+    Ok(())
+}
+
+fn handle_label_remove(goal_id: &str, raw_tag: &str) -> Result<(), Box<dyn Error>> {
+    let tag = labels::validate_tag(raw_tag)?;
+    if labels::is_source_tag(&tag) {
+        return Err(format!(
+            "tag '{tag}' is a code-managed 'source:*' provenance label and cannot be removed by hand"
+        )
+        .into());
+    }
+    let removed = with_board(|board| {
+        let goal = board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id}' not found on active board").into()
+            })?;
+        Ok(labels::remove_label(&mut goal.labels, &tag))
+    })?;
+    if removed {
+        eprintln!("[simard] goal label: removed '{tag}' from '{goal_id}'");
+    } else {
+        eprintln!("[simard] goal label: '{goal_id}' has no '{tag}' (no-op)");
+    }
+    Ok(())
+}
+
+fn handle_label_list(goal_id: &str) -> Result<(), Box<dyn Error>> {
+    let board = load_board()?;
+    let goal = board
+        .active
+        .iter()
+        .find(|g| g.id == goal_id)
+        .ok_or_else(|| -> Box<dyn Error> {
+            format!("goal '{goal_id}' not found on active board").into()
+        })?;
+    for line in format_label_list(&goal.labels) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
-    let prior = with_board(|board| {
+    let (prior, quarantine_cleared) = with_board(|board| {
         let goal = board
             .active
             .iter_mut()
@@ -277,9 +508,171 @@ fn handle_unblock(goal_id: &str) -> Result<(), Box<dyn Error>> {
             })?;
         let prior = goal.status.clone();
         goal.status = GoalProgress::NotStarted;
-        Ok(prior)
+        // Clear the durable OODA breaker terminal-quarantine marker so the goal
+        // is fully revived: a quarantined goal is otherwise skipped forever by
+        // `reinvestigate_bare_blocked_goals`, so leaving the marker in place
+        // would restore the goal to `NotStarted` while still barring it from the
+        // re-investigation pass. `goal unblock` is the documented, explicit
+        // per-goal escape hatch (unlike `unblock-all`, which is deliberately
+        // scoped away from quarantines), so clearing the marker here is the
+        // intended recovery — it hands the goal a fresh bounded guided-retry
+        // window. The surfaced-failure counter was already reset when quarantine
+        // fired, so no further counter reset is needed.
+        let before = goal.wip_refs.len();
+        goal.wip_refs.retain(|w| !is_quarantine_ref(w));
+        let quarantine_cleared = goal.wip_refs.len() != before;
+        Ok((prior, quarantine_cleared))
     })?;
-    eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
+    if quarantine_cleared {
+        eprintln!(
+            "[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior}); \
+             cleared OODA breaker quarantine marker"
+        );
+    } else {
+        eprintln!("[simard] goal unblock: '{goal_id}' restored to NotStarted (was: {prior})");
+    }
+    Ok(())
+}
+
+/// Parsed `goal set-done-gate` flags.
+struct DoneGateFlags {
+    pr: Option<String>,
+    issue: Option<String>,
+    criteria: Option<String>,
+}
+
+/// Parse `[--pr <n>] [--issue <n>] [--criteria <text…>]`. `--criteria` is
+/// greedy: it consumes the remainder of the argument list as the finish-line
+/// text so an operator can pass an unquoted multi-word criterion.
+fn parse_done_gate_flags(flags: &[String]) -> Result<DoneGateFlags, Box<dyn Error>> {
+    let mut pr = None;
+    let mut issue = None;
+    let mut criteria = None;
+    let mut i = 0;
+    while i < flags.len() {
+        match flags[i].as_str() {
+            "--pr" => {
+                let v = flags
+                    .get(i + 1)
+                    .ok_or_else(|| -> Box<dyn Error> { "--pr requires a PR number".into() })?;
+                pr = Some(parse_ref_number("--pr", v)?);
+                i += 2;
+            }
+            "--issue" => {
+                let v = flags.get(i + 1).ok_or_else(|| -> Box<dyn Error> {
+                    "--issue requires an issue number".into()
+                })?;
+                issue = Some(parse_ref_number("--issue", v)?);
+                i += 2;
+            }
+            "--criteria" => {
+                let text = flags[i + 1..].join(" ");
+                if text.trim().is_empty() {
+                    return Err("--criteria requires a non-empty finish-line description".into());
+                }
+                criteria = Some(text.trim().to_string());
+                i = flags.len();
+            }
+            other => {
+                return Err(format!(
+                    "unknown flag '{other}' (expected --pr, --issue, or --criteria)"
+                )
+                .into());
+            }
+        }
+    }
+    Ok(DoneGateFlags {
+        pr,
+        issue,
+        criteria,
+    })
+}
+
+/// Normalise a PR/issue reference to a bare positive integer string, accepting a
+/// leading `#`. The completion gate resolves state via `gh <kind> view <num>`,
+/// so a non-numeric token would silently never certify.
+fn parse_ref_number(flag: &str, raw: &str) -> Result<String, Box<dyn Error>> {
+    let trimmed = raw.trim().trim_start_matches('#');
+    if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("{flag} expects a numeric reference, got '{raw}'").into());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// `simard goal set-done-gate <id> [--pr n] [--issue n] [--criteria text]` —
+/// bind a machine-checkable finish line to a goal so the completion gate
+/// (`src/goal_curation/completion_gate.rs`) can certify it automatically. A goal
+/// whose done-criteria lived only in prose has no PR/issue the gate can observe,
+/// so the no-progress breaker parks it as `UNCLEAR-CRITERIA`; this command is the
+/// supported operator remedy — it links the PR (checked MERGED) and/or issue
+/// (checked CLOSED), rewrites the plain-English finish line, resets the breaker,
+/// and restores the goal to `NotStarted` so work resumes toward a checkable end.
+///
+/// The edit is made **durable** against the daemon's in-flight-wins reconcile by
+/// recording a [`crate::goal_board_store::DoneGatePin`]: the daemon re-asserts
+/// the pinned anchor + finish line every cycle instead of clobbering the goal
+/// back to unmeasurable prose (the failure mode that made prior manual edits
+/// evaporate within a cycle).
+fn handle_set_done_gate(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error>> {
+    let parsed = parse_done_gate_flags(flags)?;
+    if parsed.pr.is_none() && parsed.issue.is_none() {
+        return Err(
+            "set-done-gate requires at least one of --pr <n> or --issue <n> (the anchor the \
+             completion gate measures)"
+                .into(),
+        );
+    }
+    let pin = crate::goal_board_store::DoneGatePin {
+        pr: parsed.pr.clone(),
+        issue: parsed.issue.clone(),
+        criteria: parsed.criteria.clone(),
+    };
+    let anchor = pin.anchor();
+    let goal_id_owned = goal_id.to_string();
+    let pin_for_board = pin.clone();
+    with_state(move |s| {
+        let goal = s
+            .board
+            .active
+            .iter_mut()
+            .find(|g| g.id == goal_id_owned)
+            .ok_or_else(|| -> Box<dyn Error> {
+                format!("goal '{goal_id_owned}' not found on the active board").into()
+            })?;
+
+        // Bind the measurable anchor(s) and rewrite the plain-English finish
+        // line via the shared pin logic (identical to the daemon's re-assert).
+        pin_for_board.apply_to(goal);
+
+        goal.status = GoalProgress::NotStarted;
+        goal.current_activity = Some(format!(
+            "done-gate pinned by operator: {}",
+            pin_for_board.anchor()
+        ));
+
+        // The goal now has a checkable finish line — treat that as concrete
+        // progress so the no-progress breaker forgets its prior no-action count,
+        // spent guided-retry, and re-investigation bookkeeping for this goal.
+        s.no_progress.record_progress(&goal_id_owned);
+
+        Ok(())
+    })?;
+
+    // Record the durable pin so the daemon's per-cycle reconcile re-asserts the
+    // finish line instead of reverting it. A pin-write failure is non-fatal: the
+    // board edit already landed; we only warn that it may not survive a cycle.
+    let state_root = simard_state_root();
+    if let Err(e) = crate::goal_board_store::record_done_gate_pin(&state_root, goal_id, pin) {
+        eprintln!(
+            "[simard] goal set-done-gate: warning: durable pin not recorded (edit applied but \
+             the daemon may revert it next cycle): {e}"
+        );
+    }
+
+    eprintln!(
+        "[simard] goal set-done-gate: '{goal_id}' pinned — {anchor}; breaker reset; status \
+         NotStarted"
+    );
     Ok(())
 }
 
@@ -372,6 +765,7 @@ fn handle_add(
                 current_activity: None,
                 wip_refs: vec![],
                 last_progress_update_at: None,
+                labels: vec![crate::goal_curation::labels::SOURCE_OPERATOR.to_string()],
             });
             Ok(())
         })?;
@@ -552,7 +946,7 @@ fn handle_remove(ids: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// `simard goal decompose <goal-id> [--max-children <N>] [--dry-run]` — break a
 /// large active goal into 2-6 bounded sub-goals (issue #2405). Routes through
-/// the same cognitive-memory **writer bridge** as `goal add` / `goal remove`,
+/// the same cognitive-memory **writer memory** as `goal add` / `goal remove`,
 /// so the write is serialized by the daemon when one is running and takes the
 /// local writer lock otherwise. The parent->child `decomposes_into` edges are
 /// written into the graph (and are queryable back), then the mutated board is
@@ -587,11 +981,11 @@ fn handle_decompose(goal_id: &str, flags: &[String]) -> Result<(), Box<dyn Error
     }
 
     let state_root = simard_state_root();
-    let bridge = launch_writer_client(&state_root)
-        .map_err(|e| format!("failed to open cognitive memory writer bridge: {e}"))?;
-    let ops = bridge.ops();
+    let memory = launch_writer_client(&state_root)
+        .map_err(|e| format!("failed to open cognitive memory writer memory: {e}"))?;
+    let ops = memory.ops();
 
-    // Load from the authoritative store (issue #1); the memory bridge is still
+    // Load from the authoritative store (issue #1); the memory memory is still
     // used below for the durable graph-edge writes performed by decompose_goal.
     let mut board = load_board()?;
     let parent = board
@@ -753,6 +1147,149 @@ fn is_id_placeholder(id: &str, desc: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- label formatting + tag parsing (issue #2743) ---------------------
+
+    fn goal_with(id: &str, labels: &[&str]) -> crate::goal_curation::ActiveGoal {
+        crate::goal_curation::ActiveGoal::new(id, format!("desc {id}"), 1)
+            .with_labels(labels.iter().map(|s| (*s).to_string()).collect())
+    }
+
+    #[test]
+    fn parse_list_tags_collects_repeatable_flags() {
+        let args = ["--tag", "source:creative-ideas", "--tag=area:dashboard"]
+            .into_iter()
+            .map(String::from);
+        let tags = parse_list_tags(args).expect("parse");
+        assert_eq!(tags, vec!["source:creative-ideas", "area:dashboard"]);
+    }
+
+    #[test]
+    fn parse_list_tags_rejects_empty_and_stray_tokens() {
+        // Empty-after-trim tag is rejected.
+        assert!(parse_list_tags(["--tag", "   "].into_iter().map(String::from)).is_err());
+        // A bare positional is a usage error.
+        assert!(parse_list_tags(["oops"].into_iter().map(String::from)).is_err());
+        // --tag without a value is an error.
+        assert!(parse_list_tags(["--tag"].into_iter().map(String::from)).is_err());
+    }
+
+    #[test]
+    fn parse_list_tags_rejects_overlong_and_control_char_tags() {
+        // H2: the --tag filter is an operator-input boundary, so it enforces the
+        // same length cap and control-char rejection as label add.
+        let over = "x".repeat(labels::MAX_TAG_LEN + 1);
+        assert!(parse_list_tags(["--tag".to_string(), over].into_iter()).is_err());
+        assert!(
+            parse_list_tags(["--tag".to_string(), "area:\u{1b}bad".to_string()].into_iter())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_list_tags_allows_source_namespace_for_filtering() {
+        // H1 guards *mutation*, not filtering: you can still filter by provenance.
+        let tags =
+            parse_list_tags(["--tag".to_string(), "source:operator".to_string()].into_iter())
+                .expect("filtering by a source:* tag is allowed");
+        assert_eq!(tags, vec!["source:operator".to_string()]);
+    }
+
+    #[test]
+    fn label_add_rejects_reserved_source_namespace() {
+        // H1: an operator cannot forge a provenance chip. Rejection happens
+        // before any board I/O, so no state root is needed.
+        let err = handle_label_add("g1", "source:operator")
+            .expect_err("adding a source:* label must be rejected");
+        assert!(err.to_string().contains("source:*"), "got: {err}");
+    }
+
+    #[test]
+    fn label_add_rejects_overlong_tag() {
+        let long = "a".repeat(labels::MAX_TAG_LEN + 1);
+        let err = handle_label_add("g1", &long).expect_err("over-long tag must be rejected");
+        assert!(err.to_string().contains("too long"), "got: {err}");
+    }
+
+    #[test]
+    fn label_add_rejects_control_char_tag() {
+        let err = handle_label_add("g1", "area:\u{1b}[31mbad")
+            .expect_err("control-char tag must be rejected");
+        assert!(err.to_string().contains("control"), "got: {err}");
+    }
+
+    #[test]
+    fn label_remove_rejects_reserved_source_namespace() {
+        // H1: provenance is immutable from the operator CLI — it cannot be
+        // stripped by hand either.
+        let err = handle_label_remove("g1", "source:seed")
+            .expect_err("removing a source:* label must be rejected");
+        assert!(err.to_string().contains("source:*"), "got: {err}");
+    }
+
+    #[test]
+    fn format_active_goal_lines_appends_labels_column_unfiltered() {
+        let mut board = crate::goal_curation::GoalBoard::new();
+        board
+            .active
+            .push(goal_with("g1", &["source:seed", "area:x"]));
+        board.active.push(goal_with("g2", &[]));
+        let lines = format_active_goal_lines(&board, &[]);
+        assert_eq!(lines[0], "active goals: 2 / 20"); // no "(filtered by tag)"
+        assert!(
+            lines[1].ends_with("\tLABELS"),
+            "header has trailing LABELS: {}",
+            lines[1]
+        );
+        assert!(lines[2].ends_with("\tsource:seed,area:x"));
+        assert!(
+            lines[3].ends_with("\t"),
+            "an unlabelled goal shows an empty LABELS cell"
+        );
+    }
+
+    #[test]
+    fn format_active_goal_lines_filters_with_and_and_annotates_count() {
+        let mut board = crate::goal_curation::GoalBoard::new();
+        board.active.push(goal_with(
+            "g1",
+            &["source:creative-ideas", "area:dashboard"],
+        ));
+        board
+            .active
+            .push(goal_with("g2", &["source:creative-ideas"]));
+        board.active.push(goal_with("g3", &["source:operator"]));
+
+        // Single tag: two match.
+        let lines = format_active_goal_lines(&board, &["source:creative-ideas".to_string()]);
+        assert_eq!(lines[0], "active goals: 2 / 20 (filtered by tag)");
+
+        // AND of two tags: only g1 matches.
+        let lines = format_active_goal_lines(
+            &board,
+            &[
+                "source:creative-ideas".to_string(),
+                "area:dashboard".to_string(),
+            ],
+        );
+        assert_eq!(lines[0], "active goals: 1 / 20 (filtered by tag)");
+        assert!(lines.iter().any(|l| l.starts_with("g1\t")));
+        assert!(!lines.iter().any(|l| l.starts_with("g2\t")));
+
+        // A tag no goal has -> empty filtered view.
+        let lines = format_active_goal_lines(&board, &["nope".to_string()]);
+        assert_eq!(lines[0], "active goals: 0 / 20 (filtered by tag)");
+        assert_eq!(lines[1], "  (none)");
+    }
+
+    #[test]
+    fn format_label_list_lists_tags_or_none() {
+        assert_eq!(format_label_list(&[]), vec!["(none)".to_string()]);
+        assert_eq!(
+            format_label_list(&["a".to_string(), "b".to_string()]),
+            vec!["a".to_string(), "b".to_string()],
+        );
+    }
 
     // ---- is_id_placeholder ------------------------------------------------
 
@@ -933,7 +1470,7 @@ mod tests {
         // `decompose` must be a recognized verb that requires a goal id —
         // NOT fall through to the `unsupported command` arm. Reaching the
         // missing-id error proves the verb is wired without touching the
-        // cognitive-memory writer bridge.
+        // cognitive-memory writer memory.
         let args = vec!["decompose".to_string()];
         let result = dispatch_goal_command(args.into_iter());
         assert!(result.is_err());

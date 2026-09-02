@@ -6,8 +6,8 @@
 //! `.active_top_goals(5)?`. That must become:
 //!
 //! ```ignore
-//! let bridge = launch_writer_client(state_root)?;
-//! let board = load_goal_board(bridge.ops())?;
+//! let memory = launch_writer_client(state_root)?;
+//! let board = load_goal_board(memory.ops())?;
 //! let records = active_goals_as_records(&board);
 //! records.into_iter().take(5).collect()
 //! ```
@@ -40,6 +40,7 @@ fn seed_active_only(state_root: &std::path::Path, n: usize) -> GoalBoard {
     let mut board = GoalBoard::new();
     for i in 0..n {
         board.active.push(ActiveGoal {
+            labels: Vec::new(),
             parent_goal_id: None,
             priority_explicit: false,
             repo: None,
