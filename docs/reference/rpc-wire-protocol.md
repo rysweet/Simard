@@ -1,7 +1,7 @@
 ---
 title: RPC Wire Protocol Reference
 description: Complete JSON-RPC-style wire protocol specification for all Simard RPC methods.
-last_updated: 2026-07-06
+last_updated: 2026-09-03
 owner: simard
 doc_type: reference
 ---
@@ -524,7 +524,7 @@ part of the suite; run it on its own via `gym.run_scenario`.
 | Field | Type | Description |
 |-------|------|-------------|
 | suite_id | string | Echoes the requested label |
-| success | bool | `true` only if **every** scenario passed (`scenarios_passed == scenarios_total`). The adapter computes this directly from the per-scenario results; it does **not** trust the engine's suite-level flag, which has a known inverted-logic quirk upstream. |
+| success | bool | `true` only if **every** scenario passed (`scenarios_passed == scenarios_total`). The adapter computes this directly from the per-scenario results; it does **not** trust the engine's suite-level flag, whose upstream expression is a tautology that always evaluates to `true` and therefore carries no information. |
 | overall_score | float | Mean score across passing scenarios, in `[0.0, 1.0]` |
 | dimensions | object | Five-key aggregate (mean across passing scenarios) |
 | scenario_results | array | One `gym.run_scenario`-shaped object per scenario; each `scenario_id` is the advertised descriptive id, restored by the adapter |

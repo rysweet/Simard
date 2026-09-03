@@ -5,10 +5,10 @@ digraph compile_deps_external_runtime {
 
     simard [label="simard"];
 
-    amplihack_memory [label="amplihack-memory\ngit c266e15 persistent"];
+    amplihack_memory [label="amplihack-memory\ngit 0031505 persistent"];
     rustyclawd_core [label="rustyclawd-core\ngit dcccad8"];
     rustyclawd_tools [label="rustyclawd-tools\ngit dcccad8"];
-    amplihack_agent_eval [label="amplihack-agent-eval\ngit 14dc30b"];
+    amplihack_agent_eval [label="amplihack-agent-eval\ngit 9ee05a0"];
     lbug [label="lbug\ngit 5a2c107"];
 
     rusqlite [label="rusqlite =0.31.0\nbackup bundled"];

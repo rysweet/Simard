@@ -154,11 +154,53 @@ rustyclawd-tools = { git = "https://github.com/rysweet/RustyClawd.git", rev = "d
 # wiring (`src/gym_runner_client.rs`) and Simard-specific scoring/history stay
 # in this crate. The crate is a light workspace member (serde/serde_json/
 # thiserror/tracing/chrono only — no heavy workspace deps are transitive).
-# Bumped (issue #2626) to the current HEAD of amplihack-rs `main` (verified via
-# `git ls-remote`); the delta is workflow/recipe/CI-tooling fixes only, with the
-# `amplihack-agent-eval` crate surface (GymRunner/GymConfig/GymScenarioResult)
-# and the reverted workspace version 0.11.1 unchanged.
-amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "14dc30b10e87764120c6f2bae7f3630522c29e5d" }
+# Pin lineage (each rev is an immutable amplihack-rs commit SHA):
+#   59548a96… (initial de-fork, #2323)
+#     -> 2a93441d… landed by issue #2626 — bump both amplihack pins to the
+#        then-current upstream `main` HEAD;
+#     -> 14dc30b1… landed by issue #2767 — pick up amplihack-rs PR #856, the
+#        clean agent-result channel off the noisy stdout (a 2026-07-07 UTC
+#        commit: 2026-07-07 01:47:01 UTC / 2026-07-06 18:47:01 -0700);
+#     -> 9ee05a06… (this pin, below).
+# Across 2a93441d…/14dc30b1… the delta was workflow/recipe/CI-tooling only, with
+# the `amplihack-agent-eval` crate surface (GymRunner/GymConfig/
+# GymScenarioResult) unchanged.
+#
+# This pin is the amplihack-rs **v0.18.25** release source commit
+# `9ee05a06eab98e9ab504a031bffaa4190700c2af` (release published 2026-09-02;
+# pin verified 2026-09-03). Provenance, all verified with `git ls-remote` /
+# `git cat-file` against https://github.com/rysweet/amplihack-rs.git:
+#   * the **annotated** tag `refs/tags/v0.18.25` is object `e947170a…`, and it
+#     dereferences (`refs/tags/v0.18.25^{}`) to commit `9ee05a06…`;
+#   * `refs/heads/main` *was* `9ee05a06…` **at verification on 2026-09-03** —
+#     i.e. the release tag and `main` pointed at the same commit at that
+#     instant, which establishes that `9ee05a06…` is a mainline release commit
+#     rather than a side/topic branch. This is a point-in-time observation, not
+#     a standing claim: upstream `main` advances, and once it does this comment
+#     stays true (it records what was observed then) while the pin deliberately
+#     does not move.
+#   * `9ee05a06…` was 200 commits ahead of the previous pin `14dc30b1…` at that
+#     same verification.
+# The pin stays the immutable commit SHA (never the tag) so the build cannot be
+# re-pointed by an upstream tag move.
+#
+# API impact: NONE. The `crates/amplihack-agent-eval` subtree is **byte
+# identical** across those 200 commits — both `14dc30b1…:crates/amplihack-agent-eval`
+# and `9ee05a06…:crates/amplihack-agent-eval` resolve to git tree
+# `1a635333f15fa2964e6d0ecae35b5a9625d59ee7`, and the crate's own dependency set
+# (serde/serde_json/thiserror/tracing/chrono) is unchanged. So
+# `src/gym_runner_client.rs` needs no adaptation and the wire JSON stays
+# byte-stable.
+#
+# Lockfile impact: the crate inherits `version.workspace`, which upstream moved
+# 0.11.1 -> 0.18.0 in the workspace manifest, so Cargo.lock records
+# `amplihack-agent-eval 0.18.0` at the new rev. NOTE the deliberate mismatch:
+# the upstream *release* is tagged v0.18.25 while the upstream *workspace crate
+# version* at `9ee05a06…` is 0.18.0 — the tag tracks the release train, not the
+# crate version. Both readings are pinned to that immutable commit, so neither
+# changes as upstream advances. Simard consumes the crate by rev, so only the
+# rev is authoritative.
+amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "9ee05a06eab98e9ab504a031bffaa4190700c2af" }
 # De-fork phase 2b (issue #2307): the native cognitive-memory fork is gone, but
 # `lbug` is still a direct dependency of the standalone `simard-tui` binary
 # (`src/bin/simard_tui/goals.rs`), which opens a LadybugDB read-only to render

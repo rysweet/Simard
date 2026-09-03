@@ -1,11 +1,11 @@
 ---
 title: amplihack pin bump to upstream main (#2626)
-description: "Reference record for the issue #2626 dependency-pin reconcile that bumped Simard's amplihack-agent-eval and amplihack-memory git-rev pins from behind-main revisions to the current upstream main HEADs, with the lbug lockstep, API-parity, and supply-chain re-verification that gated the bump."
-last_updated: 2026-07-06
+description: "Historical record of the issue #2626 dependency-pin reconcile that bumped Simard's amplihack-agent-eval and amplihack-memory git-rev pins from behind-main revisions to the then-current upstream main HEADs, with the lbug lockstep, API-parity, and supply-chain re-verification that gated the bump. The verification method remains current; the rev table and the track-current-main target policy are superseded."
+last_updated: 2026-09-03
 review_schedule: as-needed
 owner: simard
 doc_type: reference
-status: active
+status: historical — superseded; the live pin is the `amplihack-agent-eval` line in the root `Cargo.toml`
 related:
   - ../howto/self-maintain-dependency-pins.md
   - ../architecture/gym-eval-library-adapter.md
@@ -16,14 +16,49 @@ related:
 
 # amplihack pin bump to upstream main (#2626)
 
-> **Status: active.** This page is the completed change record for issue
+> **Status: historical — superseded.** This page is the completed change record
+> for issue
 > [#2626](https://github.com/rysweet/Simard/issues/2626): the reconcile that
 > re-pointed Simard's two `amplihack-*` git-rev pins from stale, behind-`main`
-> revisions to the current upstream `main` HEADs, so the fixes those upstream
-> repos already merged actually run in Simard's own build. It is a concrete,
-> worked instance of the **proactive reconcile (Trigger B)** described in
+> revisions to the then-current upstream `main` HEADs, so the fixes those
+> upstream repos already merged actually run in Simard's own build. It is a
+> concrete, worked instance of the **proactive reconcile (Trigger B)** described in
 > [How to keep Simard's dependency pins up to date](../howto/self-maintain-dependency-pins.md),
-> and it doubles as the specification the bump PR is verified against.
+> and it doubled as the specification the #2626 bump PR was verified against.
+
+> **⚠ Historical record — the revs below are NOT the current pins.**
+> This page is frozen at the state of the #2626 bump, which landed
+> `amplihack-agent-eval` at `2a93441d…`. That pin has since moved twice:
+> issue **#2767** advanced it to `14dc30b1…` (amplihack-rs PR #856, the clean
+> agent-result channel; a 2026-07-07 UTC commit), and this change — verified
+> **2026-09-03** — advanced it to `9ee05a06eab98e9ab504a031bffaa4190700c2af`,
+> the amplihack-rs **v0.18.25** release source commit. `amplihack-memory` has
+> likewise moved on (see
+> [the WAL crash-consistency record](./cognitive-memory-wal-crash-consistency.md),
+> issue #4687). The authoritative pins are always the live lines in the root
+> `Cargo.toml`, guarded by `tests/issue_2626_amplihack_pin_bump.rs` (which rev
+> is pinned) and `tests/amplihack_agent_eval_api_compat.rs` (that the pinned
+> crate still exposes the API `src/gym_runner_client.rs` calls). The *method*
+> this page documents — lockstep, API-parity, and supply-chain re-verification —
+> remains the current procedure; only its rev table is historical.
+
+> **What is reusable here vs. what is obsolete.** Read this page with the split
+> below; individual sections carry their own ⚠ markers.
+>
+> | Still current — the **method** | Superseded — the **target policy** |
+> | --- | --- |
+> | Pin by **immutable 40-char commit SHA** on the upstream default-branch line, never a branch/tag ref | "The pin must equal the **current** upstream `main` HEAD" |
+> | **Manifest ↔ lockfile parity**: `Cargo.lock` records exactly the pinned revs | "Drift from `main` must be driven back to **zero**" |
+> | **API-parity / compatibility** check before adopting a rev | "Bump whenever `main` has advanced" |
+> | **`lbug` lockstep**: exactly one engine / one store format | |
+> | **Supply-chain re-verification** (`cargo deny` / `audit` / `vet`) | |
+> | **Build + test gates**, and the done-gate that the fix must run in Simard's own build | |
+>
+> Under the current policy a pin is adopted because it is an **approved target**
+> — for `amplihack-agent-eval` the reviewed **`v0.18.25` release source commit**
+> `9ee05a06…`. Upstream `main` moves past that commit continuously, and that
+> drift does **not** make the pin invalid or stale. See
+> [Drift is a signal, not an automatic bump](../howto/self-maintain-dependency-pins.md#drift-is-a-signal-not-an-automatic-bump).
 
 Two of the four git-rev pins in the root `Cargo.toml` had drifted behind their
 upstream default branch:
@@ -37,17 +72,21 @@ upstream default branch:
 A git-rev pin is reproducible but **frozen**: until the pin moves, merged
 upstream work is absent from the daemon that depends on it. Per the operator
 policy — *when Simard updates a tool she maintains she must bump her **own**
-dependency and run the new code* — this reconcile moves both pins to the exact
-`main` HEADs and re-verifies the whole graph.
+dependency and run the new code* — this reconcile **moved** both pins to what
+were then the exact `main` HEADs and re-verified the whole graph. (Choosing
+`main` HEAD as the target was the #2626-era policy; see the banner above for the
+current target rule.)
 
 ---
 
 ## What changed
 
-Both pins were re-pointed to the exact 40-character `main` HEAD of their
-upstream repository. No other dependency, feature, or profile was touched.
+Both pins were re-pointed to what was, **at #2626 bump time**, the exact
+40-character `main` HEAD of their upstream repository — that was the approved
+target then; it is not a standing rule (see the banner above). No other
+dependency, feature, or profile was touched.
 
-| Crate | Upstream repo | Old rev (behind `main`) | New rev (`main` HEAD) |
+| Crate | Upstream repo | Old rev (behind `main`) | New rev (`main` HEAD *at the time*) |
 | --- | --- | --- | --- |
 | `amplihack-agent-eval` | `rysweet/amplihack-rs` | `59548a96049ab8d558110bcaf9c82a4316f1bbf0` | `2a93441d1837f9f853d5dddc56cc1088353a8872` |
 | `amplihack-memory` | `rysweet/amplihack-memory-lib` | `5d7db77dd5c3bafb2846c2f50761112588a47563` | `f80037089a735bd0d394e3eec5cea9fcae1895ea` |
@@ -66,18 +105,28 @@ lbug = "=0.17.1"
 
 ---
 
-## Provenance: both revs are upstream `main` HEADs
+## Provenance: both revs were upstream `main` HEADs *at #2626 bump time*
+
+> **⚠ Historical — obsolete target policy.** This section records the #2626-era
+> rule that a pin must equal the **current** upstream `main` HEAD. That rule is
+> **superseded**. `amplihack-agent-eval` is now pinned to a reviewed **release**
+> commit (`v0.18.25`), and upstream `main` advances past any pin continuously, so
+> "equals `main` HEAD" is no longer a validity condition. What remains current is
+> the narrower requirement below: a pin must be an **immutable commit SHA on the
+> upstream default-branch line**, never a feature-branch ref. See
+> [Drift is a signal, not an automatic bump](../howto/self-maintain-dependency-pins.md#drift-is-a-signal-not-an-automatic-bump).
 
 Each new rev was taken from the live upstream default branch at bump time, not
 from a feature branch (a feature-branch ref can be force-pushed or GC'd, which
-would freeze the build against an unmergeable commit):
+would freeze the build against an unmergeable commit) — **that** constraint is
+still in force today:
 
 ```bash
 git ls-remote https://github.com/rysweet/amplihack-rs.git main
-# 2a93441d1837f9f853d5dddc56cc1088353a8872	refs/heads/main
+# 2a93441d1837f9f853d5dddc56cc1088353a8872	refs/heads/main   # as of 2026-06/07
 
 git ls-remote https://github.com/rysweet/amplihack-memory-lib.git main
-# f80037089a735bd0d394e3eec5cea9fcae1895ea	refs/heads/main
+# f80037089a735bd0d394e3eec5cea9fcae1895ea	refs/heads/main   # as of 2026-06/07
 ```
 
 After the bump, `Cargo.lock` records the identical revs for both crates. Confirm
@@ -92,12 +141,22 @@ grep -A3 'name = "amplihack-agent-eval"' Cargo.lock   # source ... #2a93441...
 grep -A3 'name = "amplihack-memory"'     Cargo.lock   # source ... #f800370...
 ```
 
-The drift that motivated the bump is verifiable with the GitHub compare API
-against the *old* rev (both report `behind_by > 0` before the bump, `0` after):
+The drift that motivated the #2626 bump was measured with the GitHub compare API
+against the *old* revs.
+
+> **⚠ Two defects in the original snippet, preserved here only as history.**
+> (1) **Wrong field.** With `base=<pin>` and `head=main`, `ahead_by` is how far
+> `main` is ahead of the pin; `behind_by` is **always `0`** in this orientation,
+> so the original `--jq '.behind_by'` printed `0` regardless of drift.
+> (2) **Obsolete criterion.** "Drift must return to `0`" is no longer a
+> correctness condition — see the corrected, current procedure in
+> [Trigger B](../howto/self-maintain-dependency-pins.md#trigger-b--the-proactive-reconcile).
+> The corrected form of the measurement is:
 
 ```bash
-gh api repos/rysweet/amplihack-rs/compare/59548a96049ab8d558110bcaf9c82a4316f1bbf0...main --jq '.behind_by'
-gh api repos/rysweet/amplihack-memory-lib/compare/5d7db77dd5c3bafb2846c2f50761112588a47563...main --jq '.behind_by'
+# base=<old pin>, head=main  =>  .ahead_by = commits main is ahead of the pin
+gh api repos/rysweet/amplihack-rs/compare/59548a96049ab8d558110bcaf9c82a4316f1bbf0...main --jq '.ahead_by'
+gh api repos/rysweet/amplihack-memory-lib/compare/5d7db77dd5c3bafb2846c2f50761112588a47563...main --jq '.ahead_by'
 ```
 
 ---
@@ -195,9 +254,17 @@ cargo vet --locked            # transitive trust certification
   already-allowlisted remotes (`amplihack-rs.git`, `amplihack-memory-lib.git`).
   `unknown-git = "deny"` holds; the bump never adds a git source to work around
   the allowlist.
-- **Pin integrity.** Each pin is an exact 40-char SHA verified equal to its
-  upstream `main` HEAD, and `Cargo.lock`'s git rev is re-confirmed to match after
-  `cargo update`.
+- **Pin integrity.** *(Current rule — not #2626-specific.)* Each pin must be an
+  **immutable full 40-char commit SHA**, verified equal to the **approved target
+  commit** chosen for that bump, with **manifest/lock parity**: `Cargo.lock`'s
+  git rev is re-confirmed to match `Cargo.toml` after `cargo update`. The
+  *approved target* is whatever commit was reviewed and selected — at #2626 that
+  happened to be the upstream `main` HEAD, whereas current policy may select a
+  reviewed **release** commit instead (today `amplihack-agent-eval` targets the
+  `v0.18.25` release source commit `9ee05a06…`). Equality with the **moving**
+  `main` branch is therefore **not** a standing requirement, and `main` advancing
+  past a pin does not breach pin integrity — see
+  [Drift is a signal, not an automatic bump](../howto/self-maintain-dependency-pins.md#drift-is-a-signal-not-an-automatic-bump).
 - **No new transitive crates.** `amplihack-agent-eval` stays light
   (`serde`/`serde_json`/`thiserror`/`tracing`/`chrono` only); the
   `amplihack-memory-lib` delta between `5d7db77` and `f800370` introduces no new
@@ -234,9 +301,17 @@ Simard change does.
 ## Done-gate: the fix must run in Simard's own build
 
 Under the [dependency-pin reconcile](../howto/self-maintain-dependency-pins.md),
-bumping the upstream repo is **not** "done". This reconcile is done only once:
+bumping the upstream repo is **not** "done". This reconcile was done only once:
 
-1. Both `Cargo.toml` revs equal the upstream `main` HEADs.
+> **⚠ Criterion 1 is #2626-era history.** "Revs equal the upstream `main` HEADs"
+> encodes the superseded track-current-`main` target policy. The **current**
+> form of criterion 1 is: *both `Cargo.toml` revs equal the immutable commit
+> SHAs of the **approved targets** chosen for this bump* — for
+> `amplihack-agent-eval` today that is the `v0.18.25` release source commit, not
+> whatever `main` points at. **Criteria 2–6 are unchanged and still current.**
+
+1. ~~Both `Cargo.toml` revs equal the upstream `main` HEADs.~~ → *now:* both
+   `Cargo.toml` revs equal the approved target commits for the bump.
 2. `Cargo.lock` records those same revs.
 3. `cargo build --release` and `cargo test` pass.
 4. `cargo tree -i lbug` shows a single `0.17.1`.
@@ -251,15 +326,25 @@ this reconcile's goal to report done.
 
 ## Reproduce / verify end-to-end
 
+> **⚠ Step 1 is #2626-era history and must not be run as a current gate.** It
+> asserts zero drift from `main`, which is the superseded target policy, and it
+> reads `.behind_by` in an orientation where that field is always `0` — so it
+> would appear to "pass" unconditionally. Steps 2–4 are the **reusable method**
+> and remain current, unchanged.
+
 ```bash
-# 1. Both pins point at the current upstream main HEAD (0 drift):
+# 1. HISTORICAL (#2626 target policy — do NOT use as a current gate):
+#    "both pins equal the current upstream main HEAD (0 drift)".
+#    CURRENT equivalent: assert each pin equals its approved TARGET commit,
+#    and treat drift from main as informational only:
 for pair in \
   "amplihack-rs:amplihack-agent-eval" \
   "amplihack-memory-lib:amplihack-memory"; do
   repo=${pair%%:*}; crate=${pair##*:}
-  pinned=$(grep "$crate " Cargo.toml | grep -oE '[0-9a-f]{40}')
-  behind=$(gh api "repos/rysweet/$repo/compare/$pinned...main" --jq '.behind_by')
-  echo "$crate: pin=$pinned behind_by=$behind"   # behind_by must be 0
+  pinned=$(sed -n "s/^$crate[[:space:]]*=.*,[[:space:]]*rev[[:space:]]*=[[:space:]]*\"\([0-9a-f]\{40\}\)\".*/\1/p" Cargo.toml)
+  # base=pin, head=main => .ahead_by (main ahead of pin). NOT .behind_by.
+  ahead=$(gh api "repos/rysweet/$repo/compare/$pinned...main" --jq '.ahead_by')
+  echo "$crate: pin=$pinned main_ahead_of_pin=$ahead   # informational, need not be 0"
 done
 
 # 2. Exactly one engine:

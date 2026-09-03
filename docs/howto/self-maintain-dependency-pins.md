@@ -1,7 +1,7 @@
 ---
 title: How to keep Simard's own dependency pins up to date
 description: "A reactive done-gate and proactive reconcile that make Simard bump her own Cargo.toml git-rev pins after she lands a change upstream, so the fixes she ships actually run in her own daemon. Prompt-first, no Rust logic."
-last_updated: 2026-06-26
+last_updated: 2026-09-03
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -62,16 +62,17 @@ CLI command, and no change to any parser contract.
 ```mermaid
 flowchart TD
     subgraph A[Reactive done-gate]
-      A1([engineer lands upstream change]) --> A2[bump own Cargo.toml rev<br/>to merged main commit]
+      A1([engineer lands upstream change]) --> A2["bump own Cargo.toml rev<br/>to that exact merge commit SHA"]
       A2 --> A3[cargo build verifies]
       A3 --> A4[open / update bump PR<br/>vs rysweet/Simard]
       A4 --> A5[land bump PR]
       A5 --> A6([goal DONE])
     end
     subgraph B[Proactive reconcile]
-      B1([idle / research time]) --> B2[compare each pinned rev<br/>to upstream default HEAD]
-      B2 -->|behind| B3[open / update bump follow-up]
-      B2 -->|current| B4([nothing to do])
+      B1([idle / research time]) --> B2["compare each pinned rev<br/>to upstream default HEAD<br/>base=pin head=main → ahead_by"]
+      B2 -->|"ahead_by > 0 AND a newer<br/>approved target exists"| B3[open / update bump follow-up<br/>targeting that exact commit]
+      B2 -->|"ahead_by > 0 but no newer<br/>approved target"| B5([drift is informational<br/>nothing to do])
+      B2 -->|"identical"| B4([nothing to do])
     end
 ```
 
@@ -92,7 +93,10 @@ one of the three repos Simard pins by git rev — `amplihack-rs`,
 Simard has also:
 
 1. **Bumped her own pin.** Edit the matching `rev = "…"` in the root
-   `Cargo.toml` to the merged `main` commit SHA.
+   `Cargo.toml` to the **exact immutable SHA of the merge commit that carried
+   that change** — that specific commit is the approved target here. It is *not*
+   "whatever `main` points at now": `main` may already have moved on, and the
+   pin must not chase it.
 2. **Verified the build.** `cargo build` (low-space variant when disk is tight —
    `scripts/cargo-low-space build`) must succeed against the new rev. A bump
    that does not build is rolled back, not shipped.
@@ -149,27 +153,84 @@ low-priority follow-up precisely because nothing is holding a goal open.
 ## Trigger B — the proactive reconcile
 
 When Simard has low-priority idle/research time (the same budget she uses for
-self-maintenance), she periodically checks each rev-pinned git dependency for
-**drift**: is the pinned rev behind the upstream default branch?
+self-maintenance), she periodically measures each rev-pinned git dependency's
+**drift**: how many commits has the upstream default branch advanced *past* the
+pinned rev?
 
-For each dependency she compares the pinned rev to the upstream `HEAD`:
+For each dependency she compares the pinned rev to the upstream `HEAD`.
+
+> **Read the compare orientation carefully.** The GitHub compare API is
+> `compare/{base}...{head}`, and `ahead_by` / `behind_by` are reported **from
+> the point of view of `head`**. With `base = $PINNED` and `head = main`:
+>
+> * `ahead_by` = how many commits **`main` is ahead of the pin** — this is the
+>   drift number you want;
+> * `behind_by` = how many commits `main` is *behind* the pin. Whenever the pin
+>   is an ancestor of `main` (the normal case) this is **always `0`**;
+> * `status` is therefore `"ahead"` for a pin that trails `main`, never
+>   `"behind"`, and `"identical"` only when the pin *is* `main`'s HEAD.
+>
+> Reading `.behind_by` in this orientation is a silent no-op: it prints `0`
+> forever and the drift check can never fire. Use `.ahead_by`. (To get a
+> `behind_by`-shaped answer you would have to flip the operands to
+> `compare/main...$PINNED`.)
 
 ```bash
-# Current pin (from Cargo.toml)
-PINNED=59548a96049ab8d558110bcaf9c82a4316f1bbf0
+# Current pin — read it from the ONE live dependency line rather than
+# hardcoding a rev here, which would go stale at the next bump.
+#   * `^` anchors to the start of the line, so the `#` provenance comments
+#     (which also carry 40-char SHAs, including git *tree* hashes) can never
+#     match;
+#   * the `rev = "…"` capture takes exactly one 40-char hex value;
+#   * the count check refuses to continue on zero or multiple matches instead
+#     of silently pasting two concatenated SHAs into the compare URL.
+PINNED=$(sed -n 's/^amplihack-agent-eval[[:space:]]*=.*,[[:space:]]*rev[[:space:]]*=[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
 
-# Upstream default-branch HEAD
-git ls-remote https://github.com/rysweet/amplihack-rs.git main
+if [ "$(printf '%s\n' "$PINNED" | grep -c '^[0-9a-f]\{40\}$')" -ne 1 ]; then
+  echo "ERROR: expected exactly one amplihack-agent-eval rev, got: '$PINNED'" >&2
+else
+  # Upstream default-branch HEAD
+  git ls-remote https://github.com/rysweet/amplihack-rs.git main
 
-# How far behind is the pin? (GitHub compare API: base=pin, head=main)
-gh api repos/rysweet/amplihack-rs/compare/$PINNED...main \
-  --jq '{status, behind: .behind_by, ahead: .ahead_by}'
+  # How far has `main` advanced past the pin? base=pin, head=main, so the
+  # answer is `ahead_by` (main ahead of pin); `behind_by` is always 0 here.
+  # "$PINNED" is quoted so a malformed value can never word-split the path.
+  gh api "repos/rysweet/amplihack-rs/compare/$PINNED...main" \
+    --jq '{status, main_ahead_of_pin: .ahead_by}'
+fi
 ```
 
-`status: "behind"` (or `ahead > 0`) means the pin is stale. Simard then opens —
-or updates — a **bump follow-up** that does exactly what Trigger A does:
-re-point the rev to the new `main`, verify `cargo build`, and ship it through
-the normal landing pipeline.
+`status: "ahead"` with `main_ahead_of_pin > 0` means `main` has moved on since
+the pin. `status: "identical"` with `main_ahead_of_pin == 0` means the pin *is*
+the current `main` HEAD.
+
+### Drift is a signal, not an automatic bump
+
+**A non-zero drift count does not by itself mean the pin is wrong.** Simard
+pins **immutable commit SHAs**, and for `amplihack-agent-eval` the pin targets a
+**tagged release commit** (currently the `v0.18.25` source commit — see the
+provenance block on the `amplihack-agent-eval` line in the root `Cargo.toml`).
+Upstream `main` advances continuously, so a release pin starts drifting the
+moment the next commit lands upstream — that is normal and expected, not a
+defect.
+
+So the reconcile asks two questions, in order:
+
+1. **Is there a newer *approved target*?** For a release-pinned crate that means
+   a newer **release tag** that has been reviewed and chosen for adoption; for a
+   crate deliberately tracking `main`, it means the specific merged commit that
+   carries the wanted fix. If there is no such target, drift is **informational
+   only** and there is nothing to do.
+2. **If yes, adopt that exact target** — never "whatever `main` happens to be
+   right now". Simard then opens (or updates) a **bump follow-up** that does
+   what Trigger A does: re-point the rev to the chosen commit, verify
+   `cargo build`, and ship it through the normal landing pipeline.
+
+Concretely: the drift number tells Simard *how much* upstream has moved and is
+useful for deciding whether a review is worth scheduling. It is **not** a
+tripwire that must be driven back to zero, and a pin is **not stale merely
+because `ahead_by > 0`**. Chasing every `main` commit would defeat the point of
+pinning — reproducible builds on a reviewed, release-quality commit.
 
 This trigger is **low priority by construction**. It never preempts an active
 engineering goal; it only fills spare capacity. It is described in
@@ -225,9 +286,11 @@ gh pr list --repo rysweet/Simard --state open \
   --json number,title,headRefName
 ```
 
-- **Found** → **update it**: re-point every crate from that repo to the latest
-  `main`, re-run `cargo build`, force-update the branch, and refresh the PR
-  body. Do **not** open a second PR.
+- **Found** → **update it**: re-point every crate from that repo to the **newly
+  selected approved target commit** — the reviewed release commit, or the
+  specific merged commit carrying the required fix — **never "the latest
+  `main`"**. Then re-run `cargo build`, force-update the branch, and refresh the
+  PR body. Do **not** open a second PR.
 - **Not found** → open a fresh PR with the convention above.
 
 > **Cross-repo safety.** The upstream change lives in another repo
@@ -298,21 +361,35 @@ as above.
    grep -nE 'git = .*(amplihack-rs|amplihack-memory-lib|RustyClawd)' Cargo.toml
    ```
 
-2. **Check one dependency for drift:**
+2. **Measure one dependency's drift from `main`:**
 
    ```bash
-   PINNED=$(grep 'amplihack-agent-eval' Cargo.toml | grep -oE '[0-9a-f]{40}')
-   gh api repos/rysweet/amplihack-rs/compare/$PINNED...main --jq '.behind_by'
+   # Anchored at `^` so the `#` provenance comments (which also contain
+   # 40-char SHAs) cannot match; the count check refuses zero-or-many.
+   PINNED=$(sed -n 's/^amplihack-agent-eval[[:space:]]*=.*,[[:space:]]*rev[[:space:]]*=[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
+
+   if [ "$(printf '%s\n' "$PINNED" | grep -c '^[0-9a-f]\{40\}$')" -ne 1 ]; then
+     echo "ERROR: expected exactly one amplihack-agent-eval rev, got: '$PINNED'" >&2
+   else
+     # base=pin, head=main => `.ahead_by` is how far main is AHEAD of the pin.
+     # `.behind_by` is always 0 in this orientation — reading it is a no-op.
+     gh api "repos/rysweet/amplihack-rs/compare/$PINNED...main" --jq '.ahead_by'
+   fi
    ```
 
-   A non-zero result means the pin is stale and Trigger B should produce a bump
-   follow-up.
+   A non-zero result means `main` has advanced past the pin. That is
+   **informational**: see
+   [Drift is a signal, not an automatic bump](#drift-is-a-signal-not-an-automatic-bump).
+   It becomes a Trigger-B bump follow-up only when a newer **approved target**
+   (for `amplihack-agent-eval`, a newer reviewed **release tag**) should be
+   adopted — not merely because the counter is non-zero.
 
-3. **After a bump lands, confirm the rev moved and the build is green:**
+3. **After a bump lands, confirm the rev moved to the chosen target and the
+   build is green:**
 
    ```bash
    git -C ~/src/Simard pull
-   grep -n 'amplihack-agent-eval' ~/src/Simard/Cargo.toml   # rev now == merged main
+   grep -n 'amplihack-agent-eval' ~/src/Simard/Cargo.toml   # rev == the adopted target commit
    cargo build --quiet                                       # succeeds
    ```
 

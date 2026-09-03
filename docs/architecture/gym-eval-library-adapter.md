@@ -1,7 +1,7 @@
 ---
 title: Library-backed Gym Evaluation Engine (the sole engine)
 description: How Simard's gym client is backed by the amplihack-agent-eval crate's native Rust GymRunner through the thin gym_runner_client adapter. As of the de-fork the private native_gym reimplementation has been deleted and the library is the only evaluation engine.
-last_updated: 2026-06-20
+last_updated: 2026-09-03
 owner: simard
 doc_type: reference
 related:
@@ -64,11 +64,15 @@ three handlers moved into the library.
 ## The dependency
 
 The engine is a pinned-revision git dependency in `Cargo.toml`, matching the
-immutable-rev style already used for `amplihack-memory` and `rustyclawd-core`:
+immutable-rev style already used for `amplihack-memory` and `rustyclawd-core`.
+The authoritative pin is always the live line in the root `Cargo.toml`; the
+snippet below records the rev current as of **2026-09-03** — the amplihack-rs
+`v0.18.25` release source commit (the annotated tag `v0.18.25` dereferences to
+it, and it was `main` HEAD at verification):
 
 ```toml
 [dependencies]
-amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "59548a96049ab8d558110bcaf9c82a4316f1bbf0" }
+amplihack-agent-eval = { git = "https://github.com/rysweet/amplihack-rs.git", rev = "9ee05a06eab98e9ab504a031bffaa4190700c2af" }
 ```
 
 ### Consumability
@@ -195,11 +199,19 @@ scenario list. The wire `scenario_id` is therefore always one of the ids
 `gym.list_scenarios` advertises — never the bare `"L{n}"` form.
 
 **2. Suite `success`.** The library's `run_suite` computes its top-level
-`success` with inverted logic —
+`success` as
 `!result.failed_levels.is_empty() || result.level_results.iter().all(|lr| lr.success)`
-(`amplihack_agent_eval::gym::GymRunner::run_suite`, gym.rs:300-301) — which
-evaluates to `true` precisely when there *are* failed levels. The adapter does
-**not** trust that flag; it recomputes
+(`amplihack_agent_eval::gym::GymRunner::run_suite`). This is a **tautology: it
+always evaluates to `true`.** `ProgressiveResult::add_result` records a level id
+in `failed_levels` exactly when that level's result is *not* successful, so an
+empty `failed_levels` implies every entry of `level_results` succeeded — meaning
+whenever the first disjunct is `false`, the second is `true`. The flag is
+therefore `true` on an all-pass suite, on a partially-failing suite, and on an
+empty suite (`all()` over an empty iterator is `true`).
+
+The consequence is stronger than "the flag is inverted": it carries **no
+information at all**, so there is nothing to invert or correct. The adapter
+ignores it outright and recomputes
 `success = scenarios_passed == scenarios_total` from the per-scenario results it
 already maps. (This upstream quirk should be filed as an issue against
 `amplihack-rs`; until it is fixed, the adapter's recomputation is the contract

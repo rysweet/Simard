@@ -1,3 +1,13 @@
+---
+title: Compile Dependencies Atlas
+description: "Code-derived atlas layer mapping Simard's direct Cargo dependencies (including the exact git-rev pins) and a one-hop view of the largest internal Rust module dependencies."
+last_updated: 2026-09-03
+review_schedule: as-needed
+owner: simard
+doc_type: reference
+status: living document — regenerate from code when stale
+---
+
 # Compile Dependencies Atlas
 
 This layer maps Simard's direct Cargo dependencies and a one-hop view of the largest internal Rust module dependencies. The overview diagrams stay small by grouping the external crates, dev/build dependencies, and internal module graph; the split diagrams below expand those groups without exceeding the atlas density target.
@@ -22,20 +32,40 @@ This layer maps Simard's direct Cargo dependencies and a one-hop view of the lar
 
 ## Evidence anchors
 
-- Direct dependencies are declared in `Cargo.toml:135` through `Cargo.toml:209`; Unix target dependency is at `Cargo.toml:212`; build and dev dependencies are at `Cargo.toml:218` and `Cargo.toml:245` through `Cargo.toml:254`.
-- `amplihack-memory` is pinned to `amplihack-memory-lib` with the `persistent` feature at `Cargo.toml:135`; the direct `lbug` fork pin is at `Cargo.toml:158`.
-- The default feature set enables `signal` and `dashboard-audit` at `Cargo.toml:227`, and `dashboard-audit` pulls `headless_chrome`, `regex`, and `url` at `Cargo.toml:236`.
-- The large internal module declarations are visible in `src/lib.rs:24`, `src/lib.rs:60`, `src/lib.rs:78`, `src/lib.rs:89`, `src/lib.rs:90`, `src/lib.rs:103`, `src/lib.rs:106`, `src/lib.rs:114`, `src/lib.rs:117`, `src/lib.rs:122`, `src/lib.rs:123`, `src/lib.rs:124`, `src/lib.rs:126`, `src/lib.rs:128`, `src/lib.rs:138`, `src/lib.rs:163`, and `src/lib.rs:164`.
+Anchors are **section- and symbol-based**, not line numbers: `Cargo.toml` and
+`src/lib.rs` both carry long provenance comment blocks, so raw line numbers rot
+on every pin bump (they were already stale before this page was last touched).
+Each anchor below is a stable, greppable construct.
+
+- Direct dependencies are declared under the `[dependencies]` table in
+  `Cargo.toml`; the Unix-only dependency (`libc`) is under
+  `[target.'cfg(unix)'.dependencies]`; build and dev dependencies are under
+  `[build-dependencies]` (`chrono`) and `[dev-dependencies]` (`assert_cmd`,
+  `proptest`, `serial_test`, `syn`, `proc-macro2`).
+- `amplihack-memory` is pinned to `amplihack-memory-lib` with the `persistent`
+  feature on the `amplihack-memory = { git = …, features = ["persistent"] }`
+  key; the direct `lbug` fork pin is the `lbug = { git = …, rev = … }` key. Both
+  are in `[dependencies]` — grep the key names.
+- The `[features]` table sets `default = ["signal", "dashboard-audit"]`, and
+  `dashboard-audit = ["dep:headless_chrome", "dep:regex", "dep:url"]`.
+- The large internal modules the module-graph diagram draws are the `pub mod` /
+  `mod` declarations in `src/lib.rs` — e.g. `cognitive_memory`, `goal_curation`,
+  `ooda_loop`, `ooda_actions`, `ooda_brain`, `journal`, `overseer`,
+  `meeting_backend`, `memory_consolidation`, `memory_ipc`, `engineer_loop`,
+  `self_deploy`, `self_improve`, and `runtime`. Every node name in
+  `compile-deps-internal-modules.dot` matches a `mod <name>;` declaration in
+  `src/lib.rs`, so the diagram can be re-checked with
+  `grep -E '^(pub )?mod <name>;' src/lib.rs`.
 
 ## Dependency inventory
 
 | Crate or section | Version or pin | Purpose |
 | --- | --- | --- |
-| `amplihack-memory` | git `c266e15d1399967c04324370e77cf281990b8be1`, feature `persistent` | Sole cognitive-memory backend adapter; persistent graph storage via upstream memory library. |
+| `amplihack-memory` | git `0031505b911151bf47409694a6c45f8b778d91b9`, feature `persistent` | Sole cognitive-memory backend adapter; persistent graph storage via upstream memory library. |
 | `lbug` | git `5a2c107881879f4d1bb594b14967948870e65cdc` | Embedded LadybugDB graph store used directly by TUI and unified with `amplihack-memory`. |
 | `rustyclawd-core` | git `dcccad80ed381c66a7728565be5cb84120aacbed` | RustyClawd core agent SDK integration. |
 | `rustyclawd-tools` | git `dcccad80ed381c66a7728565be5cb84120aacbed` | RustyClawd tool integration. |
-| `amplihack-agent-eval` | git `14dc30b10e87764120c6f2bae7f3630522c29e5d` | Native Rust gym and evaluation runner types. |
+| `amplihack-agent-eval` | git `9ee05a06eab98e9ab504a031bffaa4190700c2af` (amplihack-rs release `v0.18.25`) | Native Rust gym and evaluation runner types. |
 | `rusqlite` | `=0.31.0`, features `backup`, `bundled` | SQLite storage and backup support. |
 | `serde` | `=1.0.228`, feature `derive` | Serialization derives for config, state, and message types. |
 | `serde_json` | `=1.0.149` | JSON IO for CLI, recipes, telemetry payloads, and stored records. |

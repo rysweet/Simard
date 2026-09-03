@@ -1,14 +1,27 @@
-//! Failing TDD acceptance tests for issue #2626 — bump Simard's pinned
-//! amplihack dependencies to current upstream `main` (Step 7).
+//! Pin guards originally added as failing TDD acceptance tests for issue #2626
+//! — "bump Simard's pinned amplihack dependencies to current upstream `main`"
+//! (Step 7). The file has outlived that framing: it now guards whatever the
+//! **approved target** rev is, which for `amplihack-agent-eval` is a reviewed
+//! **release** commit rather than `main`'s HEAD.
 //!
 //! # Policy this encodes
 //!
 //! When Simard consumes `amplihack-rs` (`amplihack-agent-eval`) and
-//! `amplihack-memory-lib` (`amplihack-memory`) as git-pinned dependencies, a
-//! self-improvement bump means: point *her own* pins at current upstream
-//! `main` and run the new code. The pins are advanced as upstream lands work:
+//! `amplihack-memory-lib` (`amplihack-memory`) as git-pinned dependencies, each
+//! pin must be an **immutable commit SHA equal to the approved target** chosen
+//! for that bump, with `Cargo.lock` in parity. Tracking upstream `main`'s
+//! moving HEAD was the #2626-era target policy and is **superseded**: `main`
+//! advances past any pin continuously, and that drift alone does not make a pin
+//! stale. See `docs/howto/self-maintain-dependency-pins.md` ("Drift is a
+//! signal, not an automatic bump").
 //!
-//!   * `amplihack-agent-eval`  59548a96… → **2a93441d…** (amplihack-rs main)
+//! The pins are advanced as new approved targets are adopted:
+//!
+//!   * `amplihack-agent-eval`  59548a96… → 2a93441d… (landed by issue #2626)
+//!     → 14dc30b1… (landed by issue #2767, amplihack-rs PR #856's clean
+//!     agent-result channel; a 2026-07-07 UTC commit) → **9ee05a06…**
+//!     (amplihack-rs **v0.18.25** release source commit — see the provenance
+//!     block on `AGENT_EVAL_TARGET_REV` below)
 //!   * `amplihack-memory`       901f63ad… → **72c5ea1b…** (memory-lib main —
 //!     the squash-merge of PR #126, which serves the ranked-recall graph term
 //!     from a single bulk graph-adjacency scan per edge type instead of a
@@ -17,8 +30,10 @@
 //!     store-format change; Simard consumes it to fix the "memory graph never
 //!     loads" pathology, issue #40)
 //!
-//! These are the exact 40-char SHAs verified against `git ls-remote … main`
-//! at authoring time.
+//! These are the exact 40-char SHAs verified against upstream with
+//! `git ls-remote` (plus `git cat-file` for the annotated-tag dereference).
+//! Each constant below records **what** was verified and **when**; the header
+//! bullets are history, the constants are the live contract.
 //!
 //! # The lockstep invariant
 //!
@@ -41,10 +56,31 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-// ── Target / stale pin constants (verified against upstream `main`) ──────────
+// ── Approved-target / stale pin constants (each verified upstream) ──────────
 
-/// amplihack-rs `main` HEAD carrying the `amplihack-agent-eval` crate to adopt.
-const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
+/// amplihack-rs source commit carrying the `amplihack-agent-eval` crate to
+/// adopt: the **v0.18.25** release commit.
+///
+/// Upstream provenance, verified 2026-09-03 against
+/// `https://github.com/rysweet/amplihack-rs.git`:
+///
+///   * `git ls-remote … refs/tags/v0.18.25` → `e947170a…` (the **annotated
+///     tag object**), and `refs/tags/v0.18.25^{}` → `9ee05a06…` (the commit it
+///     dereferences to). The pin is the dereferenced *commit*, never the tag
+///     object and never the tag name — a tag can be force-moved, a commit SHA
+///     cannot.
+///   * `git ls-remote … refs/heads/main` → `9ee05a06…`, i.e. the release tag
+///     and upstream `main` were the same commit at verification time.
+///   * commit date 2026-09-02; release v0.18.25 published 2026-09-02.
+///   * `9ee05a06…` is 200 commits ahead of the previous pin `14dc30b1…`.
+///
+/// API impact of the 200-commit delta on this crate: **none**. Both
+/// `14dc30b1…:crates/amplihack-agent-eval` and
+/// `9ee05a06…:crates/amplihack-agent-eval` resolve to the identical git tree
+/// `1a635333f15fa2964e6d0ecae35b5a9625d59ee7`, so the consumed crate source is
+/// byte-for-byte unchanged. See `tests/amplihack_agent_eval_api_compat.rs` for the
+/// compile-time guard that Simard actually uses that surface.
+const AGENT_EVAL_TARGET_REV: &str = "9ee05a06eab98e9ab504a031bffaa4190700c2af";
 /// amplihack-memory-lib commit carrying the `amplihack-memory` crate.
 ///
 /// Superseded by issue #4687: originally the #2626 bump target
@@ -56,13 +92,37 @@ const AGENT_EVAL_TARGET_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 const MEMORY_TARGET_REV: &str = "0031505b911151bf47409694a6c45f8b778d91b9";
 
 /// The stale revs the bump must move *off of* (anti-regression sentinels).
+///
+/// `AGENT_EVAL_STALE_REV` is the original pre-#2626 rev.
+/// `AGENT_EVAL_PREVIOUS_REV` is the **#2767** bump target `14dc30b1…` (NOT
+/// #2626, whose target was `2a93441d…`) — a **2026-07-07 UTC** commit
+/// (2026-07-07 01:47:01 UTC / 2026-07-06 18:47:01 -0700) that was
+/// upstream `main` then and is 200 commits behind now. Regressing to either is
+/// a stale-pin regression.
 const AGENT_EVAL_STALE_REV: &str = "59548a96049ab8d558110bcaf9c82a4316f1bbf0";
+const AGENT_EVAL_PREVIOUS_REV: &str = "14dc30b10e87764120c6f2bae7f3630522c29e5d";
 const MEMORY_STALE_REV: &str = "72c5ea1bfcca7e6f3e314dfd99fbe4998378ffe8";
 
 /// The only git remotes these two crates may resolve from. A bump must never
 /// introduce a *new* git source (typosquat / allowlist-bypass guard, R1).
 const AGENT_EVAL_REMOTE: &str = "https://github.com/rysweet/amplihack-rs.git";
 const MEMORY_REMOTE: &str = "https://github.com/rysweet/amplihack-memory-lib.git";
+
+/// The crate version Cargo.lock must record for `amplihack-agent-eval` at
+/// `AGENT_EVAL_TARGET_REV`.
+///
+/// `crates/amplihack-agent-eval/Cargo.toml` sets `version.workspace = true`, and
+/// the amplihack-rs workspace manifest at `9ee05a06…` declares `version =
+/// "0.18.0"` (it was `0.11.1` at the previous pin `14dc30b1…`). Because the pin
+/// is an immutable commit SHA, this version is deterministic — asserting it
+/// proves the lockfile entry was genuinely re-resolved from the new tree rather
+/// than hand-edited to swap only the `source` string.
+///
+/// Deliberate, documented mismatch: the upstream **release tag** is `v0.18.25`
+/// while the upstream **workspace crate version** is `0.18.0`. The tag tracks
+/// the amplihack-rs release train, not this crate's semver. Simard consumes the
+/// crate by rev, so the rev — not the version — is the authoritative pin.
+const AGENT_EVAL_LOCKED_VERSION: &str = "0.18.0";
 
 /// Simard's direct `lbug` dep (simard-tui goal board) is a git dep on the
 /// rysweet/ladybug-rust fork (issue #3119: fixes the from-source duplicate-symbol
@@ -189,22 +249,25 @@ fn is_full_sha(rev: &str) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Primary contract — Cargo.toml pins the two crates at current upstream main
+// Primary contract — Cargo.toml pins the two crates at their APPROVED TARGET
+// revs (an immutable commit SHA each; NOT "whatever `main` points at now")
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn cargo_toml_pins_amplihack_agent_eval_to_target_main_rev() {
+fn cargo_toml_pins_amplihack_agent_eval_to_approved_target_rev() {
     let rev = dep_rev(&cargo_toml(), "amplihack-agent-eval")
         .expect("Cargo.toml must declare a git `amplihack-agent-eval` dependency with a `rev`");
     assert_eq!(
         rev, AGENT_EVAL_TARGET_REV,
-        "amplihack-agent-eval must be pinned to amplihack-rs `main` HEAD \
-         {AGENT_EVAL_TARGET_REV} (#2626 bump). Found `{rev}`."
+        "amplihack-agent-eval must be pinned to the amplihack-rs v0.18.25 \
+         release source commit {AGENT_EVAL_TARGET_REV} (annotated tag \
+         `v0.18.25` dereferences to it, and it was `main` HEAD when verified \
+         on 2026-09-03). Found `{rev}`."
     );
 }
 
 #[test]
-fn cargo_toml_pins_amplihack_memory_to_target_main_rev() {
+fn cargo_toml_pins_amplihack_memory_to_approved_target_rev() {
     let rev = dep_rev(&cargo_toml(), "amplihack-memory")
         .expect("Cargo.toml must declare a git `amplihack-memory` dependency with a `rev`");
     assert_eq!(
@@ -225,7 +288,13 @@ fn cargo_toml_moves_off_the_stale_amplihack_revs() {
     assert_ne!(
         agent_rev, AGENT_EVAL_STALE_REV,
         "amplihack-agent-eval is still on the STALE rev {AGENT_EVAL_STALE_REV}; \
-         #2626 requires moving to {AGENT_EVAL_TARGET_REV}."
+         the pin must be {AGENT_EVAL_TARGET_REV} (v0.18.25)."
+    );
+    assert_ne!(
+        agent_rev, AGENT_EVAL_PREVIOUS_REV,
+        "amplihack-agent-eval regressed to the PREVIOUS pin \
+         {AGENT_EVAL_PREVIOUS_REV} (a 2026-07-07 UTC commit, 200 commits behind); \
+         the pin must be {AGENT_EVAL_TARGET_REV} (v0.18.25)."
     );
     assert_ne!(
         memory_rev, MEMORY_STALE_REV,
@@ -260,6 +329,26 @@ fn amplihack_pins_are_full_sha_revs_not_floating_refs() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn cargo_lock_records_the_agent_eval_version_from_the_bumped_rev() {
+    // The lockfile must carry the version the *new* rev's manifest resolves to
+    // (workspace version 0.18.0), not the previous rev's 0.11.1. A lockfile
+    // whose `source` moved but whose `version` did not was not re-resolved.
+    let versions = distinct_locked_versions(&cargo_lock(), "amplihack-agent-eval");
+    assert_eq!(
+        versions.len(),
+        1,
+        "expected exactly one locked amplihack-agent-eval; found {versions:?}"
+    );
+    let version = versions.iter().next().expect("one locked version");
+    assert_eq!(
+        version, AGENT_EVAL_LOCKED_VERSION,
+        "Cargo.lock must record amplihack-agent-eval {AGENT_EVAL_LOCKED_VERSION} \
+         (the workspace version at rev {AGENT_EVAL_TARGET_REV}). Found \
+         `{version}` — re-run `cargo update -p amplihack-agent-eval`."
+    );
+}
+
+#[test]
 fn cargo_lock_source_rev_matches_bumped_agent_eval_pin() {
     let source = locked_source(&cargo_lock(), "amplihack-agent-eval")
         .expect("Cargo.lock must contain the amplihack-agent-eval [[package]] source");
@@ -273,6 +362,11 @@ fn cargo_lock_source_rev_matches_bumped_agent_eval_pin() {
         !source.contains(AGENT_EVAL_STALE_REV),
         "Cargo.lock amplihack-agent-eval source still references the STALE rev \
          {AGENT_EVAL_STALE_REV}; the lockfile was not refreshed."
+    );
+    assert!(
+        !source.contains(AGENT_EVAL_PREVIOUS_REV),
+        "Cargo.lock amplihack-agent-eval source still references the PREVIOUS \
+         rev {AGENT_EVAL_PREVIOUS_REV}; the lockfile was not refreshed."
     );
 }
 
