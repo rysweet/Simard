@@ -367,19 +367,32 @@ pub fn dispatch_spawn_engineer(
                     }
                     // File tracking issue. Failure to file is logged but
                     // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
-                            "issue",
-                            "create",
-                            "--title",
-                            &title,
-                            "--body",
-                            &body,
-                            "--label",
-                            "ooda-stuck",
-                        ])
-                        .output()
-                    {
+                    //
+                    // Issue #4472: `gh issue create --label ooda-stuck` used to
+                    // fail every time because the label did not exist in the
+                    // repo. Idempotently ensure it first, degrading to an
+                    // unlabeled-but-still-filed issue if it cannot be ensured.
+                    use crate::ooda_actions::gh_label::{
+                        LabelEnsure, OODA_STUCK_LABEL, ensure_gh_label,
+                    };
+                    let label = ensure_gh_label(OODA_STUCK_LABEL);
+                    match &label {
+                        LabelEnsure::Created => tracing::info!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            label = OODA_STUCK_LABEL,
+                            "deterministic safeguard: auto-created missing tracking-issue label",
+                        ),
+                        LabelEnsure::AlreadyExists => {}
+                        LabelEnsure::Unavailable(reason) => tracing::warn!(
+                            target: "simard::ooda_brain",
+                            goal = %goal_id,
+                            reason = %reason,
+                            "deterministic safeguard: could not ensure tracking-issue label; filing issue WITHOUT label (degraded)",
+                        ),
+                    }
+                    let gh_args = label.issue_create_args(&title, &body);
+                    match std::process::Command::new("gh").args(&gh_args).output() {
                         Ok(out) if out.status.success() => {
                             eprintln!(
                                 "[simard] DETERMINISTIC SAFEGUARD: goal '{}' marked Blocked + tracking issue filed",
@@ -924,18 +937,28 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .status();
+        // Issue #4472: ensure the `ooda-stuck` label exists before creating the
+        // issue, degrading to an unlabeled-but-still-filed issue if it cannot be
+        // ensured. Keeps the existing `.status()` + `warn!` failure branch.
+        use crate::ooda_actions::gh_label::{LabelEnsure, OODA_STUCK_LABEL, ensure_gh_label};
+        let label = ensure_gh_label(OODA_STUCK_LABEL);
+        match &label {
+            LabelEnsure::Created => tracing::info!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                label = OODA_STUCK_LABEL,
+                "open_tracking_issue: auto-created missing tracking-issue label",
+            ),
+            LabelEnsure::AlreadyExists => {}
+            LabelEnsure::Unavailable(reason) => tracing::warn!(
+                target: "simard::ooda_brain",
+                goal = %goal_id,
+                reason = %reason,
+                "open_tracking_issue: could not ensure tracking-issue label; filing issue WITHOUT label (degraded)",
+            ),
+        }
+        let gh_args = label.issue_create_args(title, body);
+        let result = std::process::Command::new("gh").args(&gh_args).status();
         if let Err(e) = result {
             tracing::warn!(
                 target: "simard::ooda_brain",
