@@ -1,7 +1,7 @@
 ---
 title: Cognitive-memory WAL crash-consistency and single-owner checkpointing (#4687)
 description: "Reference for the cognitive-memory write-ahead-log durability fix — single-owner checkpointing (the engine's own auto-checkpoint disabled on the read-write path), fsync-durable clean shutdown, fsync-before-advance checkpoint ordering, and the explicit error-level + monotonic-counter observability that replaces the previously silent good-prefix tail truncation. Additive and non-breaking; store format stays v42."
-last_updated: 2026-07-25
+last_updated: 2026-09-03
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -194,7 +194,8 @@ auto-checkpoint is disabled (see [Operational notes](#operational-notes)).
   wrapper. The store and WAL remain readable — no sidecar files or format
   changes were introduced.
 - **Engine lockstep:** the fix is wrapper-only, so the `lbug` engine rev
-  (`rysweet/ladybug-rust`, `Cargo.toml:158`) is **unchanged**. Exactly one
+  (`rysweet/ladybug-rust`, the `lbug = { git = …, rev = … }` key in
+  `[dependencies]`) is **unchanged**. Exactly one
   `lbug` version stays linked (`cargo tree -p lbug` shows one line). The engine
   rev bumps **only** if a defect is proven to live in engine code, in which case
   the memory-lib engine pin and Simard's direct `lbug` pin move together.
@@ -207,7 +208,7 @@ Simard consumes the fix by bumping the `amplihack-memory` git rev in
 tag `issue-4687-wal-crash-consistency-c266e15`), then refreshing `Cargo.lock`:
 
 ```bash
-# Cargo.toml:135 — amplihack-memory rev → 0031505b911151bf47409694a6c45f8b778d91b9
+# Cargo.toml `amplihack-memory` key — rev → 0031505b911151bf47409694a6c45f8b778d91b9
 cargo update -p amplihack-memory      # refreshes Cargo.lock
 cargo tree -p lbug                     # must show exactly one lbug version
 ```
@@ -226,7 +227,7 @@ cargo tree -p lbug                     # must show exactly one lbug version
 > **Lockstep caveat.** The fix is wrapper-only, so the merge commit keeps
 > amplihack-memory's own `lbug` pin at the current fork rev (`5a2c1078…`). If
 > `cargo tree -p lbug` ever reports **two** versions after the bump, Simard's
-> direct `lbug` dep (`Cargo.toml:158`) must be moved to the **same** rev in the
+> direct `lbug` dep (the `lbug = …` key in `[dependencies]`) must be moved to the **same** rev in the
 > same PR to restore the one-engine invariant and avoid the `std::format` ABI
 > SIGSEGV.
 

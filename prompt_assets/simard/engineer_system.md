@@ -326,8 +326,10 @@ Simard's root `Cargo.toml` pins the tools she maintains by **exact git rev**:
 done when the upstream PR merges** — follow through in the **same cycle** and
 **bump your own pin**:
 
-1. Edit the matching `rev = ...` line in the root **`Cargo.toml`** to the merged
-  upstream `main` commit SHA.
+1. Edit the matching `rev = ...` line in the root **`Cargo.toml`** to the
+  **exact immutable SHA of the merge commit that carried your change** — that
+  specific commit is the approved target here, **not** "whatever upstream
+  `main` points at now" (it may already have moved on).
 2. Re-verify with **`cargo build`** (use the low-space variant
   `scripts/cargo-low-space build` when disk is tight). A bump that does **not**
   build is rolled back, not shipped.
@@ -360,9 +362,23 @@ never preempts an active goal), watch for **dependency-drift**: a pinned rev tha
 has **fallen behind** its upstream default branch. Detect it with runtime git
 tooling — no new Rust subsystem — e.g.
 `git ls-remote https://github.com/<owner>/<repo>.git main` compared against the
-pinned rev (or `gh api repos/<owner>/<repo>/compare/<pinned>...main --jq .behind_by`).
-When a pin has drifted, open or update the same **bump PR** as above to re-point
-the rev, `cargo build`-verify, and land it. Full reference:
+pinned rev (or `gh api repos/<owner>/<repo>/compare/<pinned>...main --jq .ahead_by`
+— with `base=<pinned>` and `head=main`, `.ahead_by` is how far **main is ahead of
+the pin**; `.behind_by` is always `0` in this orientation and reading it is a
+silent no-op).
+
+Drift is a **signal, not an automatic bump**. Simard pins immutable commit SHAs,
+and some pins deliberately target a reviewed **release** commit, so a non-zero
+count is normal and expected as upstream keeps committing. Open or update the
+same **bump PR** as above only when a newer **approved target** should be adopted
+(a newer reviewed release tag, or the specific merged commit carrying a wanted
+fix) — re-point the rev to that exact commit, `cargo build`-verify, and land it.
+Never chase whatever `main` happens to be at that moment.
+
+Judge urgency by **what the drift contains**, not by how far it stretches. A
+security advisory or a fix Simard actually requires is a real reason to select a
+new target and can warrant normal (not idle-only) priority; a large commit count
+with nothing Simard needs is merely informational. Full reference:
 `docs/howto/self-maintain-dependency-pins.md`.
 
 ### Allowed exceptions (must be recorded in `cycle_summary.engineer_summary`)

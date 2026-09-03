@@ -101,10 +101,20 @@ fn sanitized(lookup: impl Fn(&str) -> Option<f64>) -> ScoreDimensions {
 
 /// Recompute the suite-level `success` flag from the per-scenario tallies.
 ///
-/// The library's `GymRunner::run_suite` computes its top-level `success` with
-/// inverted logic (it is `true` precisely when failures exist). The adapter
-/// must NOT trust that flag — `success` is `true` only when every scenario in
-/// the suite passed: `scenarios_passed == scenarios_total`.
+/// The library's `GymRunner::run_suite` computes its top-level `success` as
+/// `!result.failed_levels.is_empty() || result.level_results.iter().all(|lr| lr.success)`.
+/// `ProgressiveResult::add_result` pushes a level id onto `failed_levels`
+/// exactly when that level's result is NOT successful, so an empty
+/// `failed_levels` implies every entry of `level_results` succeeded. One
+/// disjunct or the other therefore holds in every reachable state: the
+/// expression is a **tautology that always evaluates to `true`** — for an
+/// all-pass suite, a partially-failing suite, and an empty suite alike
+/// (`all()` over an empty iterator is `true`).
+///
+/// So the flag is not merely "inverted"; it carries **no information at all**.
+/// The adapter must therefore ignore it entirely and derive the verdict itself:
+/// `success` is `true` only when every scenario in the suite passed, i.e.
+/// `scenarios_passed == scenarios_total`.
 pub(crate) fn suite_success(scenarios_passed: usize, scenarios_total: usize) -> bool {
     scenarios_passed == scenarios_total
 }
@@ -503,7 +513,7 @@ mod tests {
         assert_eq!(d.temporal_awareness, 0.0);
     }
 
-    // ── Suite success recompute (the upstream inverted-flag fix) ──────────
+    // ── Suite success recompute (upstream flag is an always-true tautology) ──
 
     #[test]
     fn run_suite_success_requires_all_passed() {
@@ -513,7 +523,8 @@ mod tests {
         );
         assert!(
             !suite_success(11, 12),
-            "a single failure => success: false (must not trust the engine's inverted flag)"
+            "a single failure => success: false (the engine's own flag is an \
+             always-true tautology and must not be trusted)"
         );
         assert!(
             !suite_success(0, 12),

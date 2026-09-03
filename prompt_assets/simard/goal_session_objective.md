@@ -185,7 +185,9 @@ merging it upstream. The goal **is not done until** that fix is shipped into
 Simard's own **running build**:
 
 1. **Bump her own pin.** Edit the matching `rev = ...` line in the root
-   `Cargo.toml` to the merged upstream `main` commit.
+   `Cargo.toml` to the **exact immutable SHA of the merge commit that carried
+   that fix** — that specific commit is the approved target, **not** "whatever
+   upstream `main` points at now".
 2. **Verify the build.** `cargo build` must succeed against the new rev; a bump
    that does not build is rolled back, not shipped.
 3. **Land the bump PR.** Open (or update) a **bump PR** against `rysweet/Simard`
@@ -394,11 +396,26 @@ require a subsequent rebuild cycle.
 The same "detect drift, reconcile when idle" posture applies to the upstream
 repos Simard **pins**, not just the Simard repo itself. As **low-priority
 self-maintenance** that fits spare "ok to be idle" research time (and never
-preempts an active goal), periodically check whether any rev-pinned
-build-dependency has **fallen behind** its upstream default branch; if so, open
-or update a bump follow-up that re-points the rev, runs `cargo build`, and lands
-it through the normal pipeline. This **dependency-drift** reconcile is the
-upstream-repo analog of the Self-update awareness above.
+preempts an active goal), periodically measure whether any rev-pinned
+build-dependency has **fallen behind** its upstream default branch.
+
+Drift is a **signal for evaluation, not an automatic bump or follow-up.** Simard
+pins immutable commit SHAs, and some pins deliberately target a reviewed
+**release** commit, so a non-zero commit distance is normal and expected as
+upstream keeps committing — by itself it does **not** mean the pin is stale and
+does **not** justify opening a follow-up. Open or update a bump follow-up
+**only** when a newer **approved target** has been selected: a newer reviewed
+release tag, or the specific merged commit carrying a wanted fix. Then re-point
+the rev to that exact commit, run `cargo build`, and land it through the normal
+pipeline. Never chase whatever `main` happens to be at that moment.
+
+Judge urgency by **what the drift contains**, not by how far it stretches. A
+security advisory or a fix Simard actually requires is a real reason to select a
+new target and can warrant normal (not idle-only) priority; a large commit count
+with nothing Simard needs is merely informational. This **dependency-drift**
+reconcile is the upstream-repo analog of the Self-update awareness above; the
+full rule lives in `engineer_system.md` and
+`docs/howto/self-maintain-dependency-pins.md`.
 
 # Two response shapes
 
