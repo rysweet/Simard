@@ -57,7 +57,7 @@ jobs:
           rust-components: rustfmt,clippy
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           # Bumped 2026-05-10: previous `simard-ci` cache held stale test
           # binaries from before tests were renamed/deleted (notably
@@ -414,7 +414,7 @@ jobs:
         uses: ./.github/actions/rust-runner-prep
 
       - name: Cache cargo registry and build artifacts
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: simard-ci-v2
           # Read-only on PRs and non-pre-commit jobs; pre-commit on main is
@@ -503,7 +503,7 @@ jobs:
 
       - name: Cache cargo registry and build artifacts (fallback build)
         if: steps.download-bin.outcome != 'success'
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: simard-ci-v2
           save-if: false
