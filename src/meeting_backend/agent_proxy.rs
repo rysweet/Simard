@@ -1179,9 +1179,8 @@ mod tests {
         // captured. `copilot`/`claude` write to a pipe (block-buffered) and
         // routinely flush a big final chunk right before exit; the old
         // `try_wait` + non-blocking-`try_recv` drain dropped that burst. We use
-        // 4-digit numbers so `strip_copilot_noise` (which drops lines of length
-        // <= 2) keeps all of them, and a burst (~30 KB) far larger than the
-        // reader's buffer so the race would trigger on the old code.
+        // a burst (~30 KB) far larger than the reader's buffer so the race
+        // would trigger on the old code.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "seq 1000 7000".to_string()];
@@ -1446,8 +1445,8 @@ mod tests {
     #[test]
     fn large_prompt_round_trips_through_stdin_without_truncation() {
         // Build a >=256 KiB payload of clean, noise-free lines (each distinct so
-        // the assertion also proves ordering and no de-duplication). Every line
-        // is > 2 chars and matches no `line_is_noise` marker, so
+        // the assertion also proves ordering and no de-duplication). No line
+        // matches a `line_is_noise` marker, so
         // `strip_copilot_noise` is a no-op and the round-trip is exact.
         let mut payload = String::new();
         let mut i = 0usize;
