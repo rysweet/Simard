@@ -1,7 +1,7 @@
 ---
 title: Meeting backend API reference
 description: Rust API reference for MeetingBackend — the unified meeting engine behind CLI REPL and dashboard WebSocket chat.
-last_updated: 2026-04-12
+last_updated: 2026-10-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -66,6 +66,23 @@ pub struct MeetingResponse {
 ```
 
 Returned by `send_message()`. Contains Simard's response text and the running count of messages in the session.
+
+#### Response content
+
+The meeting agent proxy preserves substantive output regardless of line length
+in both streaming callbacks and the final response. This includes short prose
+such as `OK`, JSON delimiters (`{`, `}`, `[`, `]`, `},`), and numeric lines
+such as `0`, `12`, and `-1`. Multiline JSON retains its delimiters and values
+instead of losing lines of one or two characters. This applies to the CLI
+meeting REPL and dashboard chat, which share the proxy.
+
+Known CLI noise is still filtered: staged-hook bootstrap messages, lines
+containing `XPIA`, `Script started on` banners, `Warning:` lines, and `●`
+progress lines. Usage-footer lines starting with `Total usage est:`,
+`API time spent:`, `Total session time:`, `Changes `, `Requests `, or
+`Tokens ` remain filtered; the final response also discards everything after
+the first such footer. Leading and trailing whitespace is trimmed from the
+final response. Short content alone is never a reason to discard a line.
 
 ### `MeetingSummary`
 
