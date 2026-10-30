@@ -31,7 +31,6 @@
 
 #![cfg(unix)]
 
-use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -59,22 +58,20 @@ fn run_cat_with_prompt(prompt: &[u8], mode: PromptDelivery) -> Vec<u8> {
 
     let mut child = cmd.spawn().expect("/bin/cat spawn failed");
     let stdin = child.stdin.take();
-    applied.feed(stdin).expect("AppliedPromptStd::feed failed");
-
-    let mut stdout_buf = Vec::with_capacity(prompt.len());
-    child
-        .stdout
-        .take()
-        .expect("child stdout pipe missing")
-        .read_to_end(&mut stdout_buf)
-        .expect("reading cat stdout");
-
-    let status = child.wait().expect("cat wait failed");
+    // Drain stdout while feeding stdin: either pipe can fill before a large
+    // prompt is fully written, leaving both this helper and cat blocked.
+    let writer = std::thread::spawn(move || applied.feed(stdin));
+    let output = child.wait_with_output().expect("cat wait failed");
+    writer
+        .join()
+        .expect("prompt writer should not panic")
+        .expect("AppliedPromptStd::feed failed");
     assert!(
-        status.success(),
-        "/bin/cat exited unsuccessfully: {status:?}"
+        output.status.success(),
+        "/bin/cat exited unsuccessfully: {:?}",
+        output.status
     );
-    stdout_buf
+    output.stdout
 }
 
 /// Lock a sane test timeout so a hung subprocess fails the CI run within a
