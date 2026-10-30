@@ -8,6 +8,7 @@ doc_type: concept
 related:
   - ../howto/configure-disk-reclamation.md
   - ../reference/disk-reclaim-api.md
+  - ../reference/disk-reclaim-build-cache-producer.md
   - ../reference/disk-reclaim-telemetry.md
   - ../reference/engineer-worktree-sweep-safety.md
   - ./automated-disk-health.md
@@ -257,6 +258,7 @@ reused unchanged.
 
 - [Configure disk reclamation (how-to)](../howto/configure-disk-reclamation.md) — operator guide, CLI, env config
 - [Disk reclaim API (reference)](../reference/disk-reclaim-api.md) — module API, the guard, the executor, the recipe contract
+- [Disk reclaim build-cache producer (reference)](../reference/disk-reclaim-build-cache-producer.md) — the deterministic sub-artifact `StaleBuildCache` producer that lets routine reclaim hold steady-state disk below the emergency threshold
 - [Disk reclaim telemetry (reference)](../reference/disk-reclaim-telemetry.md) — emitted metrics
 - [Worktree reaping safety guards](../reference/engineer-worktree-sweep-safety.md) — the shared liveness/uncommitted-work primitives the guard composes
 - [Automated disk health (concept)](./automated-disk-health.md) — the superseded per-cycle check

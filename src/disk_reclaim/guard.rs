@@ -27,6 +27,7 @@ use crate::worktree_gc::liveness::LiveProcessProbe;
 
 use super::candidate::{CandidateKind, ReclaimCandidate};
 use super::daemon_dir::resolve_daemon_working_dirs;
+use super::fs_predicates::is_real_dir;
 
 /// The concrete filesystem primitive the executor will run for an allowed
 /// candidate.
@@ -210,6 +211,14 @@ impl SizeMeasurer for CachingSizeMeasurer<'_> {
 pub struct GuardContext<'a> {
     /// The positive containment allow-list (reclamation scope).
     pub allow_roots: &'a [PathBuf],
+    /// The registered build-cache leaf allowlist (issue #4810). Each entry is a
+    /// canonical `target/debug/{incremental,deps,build}` (or `llvm-cov-target`
+    /// mirror) leaf that routine reclaim may evict. A candidate whose canonical
+    /// path **exactly** equals one of these is exempted from the protected
+    /// deny-set and serves as its own allow-root anchor — never a prefix,
+    /// substring, or pattern match. Rails 3–4 still apply. Empty for callers
+    /// that do not manage build caches (behaviour is then identical to before).
+    pub build_cache_leaves: &'a [PathBuf],
     /// The protected deny-set.
     pub protected: &'a ProtectedDenySet,
     /// Live-PID probe (fail-closed).
@@ -230,16 +239,33 @@ pub struct GuardContext<'a> {
 pub fn vet_candidate(candidate: &ReclaimCandidate, ctx: &GuardContext<'_>) -> Verdict {
     let path = candidate.path.as_path();
 
-    // Rail 1 — protected deny-set (absolute; checked first so it always wins).
-    if ctx.protected.contains(path) {
+    // A registered build-cache leaf (exact canonical match) gets a surgical,
+    // double-locked exemption (issue #4810): it bypasses the protected deny-set
+    // (Rail 1) and serves as its own allow-root anchor (Rail 2). This is what
+    // lets ROUTINE reclaim evict `<repo>/target/debug/{incremental,deps,build}`
+    // even when the managed repo root itself is deny-set-protected (the daemon
+    // runs from a managed checkout), instead of only the emergency net nuking
+    // `target/debug` wholesale. The exemption is **fail-closed**: a symlink,
+    // non-directory, or canonicalize failure means "not a registered leaf", and
+    // the path then falls through to the normal rails. Rails 3–4 still apply.
+    let is_build_cache_leaf = is_registered_build_cache_leaf(path, ctx.build_cache_leaves);
+
+    // Rail 1 — protected deny-set (absolute; checked first so it always wins),
+    // except for an exact-canonical registered build-cache leaf.
+    if !is_build_cache_leaf && ctx.protected.contains(path) {
         return Verdict::Reject {
             reason: RejectReason::ProtectedPath,
         };
     }
 
     // Rail 2 — allow-root containment + symlink/canonicalize refusal. Reuses the
-    // audited component-wise primitive (no string-prefix confusion).
-    if !is_safe_to_delete(path, ctx.allow_roots, ctx.protected.as_paths()) {
+    // audited component-wise primitive (no string-prefix confusion). A registered
+    // leaf equals (not strictly-inside) its leaf allow-root, which
+    // `is_safe_to_delete` refuses by design; the exemption above already proved
+    // the leaf is a real, non-symlink directory canonically equal to a registered
+    // leaf, so it satisfies containment on its own — never `target/debug`, which
+    // is a parent (not a descendant) and can never match a leaf.
+    if !is_build_cache_leaf && !is_safe_to_delete(path, ctx.allow_roots, ctx.protected.as_paths()) {
         return Verdict::Reject {
             reason: RejectReason::OutsideAllowRoot,
         };
@@ -278,6 +304,34 @@ pub fn vet_candidate(candidate: &ReclaimCandidate, ctx: &GuardContext<'_>) -> Ve
             primitive: ReclaimPrimitive::RemoveDir,
             bytes: ctx.measurer.measure(path),
         }
+    }
+}
+
+/// `true` iff `path` is an **exact-canonical** registered build-cache leaf
+/// (issue #4810). Fail-closed by construction: the path must be a real,
+/// non-symlink directory whose canonical form exactly equals one of `leaves`.
+/// A symlink (symlink-swap defense), a non-directory, a canonicalize failure, or
+/// any prefix/substring relationship is **not** a match, so `target/debug`, a
+/// worktree root, or a sibling like `target/debug/simard` is never exempted.
+///
+/// `leaves` are already canonical by contract (produced by
+/// [`build_cache_leaf_dirs`](super::build_cache::build_cache_leaf_dirs), which
+/// canonicalizes every entry), so membership is a direct comparison against the
+/// freshly-canonicalized `path` — no need to re-resolve each leaf.
+fn is_registered_build_cache_leaf(path: &Path, leaves: &[PathBuf]) -> bool {
+    if leaves.is_empty() {
+        return false;
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if !is_real_dir(&meta) {
+        return false;
+    }
+    match std::fs::canonicalize(path) {
+        Ok(canon) => leaves.contains(&canon),
+        Err(_) => false,
     }
 }
 
@@ -354,6 +408,7 @@ mod tests {
     ) -> Verdict {
         let ctx = GuardContext {
             allow_roots,
+            build_cache_leaves: &[],
             protected,
             live_probe: live,
             wt_probe: wt,

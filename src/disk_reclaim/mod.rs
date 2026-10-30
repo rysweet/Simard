@@ -13,6 +13,7 @@
 //! - [`candidate`] — the `ReclaimCandidate` serde contract + marker parser.
 //! - [`guard`] — the non-bypassable rail: `vet_candidate` → `Verdict`.
 //! - [`daemon_dir`] — the protected daemon-directory union.
+//! - `fs_predicates` — shared fail-closed real-dir / euid-ownership checks.
 //! - [`executor`] — the largest-first, threshold-stop, TOCTOU-reasserting disposer.
 //! - [`recipe`] — invoke the analysis recipe; strict parse; no fallback.
 
@@ -25,10 +26,17 @@ use crate::error::SimardResult;
 pub mod candidate;
 pub mod daemon_dir;
 pub mod executor;
+mod fs_predicates;
 pub mod guard;
 pub mod prod;
 pub mod recipe;
 
+pub mod build_cache;
+
+pub use build_cache::{
+    EVICTABLE_CACHE_DIRS, build_cache_candidates, build_cache_candidates_from_leaves,
+    build_cache_leaf_dirs, target_debug_roots,
+};
 pub use candidate::{CandidateKind, MAX_CANDIDATES, ReclaimCandidate, parse_candidates};
 pub use daemon_dir::resolve_daemon_working_dirs;
 pub use executor::{
@@ -176,6 +184,32 @@ pub fn reclaim_candidates(
     target_pct: u8,
     source: ReclaimSource,
 ) -> ReclaimReport {
+    // Deterministic build-cache leaves for the managed repos (issue #4810).
+    // Every entry point (CLI, daemon) inherits the leaf allowlist by having it
+    // computed here rather than trusting the caller to supply it.
+    let build_cache_leaves = build_cache::build_cache_leaf_dirs(&managed_repos());
+    reclaim_candidates_with_leaves(
+        candidates,
+        build_cache_leaves,
+        state_root,
+        mode,
+        target_pct,
+        source,
+    )
+}
+
+/// [`reclaim_candidates`] with the build-cache leaves supplied by the caller,
+/// so the production path can compute that (filesystem-walking) set **once** and
+/// reuse it for both the candidate list and the guard allowlist. Callers that do
+/// not already have the leaves use [`reclaim_candidates`], which computes them.
+fn reclaim_candidates_with_leaves(
+    candidates: Vec<ReclaimCandidate>,
+    build_cache_leaves: Vec<PathBuf>,
+    state_root: &Path,
+    mode: ReclaimMode,
+    target_pct: u8,
+    source: ReclaimSource,
+) -> ReclaimReport {
     // Defense in depth: refuse to delete as root at the guarded core so every
     // entry point inherits the invariant — even a future caller that skips an
     // adapter-level pre-check. Downgrade apply -> dry-run rather than delete
@@ -191,7 +225,15 @@ pub fn reclaim_candidates(
         effective
     };
 
-    let allow = allow_roots(state_root);
+    // The leaves are threaded into BOTH the Rail-2 allow-scope and the guard's
+    // registered-leaf allowlist so routine reclaim can evict
+    // `<repo>/target/debug/*` without widening any other rail. The widening is
+    // expressed leaf-by-leaf (never `target/`), so `starts_with` structurally
+    // forbids a wholesale-`target/debug` candidate from ever being contained.
+    // Empty when nothing is built yet.
+    let mut allow = allow_roots(state_root);
+    allow.extend(build_cache_leaves.iter().cloned());
+
     let protected = ProtectedDenySet::resolve(Path::new("/proc"));
     let live = crate::worktree_gc::ProcfsLiveProcessProbe::new();
     let wt = RealTrackedWorktreeProbe;
@@ -201,6 +243,7 @@ pub fn reclaim_candidates(
     let measurer = CachingSizeMeasurer::new(&du);
     let ctx = GuardContext {
         allow_roots: &allow,
+        build_cache_leaves: &build_cache_leaves,
         protected: &protected,
         live_probe: &live,
         wt_probe: &wt,
@@ -249,9 +292,51 @@ pub fn run_disk_reclaim(
     };
     let (candidates, _used_pct) = run_reclaim_recipe(&invoker)?;
 
-    Ok(reclaim_candidates(
-        candidates, state_root, mode, target_pct, source,
+    // Merge the deterministic build-cache leaves with the agent's proposal,
+    // de-duplicating by path (issue #4810). The recipe contract is unchanged —
+    // the agent may still nominate build caches and everything else — but the
+    // deterministic set guarantees the regenerable leaves are always present
+    // regardless of what the agent returns, removing steady-state relief's
+    // dependence on non-deterministic LLM output. There is NO fallback: a recipe
+    // failure still surfaces above as `AdapterInvocationFailed`; the deterministic
+    // candidates never mask a broken recipe.
+    //
+    // The leaf set is walked from disk **once** here and reused for both the
+    // candidate list and the guard allowlist (`reclaim_candidates_with_leaves`),
+    // so routine reclaim never re-`read_dir`/`canonicalize`s every leaf twice.
+    let build_cache_leaves = build_cache::build_cache_leaf_dirs(&managed_repos());
+    let candidates = merge_dedup_by_path(
+        candidates,
+        build_cache::build_cache_candidates_from_leaves(build_cache_leaves.clone()),
+    );
+
+    Ok(reclaim_candidates_with_leaves(
+        candidates,
+        build_cache_leaves,
+        state_root,
+        mode,
+        target_pct,
+        source,
     ))
+}
+
+/// Merge two candidate lists, keeping the first occurrence of each path. The
+/// recipe proposal wins on a path collision (its `kind`/`reason` are advisory and
+/// re-derived by the guard anyway), and each deterministic leaf is appended only
+/// when no candidate already targets that path.
+fn merge_dedup_by_path(
+    primary: Vec<ReclaimCandidate>,
+    extra: Vec<ReclaimCandidate>,
+) -> Vec<ReclaimCandidate> {
+    let mut seen: std::collections::HashSet<PathBuf> =
+        primary.iter().map(|c| c.path.clone()).collect();
+    let mut out = primary;
+    for candidate in extra {
+        if seen.insert(candidate.path.clone()) {
+            out.push(candidate);
+        }
+    }
+    out
 }
 
 /// Whether the daemon self-heal trigger should fire: the measured home-partition
@@ -566,5 +651,33 @@ mod tests {
             reason_attr(RejectReason::UnknownPrState),
             "unknown_pr_state"
         );
+    }
+
+    #[test]
+    fn merge_dedup_by_path_appends_only_new_paths() {
+        let mk = |p: &str, kind: CandidateKind| ReclaimCandidate {
+            path: PathBuf::from(p),
+            kind,
+            parent_repo: None,
+            reason: None,
+            est_bytes: None,
+        };
+        // The recipe proposal already includes `/a`; the deterministic set adds
+        // `/a` (a collision, dropped) and `/b` (new, appended).
+        let recipe = vec![mk("/a", CandidateKind::OrphanDir)];
+        let deterministic = vec![
+            mk("/a", CandidateKind::StaleBuildCache),
+            mk("/b", CandidateKind::StaleBuildCache),
+        ];
+
+        let merged = merge_dedup_by_path(recipe, deterministic);
+        let paths: Vec<_> = merged.iter().map(|c| c.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            "collision keeps the first (recipe) entry; only the new path is appended",
+        );
+        // The surviving `/a` is the recipe's, proving first-wins on collision.
+        assert_eq!(merged[0].kind, CandidateKind::OrphanDir);
     }
 }

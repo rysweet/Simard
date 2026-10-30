@@ -8,6 +8,7 @@ doc_type: howto
 related:
   - ../concepts/agentic-disk-reclamation.md
   - ../reference/disk-reclaim-api.md
+  - ../reference/disk-reclaim-build-cache-producer.md
   - ../reference/disk-reclaim-telemetry.md
   - ./configure-disk-health-check.md
   - ./reclaim-disk-space-and-run-low-space-rust-builds.md
@@ -322,6 +323,7 @@ du -sh /home/azureuser/* 2>/dev/null | sort -h | tail -10
 - [The simard disk tool (reference)](../reference/simard-disk-tool.md) — CLI grammar, exit codes, guard reasons
 - [Agentic disk reclamation (concept)](../concepts/agentic-disk-reclamation.md) — design rationale, the rails, "agent proposes, Rust disposes"
 - [Disk reclaim API (reference)](../reference/disk-reclaim-api.md) — module API, guard, executor, recipe contract
+- [Disk reclaim build-cache producer (reference)](../reference/disk-reclaim-build-cache-producer.md) — the deterministic sub-artifact producer that makes routine reclaim free build caches so the emergency net stops firing every cycle
 - [Disk reclaim telemetry (reference)](../reference/disk-reclaim-telemetry.md) — emitted metrics
 - [Configure the disk health check](./configure-disk-health-check.md) — the superseded per-cycle check
 - [Reclaim disk space and run low-space Rust builds](./reclaim-disk-space-and-run-low-space-rust-builds.md) — manual build-artifact scripts
