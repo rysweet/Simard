@@ -59,7 +59,7 @@ jobs:
           "$RUNNER_TEMP/rust-toolchain-smoke" --nocapture
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
@@ -474,7 +474,7 @@ jobs:
         run: cargo test --test install_real -- --nocapture
 
   e2e-dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     # Reuse the simard binary built by the pre-commit job instead of doing a
     # full from-scratch Rust build here. Cuts ~15-20 min off this job.
