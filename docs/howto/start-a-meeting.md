@@ -1,7 +1,7 @@
 ---
 title: How to start a meeting with Simard
 description: Start a conversational meeting with Simard from the CLI or dashboard. Simard maintains conversation context, remembers past meetings, and persists outcomes on close.
-last_updated: 2026-07-04
+last_updated: 2026-10-29
 review_schedule: as-needed
 owner: simard
 doc_type: howto
@@ -63,6 +63,12 @@ and I think the issue is that my code scanning prompts are too generic...
 ```
 
 Just talk. Simard maintains the full conversation history and uses it on every turn.
+
+Short response lines, including `OK`, JSON braces and brackets, and numeric
+values, are preserved in live output and the completed response. Known CLI
+bootstrap, progress, and usage noise is still filtered. See the
+[response-content contract](../reference/meeting-backend-api.md#response-content)
+for details.
 
 ## 2. Start a meeting from the dashboard
 
