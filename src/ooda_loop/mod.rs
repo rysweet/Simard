@@ -41,6 +41,9 @@ mod tests_types;
 #[cfg(test)]
 mod tests_no_progress;
 
+#[cfg(all(test, unix))]
+mod tests_gh_label_timeout;
+
 // Issue #16 (TDD): integration tests for the agentic root-cause upgrade — the
 // investigated adapter routes a stuck goal down the self-resolving ladder and
 // only ever authors a human block WITH the concrete why + evidence attached.
