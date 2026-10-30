@@ -2,14 +2,14 @@
 title: "Reference: resilient tracking-issue label ensure (`ooda-stuck`)"
 description: >
   The label-ensure prelude that makes every OODA tracking-issue creation robust
-  to a missing `ooda-stuck` label. Documents the pure `ensure_gh_label` helper
+  to a missing `ooda-stuck` label. Documents the bounded `ensure_gh_label` helper
   and its `LabelEnsure` classification, the idempotent `gh label create` +
   graceful-degradation contract shared by the three `gh issue create` sites (the
   deterministic brain-failure safeguard, the `OpenTrackingIssue` lifecycle path,
   and the no-progress breaker's `GhIssueFiler`), and the structured tracing each
   site emits. Fixes the recurring `could not add label: 'ooda-stuck' not found`
   escalation failure (#4472).
-last_updated: 2026-07-22
+last_updated: 2026-10-29
 review_schedule: as-needed
 owner: simard
 doc_type: reference
@@ -27,7 +27,7 @@ related:
 
 # Reference: resilient tracking-issue label ensure (`ooda-stuck`)
 
-> **Status: implemented (issue #4472).** The pure helper lives at
+> **Status: implemented (issue #4472).** The subprocess helper lives at
 > [`src/ooda_actions/gh_label.rs`](https://github.com/rysweet/Simard/blob/main/src/ooda_actions/gh_label.rs).
 > It is called from the three sites that create the operator-facing tracking
 > issue for a stuck goal:
@@ -75,7 +75,7 @@ no-progress breaker — see the
 [no-progress breaker API](./no-progress-breaker-api.md) and
 [steerable-daemon concept](../concepts/steerable-ooda-daemon.md).
 
-## `ensure_gh_label` — the pure helper
+## `ensure_gh_label` — the bounded subprocess helper
 
 ```rust
 // src/ooda_actions/gh_label.rs
@@ -102,7 +102,7 @@ pub(crate) enum LabelEnsure {
 ///
 /// Runs `gh label create ooda-stuck` (argv-only, never `sh -c`). Treats an
 /// "already exists" stderr as success (`AlreadyExists`). Any other non-zero
-/// exit, or a spawn error, is classified `Unavailable(reason)`.
+/// exit, spawn error, or five-second timeout is classified `Unavailable(reason)`.
 ///
 /// This function emits **no** tracing itself — it returns a classification so
 /// each call site can log with its own static `target:`. It never panics and
@@ -126,6 +126,16 @@ and classifies the result:
 | exit ≠ 0 | `already exists` (case-insensitive substring) | `AlreadyExists` |
 | exit ≠ 0 | anything else (auth, not-found repo, rate-limit, …) | `Unavailable(<trimmed stderr>)` |
 | spawn error (`gh` not on `PATH`, etc.) | — | `Unavailable(<io error>)` |
+| five-second deadline exceeded | — | `Unavailable(gh label create timed out after 5000 ms)` |
+
+On expiry, the helper terminates and reaps the label child before returning.
+Callers emit their existing degradation warning and attempt issue creation
+without `--label`. The timeout reason includes any termination or reap error.
+Stderr is captured in a temporary file, with at most 64 KiB read for
+classification, so full pipes or inherited pipe handles cannot extend the wait.
+Stdin and unused stdout are disconnected. The engineer-lifecycle caller holds
+the shared state mutex only for state updates, releasing it during subprocess
+operations, including label preflight and issue creation.
 
 The "already exists" substring match is intentionally the **only** wording the
 helper treats as idempotent success. If a future `gh` release changes that
@@ -153,7 +163,7 @@ Every site follows the same three-step prelude before `gh issue create`:
 3. **File the issue**, preserving each site's existing result handling and every
    pre-existing failure-branch trace verbatim.
 
-> The behaviour is **additive and non-breaking**: no function signature changes,
+> The helper's caller contract is unchanged:
 > no new panics, and no new `print!`/`println!`/`eprintln!`. New code emits
 > structured tracing / OTel only. The pre-existing success `eprintln!` in the
 > deterministic safeguard is intentionally left untouched.
@@ -243,15 +253,20 @@ INFO simard::ooda label=ooda-stuck no-progress breaker: created missing 'ooda-st
 
 ## Testing
 
-- **Unit (hermetic).** An inline `#[cfg(test)]` test in `gh_label.rs` exercises
-  the pure stderr classifier: `already exists` → `AlreadyExists`; an auth
-  string → `Unavailable`; empty/other → `Unavailable`. No live `gh` is spawned.
+- **Unit (hermetic).** Tests in `gh_label.rs` exercise the stderr classifier,
+  local subprocess success, duplicate and failure results, and a missing
+  executable. No live GitHub CLI or network is used.
+- **Timeout regression (hermetic).** `tests_gh_label_timeout.rs` runs the actual
+  `GhIssueFiler` in an isolated test process with a fake `gh` that stalls at
+  label creation. It verifies child reaping, the timeout cause in the warning,
+  and a subsequent unlabeled issue-create invocation, in that order. A separate
+  fixture deadline makes an unbounded preflight fail the test.
 - **Regression (must stay green).**
   - `src/ooda_loop/tests_no_progress_investigation.rs`
   - `tests/gadugi/no-progress-tracking-issue-link.sh`
   - `tests/gadugi/no-progress-tracking-issue-link.yaml`
-- **Gate.** `cargo build`, `cargo clippy -- -D warnings`, and the targeted tests
-  above are all clean; CI-green and merge-ready.
+- **Checks.** Run `cargo fmt --all -- --check`, the repository's release Clippy
+  hook, and `cargo test --lib --locked gh_label` plus the no-progress tests above.
 
 ## Out of scope
 

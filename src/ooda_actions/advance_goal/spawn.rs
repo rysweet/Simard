@@ -442,13 +442,12 @@ pub fn dispatch_spawn_engineer(
         // `OpenTrackingIssue`) intentionally return `success=false`. Reset
         // here so the safeguard threshold doesn't keep advancing.
         //
-        // `apply_lifecycle_decision` performs the slow reclaim/issue side
-        // effects under the lock; this is the rare cross-restart branch
-        // (a live on-disk engineer for an unassigned goal), not the common
-        // spawn path, so brief lock contention here is acceptable.
+        // Only the counter reset and final lifecycle state mutation need the
+        // mutex. Release it before starting subprocess operations below.
         let mut guard = lock_state(state);
         guard.goal_failure_counts.remove(goal_id);
-        return apply_lifecycle_decision(action, &mut guard, goal_id, &live, decision);
+        drop(guard);
+        return apply_lifecycle_decision(action, state, goal_id, &live, decision);
     }
 
     // Recursion guard. Default current depth = 0 (top-level supervisor).
@@ -898,7 +897,7 @@ fn truncate_for_log(s: &str) -> String {
 /// orient phase (see `src/ooda_loop/orient.rs:12`).
 fn apply_lifecycle_decision(
     action: &PlannedAction,
-    state: &mut OodaState,
+    state: &Mutex<&mut OodaState>,
     goal_id: &str,
     live_worktree: &std::path::Path,
     decision: EngineerLifecycleDecision,
@@ -1023,7 +1022,7 @@ fn apply_lifecycle_decision(
         }
     }
 
-    let detail = apply_decision_to_state(&decision, state, goal_id);
+    let detail = apply_decision_to_state(&decision, &mut lock_state(state), goal_id);
     make_outcome(action, success, detail)
 }
 
