@@ -164,6 +164,30 @@ fn is_version_tag_comment(comment: &str) -> bool {
     chars.next() == Some('v') && chars.next().is_some_and(|c| c.is_ascii_digit())
 }
 
+/// Verify must exercise the same action revision as release and coverage.
+#[test]
+fn rust_toolchain_revision_is_shared_by_verify_release_and_coverage() {
+    let smoke_pins = parse_pins(
+        &workflows_dir().join("verify.yml"),
+        "dtolnay/rust-toolchain",
+    );
+    assert_eq!(
+        smoke_pins.len(),
+        1,
+        "verify must run the toolchain smoke job"
+    );
+    let tested_sha = &smoke_pins[0].sha;
+    for file in pin_source_files() {
+        for pin in parse_pins(&file, "dtolnay/rust-toolchain") {
+            assert_eq!(
+                &pin.sha, tested_sha,
+                "{} installs a revision that verify's smoke job does not exercise",
+                pin.file
+            );
+        }
+    }
+}
+
 #[test]
 fn taiki_install_action_pins_are_dependabot_resolvable() {
     let mut pins = Vec::new();
