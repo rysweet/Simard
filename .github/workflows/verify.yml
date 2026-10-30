@@ -31,8 +31,35 @@ env:
   CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "false"
 
 jobs:
-  pre-commit:
+  # Validate release and coverage's toolchain inputs even on action-only PRs.
+  rust-toolchain-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: stable
+            components: ""
+          - toolchain: nightly-2026-07-01
+            components: llvm-tools-preview
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: ${{ matrix.components }}
+      - name: Compile and test with the installed toolchain
+        env:
+          RUST_TOOLCHAIN_SMOKE_EXPECTED: ${{ matrix.toolchain }}
+        run: |
+          rustc --edition=2024 --test tests/rust_toolchain_smoke.rs -o "$RUNNER_TEMP/rust-toolchain-smoke"
+          "$RUNNER_TEMP/rust-toolchain-smoke" --nocapture
+
+  pre-commit:
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
@@ -447,7 +474,7 @@ jobs:
         run: cargo test --test install_real -- --nocapture
 
   e2e-dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     # Reuse the simard binary built by the pre-commit job instead of doing a
     # full from-scratch Rust build here. Cuts ~15-20 min off this job.

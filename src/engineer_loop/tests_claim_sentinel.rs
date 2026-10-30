@@ -161,6 +161,7 @@ fn inspection_for(repo: &Path) -> RepoInspection {
 /// deleted `strip_claim_sentinel(...)` from the post-status path would compile
 /// and pass every other test in the suite — this is the test that catches it.
 #[test]
+#[serial(cognitive_memory)]
 fn verify_agent_spawn_artifacts_ignores_claim_only_no_op_session() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());
@@ -194,6 +195,7 @@ fn verify_agent_spawn_artifacts_ignores_claim_only_no_op_session() {
 /// appears in the evidence). Guards against an over-broad filter that would
 /// swallow real work and hide a productive session.
 #[test]
+#[serial(cognitive_memory)]
 fn verify_agent_spawn_artifacts_still_verifies_real_change_alongside_claim() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());
