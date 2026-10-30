@@ -488,8 +488,8 @@ mod tests_pending_writes {
         pending.add_memory(make_memory_record("key-1"));
         pending.add_evidence(make_evidence_record("ev-1"));
 
-        let mem: Vec<_> = pending.memory_records.drain(..).collect();
-        let ev: Vec<_> = pending.evidence_records.drain(..).collect();
+        let mem = std::mem::take(&mut pending.memory_records);
+        let ev = std::mem::take(&mut pending.evidence_records);
 
         assert_eq!(mem.len(), 1);
         assert_eq!(ev.len(), 1);

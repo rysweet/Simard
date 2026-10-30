@@ -24,7 +24,7 @@ fn local_miss_triggers_client_query() {
                     "confidence": 1.0,
                     "source_id": "test",
                     "tags": [
-                        format!("scope:Decision"),
+                        "scope:Decision".to_string(),
                         format!("session:{sid}")
                     ]
                 }]
