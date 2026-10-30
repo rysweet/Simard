@@ -49,7 +49,7 @@ jobs:
         # SHA-pins the reachable `v2` release of taiki-e/install-action and
         # selects the tool via the `tool:` input. A diverged per-tool tag commit
         # breaks Dependabot's github_actions updater ("no such commit").
-        uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        uses: taiki-e/install-action@7b8d4719ee4aaa279bdf55df38dacb9ebfe12a6c # v2.87.6
         with:
           tool: cargo-llvm-cov
 
