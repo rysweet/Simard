@@ -268,10 +268,15 @@ pub(crate) fn read_recent_cycle_reports(state_root: &std::path::Path, n: usize) 
 
     // Collect only (cycle_number, path) refs first — no file contents yet. The
     // `cycle_reports/` directory grows unbounded (one file per cycle, never
-    // pruned), so reading every file just to keep the newest `n` wastes disk
-    // I/O and memory on hot, repeatedly-polled dashboard endpoints. Deferring
-    // the reads until we know which cycles survive turns O(total files) reads
-    // into O(n).
+    // pruned), so reading every file's contents just to keep the newest `n`
+    // wastes disk I/O and memory on hot, repeatedly-polled dashboard endpoints.
+    //
+    // Enumerating the directories and sorting the refs is still O(total files) —
+    // the filesystem offers no cheaper way to find the newest entries — but that
+    // work is light (a filename parse plus one small tuple per file). The costly
+    // part is reading and JSON-parsing each report's full contents; deferring
+    // those until we know which cycles survive drops them to O(n) in the common
+    // case (a run of unreadable newest files can still force more read attempts).
     let mut refs: Vec<(u32, std::path::PathBuf)> = Vec::new();
 
     for dir in &candidates {
