@@ -52,6 +52,7 @@ Simard does **not** expose:
 | benchmark scenarios and suites | `simard gym ...` | `simard-gym ...` |
 | LOCAL COIN Gym harness done-gate | `coin-gym verify` | `simard_operator_probe coin-gym-verify` |
 | handoff export/restore roundtrip probe | none | `simard_operator_probe handoff-roundtrip ...` |
+| operator Signal notice (plain-English, one line) | none | `simard_operator_probe signal-notify <message>` |
 
 ## Canonical CLI surface
 
@@ -525,6 +526,30 @@ counts, and restored session phase.
 - a missing durable handoff snapshot fails explicitly rather than fabricating a
   restored runtime
 - the probe writes under the resolved `handoff-roundtrip` state root
+
+### Operator Signal notice
+
+Compatibility surface: `simard_operator_probe signal-notify <message>`
+
+This probe has no canonical `simard` subcommand; it ships only through the
+`simard_operator_probe` compatibility binary. It delivers ONE plain-English
+operator notice to the running local Signal JSON-RPC service through the same
+transport the Overseer's own operator notifications use
+(`JsonRpcSignalSender`), wrapping the body in the reserved anti-self-ingest
+marker so the inbound Signal processor skips Simard's own notice when it syncs
+back to a linked device.
+
+It exists so the agentic escalation-triage recipe
+(`prompt_assets/simard/overseer/escalation_triage.md`) can actually SEND its
+per-step plain-English updates and its single operator question, rather than
+only composing them.
+
+- the message is required positionally (quote it so it is a single argument)
+- an empty message is rejected
+- the live Signal principals (`SIMARD_SIGNAL_RPC_ACCOUNT` and
+  `SIMARD_SIGNAL_RPC_RECIPIENT`) must be set, or the command fails explicitly
+- any transport/protocol failure surfaces as a non-zero exit (never a silent
+  drop), so the caller never mistakes an undelivered notice for a delivered one
 
 ## Durable carryover contract
 

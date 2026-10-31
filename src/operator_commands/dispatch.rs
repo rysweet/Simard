@@ -6,9 +6,9 @@ use super::{
     run_engineer_read_probe, run_goal_curation_probe, run_gym_compare, run_gym_list,
     run_gym_scenario, run_gym_suite, run_handoff_probe, run_improvement_curation_probe,
     run_improvement_curation_read_probe, run_meeting_probe, run_meeting_read_probe,
-    run_review_probe, run_review_read_probe, run_terminal_probe, run_terminal_probe_from_file,
-    run_terminal_read_probe, run_terminal_recipe_list_probe, run_terminal_recipe_probe,
-    run_terminal_recipe_show_probe,
+    run_review_probe, run_review_read_probe, run_signal_notify_probe, run_terminal_probe,
+    run_terminal_probe_from_file, run_terminal_read_probe, run_terminal_recipe_list_probe,
+    run_terminal_recipe_probe, run_terminal_recipe_show_probe,
 };
 
 pub fn dispatch_operator_probe<I>(args: I) -> Result<(), Box<dyn std::error::Error>>
@@ -147,6 +147,11 @@ where
         "coin-gym-verify" => {
             reject_extra_args(args)?;
             run_coin_gym_verify_probe()?;
+        }
+        "signal-notify" => {
+            let message = next_required(&mut args, "message")?;
+            reject_extra_args(args)?;
+            run_signal_notify_probe(&message)?;
         }
         other => return Err(format!("unsupported probe command '{other}'").into()),
     }

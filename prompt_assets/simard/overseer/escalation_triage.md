@@ -80,6 +80,21 @@ English, what you found or decided. No jargon, no marker tokens. Example cadence
 automatically." → "I rewrote its finish condition to: all tests in suite Y pass."
 → "Done — the goal can now be certified automatically; nothing needed from you."
 
+**Actually DELIVER each message — do not merely compose it.** Send every per-step
+update, and the single operator question when your decision is
+`ask-operator-one-question`, through the thin Signal seam:
+
+```
+simard_operator_probe signal-notify "<your plain-English line>"
+```
+
+This posts one line to the running local Signal service (the same transport the
+Overseer's own notifications use) and wraps it so it is never mis-read back as an
+operator command. It exits non-zero if the operator was not reached, so treat a
+failure as "not delivered" and report it — never assume a composed message was
+sent. Only fall back to recording the text in your output when the seam itself is
+unavailable (e.g. the Signal principals are unset), and say so explicitly.
+
 ## OUTPUT
 
 ```json
