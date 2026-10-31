@@ -314,7 +314,7 @@ serial_test = "=3.4.0"
 # already in the dependency graph transitively (pinned to the locked versions);
 # this only promotes them to explicit dev-deps and enables the features the
 # AST scan needs. `span-locations` gives the scan accurate file:line offenders.
-syn = { version = "=2.0.117", features = ["full", "visit"] }
+syn = { version = "=3.0.3", features = ["full", "visit"] }
 proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 
 [profile.release]
