@@ -646,20 +646,18 @@ impl PersistentAgentProxy {
 
         self.turn_count += 1;
 
-        // Build the full prompt including context on first turn
-        let prompt = if self.turn_count == 1 {
-            let mut parts = Vec::new();
-            if !input.identity_context.is_empty() {
-                parts.push(input.identity_context.as_str());
-            }
-            if !input.prompt_preamble.is_empty() {
-                parts.push(input.prompt_preamble.as_str());
-            }
-            parts.push(&input.objective);
-            parts.join("\n\n")
-        } else {
-            input.objective.clone()
-        };
+        // Every invocation spawns a fresh CLI process with no memory of the
+        // previous one, so identity and the supplied conversation context must
+        // accompany every turn, not only the first (issue #5031).
+        let mut parts = Vec::new();
+        if !input.identity_context.is_empty() {
+            parts.push(input.identity_context.as_str());
+        }
+        if !input.prompt_preamble.is_empty() {
+            parts.push(input.prompt_preamble.as_str());
+        }
+        parts.push(&input.objective);
+        let prompt = parts.join("\n\n");
 
         info!(
             turn = self.turn_count,
@@ -1232,6 +1230,55 @@ mod tests {
         proxy.idle_window = Some(Duration::from_secs(30));
         let response = proxy.invoke_agent("hello").expect("substantive answer");
         assert!(response.contains("usage limit handling"));
+    }
+
+    #[test]
+    fn every_fresh_invocation_receives_identity_and_conversation_context() {
+        // Issue #5031: each turn starts a fresh CLI process, so identity and
+        // the supplied conversation history must reach the child on every
+        // invocation, not only the first.
+        let dir = std::env::temp_dir().join(format!("simard-5031-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "sh".to_string();
+        proxy.agent_base_args = vec![
+            "-c".to_string(),
+            format!("cat > {}/in-$$.txt; echo ok", dir.display()),
+        ];
+        proxy.idle_window = Some(Duration::from_secs(30));
+        proxy.is_open = true;
+
+        for objective in ["first question", "summarise the meeting"] {
+            proxy
+                .run_turn_streaming_impl(
+                    BaseTypeTurnInput {
+                        objective: objective.to_string(),
+                        identity_context: "IDENTITY-CONSTRAINT".to_string(),
+                        prompt_preamble: "Operator: PRIOR-CONVERSATION".to_string(),
+                    },
+                    &mut |_| {},
+                )
+                .unwrap();
+        }
+
+        let mut inputs: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+            .collect();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(inputs.len(), 2, "two fresh invocations expected");
+        inputs.sort();
+        for input in &inputs {
+            assert!(
+                input.contains("IDENTITY-CONSTRAINT"),
+                "identity lost: {input}"
+            );
+            assert!(
+                input.contains("PRIOR-CONVERSATION"),
+                "history lost: {input}"
+            );
+        }
+        assert!(inputs.iter().any(|i| i.contains("summarise the meeting")));
     }
 
     #[test]
