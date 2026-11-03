@@ -367,17 +367,7 @@ pub fn dispatch_spawn_engineer(
                     }
                     // File tracking issue. Failure to file is logged but
                     // does NOT swallow the original brain failure.
-                    match std::process::Command::new("gh")
-                        .args([
-                            "issue",
-                            "create",
-                            "--title",
-                            &title,
-                            "--body",
-                            &body,
-                            "--label",
-                            "ooda-stuck",
-                        ])
+                    match crate::ooda_actions::gh_label::tracking_issue_command(&title, &body)
                         .output()
                     {
                         Ok(out) if out.status.success() => {
@@ -924,25 +914,15 @@ fn apply_lifecycle_decision(
     }
 
     if let EngineerLifecycleDecision::OpenTrackingIssue { title, body, .. } = &decision {
-        let result = std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .status();
-        if let Err(e) = result {
-            tracing::warn!(
-                target: "simard::ooda_brain",
-                goal = %goal_id,
-                error = %e,
-                "open_tracking_issue: gh issue create failed",
-            );
+        let result = crate::ooda_actions::gh_label::tracking_issue_command(title, body).status();
+        match result {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                tracing::warn!(target: "simard::ooda_brain", goal = %goal_id, %status, "open_tracking_issue: gh issue create failed")
+            }
+            Err(e) => {
+                tracing::warn!(target: "simard::ooda_brain", goal = %goal_id, error = %e, "open_tracking_issue: gh issue create failed")
+            }
         }
     }
 
