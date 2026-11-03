@@ -1,11 +1,57 @@
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use crate::error::{SimardError, SimardResult};
 use crate::sanitization::sanitize_terminal_text;
 
 use super::{CARGO_COMMAND_TIMEOUT_SECS, CLEARED_GIT_ENV_VARS, GIT_COMMAND_TIMEOUT_SECS};
+
+#[cfg(unix)]
+fn spawn_pipe_reader<R: Read + std::os::fd::AsRawFd + Send + 'static>(
+    mut pipe: R,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        // SAFETY: the descriptor is owned by this thread and remains open for this call.
+        let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut result = Vec::new();
+        let mut buf = [0; 8192];
+        while !stop.load(Ordering::Relaxed) {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => result.extend_from_slice(&buf[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(result)
+    })
+}
+
+#[cfg(not(unix))]
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    mut pipe: R,
+    _stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
 
 pub(crate) struct CommandOutput {
     pub(crate) stdout: String,
@@ -73,14 +119,27 @@ fn run_command_inner(
             reason: error.to_string(),
         })?;
 
+    // Drain both pipes while polling: either pipe can fill before the child exits.
+    let stdout = child.stdout.take().expect("stdout was configured as piped");
+    let stderr = child.stderr.take().expect("stderr was configured as piped");
+    let stop_readers = Arc::new(AtomicBool::new(false));
+    let stdout_reader = spawn_pipe_reader(stdout, Arc::clone(&stop_readers));
+    let stderr_reader = spawn_pipe_reader(stderr, Arc::clone(&stop_readers));
+
     let deadline = Instant::now() + timeout_for_command(argv);
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    stop_readers.store(true, Ordering::Relaxed);
+                    #[cfg(unix)]
+                    {
+                        let _ = stdout_reader.join();
+                        let _ = stderr_reader.join();
+                    }
                     return Err(SimardError::CommandTimeout {
                         action: argv.join(" "),
                         timeout_secs: timeout_for_command(argv).as_secs(),
@@ -89,34 +148,52 @@ fn run_command_inner(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                stop_readers.store(true, Ordering::Relaxed);
+                #[cfg(unix)]
+                {
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                }
                 return Err(SimardError::ActionExecutionFailed {
                     action: argv.join(" "),
                     reason: format!("failed to poll child process: {error}"),
                 });
             }
         }
-    }
+    };
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| SimardError::ActionExecutionFailed {
-            action: argv.join(" "),
-            reason: format!("failed to collect child output: {error}"),
-        })?;
+    let collect = |reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+        reader
+            .join()
+            .map_err(|_| "reader thread panicked".to_string())?
+            .map_err(|error| error.to_string())
+    };
+    let stdout_result = collect(stdout_reader);
+    let stderr_result = collect(stderr_reader);
+    let stdout = stdout_result.map_err(|error| SimardError::ActionExecutionFailed {
+        action: argv.join(" "),
+        reason: format!("failed to collect child stdout: {error}"),
+    })?;
+    let stderr = stderr_result.map_err(|error| SimardError::ActionExecutionFailed {
+        action: argv.join(" "),
+        reason: format!("failed to collect child stderr: {error}"),
+    })?;
 
-    if !output.status.success() && !allow_nonzero_exit {
-        let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&output.stderr));
-        let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout));
+    if !status.success() && !allow_nonzero_exit {
+        let stderr = sanitize_terminal_text(&String::from_utf8_lossy(&stderr));
+        let stdout = sanitize_terminal_text(&String::from_utf8_lossy(&stdout));
         let reason = if stderr.trim().is_empty() {
             format!(
                 "command exited with status {} and stdout='{}'",
-                output.status,
+                status,
                 stdout.trim()
             )
         } else {
             format!(
                 "command exited with status {} and stderr='{}'",
-                output.status,
+                status,
                 stderr.trim()
             )
         };
@@ -135,7 +212,7 @@ fn run_command_inner(
     }
 
     Ok(CommandOutput {
-        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&output.stdout)),
+        stdout: sanitize_terminal_text(&String::from_utf8_lossy(&stdout)),
     })
 }
 
@@ -184,6 +261,61 @@ pub(crate) fn parse_status_paths(stdout: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::cargo_jobs_env;
+
+    #[cfg(unix)]
+    #[test]
+    fn drains_large_stderr_then_stdout() {
+        let output = super::run_command(
+            std::path::Path::new("."),
+            &[
+                "sh",
+                "-c",
+                "yes e | head -c 1048576 >&2; yes o | head -c 1048576",
+            ],
+        )
+        .expect("large child output should not block the child");
+        assert_eq!(
+            output.stdout,
+            crate::sanitization::sanitize_terminal_text(&"o\n".repeat(524_288))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_output_preserves_nonzero_status() {
+        let args = [
+            "sh",
+            "-c",
+            "yes e | head -c 131072 >&2; printf result; exit 7",
+        ];
+        let error = super::run_command(std::path::Path::new("."), &args)
+            .err()
+            .expect("nonzero status must fail");
+        assert!(error.to_string().contains("exit status: 7"));
+        let output = super::run_command_allow_failure(std::path::Path::new("."), &args)
+            .expect("allow failure must preserve stdout");
+        assert_eq!(output.stdout, "result");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pipe_reader_stops_while_writer_remains_open() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exec sleep 10"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn writer");
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = super::spawn_pipe_reader(child.stdout.take().unwrap(), Arc::clone(&stop));
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap().expect("reader stopped");
+        child.kill().expect("stop test child");
+        child.wait().expect("reap test child");
+    }
 
     #[test]
     fn cargo_program_gets_build_jobs_cap() {
