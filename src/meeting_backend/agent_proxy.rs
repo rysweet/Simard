@@ -44,7 +44,6 @@ fn line_is_noise(trimmed: &str) -> bool {
         || trimmed.contains("XPIA")
         || trimmed.starts_with("Script started on")
         || trimmed.starts_with("Warning:")
-        || (trimmed.len() <= 2 && !trimmed.is_empty())
         || trimmed.starts_with('●')
 }
 
@@ -737,6 +736,15 @@ impl Drop for PersistentAgentProxy {
 mod tests {
     use super::*;
 
+    const USAGE_FOOTER_LINES: [&str; 6] = [
+        "Total usage est: 1234 tokens",
+        "API time spent: 2.3s",
+        "Total session time: 4.5s",
+        "Changes 2 files",
+        "Requests 3",
+        "Tokens 1234",
+    ];
+
     #[test]
     fn new_creates_proxy() {
         let proxy = PersistentAgentProxy::new();
@@ -782,6 +790,30 @@ mod tests {
         let input = "Normal response.\nWith multiple lines.";
         let result = strip_copilot_noise(input);
         assert_eq!(result, "Normal response.\nWith multiple lines.");
+    }
+
+    #[test]
+    fn line_is_noise_preserves_short_content() {
+        for line in ["{", "}", "[", "]", "},", "0,", "0", "12", "-1", "OK", "a"] {
+            assert!(
+                !line_is_noise(line),
+                "short content must not be classified as noise: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_copilot_noise_discards_every_usage_footer_and_following_content() {
+        for footer in USAGE_FOOTER_LINES {
+            let input = format!(
+                "Actual response here.\n  {footer}  \nArbitrary trailing content.\n{{\"tail\": true}}"
+            );
+            assert_eq!(
+                strip_copilot_noise(&input),
+                "Actual response here.",
+                "the footer and everything after it must be discarded: {footer:?}"
+            );
+        }
     }
 
     // ── issues #2549/#2581: default idle-liveness window ──
@@ -1147,9 +1179,8 @@ mod tests {
         // captured. `copilot`/`claude` write to a pipe (block-buffered) and
         // routinely flush a big final chunk right before exit; the old
         // `try_wait` + non-blocking-`try_recv` drain dropped that burst. We use
-        // 4-digit numbers so `strip_copilot_noise` (which drops lines of length
-        // <= 2) keeps all of them, and a burst (~30 KB) far larger than the
-        // reader's buffer so the race would trigger on the old code.
+        // a burst (~30 KB) far larger than the reader's buffer so the race
+        // would trigger on the old code.
         let mut proxy = PersistentAgentProxy::new().unwrap();
         proxy.agent_cmd = "sh".to_string();
         proxy.agent_base_args = vec!["-c".to_string(), "seq 1000 7000".to_string()];
@@ -1218,30 +1249,86 @@ mod tests {
 
     #[test]
     fn streaming_filters_noise_lines_from_chunks() {
-        // Streamed chunks are the substantive lines only — copilot usage/banner
-        // noise is filtered from the live preview exactly as it is from the
-        // final text, so the two never disagree.
+        // Exercise each marker independently so an earlier usage footer cannot
+        // hide a later marker from the final response assertions.
         let mut proxy = PersistentAgentProxy::new().unwrap();
-        proxy.agent_cmd = "sh".to_string();
-        proxy.agent_base_args = vec![
-            "-c".to_string(),
-            "printf 'hello world\\nTotal usage est: 5 tokens\\n'".to_string(),
-        ];
+        proxy.agent_cmd = "cat".to_string();
+        proxy.agent_base_args.clear();
         proxy.idle_window = Some(Duration::from_secs(30));
 
-        let mut chunks: Vec<String> = Vec::new();
-        let response = proxy
-            .invoke_agent_streaming("hi", &mut |c| chunks.push(c.to_string()))
-            .expect("clean child must return Ok");
+        let noise_lines = [
+            "Staged 3 hook files",
+            "XPIA defender loaded",
+            "Script started on 2026-10-29",
+            "Warning: CLI warning",
+            "● Working on response",
+        ];
+        for noise in noise_lines.into_iter().chain(USAGE_FOOTER_LINES) {
+            let input = format!("hello world\n  {noise}  \n");
+            let mut chunks = Vec::new();
+            let response = proxy
+                .invoke_agent_streaming(&input, &mut |c| chunks.push(c.to_string()))
+                .expect("cat must echo the fixture from stdin");
 
+            assert_eq!(
+                chunks,
+                vec!["hello world".to_string()],
+                "noise must be filtered from stream: {noise:?}"
+            );
+            assert_eq!(
+                response, "hello world",
+                "noise must be filtered from final response: {noise:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_and_final_response_preserve_nested_multiline_json() {
+        // Issue #5028: delimiters and short numbers are substantive output.
+        let input = r#"{
+  "meeting":
+  {
+    "items":
+    [
+      {
+        "values":
+        [
+          0,
+          12
+        ]
+      },
+      {
+        "values":
+        [
+          -1
+        ]
+      }
+    ]
+  }
+}"#;
+        let expected = serde_json::json!({
+            "meeting": {"items": [{"values": [0, 12]}, {"values": [-1]}]}
+        });
+
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "cat".to_string();
+        proxy.agent_base_args.clear();
+        proxy.idle_window = Some(Duration::from_secs(30));
+
+        let mut chunks = Vec::new();
+        let response = proxy
+            .invoke_agent_streaming(input, &mut |c| chunks.push(c.to_string()))
+            .expect("cat must echo the JSON fixture from stdin");
+
+        let streamed_json = serde_json::from_str::<serde_json::Value>(&chunks.join("\n"));
+        let final_json = serde_json::from_str::<serde_json::Value>(&response);
         assert_eq!(
-            chunks,
-            vec!["hello world".to_string()],
-            "noise must be filtered from stream"
+            streamed_json.expect("streaming output must remain valid JSON"),
+            expected
         );
         assert_eq!(
-            response, "hello world",
-            "final text must match the streamed substantive content"
+            final_json.expect("final response must remain valid JSON"),
+            expected
         );
     }
 
@@ -1358,8 +1445,8 @@ mod tests {
     #[test]
     fn large_prompt_round_trips_through_stdin_without_truncation() {
         // Build a >=256 KiB payload of clean, noise-free lines (each distinct so
-        // the assertion also proves ordering and no de-duplication). Every line
-        // is > 2 chars and matches no `line_is_noise` marker, so
+        // the assertion also proves ordering and no de-duplication). No line
+        // matches a `line_is_noise` marker, so
         // `strip_copilot_noise` is a no-op and the round-trip is exact.
         let mut payload = String::new();
         let mut i = 0usize;
