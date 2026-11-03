@@ -47,6 +47,29 @@ fn line_is_noise(trimmed: &str) -> bool {
         || trimmed.starts_with('●')
 }
 
+/// Longest response, in bytes, still treated as a possible provider notice.
+/// Substantive answers that merely discuss limits are longer than this.
+const USAGE_LIMIT_NOTICE_MAX_LEN: usize = 400;
+
+/// True when `response` is a provider usage-limit notice rather than an answer
+/// (issue #5029). Only short responses are considered, so a long answer that
+/// discusses usage limits is left alone.
+fn response_is_usage_limit_notice(response: &str) -> bool {
+    let trimmed = response.trim();
+    if trimmed.is_empty() || trimmed.len() > USAGE_LIMIT_NOTICE_MAX_LEN {
+        return false;
+    }
+    let lower = trimmed.to_lowercase().replace('\u{2019}', "'");
+    [
+        "usage limit",
+        "you've hit your limit",
+        "you've hit your org",
+        "you have hit your limit",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 /// Strip copilot CLI noise (usage stats, bootstrap lines, progress indicators)
 /// from raw output, keeping only the substantive response.
 fn strip_copilot_noise(raw: &str) -> String {
@@ -590,7 +613,23 @@ impl PersistentAgentProxy {
             "Agent invocation complete"
         );
 
-        Ok(strip_copilot_noise(&raw_response))
+        let response = strip_copilot_noise(&raw_response);
+        if response_is_usage_limit_notice(&response) {
+            // Issue #5029: the provider printed a usage-limit notice (and may
+            // have exited 0). That is a recoverable provider failure, not a
+            // facilitator answer; the conversation history is retained by the
+            // caller so the operator can retry once the limit resets.
+            return Err(SimardError::AdapterInvocationFailed {
+                base_type: "persistent-agent-proxy".to_string(),
+                reason: format!(
+                    "provider is usage-limited (recoverable; conversation retained, \
+                     retry after the limit resets): {}",
+                    response.trim()
+                ),
+            });
+        }
+
+        Ok(response)
     }
 
     /// Shared turn logic behind both [`BaseTypeSession::run_turn`] and
@@ -1155,6 +1194,44 @@ mod tests {
             "proxy must invoke the agent over piped (non-PTY) stdio — no \
              script(1)/PTY/bash wrapper (issue #2179)"
         );
+    }
+
+    #[test]
+    fn invoke_agent_reports_usage_limit_printed_with_exit_code_zero_as_failure() {
+        // Issue #5029: a provider that prints its usage-limit notice and exits
+        // 0 must not be reported as a substantive answer.
+        for notice in [
+            "You've hit your org's monthly usage limit",
+            "Claude AI usage limit reached|1761770000",
+            "You've hit your limit · resets 3pm (Europe/London)",
+        ] {
+            let mut proxy = PersistentAgentProxy::new().unwrap();
+            proxy.agent_cmd = "sh".to_string();
+            proxy.agent_base_args = vec![
+                "-c".to_string(),
+                format!("printf '%s\\n' \"{notice}\"; exit 0"),
+            ];
+            proxy.idle_window = Some(Duration::from_secs(30));
+
+            let err = proxy
+                .invoke_agent("plan the project")
+                .expect_err("a usage-limit notice must surface as an error");
+            assert!(
+                err.to_string().contains("usage-limited"),
+                "error must name the recoverable usage-limited state, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn invoke_agent_keeps_long_answers_that_discuss_usage_limits() {
+        let mut proxy = PersistentAgentProxy::new().unwrap();
+        proxy.agent_cmd = "sh".to_string();
+        let long = "We should document the usage limit handling. ".repeat(20);
+        proxy.agent_base_args = vec!["-c".to_string(), format!("printf '%s\\n' '{long}'")];
+        proxy.idle_window = Some(Duration::from_secs(30));
+        let response = proxy.invoke_agent("hello").expect("substantive answer");
+        assert!(response.contains("usage limit handling"));
     }
 
     #[test]
