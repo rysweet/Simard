@@ -330,20 +330,21 @@ impl PtyTerminalSession {
                                         libc::kill(self.child.id() as i32, libc::SIGTERM);
                                     }
                                 }
-                                // Give it a moment to clean up.
-                                std::thread::sleep(std::time::Duration::from_secs(2));
-                                match self.child.try_wait() {
-                                    Ok(Some(status)) => break status,
-                                    _ => {
-                                        #[cfg(unix)]
-                                        {
-                                            use std::os::unix::process::ExitStatusExt;
-                                            break std::process::ExitStatus::from_raw(0);
-                                        }
-                                        #[cfg(not(unix))]
-                                        {
-                                            break self.child.wait().unwrap_or_default();
-                                        }
+                                // Give it a moment to clean up, then force it. The
+                                // real status is reported either way; a child that
+                                // ignored SIGTERM is never synthesised as exit 0.
+                                match reap_after_term(
+                                    &mut self.child,
+                                    std::time::Duration::from_secs(2),
+                                ) {
+                                    Ok(status) => break status,
+                                    Err(e) => {
+                                        return Err(SimardError::AdapterInvocationFailed {
+                                            base_type: self.base_type.clone(),
+                                            reason: format!(
+                                                "terminal-shell session could not be reaped after SIGTERM: {e}"
+                                            ),
+                                        });
                                     }
                                 }
                             }
@@ -523,6 +524,27 @@ fn has_active_work_processes(root_pid: u32) -> bool {
 #[cfg(not(unix))]
 fn has_active_work_processes(_root_pid: u32) -> bool {
     false
+}
+
+/// Reap a child that has been sent SIGTERM and return its real exit status.
+///
+/// Polls for up to `grace`; if the child is still running it is killed
+/// (SIGKILL) and waited for. A wait failure is returned to the caller rather
+/// than being replaced by a successful status, so a lost or unrecoverable
+/// child status can never be reported as exit code 0.
+fn reap_after_term(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    child.kill()?;
+    child.wait()
 }
 
 fn unique_transcript_path(label: &str) -> PathBuf {
@@ -937,6 +959,21 @@ mod tests {
             capture.transcript.contains(&executed_output),
             "final transcript must contain the executed output '{executed_output}'; transcript was:\n{}",
             capture.transcript
+        );
+    }
+
+    #[test]
+    fn reap_after_term_reports_failure_for_child_that_ignores_sigterm() {
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .spawn()
+            .expect("spawn sh");
+        // Let the shell install its trap before the grace period starts.
+        thread::sleep(Duration::from_millis(300));
+        let status = reap_after_term(&mut child, Duration::from_millis(300)).expect("reap");
+        assert!(
+            !status.success(),
+            "a child that had to be killed must not be reported as success: {status:?}"
         );
     }
 }
