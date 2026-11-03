@@ -10,6 +10,7 @@
 // (CLI bulk-unblock scoping) and from cross-module test modules.
 pub(crate) mod advance_goal;
 mod concurrent;
+pub(crate) mod gh_label;
 mod goal_session;
 mod session;
 mod simple_actions;

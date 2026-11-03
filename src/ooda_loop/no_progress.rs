@@ -164,19 +164,7 @@ pub(crate) struct GhIssueFiler;
 
 impl NoProgressIssueFiler for GhIssueFiler {
     fn file_issue(&self, title: &str, body: &str) -> Option<FiledIssue> {
-        match std::process::Command::new("gh")
-            .args([
-                "issue",
-                "create",
-                "--title",
-                title,
-                "--body",
-                body,
-                "--label",
-                "ooda-stuck",
-            ])
-            .output()
-        {
+        match crate::ooda_actions::gh_label::tracking_issue_command(title, body).output() {
             Ok(out) if out.status.success() => {
                 // `gh issue create` prints the created issue's URL on success,
                 // e.g. `https://github.com/rysweet/Simard/issues/4231`.
@@ -2469,6 +2457,55 @@ mod tests_derive_criteria {
         assert!(
             derive_criteria(&g).is_some(),
             "a criteria-only done-gate finish line must still un-stick the goal (B4)"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests_missing_tracking_label {
+    use super::{GhIssueFiler, NoProgressIssueFiler};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn tracking_issue_is_filed_when_label_initially_missing() {
+        if std::env::var_os("SIMARD_LABEL_TEST_CHILD").is_some() {
+            let filed = GhIssueFiler.file_issue("stuck goal", "details");
+            assert_eq!(filed.map(|issue| issue.number), Some("123".to_string()));
+            return;
+        }
+        let dir = tempfile::tempdir().expect("private test directory");
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            r##"#!/bin/sh
+if [ "$1" = label ] && [ "$2" = create ]; then
+  /usr/bin/touch "$SIMARD_LABEL_TEST_STATE"
+  exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = create ]; then
+  if [ ! -e "$SIMARD_LABEL_TEST_STATE" ]; then
+    echo "could not add label: 'ooda-stuck' not found" >&2
+    exit 1
+  fi
+  echo 'https://github.com/example/repo/issues/123'
+  exit 0
+fi
+exit 1
+"##,
+        )
+        .expect("write gh stub");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+            .expect("make stub executable");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "ooda_loop::no_progress::tests_missing_tracking_label::tracking_issue_is_filed_when_label_initially_missing", "--nocapture"])
+            .env("PATH", dir.path())
+            .env("SIMARD_LABEL_TEST_CHILD", "1")
+            .env("SIMARD_LABEL_TEST_STATE", dir.path().join("label-created"))
+            .output().expect("run isolated test");
+        assert!(
+            output.status.success(),
+            "child test failed: {}",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
 }
